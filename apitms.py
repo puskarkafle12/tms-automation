@@ -1,0 +1,134 @@
+from time import sleep, time
+import requests
+from requests.api import head
+from requests.exceptions import Timeout
+from datetime import datetime
+errorcount=0
+timeout_count=0
+timeout_count1=0
+count=0
+
+
+url='https://tms35.nepsetms.com.np/tmsapi/rtApi/ws/stockQuote/2888'
+ref_url='https://tms35.nepsetms.com.np/tms/me/memberclientorderentry'
+request_owner='36320'
+
+# url='https://tms56.nepsetms.com.np/tmsapi/rtApi/ws/stockQuote/2888'
+# ref_url='https://tms56.nepsetms.com.np/tms/me/memberclientorderentry'
+# request_owner='65884'
+
+def fetchprice(xsrf_token,aid,rid,previous_ltp):
+    
+    start=datetime.now()
+    global errorcount
+    global timeout_count
+    global timeout_count1
+    cookies = {
+        'XSRF-TOKEN': xsrf_token,
+        '_aid': aid,
+        '_rid': rid
+        }
+
+    headers = {
+        'Connection': 'keep-alive',
+        'sec-ch-ua': '" Not;A Brand";v="99", "Google Chrome";v="91", "Chromium";v="91"',
+        'Accept': 'application/json, text/plain, */*',
+        'X-XSRF-TOKEN': xsrf_token,
+        'Request-Owner': request_owner,
+        'Content-Type': 'application/json',
+        'sec-ch-ua-mobile': '?0',
+        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.164 Safari/537.36',
+        'Host-Session-Id': 'TWpRPS0yZjg4ZmIzNC1jZDQ4LTQwZTMtODdiNy0xNGFkNzMwZDEwYTk=',
+        'Origin': 'https://tms35.nepsetms.com.np',
+        'Sec-Fetch-Site': 'same-origin',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Dest': 'empty',
+        'Referer': ref_url,
+        'Accept-Language': 'en-US,en;q=0.9',
+    }
+
+
+
+    # ZFc1a1pXWnBibVZrLTg3MzEwNmYzLTIzZmItNDk3OC1iZGMwLWQwODlhZGYyM2M4Yg==
+    # Host-Session-Id: TVRJPS1jNjk2NDE5Ni1lMDcyLTQ1NzgtYmY4Ny0yZjUzOGY3NGJjZTc=
+
+    # response = requests.get('https://tms56.nepsetms.com.np/tmsapi/rtApi/ws/stockQuote/2888', headers=headers, cookies=cookies).json()
+    # previous_ltp=int(response['payload']['data'][0]['ltp'])
+    # print (response)
+    # ltp=int(previous_ltp)
+    
+    session=requests.session()
+        
+    while(1):
+        sleep(0.1)
+        
+        
+        try:
+                try:
+                    responsee = session.get(url, headers=headers, cookies=cookies,timeout=1)
+                    try:
+                        response=responsee.json()
+                    except Exception as e:
+                        print('exception occured ',e)
+                except Timeout:
+                    timeout_count=timeout_count+1
+                    timeout_count1=timeout_count1+1
+                    print('The request timeout:',timeout_count1)
+
+                
+                
+                ltp=int(response['payload']['data'][0]['ltp'])
+                print('ltp price :',ltp)
+                global count
+                count=count+1-timeout_count
+                timeout_count=0
+                print('fetched count:',count)
+
+                now = datetime.now()
+                
+
+                current_time = now.strftime("%H:%M:%S.%f")[:-3]
+                print("Current Time =", current_time)
+                stop=datetime.now()
+                time_taken=stop-start
+                print('time taken is:',time_taken)
+                print('fetch per second is ',count/time_taken.total_seconds(),'\n')
+                if previous_ltp<ltp:
+                    print('price is greater than expected')
+                    print('ltp price:',ltp)
+                    
+                    return ltp
+                
+                    
+                
+        except Exception as e:
+            errorcount=errorcount+1
+            
+            if (responsee.status_code==401):
+                print('while loop of api broked')
+                break
+            print('error exception occured',e)
+            print('error count:',errorcount)
+            
+def order(orderPrice,orderQuantity,exchangeSecurityid,id,cookies,headers):
+
+    orderPrice=str(orderPrice)
+    orderQuantity=str(orderQuantity)
+    exchangeSecurityid=str(exchangeSecurityid)
+    id=str(id)
+
+    data = '{"orderBook":{"orderBookExtensions":[{"orderTypes":{"id":1,"orderTypeCode":"LMT"},"disclosedQuantity":0,"orderValidity":{"id":1,"orderValidityCode":"DAY"},"triggerPrice":0,"orderPrice":'+orderPrice+',"orderQuantity":'+orderQuantity+',"remainingOrderQuantity":10,"marketType":{"id":2,"marketType":"Continuous"}}],"exchange":{"id":1},"dnaConnection":{},"dealer":{},"member":{},"productType":{"id":1,"productCode":"CNC"},"instrumentType":{"id":1,"code":"EQ"},"client":{"activeStatus":"A","id":1974509,"accountType":"CLI","allowedToTrade":"Y","clientMemberCode":"PK479690","clientOrDealer":"C","contactNumber":null,"emailId":null,"notsUniqueClientCode":"201811021236758","clientDealerType":null,"clientGroup":{"activeStatus":"A","id":101,"clientGroupCode":null,"clientGroupName":null},"memberBranch":{"activeStatus":"A","id":1,"branchLocation":null,"branchName":null,"hidden":null,"branchProvince":null,"branchDistrict":null,"branchMunicipality":null,"branchHead":null,"branchPhoneNumber":null},"clientDealerAddressDetails":null,"clientDealerBankDetail":null,"clientDealerIndividual":null,"clientDealerPerTradeLimits":null,"clientDealerProductMappings":null,"clientDealerOrderTypeMappings":null,"clientDealerTradingLimits":null,"clientDepositoryDetail":null,"corporateDetail":null,"corporateOwnershipDetails":null,"displayName":"PUSKAR KAFLE","blockedDate":null,"remarks":null,"parentId":null,"recordType":null,"collateralByEntities":null,"shortSellMode":0,"onlineOrOffline":1,"panNumber":null,"onlineFundTransfer":null,"collateralCalculationMode":1,"isMarginLendingClient":null,"clientRiskType":null},"security":{"id":'+id+',"exchangeSecurityId":'+exchangeSecurityid+',"marketProtectionPercentage":0,"divisor":100,"boardLotQuantity":1,"tickSize":0.1},"accountType":1,"cpMemberId":0,"buyOrSell":1},"orderPlacedBy":2,"exchangeOrderId":null}'
+
+    response = requests.post('https://tms35.nepsetms.com.np/tmsapi/orderApi/orderbook-v2/', headers=headers, cookies=cookies, data=data)
+
+    if response.status_code==200:
+        print(response.status_code)
+        print(response.status_code,response.json())
+         
+    else:
+        print('post failed')
+        print(response.status_code,response.json())
+
+
+
+
