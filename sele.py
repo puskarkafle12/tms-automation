@@ -218,8 +218,8 @@ while(1):
 
 
         cookies = driver.get_cookies()
-        print('csrf token')
-        print(cookies)
+        # print('csrf token')
+        # print(cookies)
         # print(cookies[0]['name'])
         xsrf_token=cookies[0]['value']
         aid=cookies[1]['value']
@@ -228,18 +228,14 @@ while(1):
         price=apitms.fetchprice(xsrf_token,aid,rid,previous_ltp)
         if price=='end':
             break
-        print('this is fetched price ',price)
-        high_price=price+2/100*price
-        high_price=math.floor(high_price * 10 ** 1) / 10 ** 1
-        print('the high price after calc is ',high_price)
+        # print('this is fetched price ',price)
+        # # high_price=price+2/100*price
+        # # high_price=math.floor(high_price * 10 ** 1) / 10 ** 1
+        # print('the high price after calc is ',high_price)
         ltp_price=price
         inc_percentage=(ltp_price-starting_price)/starting_price*100
         print('increase percent is :',inc_percentage)
-        if inc_percentage>7:
-            if order_count==0:
-                order(30)
-                order_count=order_count+1
-
+       
         symbol_input_box.send_keys(Keys.RETURN)
         if inc_percentage<9:
             order(10)
