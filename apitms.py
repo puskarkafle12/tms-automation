@@ -113,21 +113,33 @@ def fetchprice(xsrf_token,aid,rid,previous_ltp):
                 print('maxorder limit left',maxorder_limit)
                 # if ordercount==0:
                 #     ordercount=1
-                if maxorder_limit<0:
-                    print('maximum order count limit reached')
-                else:
-
-                    if changePercentage>7.9:
-                        # server time and last order time left to be substracted
-                        order(orderPrice,50,exchangeSecurityid,id,cookies,headers)
-                        break
-                    else:
-                        order(orderPrice,orderQuantity,exchangeSecurityid,id,cookies,headers)
-
-
                 if previous_ltp<ltp:
-                    print('price is greater than expected')
+                    print('price is greater than expected previous ltp',previous_ltp)
                     print('ltp price:',ltp)
+                    previous_ltp=ltp
+                    if maxorder_limit<0:
+                        print('maximum order count limit reached')
+                    else:
+                        lastTradedTime=lastTradedTime[:26]
+                        lastTradedTime= datetime.strptime(lastTradedTime,'%Y-%m-%d %H:%M:%S.%f')
+                        now=datetime.now()
+                        order_delay=(now-lastTradedTime).total_seconds()
+                        if order_delay<25:
+                            print("delay is less lets order")
+                            if changePercentage>7.9:
+                            # server time and last order time left to be substracted
+                                order(orderPrice,50,exchangeSecurityid,id,cookies,headers)
+                                break
+                            else:
+                                order(orderPrice,orderQuantity,exchangeSecurityid,id,cookies,headers)
+        
+
+                        else:
+                            print('delay limit reached order hat ma xaina')
+
+
+                    
+
                 # this function should be called for ordering when price changes
                     # order(orderPrice,orderQuantity,exchangeSecurityid,id,cookies,headers)
 
