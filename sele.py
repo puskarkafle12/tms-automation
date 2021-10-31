@@ -8,8 +8,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 import math
 
 #stock name lekne
-stock_name='JBLB'
-starting_price=3551
+stock_name='SAHAS'
+starting_price=436
 count=0
 order_count=0
 #browser exposes an executable file
@@ -226,6 +226,8 @@ while(1):
         rid=cookies[2]['value']
         # print(xsrf_token,aid,rid)
         price=apitms.fetchprice(xsrf_token,aid,rid,previous_ltp)
+        if price=='end':
+            break
         print('this is fetched price ',price)
         high_price=price+2/100*price
         high_price=math.floor(high_price * 10 ** 1) / 10 ** 1
