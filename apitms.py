@@ -4,10 +4,13 @@ from requests.api import head
 from requests.exceptions import Timeout
 from datetime import datetime
 
-orderPrice=20 
-orderQuantity=00
-exchangeSecurityid=00
-id=00
+orderPrice=440
+orderQuantity=10
+exchangeSecurityid=8021
+id=2912
+# set maximum order limit 
+maxorder_limit=6 
+# 8021 sahas
 
 
 errorcount=0
@@ -16,7 +19,8 @@ timeout_count1=0
 count=0
 
 
-url='https://tms35.nepsetms.com.np/tmsapi/rtApi/ws/stockQuote/2888'
+url=f'https://tms35.nepsetms.com.np/tmsapi/rtApi/ws/stockQuote/{id}'
+# print(url)
 ref_url='https://tms35.nepsetms.com.np/tms/me/memberclientorderentry'
 request_owner='36320'
 
@@ -25,8 +29,9 @@ request_owner='36320'
 # request_owner='65884'
 
 def fetchprice(xsrf_token,aid,rid,previous_ltp):
-    
+    global ordercount
     start=datetime.now()
+    global orderPrice,orderQuantity,exchangeSecurityid,id
     global errorcount
     global timeout_count
     global timeout_count1
@@ -67,7 +72,7 @@ def fetchprice(xsrf_token,aid,rid,previous_ltp):
     session=requests.session()
         
     while(1):
-        sleep(0.1)
+        sleep(0.4)
         
         
         try:
@@ -85,7 +90,12 @@ def fetchprice(xsrf_token,aid,rid,previous_ltp):
                 
                 
                 ltp=int(response['payload']['data'][0]['ltp'])
-                print('ltp price :',ltp)
+                changePercentage=float(response['payload']['data'][0]['changePercentage'])
+                lastTradedTime=response['payload']['data'][0]['lastTradedTime']
+                id=int(response['payload']['data'][0]['security']['id'])
+                print('ltp price :',ltp,"id: ",id)
+                print("last traded time is",lastTradedTime)
+                print("change in percent is",changePercentage)
                 global count
                 count=count+1-timeout_count
                 timeout_count=0
@@ -100,11 +110,27 @@ def fetchprice(xsrf_token,aid,rid,previous_ltp):
                 time_taken=stop-start
                 print('time taken is:',time_taken)
                 print('fetch per second is ',count/time_taken.total_seconds(),'\n')
+                print('maxorder limit left',maxorder_limit)
+                # if ordercount==0:
+                #     ordercount=1
+                if maxorder_limit<0:
+                    print('maximum order count limit reached')
+                else:
+
+                    if changePercentage>7.9:
+                        # server time and last order time left to be substracted
+                        order(orderPrice,50,exchangeSecurityid,id,cookies,headers)
+                        break
+                    else:
+                        order(orderPrice,orderQuantity,exchangeSecurityid,id,cookies,headers)
+
+
                 if previous_ltp<ltp:
                     print('price is greater than expected')
                     print('ltp price:',ltp)
-                
-                    return ltp
+                # this function should be called for ordering when price changes
+                    # order(orderPrice,orderQuantity,exchangeSecurityid,id,cookies,headers)
+
                 
                     
                 
@@ -118,6 +144,7 @@ def fetchprice(xsrf_token,aid,rid,previous_ltp):
             print('error count:',errorcount)
             
 def order(orderPrice,orderQuantity,exchangeSecurityid,id,cookies,headers):
+    global maxorder_limit
 
     orderPrice=str(orderPrice)
     orderQuantity=str(orderQuantity)
@@ -125,18 +152,31 @@ def order(orderPrice,orderQuantity,exchangeSecurityid,id,cookies,headers):
     id=str(id)
 
     data = '{"orderBook":{"orderBookExtensions":[{"orderTypes":{"id":1,"orderTypeCode":"LMT"},"disclosedQuantity":0,"orderValidity":{"id":1,"orderValidityCode":"DAY"},"triggerPrice":0,"orderPrice":'+orderPrice+',"orderQuantity":'+orderQuantity+',"remainingOrderQuantity":10,"marketType":{"id":2,"marketType":"Continuous"}}],"exchange":{"id":1},"dnaConnection":{},"dealer":{},"member":{},"productType":{"id":1,"productCode":"CNC"},"instrumentType":{"id":1,"code":"EQ"},"client":{"activeStatus":"A","id":1974509,"accountType":"CLI","allowedToTrade":"Y","clientMemberCode":"PK479690","clientOrDealer":"C","contactNumber":null,"emailId":null,"notsUniqueClientCode":"201811021236758","clientDealerType":null,"clientGroup":{"activeStatus":"A","id":101,"clientGroupCode":null,"clientGroupName":null},"memberBranch":{"activeStatus":"A","id":1,"branchLocation":null,"branchName":null,"hidden":null,"branchProvince":null,"branchDistrict":null,"branchMunicipality":null,"branchHead":null,"branchPhoneNumber":null},"clientDealerAddressDetails":null,"clientDealerBankDetail":null,"clientDealerIndividual":null,"clientDealerPerTradeLimits":null,"clientDealerProductMappings":null,"clientDealerOrderTypeMappings":null,"clientDealerTradingLimits":null,"clientDepositoryDetail":null,"corporateDetail":null,"corporateOwnershipDetails":null,"displayName":"PUSKAR KAFLE","blockedDate":null,"remarks":null,"parentId":null,"recordType":null,"collateralByEntities":null,"shortSellMode":0,"onlineOrOffline":1,"panNumber":null,"onlineFundTransfer":null,"collateralCalculationMode":1,"isMarginLendingClient":null,"clientRiskType":null,"userAgreementChecked":null,"referredBy":null,"marginLendingClient":null},"security":{"id":'+id+',"exchangeSecurityId":'+exchangeSecurityid+',"marketProtectionPercentage":0,"divisor":100,"boardLotQuantity":1,"tickSize":0.1},"accountType":1,"cpMemberId":0,"buyOrSell":1},"orderPlacedBy":2,"exchangeOrderId":null}'
-
+    print(data)
     response = requests.post('https://tms35.nepsetms.com.np/tmsapi/orderApi/orderbook-v2/', headers=headers, cookies=cookies, data=data)
 
     if response.status_code==200:
+        maxorder_limit=maxorder_limit-1
         print(response.status_code)
         print(response.status_code,response.json())
+        return response.status_code
          
     else:
         print('post failed')
         print(response.status_code,response.json())
+        return response.status_code
+        
 
 
-
-
+# order(orderPrice,orderQuantity,exchangeSecurityid,id,cookies,headers)
 # ,"userAgreementChecked":null,"referredBy":null,"marginLendingClient":null this added in post data client risk type null
+# averageTradedPrice: 439.82
+# change: 40.5
+# changePercentage: 9.99259807549963
+# closePrice: 405.3
+# dayHigh: 445.8
+# dayLow: 405.3
+# lastTradedQty: 10
+# lastTradedTime: "2021-10-31 14:10:11.302921000"
+# ltp: 445.8
+# openPrice: 405.3
