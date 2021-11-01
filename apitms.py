@@ -108,8 +108,9 @@ def fetchprice(xsrf_token,aid,rid,previous_ltp):
 
                 now = datetime.now()
                 if changePercentage>9:
-                    print('it is price already changed')
-                    break
+                    print('price already changed you miss the chance try next day')
+                    return 'end'
+                    
                 
 
                 current_time = now.strftime("%H:%M:%S.%f")[:-3]

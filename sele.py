@@ -232,19 +232,19 @@ while(1):
         # # high_price=price+2/100*price
         # # high_price=math.floor(high_price * 10 ** 1) / 10 ** 1
         # print('the high price after calc is ',high_price)
-        ltp_price=price
-        inc_percentage=(ltp_price-starting_price)/starting_price*100
-        print('increase percent is :',inc_percentage)
+        # ltp_price=price
+        # inc_percentage=(ltp_price-starting_price)/starting_price*100
+        # print('increase percent is :',inc_percentage)
        
         symbol_input_box.send_keys(Keys.RETURN)
-        if inc_percentage<9:
-            order(10)
-        previous_ltp=price
-        try:
-            check_radio_button_isclicked()
-        except Exception as e:
-            print(e)
-            print('buy radio button cannot be clicked :',e)
+        # if inc_percentage<9:
+        #     order(10)
+        # previous_ltp=price
+        # try:
+        #     check_radio_button_isclicked()
+        # except Exception as e:
+        #     print(e)
+        #     print('buy radio button cannot be clicked :',e)
     except Exception as e:
         print(e)
         print('exception in while 1 in main program',e)
