@@ -71,9 +71,12 @@ def fetchprice(xsrf_token,aid,rid,previous_ltp):
     # ltp=int(previous_ltp)
     
     session=requests.session()
-        
+    fetch_start=datetime.now()
+    fetch_count=1
     while(1):
-        sleep(0.2)
+       
+        
+        sleep(0.4)
         
         
         try:
@@ -103,13 +106,14 @@ def fetchprice(xsrf_token,aid,rid,previous_ltp):
                 print("change in percent is",changePercentage)
                 global count
                 count=count+1-timeout_count
+                fetch_count=fetch_count+1
                 timeout_count=0
                 print('fetched count:',count)
 
                 now = datetime.now()
                 if changePercentage>9:
                     print('price already changed you miss the chance try next day')
-                    return 'end'
+                    # return 'end'
                     
                 
 
@@ -117,8 +121,13 @@ def fetchprice(xsrf_token,aid,rid,previous_ltp):
                 print("Current Time =", current_time)
                 stop=datetime.now()
                 time_taken=stop-start
+                fetch_time_taken=stop-fetch_start
                 print('time taken is:',time_taken)
-                print('fetch per second is ',count/time_taken.total_seconds(),'\n')
+                
+
+                   
+                    
+                print('fetch per second is ',round(fetch_count/fetch_time_taken.total_seconds(),2),'\n')
                 print('maxorder limit left',maxorder_limit)
                 # if ordercount==0:
                 #     ordercount=1
@@ -164,6 +173,9 @@ def fetchprice(xsrf_token,aid,rid,previous_ltp):
                 break
             print('error exception occured',e)
             print('error count:',errorcount)
+        if fetch_time_taken.total_seconds()>=3:
+            fetch_start=datetime.now()
+            fetch_count=0
             
 def order(orderPrice,orderQuantity,exchangeSecurityid,id,cookies,headers):
     global maxorder_limit
