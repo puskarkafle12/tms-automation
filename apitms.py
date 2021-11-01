@@ -1,4 +1,5 @@
 from time import sleep, time
+import math
 import requests
 from requests.api import head
 from requests.exceptions import Timeout
@@ -9,7 +10,7 @@ orderQuantity=10
 exchangeSecurityid=8021
 id=2912
 # set maximum order limit 
-maxorder_limit=6 
+maxorder_limit=4
 # 8021 sahas
 
 
@@ -72,7 +73,7 @@ def fetchprice(xsrf_token,aid,rid,previous_ltp):
     session=requests.session()
         
     while(1):
-        sleep(0.4)
+        sleep(0.2)
         
         
         try:
@@ -89,7 +90,11 @@ def fetchprice(xsrf_token,aid,rid,previous_ltp):
 
                 
                 
-                ltp=int(response['payload']['data'][0]['ltp'])
+                ltp=float(response['payload']['data'][0]['ltp'])
+                
+                high_price=ltp+2/100*ltp
+                high_price=math.floor(high_price * 10 ** 1) / 10 ** 1
+                print('the high price after calc is ',high_price)
                 changePercentage=float(response['payload']['data'][0]['changePercentage'])
                 lastTradedTime=response['payload']['data'][0]['lastTradedTime']
                 id=int(response['payload']['data'][0]['security']['id'])
@@ -114,7 +119,7 @@ def fetchprice(xsrf_token,aid,rid,previous_ltp):
                 # if ordercount==0:
                 #     ordercount=1
                 if previous_ltp<ltp:
-                    print('price is greater than expected previous ltp',previous_ltp)
+                    print(f'previous ltp price is : {previous_ltp} new ltp price is : {ltp}')
                     print('ltp price:',ltp)
                     previous_ltp=ltp
                     if maxorder_limit<0:
@@ -128,10 +133,11 @@ def fetchprice(xsrf_token,aid,rid,previous_ltp):
                             print("delay is less lets order")
                             if changePercentage>7.9:
                             # server time and last order time left to be substracted
-                                order(orderPrice,50,exchangeSecurityid,id,cookies,headers)
+                                print("last order is executed with 50 kitta")
+                                order(high_price,50,exchangeSecurityid,id,cookies,headers)
                                 break
                             else:
-                                order(orderPrice,orderQuantity,exchangeSecurityid,id,cookies,headers)
+                                order(high_price,orderQuantity,exchangeSecurityid,id,cookies,headers)
         
 
                         else:
