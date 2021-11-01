@@ -1,0 +1,12 @@
+server time and last traded time difference is:2:50:24.820298 
+ response{"status": "400", "level": null, "message": "SESSION NOT ACTIVE", "data": null}
+
+
+server time and last traded time difference is:3:00:14.326298 
+ response{"status": "400", "level": null, "message": "SESSION NOT ACTIVE", "data": null}
+
+
+last traded time after buy order is : 2021-11-01 14:54:50.138702000server time and last traded time difference is:3:04:52.271298 
+ response{"status": "400", "level": null, "message": "SESSION NOT ACTIVE", "data": null}last traded time after buy order is : 2021-11-01 14:54:50.138702000
+
+

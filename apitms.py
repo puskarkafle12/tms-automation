@@ -1,3 +1,4 @@
+import json
 from time import sleep, time
 import math
 import requests
@@ -18,6 +19,7 @@ errorcount=0
 timeout_count=0
 timeout_count1=0
 count=0
+order_flag=0
 
 
 url=f'https://tms35.nepsetms.com.np/tmsapi/rtApi/ws/stockQuote/{id}'
@@ -30,6 +32,7 @@ request_owner='36320'
 # request_owner='65884'
 
 def fetchprice(xsrf_token,aid,rid,previous_ltp):
+    global order_flag
     global ordercount
     start=datetime.now()
     global orderPrice,orderQuantity,exchangeSecurityid,id
@@ -110,6 +113,13 @@ def fetchprice(xsrf_token,aid,rid,previous_ltp):
                 timeout_count=0
                 print('fetched count:',count)
 
+
+                if order_flag==1:
+                    f = open("traded_difference.txt", "a")
+                    f.write("\nlast traded time after buy order is : "+lastTradedTime+'\n\n\n')
+                    f.close()
+                    order_flag=0
+
                 now = datetime.now()
                 if changePercentage>9:
                     print('price already changed you miss the chance try next day')
@@ -147,10 +157,10 @@ def fetchprice(xsrf_token,aid,rid,previous_ltp):
                             if changePercentage>7.9:
                             # server time and last order time left to be substracted
                                 print("last order is executed with 50 kitta")
-                                order(high_price,50,exchangeSecurityid,id,cookies,headers)
+                                order(high_price,50,exchangeSecurityid,id,cookies,headers,lastTradedTime)
                                 break
                             else:
-                                order(high_price,orderQuantity,exchangeSecurityid,id,cookies,headers)
+                                order(high_price,orderQuantity,exchangeSecurityid,id,cookies,headers,lastTradedTime)
         
 
                         else:
@@ -177,7 +187,8 @@ def fetchprice(xsrf_token,aid,rid,previous_ltp):
             fetch_start=datetime.now()
             fetch_count=0
             
-def order(orderPrice,orderQuantity,exchangeSecurityid,id,cookies,headers):
+def order(orderPrice,orderQuantity,exchangeSecurityid,id,cookies,headers,lastTradedTime):
+    global order_flag
     global maxorder_limit
 
     orderPrice=str(orderPrice)
@@ -186,19 +197,32 @@ def order(orderPrice,orderQuantity,exchangeSecurityid,id,cookies,headers):
     id=str(id)
 
     data = '{"orderBook":{"orderBookExtensions":[{"orderTypes":{"id":1,"orderTypeCode":"LMT"},"disclosedQuantity":0,"orderValidity":{"id":1,"orderValidityCode":"DAY"},"triggerPrice":0,"orderPrice":'+orderPrice+',"orderQuantity":'+orderQuantity+',"remainingOrderQuantity":10,"marketType":{"id":2,"marketType":"Continuous"}}],"exchange":{"id":1},"dnaConnection":{},"dealer":{},"member":{},"productType":{"id":1,"productCode":"CNC"},"instrumentType":{"id":1,"code":"EQ"},"client":{"activeStatus":"A","id":1974509,"accountType":"CLI","allowedToTrade":"Y","clientMemberCode":"PK479690","clientOrDealer":"C","contactNumber":null,"emailId":null,"notsUniqueClientCode":"201811021236758","clientDealerType":null,"clientGroup":{"activeStatus":"A","id":101,"clientGroupCode":null,"clientGroupName":null},"memberBranch":{"activeStatus":"A","id":1,"branchLocation":null,"branchName":null,"hidden":null,"branchProvince":null,"branchDistrict":null,"branchMunicipality":null,"branchHead":null,"branchPhoneNumber":null},"clientDealerAddressDetails":null,"clientDealerBankDetail":null,"clientDealerIndividual":null,"clientDealerPerTradeLimits":null,"clientDealerProductMappings":null,"clientDealerOrderTypeMappings":null,"clientDealerTradingLimits":null,"clientDepositoryDetail":null,"corporateDetail":null,"corporateOwnershipDetails":null,"displayName":"PUSKAR KAFLE","blockedDate":null,"remarks":null,"parentId":null,"recordType":null,"collateralByEntities":null,"shortSellMode":0,"onlineOrOffline":1,"panNumber":null,"onlineFundTransfer":null,"collateralCalculationMode":1,"isMarginLendingClient":null,"clientRiskType":null,"userAgreementChecked":null,"referredBy":null,"marginLendingClient":null},"security":{"id":'+id+',"exchangeSecurityId":'+exchangeSecurityid+',"marketProtectionPercentage":0,"divisor":100,"boardLotQuantity":1,"tickSize":0.1},"accountType":1,"cpMemberId":0,"buyOrSell":1},"orderPlacedBy":2,"exchangeOrderId":null}'
-    print(data)
+    # print(data)
     response = requests.post('https://tms35.nepsetms.com.np/tmsapi/orderApi/orderbook-v2/', headers=headers, cookies=cookies, data=data)
+
+    time_server_response = requests.get('https://tms35.nepsetms.com.np/tmsapi/metadata/serverTime',headers=headers)
+    time=time_server_response.json()['message'][:26]
+    server_time = datetime.strptime(time,'%Y-%m-%d %H:%M:%S.%f')
+    f = open("traded_difference.txt", "a")
+    print("server time and last traded time difference is:"+str(server_time-lastTradedTime))
+    f.write("server time and last traded time difference is:"+str(server_time-lastTradedTime)+' \n response'+json.dumps(response.json()))
+    f.close()
+    order_flag=1
+
+
 
     if response.status_code==200:
         maxorder_limit=maxorder_limit-1
         print(response.status_code)
         print(response.status_code,response.json())
         return response.status_code
+
          
     else:
         print('post failed')
         print(response.status_code,response.json())
         return response.status_code
+    
         
 
 
