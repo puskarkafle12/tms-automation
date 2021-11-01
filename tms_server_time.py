@@ -31,10 +31,10 @@ if order_delay<25:
     print("delay is less lets order")
 
 print(now-lastTradedTime)
-# response = requests.get('https://tms35.nepsetms.com.np/tmsapi/metadata/serverTime',headers=headers)
-# time=response.json()['message'][:26]
-# current_dat_time = datetime.strptime(time,'%Y-%m-%d %H:%M:%S.%f')
-
+time_server_response = requests.get('https://tms35.nepsetms.com.np/tmsapi/metadata/serverTime',headers=headers)
+time=time_server_response.json()['message'][:26]
+server_time = datetime.strptime(time,'%Y-%m-%d %H:%M:%S.%f')
+print("server time",server_time-now)
 # date_time_obj = datetime.strptime(time,'%y-%m-%d %H:%M:%S.%f')[:-3]
 
 # print((current_dat_time-lastTradedTime).total_seconds())
