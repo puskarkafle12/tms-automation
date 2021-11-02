@@ -123,7 +123,7 @@ def fetchprice(xsrf_token,aid,rid,previous_ltp):
                 now = datetime.now()
                 if changePercentage>9:
                     print('price already changed you miss the chance try next day')
-                    # return 'end'
+                    return 'end'
                     
                 
 
