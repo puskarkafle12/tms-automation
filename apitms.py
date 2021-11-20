@@ -79,7 +79,7 @@ def fetchprice(xsrf_token,aid,rid,previous_ltp):
     while(1):
        
         
-        sleep(0.4)
+        sleep(1)
         
         
         try:
