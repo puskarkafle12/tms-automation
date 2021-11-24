@@ -14,7 +14,8 @@ count=0
 order_count=0
 #browser exposes an executable file
 #Through Selenium test we will invoke the executable file which will then #invoke actual browser
-driver = webdriver.Chrome(executable_path="/home/pk/Downloads/chromedriver")
+# driver = webdriver.Chrome(executable_path="/home/pk/Downloads/chromedriver")
+driver = webdriver.Chrome(executable_path='C:\\chrome_driver\\chromedriver.exe')
 # to maximize the browser window
 driver.maximize_window()
 def check_radio_button_isclicked():

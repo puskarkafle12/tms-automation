@@ -8,8 +8,8 @@ from datetime import datetime
 
 orderPrice=440
 orderQuantity=10
-exchangeSecurityid=8021
-id=2912
+exchangeSecurityid=8018
+id=2911
 # set maximum order limit 
 maxorder_limit=4
 # 8021 sahas
@@ -19,7 +19,6 @@ errorcount=0
 timeout_count=0
 timeout_count1=0
 count=0
-order_flag=0
 
 
 url=f'https://tms35.nepsetms.com.np/tmsapi/rtApi/ws/stockQuote/{id}'
@@ -32,7 +31,6 @@ request_owner='36320'
 # request_owner='65884'
 
 def fetchprice(xsrf_token,aid,rid,previous_ltp):
-    global order_flag
     global ordercount
     start=datetime.now()
     global orderPrice,orderQuantity,exchangeSecurityid,id
@@ -79,7 +77,7 @@ def fetchprice(xsrf_token,aid,rid,previous_ltp):
     while(1):
        
         
-        sleep(1)
+        sleep(0.2)
         
         
         try:
@@ -97,11 +95,15 @@ def fetchprice(xsrf_token,aid,rid,previous_ltp):
                 
                 
                 ltp=float(response['payload']['data'][0]['ltp'])
-                
-                high_price=ltp+2/100*ltp
+                changePercentage=float(response['payload']['data'][0]['changePercentage'])
+                # at 7.84 compound effect re3aches 10 percent change crossing this
+                if changePercentage>7.84:
+                    # solving equations we get
+                    high_price=110*ltp/(changePercentage+100)
+                else:
+                    high_price=ltp+2/100*ltp
                 high_price=math.floor(high_price * 10 ** 1) / 10 ** 1
                 print('the high price after calc is ',high_price)
-                changePercentage=float(response['payload']['data'][0]['changePercentage'])
                 lastTradedTime=response['payload']['data'][0]['lastTradedTime']
                 id=int(response['payload']['data'][0]['security']['id'])
                 print('ltp price :',ltp,"id: ",id)
@@ -114,11 +116,7 @@ def fetchprice(xsrf_token,aid,rid,previous_ltp):
                 print('fetched count:',count)
 
 
-                if order_flag==1:
-                    f = open("traded_difference.txt", "a")
-                    f.write("\nlast traded time after buy order is : "+lastTradedTime+'\n\n\n')
-                    f.close()
-                    order_flag=0
+                
 
                 now = datetime.now()
                 if changePercentage>9:
@@ -188,7 +186,6 @@ def fetchprice(xsrf_token,aid,rid,previous_ltp):
             fetch_count=0
             
 def order(orderPrice,orderQuantity,exchangeSecurityid,id,cookies,headers,lastTradedTime):
-    global order_flag
     global maxorder_limit
 
     orderPrice=str(orderPrice)
@@ -206,9 +203,8 @@ def order(orderPrice,orderQuantity,exchangeSecurityid,id,cookies,headers,lastTra
     f = open("traded_difference.txt", "a")
     print("server time and last traded time difference is:"+str(server_time-lastTradedTime))
     f.write("server time and last traded time difference is:"+str(server_time-lastTradedTime)+' \n response'+json.dumps(response.json()))
+    f.write("\nlast traded time after buy order is : "+lastTradedTime+'   server order response time is: '+server_time+'\n\n\n')
     f.close()
-    order_flag=1
-
 
 
     if response.status_code==200:
