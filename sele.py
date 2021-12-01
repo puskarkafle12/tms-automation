@@ -8,7 +8,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 import math
 
 #stock name lekne
-stock_name='SAHAS'
+stock_name='SPC'
 starting_price=436
 count=0
 order_count=0
@@ -88,7 +88,7 @@ def order(quantity):
 ###puskar login sys
 driver.get("https://tms35.nepsetms.com.np/login")
 driver.find_element_by_xpath('/html/body/app-root/app-login/div/div/div[2]/form/div[1]/input').send_keys("PK479690") #user name
-driver.find_element_by_xpath('//*[@id="password-field"]').send_keys("Puskar123@@@@")  #password
+driver.find_element_by_xpath('//*[@id="password-field"]').send_keys("Puskar123@@@#")  #password
 driver.find_element_by_xpath('//*[@id="captchaEnter"]').click()
 
 # # # wait until captcha come

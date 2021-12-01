@@ -8,8 +8,8 @@ from datetime import datetime
 
 orderPrice=440
 orderQuantity=10
-exchangeSecurityid=8018
-id=2911
+exchangeSecurityid=8025
+id=2918
 # set maximum order limit 
 maxorder_limit=4
 # 8021 sahas
@@ -74,10 +74,11 @@ def fetchprice(xsrf_token,aid,rid,previous_ltp):
     session=requests.session()
     fetch_start=datetime.now()
     fetch_count=1
+    first_run=1
     while(1):
        
         
-        sleep(0.2)
+        sleep(0.3)
         
         
         try:
@@ -95,18 +96,25 @@ def fetchprice(xsrf_token,aid,rid,previous_ltp):
                 
                 
                 ltp=float(response['payload']['data'][0]['ltp'])
+                
+                if first_run==1:
+                    previous_ltp=ltp
+                    first_run=0
+
+           
                 changePercentage=float(response['payload']['data'][0]['changePercentage'])
                 # at 7.84 compound effect re3aches 10 percent change crossing this
-                if changePercentage>7.84:
+                if changePercentage>7.8431372:
                     # solving equations we get
                     high_price=110*ltp/(changePercentage+100)
                 else:
                     high_price=ltp+2/100*ltp
+                
                 high_price=math.floor(high_price * 10 ** 1) / 10 ** 1
-                print('the high price after calc is ',high_price)
+                print('\nthe high price after calc is ',high_price)
                 lastTradedTime=response['payload']['data'][0]['lastTradedTime']
                 id=int(response['payload']['data'][0]['security']['id'])
-                print('ltp price :',ltp,"id: ",id)
+                print('ltp price:'+str(ltp)+'previous ltp :'+str(previous_ltp))
                 print("last traded time is",lastTradedTime)
                 print("change in percent is",changePercentage)
                 global count
@@ -135,13 +143,13 @@ def fetchprice(xsrf_token,aid,rid,previous_ltp):
 
                    
                     
-                print('fetch per second is ',round(fetch_count/fetch_time_taken.total_seconds(),2),'\n')
+                print('fetch per second is ',round(fetch_count/fetch_time_taken.total_seconds(),2))
                 print('maxorder limit left',maxorder_limit)
                 # if ordercount==0:
                 #     ordercount=1
                 if previous_ltp<ltp:
                     print(f'previous ltp price is : {previous_ltp} new ltp price is : {ltp}')
-                    print('ltp price:',ltp)
+                    print('ltp price:'+str(ltp)+'previous ltp :'+str(previous_ltp))
                     previous_ltp=ltp
                     if maxorder_limit<0:
                         print('maximum order count limit reached')
@@ -150,8 +158,8 @@ def fetchprice(xsrf_token,aid,rid,previous_ltp):
                         lastTradedTime= datetime.strptime(lastTradedTime,'%Y-%m-%d %H:%M:%S.%f')
                         now=datetime.now()
                         order_delay=(now-lastTradedTime).total_seconds()
-                        if order_delay<25:
-                            print("delay is less lets order")
+                        if order_delay<120:
+                            print("delay is less than 120 sec lets order")
                             if changePercentage>7.9:
                             # server time and last order time left to be substracted
                                 print("last order is executed with 50 kitta")
@@ -203,7 +211,7 @@ def order(orderPrice,orderQuantity,exchangeSecurityid,id,cookies,headers,lastTra
     f = open("traded_difference.txt", "a")
     print("server time and last traded time difference is:"+str(server_time-lastTradedTime))
     f.write("server time and last traded time difference is:"+str(server_time-lastTradedTime)+' \n response'+json.dumps(response.json()))
-    f.write("\nlast traded time after buy order is : "+lastTradedTime+'   server order response time is: '+server_time+'\n\n\n')
+    f.write("\nlast traded time after buy order is : "+str(lastTradedTime)+'   server order response time is: '+str(server_time)+'\n\n\n')
     f.close()
 
 
