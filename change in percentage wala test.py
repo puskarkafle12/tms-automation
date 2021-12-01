@@ -1,7 +1,7 @@
 import math
-ltp=1424.9
-changePercentage=0.99
-if changePercentage>7.84:
+ltp=1618.5
+changePercentage=8.2391
+if changePercentage>7.8431372:
                     # solving equations we get
         high_price=110*ltp/(changePercentage+100)
 else:
