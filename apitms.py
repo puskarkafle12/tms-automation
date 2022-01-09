@@ -8,8 +8,8 @@ from datetime import datetime
 
 orderPrice=440
 orderQuantity=10
-exchangeSecurityid=8025
-id=2918
+exchangeSecurityid=8031
+id=2923
 # set maximum order limit 
 maxorder_limit=4
 # 8021 sahas
@@ -78,7 +78,7 @@ def fetchprice(xsrf_token,aid,rid,previous_ltp):
     while(1):
        
         
-        sleep(0.3)
+        sleep(0.18)
         
         
         try:
@@ -127,9 +127,7 @@ def fetchprice(xsrf_token,aid,rid,previous_ltp):
                 
 
                 now = datetime.now()
-                if changePercentage>9:
-                    print('price already changed you miss the chance try next day')
-                    return 'end'
+               
                     
                 
 
@@ -192,6 +190,9 @@ def fetchprice(xsrf_token,aid,rid,previous_ltp):
         if fetch_time_taken.total_seconds()>=3:
             fetch_start=datetime.now()
             fetch_count=0
+        if changePercentage>8:
+                    print('price already changed you miss the chance try next day')
+                    return 'end'
             
 def order(orderPrice,orderQuantity,exchangeSecurityid,id,cookies,headers,lastTradedTime):
     global maxorder_limit
