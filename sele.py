@@ -14,11 +14,11 @@ count=0
 order_count=0
 #browser exposes an executable file
 #Through Selenium test we will invoke the executable file which will then #invoke actual browser
-driver = webdriver.Chrome(executable_path="/home/pk/Downloads/chromedriver")
+driver = webdriver.Chrome()
 # to maximize the browser window
 driver.maximize_window()
 def check_radio_button_isclicked():
-    buy_radio_button=driver.find_element_by_xpath('/html/body/app-root/tms/main/div/div/app-member-client-order-entry/div/div/div[1]/div[2]/app-three-state-toggle/div/div/label[3]')
+    buy_radio_button=driver.find_element(By.XPATH,'/html/body/app-root/tms/main/div/div/app-member-client-order-entry/div/div/div[1]/div[2]/app-three-state-toggle/div/div/label[3]')
 
     # print('pkpk '+buy_radio_button.get_attribute('class'))
     if(buy_radio_button.get_attribute('class')=='xtoggler-btn-wrapper is-active'):
@@ -32,7 +32,7 @@ def order(quantity):
     # global previous_high
     # global previous_ltp
     # global ltp_price
-    symbol_input_box=driver.find_element_by_xpath('/html/body/app-root/tms/main/div/div/app-member-client-order-entry/div/div/div[3]/form/div[2]/div[2]/input')
+    symbol_input_box=driver.find_element(By.XPATH,'/html/body/app-root/tms/main/div/div/app-member-client-order-entry/div/div/div[3]/form/div[2]/div[2]/input')
 
 
     symbol_box=symbol_input_box.get_attribute('value')
@@ -44,9 +44,9 @@ def order(quantity):
         #     print("radio button cannot be clicked")
         # dropdown_element.click() yesma click garnu pardaina drop down confirm garna matrai ho
         qty.send_keys(quantity)
-        # driver.find_element_by_xpath('').send_keys("")
+        # driver.find_element(By.XPATH,'').send_keys("")
         
-        driver.find_element_by_xpath('/html/body/app-root/tms/main/div/div/app-member-client-order-entry/div/div/div[3]/form/div[2]/div[4]/input').send_keys(str(low_price))
+        driver.find_element(By.XPATH,'/html/body/app-root/tms/main/div/div/app-member-client-order-entry/div/div/div[3]/form/div[2]/div[4]/input').send_keys(str(low_price))
         # driver.execute_script('document.getElementsByClassName("btn btn-sm ng-star-inserted")[0].removeAttribute("disabled");')
         
         order_button.click()
@@ -81,19 +81,18 @@ def order(quantity):
 # username='20210609326'
 # password='PUSkar123@@'
 # driver.get("https://tms56.nepsetms.com.np/login")
-# driver.find_element_by_xpath('/html/body/app-root/app-login/div/div/div[2]/form/div[1]/input').send_keys(username) #user name
-# driver.find_element_by_xpath('//*[@id="password-field"]').send_keys(password)  #password
-# driver.find_element_by_xpath('//*[@id="captchaEnter"]').click()
+# driver.find_element(By.XPATH,'/html/body/app-root/app-login/div/div/div[2]/form/div[1]/input').send_keys(username) #user name
+# driver.find_element(By.XPATH,'//*[@id="password-field"]').send_keys(password)  #password
+# driver.find_element(By.XPATH,'//*[@id="captchaEnter"]').click()
 ###puskar login sys
 driver.get("https://tms35.nepsetms.com.np/login")
-driver.find_element_by_xpath('/html/body/app-root/app-login/div/div/div[2]/form/div[1]/input').send_keys("PK479690") #user name
-driver.find_element_by_xpath('//*[@id="password-field"]').send_keys("Puskar123@@@@")  #password
-driver.find_element_by_xpath('//*[@id="captchaEnter"]').click()
-
+driver.find_element(By.XPATH,'/html/body/app-root/app-login/div/div/div[2]/form/div[1]/input').send_keys("PK479690") #user name
+driver.find_element(By.XPATH,'//*[@id="password-field"]').send_keys("a%bQ7PonS6QYGS")  #password
+driver.find_element(By.XPATH,'//*[@id="captchaEnter"]').click()
 # # # wait until captcha come
 # captcha aafile halne 
 
-# driver.find_element_by_xpath('/html/body/app-root/app-login/div/div/div[2]/form/div[4]/input').click()#click login button
+# driver.find_element(By.XPATH,'/html/body/app-root/app-login/div/div/div[2]/form/div[4]/input').click()#click login button
 
 
 # wait until order management button appears
@@ -109,7 +108,7 @@ order_management_button.click()
 #click buy and sell button
 
 
-buysell_button=driver.find_element_by_xpath('/html/body/app-root/tms/app-menubar/aside/nav/ul/li[10]/ul/li[1]/a')
+buysell_button=driver.find_element(By.XPATH,'/html/body/app-root/tms/app-menubar/aside/nav/ul/li[10]/ul/li[1]/a')
 try:
     buysell_button.click()
 except:
@@ -130,7 +129,7 @@ symbol_input_box.click()
 
 try:
     
-  driver.find_element_by_class_name('box-order-entry box-indeterminate')
+  driver.find_element(By.CLASS_NAME,'box-order-entry box-indeterminate')
 except:
     try:
         driver.execute_script('try {document.getElementsByClassName("box-order-entry blur__options box-buy")[0].removeAttribute("class");} catch(err) { document.getElementsByClassName("box-order-entry blur__options box-indeterminate")[0].removeAttribute("class");}')
@@ -145,32 +144,32 @@ dropdown_element = WebDriverWait(driver, 10).until(
 )
 # dropdown_element.click() yesma click garnu pardaina drop down confirm garna matrai ho
 symbol_input_box.send_keys(Keys.RETURN)#pressing enter button 
-buy_radio_button=driver.find_element_by_xpath('/html/body/app-root/tms/main/div/div/app-member-client-order-entry/div/div/div[1]/div[2]/app-three-state-toggle/div/div/label[3]')
+buy_radio_button=driver.find_element(By.XPATH,'/html/body/app-root/tms/main/div/div/app-member-client-order-entry/div/div/div[1]/div[2]/app-three-state-toggle/div/div/label[3]')
 
 buy_radio_button.click()#click buy radio
 
 
 
-qty=driver.find_element_by_xpath('/html/body/app-root/tms/main/div/div/app-member-client-order-entry/div/div/div[3]/form/div[2]/div[3]/input')
+qty=driver.find_element(By.XPATH,'/html/body/app-root/tms/main/div/div/app-member-client-order-entry/div/div/div[3]/form/div[2]/div[3]/input')
 qty.send_keys("10")
 
-# driver.find_element_by_xpath('').send_keys("")
-highprice=driver.find_element_by_xpath('/html/body/app-root/tms/main/div/div/app-member-client-order-entry/div/div/div[3]/form/div[3]/div[1]/div[3]/b')
+# driver.find_element(By.XPATH,'').send_keys("")
+highprice=driver.find_element(By.XPATH,'/html/body/app-root/tms/main/div/div/app-member-client-order-entry/div/div/div[3]/form/div[3]/div[1]/div[3]/b')
 
 high_price = float(highprice.text.replace(',', ''))
-lowprice=driver.find_element_by_xpath('/html/body/app-root/tms/main/div/div/app-member-client-order-entry/div/div/div[3]/form/div[3]/div[1]/div[2]/b')
+lowprice=driver.find_element(By.XPATH,'/html/body/app-root/tms/main/div/div/app-member-client-order-entry/div/div/div[3]/form/div[3]/div[1]/div[2]/b')
 low_price=float(lowprice.text)
-ltpprice=driver.find_element_by_xpath("//div[@class='order__form--prodtype price-display ng-star-inserted'][1]")
+ltpprice=driver.find_element(By.XPATH,"//div[@class='order__form--prodtype price-display ng-star-inserted'][1]")
 ltp_price=ltpprice.text
 
 ltp_price = ltp_price.split()[1]
 print("ltp price ",ltp_price," high price ",high_price," low price",low_price)
 ltp_price = float(ltp_price.replace(',', ''))
-tms_time=driver.find_element_by_xpath("/html/body/app-root/tms/app-menubar/aside/div[2]/div[1]/span")
-driver.find_element_by_xpath('/html/body/app-root/tms/main/div/div/app-member-client-order-entry/div/div/div[3]/form/div[2]/div[4]/input').send_keys(str(low_price))
+tms_time=driver.find_element(By.XPATH,"/html/body/app-root/tms/app-menubar/aside/div[2]/div[1]/span")
+driver.find_element(By.XPATH,'/html/body/app-root/tms/main/div/div/app-member-client-order-entry/div/div/div[3]/form/div[2]/div[4]/input').send_keys(str(low_price))
 driver.execute_script('document.getElementsByClassName("btn btn-sm ng-star-inserted")[0].removeAttribute("disabled");')
 
-order_button=driver.find_element_by_xpath("//button[@class='btn btn-sm ng-star-inserted btn-primary']")
+order_button=driver.find_element(By.XPATH,"//button[@class='btn btn-sm ng-star-inserted btn-primary']")
 # waiting 
 tmstime=(tms_time.text).split()[3]
 today = datetime.datetime.strptime(tmstime,"%H:%M:%S")
@@ -199,10 +198,10 @@ else:
 previous_ltp=ltp_price
 
 
-# driver.find_element_by_xpath('/html/body/app-root/tms/main/div/div/app-member-client-order-entry/div/div/div[3]/form/div[2]/div[2]/input').send_keys(Keys.RETURN)#pressing enter button 
+# driver.find_element(By.XPATH,'/html/body/app-root/tms/main/div/div/app-member-client-order-entry/div/div/div[3]/form/div[2]/div[2]/input').send_keys(Keys.RETURN)#pressing enter button 
 while(1):
     try:
-        symbol_input_box=driver.find_element_by_xpath('/html/body/app-root/tms/main/div/div/app-member-client-order-entry/div/div/div[3]/form/div[2]/div[2]/input')
+        symbol_input_box=driver.find_element(By.XPATH,'/html/body/app-root/tms/main/div/div/app-member-client-order-entry/div/div/div[3]/form/div[2]/div[2]/input')
 
    
         symbol_input_box.clear()
@@ -221,8 +220,8 @@ while(1):
         # print('csrf token')
         # print(cookies)
         # print(cookies[0]['name'])
-        xsrf_token=cookies[0]['value']
-        aid=cookies[1]['value']
+        aid=cookies[0]['value']
+        xsrf_token=cookies[1]['value']
         rid=cookies[2]['value']
         # print(xsrf_token,aid,rid)
         price=apitms.fetchprice(xsrf_token,aid,rid,previous_ltp)
@@ -276,9 +275,9 @@ while(1):
 #             symbol_input_box.send_keys(Keys.RETURN)
 
         
-#             high_price=driver.find_element_by_xpath('/html/body/app-root/tms/main/div/div/app-member-client-order-entry/div/div/div[3]/form/div[3]/div[1]/div[3]/b').text
+#             high_price=driver.find_element(By.XPATH,'/html/body/app-root/tms/main/div/div/app-member-client-order-entry/div/div/div[3]/form/div[3]/div[1]/div[3]/b').text
 #             high_price = float(high_price.replace(',', ''))
-#             tms_time=driver.find_element_by_xpath("/html/body/app-root/tms/app-menubar/aside/div[2]/div[1]/span")
+#             tms_time=driver.find_element(By.XPATH,"/html/body/app-root/tms/app-menubar/aside/div[2]/div[1]/span")
 #             print("ltp price ",ltp_price," high price ",high_price," low price",low_price)
 #             print('tms_time: '+(tms_time.text).split()[3]+'\n')
 #             inc_percentage=(ltp_price-starting_price)/starting_price*100
@@ -292,8 +291,8 @@ while(1):
 #             if previous_high<float(high_price):
 #                 order(10)
             
-#                 low_price=driver.find_element_by_xpath('/html/body/app-root/tms/main/div/div/app-member-client-order-entry/div/div/div[3]/form/div[3]/div[1]/div[2]/b').text
-#                 ltp_price=driver.find_element_by_xpath("//div[@class='order__form--prodtype price-display ng-star-inserted'][1]").text
+#                 low_price=driver.find_element(By.XPATH,'/html/body/app-root/tms/main/div/div/app-member-client-order-entry/div/div/div[3]/form/div[3]/div[1]/div[2]/b').text
+#                 ltp_price=driver.find_element(By.XPATH,"//div[@class='order__form--prodtype price-display ng-star-inserted'][1]").text
 #                 ltp_price = ltp_price.split()[1]
 #                 ltp_price = float(ltp_price.replace(',', ''))
 #                 print("ltp price ",ltp_price," high price ",high_price," low price",low_price)
@@ -302,10 +301,10 @@ while(1):
    
 # reload()
 
-# highprice=driver.find_element_by_xpath('/html/body/app-root/tms/main/div/div/app-member-client-order-entry/div/div/div[3]/form/div[3]/div[1]/div[3]/b')
-# lowprice=driver.find_element_by_xpath('/html/body/app-root/tms/main/div/div/app-member-client-order-entry/div/div/div[3]/form/div[3]/div[1]/div[2]/b')
-# ltpprice=driver.find_element_by_xpath("//div[@class='order__form--prodtype price-display ng-star-inserted'][1]")
-# tms_time=driver.find_element_by_xpath("/html/body/app-root/tms/app-menubar/aside/div[2]/div[1]/span")
+# highprice=driver.find_element(By.XPATH,'/html/body/app-root/tms/main/div/div/app-member-client-order-entry/div/div/div[3]/form/div[3]/div[1]/div[3]/b')
+# lowprice=driver.find_element(By.XPATH,'/html/body/app-root/tms/main/div/div/app-member-client-order-entry/div/div/div[3]/form/div[3]/div[1]/div[2]/b')
+# ltpprice=driver.find_element(By.XPATH,"//div[@class='order__form--prodtype price-display ng-star-inserted'][1]")
+# tms_time=driver.find_element(By.XPATH,"/html/body/app-root/tms/app-menubar/aside/div[2]/div[1]/span")
     
 
 # #waiting 
@@ -316,7 +315,7 @@ while(1):
 # print('Waiting for ' + str(datetime.timedelta(seconds=sleep)))
 # time.sleep(sleep)
 # driver.execute_script('document.getElementsByClassName("btn btn-sm ng-star-inserted")[0]").removeAttribute("disable");')
-# driver.find_element_by_xpath("//button[@class='btn btn-sm ng-star-inserted']").click()
+# driver.find_element(By.XPATH,"//button[@class='btn btn-sm ng-star-inserted']").click()
 #to close the browser
 
 # document.querySelector("body > app-root > tms > main > div > div > app-member-client-order-entry > div > div > div:nth-child(3) > form > div.d-flex.flex-wrap.flex-lg-nowrap.row.mt-3 > div.order__form--btngrp.ml-auto > button.btn.btn-sm.ng-star-inserted.btn-primary").click()

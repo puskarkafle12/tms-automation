@@ -45,24 +45,43 @@ def fetchprice(xsrf_token,aid,rid,previous_ltp):
         '_rid': rid
         }
 
-    headers = {
-        'Connection': 'keep-alive',
-        'sec-ch-ua': '" Not;A Brand";v="99", "Google Chrome";v="91", "Chromium";v="91"',
-        'Accept': 'application/json, text/plain, */*',
-        'X-XSRF-TOKEN': xsrf_token,
-        'Request-Owner': request_owner,
-        'Content-Type': 'application/json',
-        'sec-ch-ua-mobile': '?0',
-        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.164 Safari/537.36',
-        'Host-Session-Id': 'TWpRPS0yZjg4ZmIzNC1jZDQ4LTQwZTMtODdiNy0xNGFkNzMwZDEwYTk=',
-        'Origin': 'https://tms35.nepsetms.com.np',
-        'Sec-Fetch-Site': 'same-origin',
-        'Sec-Fetch-Mode': 'cors',
-        'Sec-Fetch-Dest': 'empty',
-        'Referer': ref_url,
-        'Accept-Language': 'en-US,en;q=0.9',
-    }
+    # headers = {
+    #     'Connection': 'keep-alive',
+    #     'sec-ch-ua': '" Not;A Brand";v="99", "Google Chrome";v="91", "Chromium";v="91"',
+    #     'Accept': 'application/json, text/plain, */*',
+    #     'X-XSRF-TOKEN': xsrf_token,
+    #     'Request-Owner': request_owner,
+    #     'Content-Type': 'application/json',
+    #     'sec-ch-ua-mobile': '?0',
+    #     'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.164 Safari/537.36',
+    #     'Host-Session-Id': 'TWpRPS0yZjg4ZmIzNC1jZDQ4LTQwZTMtODdiNy0xNGFkNzMwZDEwYTk=',
+    #     'Origin': 'https://tms35.nepsetms.com.np',
+    #     'Sec-Fetch-Site': 'same-origin',
+    #     'Sec-Fetch-Mode': 'cors',
+    #     'Sec-Fetch-Dest': 'empty',
+    #     'Referer': ref_url,
+    #     'Accept-Language': 'en-US,en;q=0.9',
+    # }
 
+
+    headers = {
+        'authority': 'tms35.nepsetms.com.np',
+        'accept': 'application/json, text/plain, */*',
+        'accept-language': 'en-US,en;q=0.9',
+        # Requests sorts cookies= alphabetically
+        # 'cookie': '_rid='+rid+'; _aid='+aid+'; XSRF-TOKEN='+xsrf_token,
+        'host-session-id': 'TVRJPS1lYWU2MTU0ZS0xODkyLTQxNDEtYTczZS1kMGI1YmM5N2I1YzQ=',
+        'referer': 'https://tms35.nepsetms.com.np/tms/me/memberclientorderentry',
+        'request-owner': request_owner,
+        'sec-ch-ua': '"Google Chrome";v="117", "Not;A=Brand";v="8", "Chromium";v="117"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"macOS"',
+        'sec-fetch-dest': 'empty',
+        'sec-fetch-mode': 'cors',
+        'sec-fetch-site': 'same-origin',
+        'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36',
+        'x-xsrf-token': xsrf_token,
+    }
 
 
     # ZFc1a1pXWnBibVZrLTg3MzEwNmYzLTIzZmItNDk3OC1iZGMwLWQwODlhZGYyM2M4Yg==
@@ -95,7 +114,8 @@ def fetchprice(xsrf_token,aid,rid,previous_ltp):
                     print('The request timeout:',timeout_count1)
 
                 
-                
+                # if response['status']=='401':
+                #     not authorized token not validated
                 ltp=float(response['payload']['data'][0]['ltp'])
                 
                 high_price=ltp+2/100*ltp
