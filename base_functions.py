@@ -8,45 +8,60 @@ import math
 from requests.exceptions import Timeout
 def get_stock_details(session,headers,token,id):
     url=f'https://tms35.nepsetms.com.np/tmsapi/rtApi/ws/stockQuote/{id}'
-    responsee = session.get(url, headers=headers, cookies=token,timeout=1)
+    responsee = session.get(url, headers=headers, cookies=token,timeout=5)
     response=responsee.json()
     try:
         return response['payload']['data'][0]
     except KeyError:
         if response['message']=='ACCESS_TOKEN_EXPIRED':
             return response
+import time
 
-def price_scanner(id,previous_ltp, session, headers, token,request_per_sec):
+def price_scanner(id, previous_ltp, session, headers, token, request_per_sec):
     fetch_count = 0
+    total_fetch_count=0
+    start_time = time.time()
+    reset_time = 4  # Reset the fetch rate counter every 4 seconds
+    fetch_rate = 0
+
     while True:
-        sleep(1/request_per_sec)
+        time.sleep(1/request_per_sec)
+        elapsed_time = time.time() - start_time
+        fetch_rate = fetch_count / elapsed_time
+        if elapsed_time >= reset_time:
+            # Reset the fetch rate counter every 4 seconds
+            start_time = time.time()
+            fetch_count = 0
+
         try:
-            response = get_stock_details(session, headers, token,id)
+            response = get_stock_details(session, headers, token, id)
             if response.get('status'):
-                if  response['status']=='401':
-                    if response['message']=='ACCESS_TOKEN_EXPIRED':
+                if response['status'] == '401':
+                    if response['message'] == 'ACCESS_TOKEN_EXPIRED':
                         return response
                     continue
             fetch_count += 1
+            total_fetch_count+=1
         except Exception as e:
             print(f"Error fetching stock details: {e}")
             continue
 
         ltp = float(response['ltp'])
         percentage_change = float(response['changePercentage'])
-        print('Fetched count:', fetch_count)
+        print('Fetch per second:', fetch_rate)
+        print('Fetched count:', total_fetch_count)
         print('LTP:', ltp,'\n')
 
         if percentage_change > 9:
             print('Price already changed; you missed the chance. Try next day.')
-            return {'message':'exit'}  # Return None to indicate that the condition was met
+            return {'message': 'exit'}  # Return None to indicate that the condition was met
 
         if previous_ltp < ltp:
-            two_percent_high=calculate_high_price(ltp)
+            two_percent_high = calculate_high_price(ltp)
             print('The high price after calculation is', two_percent_high)
             response['twoPercentHigh'] = two_percent_high
-            return response  
-        
+            return response
+   
 def calculate_high_price(ltp):
     high_price = ltp + (2 / 100) * ltp
     high_price = math.floor(high_price * 10 ** 1) / 10 ** 1
@@ -73,7 +88,7 @@ def format_time(time_str):
     formatted_time = datetime.strptime(formatted_time_str, '%Y-%m-%d %H:%M:%S.%f')
     
     return formatted_time
-def order(orderPrice,orderQuantity,exchangeSecurityid,id,cookies,headers,lastTradedTime):
+def order(orderPrice,orderQuantity,exchangeSecurityid,id,cookies,headers):
     global order_flag
     global maxorder_limit
 
@@ -83,6 +98,12 @@ def order(orderPrice,orderQuantity,exchangeSecurityid,id,cookies,headers,lastTra
     id=str(id)
     data = '{"orderBook":{"orderBookExtensions":[{"orderTypes":{"id":1,"orderTypeCode":"LMT"},"disclosedQuantity":0,"orderValidity":{"id":1,"orderValidityCode":"DAY"},"triggerPrice":0,"orderPrice":'+orderPrice+',"orderQuantity":'+orderQuantity+',"remainingOrderQuantity":10,"marketType":{"id":2,"marketType":"Continuous"}}],"exchange":{"id":1},"dnaConnection":{},"dealer":{},"member":{},"productType":{"id":1,"productCode":"CNC"},"instrumentType":{"id":1,"code":"EQ"},"client":{"activeStatus":"A","id":1974509,"accountType":"CLI","allowedToTrade":"Y","clientMemberCode":"PK479690","clientOrDealer":"C","contactNumber":null,"emailId":null,"notsUniqueClientCode":"201811021236758","clientDealerType":null,"clientGroup":{"activeStatus":"A","id":101,"clientGroupCode":null,"clientGroupName":null},"memberBranch":{"activeStatus":"A","id":1,"branchLocation":null,"branchName":null,"hidden":null,"branchProvince":null,"branchDistrict":null,"branchMunicipality":null,"branchHead":null,"branchPhoneNumber":null},"clientDealerAddressDetails":null,"clientDealerBankDetail":null,"clientDealerIndividual":null,"clientDealerPerTradeLimits":null,"clientDealerProductMappings":null,"clientDealerOrderTypeMappings":null,"clientDealerTradingLimits":null,"clientDepositoryDetail":null,"corporateDetail":null,"corporateOwnershipDetails":null,"displayName":"PUSKAR KAFLE","blockedDate":null,"remarks":null,"parentId":null,"recordType":null,"collateralByEntities":null,"shortSellMode":0,"onlineOrOffline":1,"panNumber":null,"onlineFundTransfer":null,"collateralCalculationMode":1,"isMarginLendingClient":null,"clientRiskType":null,"userAgreementChecked":null,"referredBy":null,"marginLendingClient":null},"security":{"id":'+id+',"exchangeSecurityId":'+exchangeSecurityid+',"marketProtectionPercentage":0,"divisor":100,"boardLotQuantity":1,"tickSize":0.1},"accountType":1,"cpMemberId":0,"buyOrSell":1},"orderPlacedBy":2,"exchangeOrderId":null}'
     response = requests.post('https://tms35.nepsetms.com.np/tmsapi/orderApi/orderbook-v2/', headers=headers, cookies=cookies, data=data)
+    order_flag=1
+    if response.status_code==200:
+        return json.loads(response.content)
+    else:
+        return json.loads(response.content)
+def time_logger(lastTradedTime,headers,):
     time_server_response = requests.get('https://tms35.nepsetms.com.np/tmsapi/metadata/serverTime',headers=headers)
     time=time_server_response.json()['message'][:26]
     server_time = format_time(time)
@@ -90,11 +111,6 @@ def order(orderPrice,orderQuantity,exchangeSecurityid,id,cookies,headers,lastTra
     f = open("traded_difference.txt", "a")
     f.write("\n\nserver time and last traded time difference is:"+str(server_time-lastTradedTime)+' \n response'+json.dumps(response.json()))
     f.close()
-    order_flag=1
-    if response.status_code==200:
-        return json.loads(response.content)
-    else:
-        return json.loads(response.content)
 # Function to save tokens to a JSON file
 def save_tokens(username, tokens):
     data={}
