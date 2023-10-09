@@ -9,10 +9,11 @@ if __name__ == "__main__":
     password = 'a%bQ7PonS6QYGS'
     stock_symbol='prvu'
     broker_no=35
+    previous_ltp=400
+    request_per_sec=3
     order_quantity=10
-    previous_ltp=158
-    request_per_sec=4
-    stock_order_manager = StockOrderManager(username, password,stock_symbol,request_per_sec,broker_no)
+    request_owner='36320'
+    stock_order_manager = StockOrderManager(username, password,stock_symbol,request_per_sec,broker_no,request_owner)
     stock_order_manager.initialize()
-    stock_grab=stock_order_manager.stock_grabber(order_quantity,previous_ltp)
-    print(stock_grab)
+    stock_grab_response=stock_order_manager.stock_grabber(order_quantity,previous_ltp)
+    print(stock_grab_response)

@@ -6,7 +6,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.by import By
 
 class StockOrderManager:
-    def __init__(self, username, password,stock_symbol,request_per_sec,broker_no):
+    def __init__(self, username, password,stock_symbol,request_per_sec,broker_no,request_owner):
         self.username = username
         self.password = password
         self.driver = None
@@ -14,7 +14,7 @@ class StockOrderManager:
         self.cookies = None
         self.headers = None
         self.security = None
-        self.request_owner='36320'
+        self.request_owner=request_owner
         self.stock_symbol=stock_symbol
         self.request_per_sec=request_per_sec
         self.broker_no=broker_no
@@ -34,19 +34,22 @@ class StockOrderManager:
         self.security = get_securities_ids(self.stock_symbol, self.cookies, self.headers)
 
     def stock_grabber(self, order_quantity, previous_ltp):
-        stock_details = asyncio.run(price_scanner(self.security['id'], previous_ltp, self.session, self.headers, self.cookies,self.request_per_sec))
-        
-        if stock_details.get('message') == 'ACCESS_TOKEN_EXPIRED':
-            # Handle token expiration or refresh here
-            return stock_details
+        stock_details={}
+        order_limit=0
+        while stock_details.get('message') !='exit' and order_limit<3:
+            stock_details = asyncio.run(price_scanner(self.security['id'], previous_ltp, self.session, self.headers, self.cookies,self.request_per_sec))
+            if stock_details.get('message') == 'ACCESS_TOKEN_EXPIRED':
+                # Handle token expiration or refresh here
+                return stock_details
 
-        order_response = order(stock_details['twoPercentHigh'], order_quantity,self.security, self.cookies, self.headers,self.client_details)
-        if order_response.get('status') == '200':
-            log_time(stock_details['lastTradedTime'],self.headers,order_response)
-            return order_response
-        elif order_response.get('status') == '400':
-            order_response['message']='ordered failed due to '+order_response['message']
-            log_time(stock_details['lastTradedTime'],self.headers,order_response)
-            return order_response
-        else:
-            return order_response
+            order_response = order(stock_details['twoPercentHigh'], order_quantity,self.security, self.cookies, self.headers,self.client_details)
+            if order_response.get('status') == '200':
+                log_time(stock_details['lastTradedTime'],self.headers,order_response)
+                order_limit+=1
+                return order_response
+            elif order_response.get('status') == '400':
+                order_response['message']='ordered failed due to '+order_response['message']
+                log_time(stock_details['lastTradedTime'],self.headers,order_response)
+                return order_response
+            else:
+                return order_response
