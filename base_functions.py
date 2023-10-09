@@ -1,23 +1,37 @@
     
 from datetime import datetime
 import json
+import sys
 import requests
 from requests.exceptions import Timeout
 from time import sleep
 import math
 from requests.exceptions import Timeout
-def get_stock_details(session,headers,token,id):
-    url=f'https://tms35.nepsetms.com.np/tmsapi/rtApi/ws/stockQuote/{id}'
-    responsee = session.get(url, headers=headers, cookies=token,timeout=5)
-    response=responsee.json()
-    try:
-        return response['payload']['data'][0]
-    except KeyError:
-        if response['message']=='ACCESS_TOKEN_EXPIRED':
-            return response
+import aiohttp
+import asyncio
 import time
 
-def price_scanner(id, previous_ltp, session, headers, token, request_per_sec):
+
+async def get_stock_details(session, headers, token, id):
+    for attempt in range(3):  # Retry up to 3 times
+        try:
+            url = f'https://tms35.nepsetms.com.np/tmsapi/rtApi/ws/stockQuote/{id}'
+            async with session.get(url, headers=headers, cookies=token, timeout=5) as responsee:
+                responsee.raise_for_status()
+                response = await responsee.json()
+                return response['payload']['data'][0]
+        except aiohttp.ClientError as e:
+            print(f"Attempt {attempt + 1} failed: {e}")
+            await asyncio.sleep(2 ** attempt)  # Exponential backoff
+        except KeyError as e:
+            print(f"KeyError: {e}")
+            if response.get('message') == 'ACCESS_TOKEN_EXPIRED':
+                return response
+
+    print("Max retries reached, unable to fetch data.")
+    return None
+
+async def price_scanner(id, previous_ltp, session, headers, token, request_per_sec):
     fetch_count = 0
     total_fetch_count=0
     start_time = time.time()
@@ -34,7 +48,9 @@ def price_scanner(id, previous_ltp, session, headers, token, request_per_sec):
             fetch_count = 0
 
         try:
-            response = get_stock_details(session, headers, token, id)
+            async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(keepalive_timeout=30)) as session:
+                response = await get_stock_details(session, headers, token, id)
+
             if response.get('status'):
                 if response['status'] == '401':
                     if response['message'] == 'ACCESS_TOKEN_EXPIRED':
@@ -54,6 +70,7 @@ def price_scanner(id, previous_ltp, session, headers, token, request_per_sec):
 
         if percentage_change > 9:
             print('Price already changed; you missed the chance. Try next day.')
+            sys.exit()
             return {'message': 'exit'}  # Return None to indicate that the condition was met
 
         if previous_ltp < ltp:
@@ -88,28 +105,142 @@ def format_time(time_str):
     formatted_time = datetime.strptime(formatted_time_str, '%Y-%m-%d %H:%M:%S.%f')
     
     return formatted_time
-def order(orderPrice,orderQuantity,exchangeSecurityid,id,cookies,headers):
-    global order_flag
-    global maxorder_limit
-
+def get_client_details(cookies,headers):
+    response = requests.get(
+    'https://tms35.nepsetms.com.np/tmsapi/clientApi/clientDealer/info/1974509',
+    cookies=cookies,
+    headers=headers,
+)
+    if response.status_code!=200:
+        response.raise_for_status()
+    return json.loads(response.content)
+def order(orderPrice,orderQuantity,security,cookies,headers,client_details):
     orderPrice=str(orderPrice)
-    orderQuantity=str(orderQuantity)
-    exchangeSecurityid=str(exchangeSecurityid)
-    id=str(id)
-    data = '{"orderBook":{"orderBookExtensions":[{"orderTypes":{"id":1,"orderTypeCode":"LMT"},"disclosedQuantity":0,"orderValidity":{"id":1,"orderValidityCode":"DAY"},"triggerPrice":0,"orderPrice":'+orderPrice+',"orderQuantity":'+orderQuantity+',"remainingOrderQuantity":10,"marketType":{"id":2,"marketType":"Continuous"}}],"exchange":{"id":1},"dnaConnection":{},"dealer":{},"member":{},"productType":{"id":1,"productCode":"CNC"},"instrumentType":{"id":1,"code":"EQ"},"client":{"activeStatus":"A","id":1974509,"accountType":"CLI","allowedToTrade":"Y","clientMemberCode":"PK479690","clientOrDealer":"C","contactNumber":null,"emailId":null,"notsUniqueClientCode":"201811021236758","clientDealerType":null,"clientGroup":{"activeStatus":"A","id":101,"clientGroupCode":null,"clientGroupName":null},"memberBranch":{"activeStatus":"A","id":1,"branchLocation":null,"branchName":null,"hidden":null,"branchProvince":null,"branchDistrict":null,"branchMunicipality":null,"branchHead":null,"branchPhoneNumber":null},"clientDealerAddressDetails":null,"clientDealerBankDetail":null,"clientDealerIndividual":null,"clientDealerPerTradeLimits":null,"clientDealerProductMappings":null,"clientDealerOrderTypeMappings":null,"clientDealerTradingLimits":null,"clientDepositoryDetail":null,"corporateDetail":null,"corporateOwnershipDetails":null,"displayName":"PUSKAR KAFLE","blockedDate":null,"remarks":null,"parentId":null,"recordType":null,"collateralByEntities":null,"shortSellMode":0,"onlineOrOffline":1,"panNumber":null,"onlineFundTransfer":null,"collateralCalculationMode":1,"isMarginLendingClient":null,"clientRiskType":null,"userAgreementChecked":null,"referredBy":null,"marginLendingClient":null},"security":{"id":'+id+',"exchangeSecurityId":'+exchangeSecurityid+',"marketProtectionPercentage":0,"divisor":100,"boardLotQuantity":1,"tickSize":0.1},"accountType":1,"cpMemberId":0,"buyOrSell":1},"orderPlacedBy":2,"exchangeOrderId":null}'
-    response = requests.post('https://tms35.nepsetms.com.np/tmsapi/orderApi/orderbook-v2/', headers=headers, cookies=cookies, data=data)
-    order_flag=1
+    orderPrice=157
+        # data = '{"orderBook":{"orderBookExtensions":[{"orderTypes":{"id":1,"orderTypeCode":"LMT"},"disclosedQuantity":0,"orderValidity":{"id":1,"orderValidityCode":"DAY"},"triggerPrice":0,"orderPrice":'+orderPrice+',"orderQuantity":'+orderQuantity+',"remainingOrderQuantity":10,"marketType":{"id":2,"marketType":"Continuous"}}],"exchange":{"id":1},"dnaConnection":{},"dealer":{},"member":{},"productType":{"id":1,"productCode":"CNC"},"instrumentType":{"id":1,"code":"EQ"},"client":{"activeStatus":"A","id":1974509,"accountType":"CLI","allowedToTrade":"Y","clientMemberCode":"PK479690","clientOrDealer":"C","contactNumber":null,"emailId":null,"notsUniqueClientCode":"201811021236758","clientDealerType":null,"clientGroup":{"activeStatus":"A","id":101,"clientGroupCode":null,"clientGroupName":null},"memberBranch":{"activeStatus":"A","id":1,"branchLocation":null,"branchName":null,"hidden":null,"branchProvince":null,"branchDistrict":null,"branchMunicipality":null,"branchHead":null,"branchPhoneNumber":null},"clientDealerAddressDetails":null,"clientDealerBankDetail":null,"clientDealerIndividual":null,"clientDealerPerTradeLimits":null,"clientDealerProductMappings":null,"clientDealerOrderTypeMappings":null,"clientDealerTradingLimits":null,"clientDepositoryDetail":null,"corporateDetail":null,"corporateOwnershipDetails":null,"displayName":"PUSKAR KAFLE","blockedDate":null,"remarks":null,"parentId":null,"recordType":null,"collateralByEntities":null,"shortSellMode":0,"onlineOrOffline":1,"panNumber":null,"onlineFundTransfer":null,"collateralCalculationMode":1,"isMarginLendingClient":null,"clientRiskType":null,"userAgreementChecked":null,"referredBy":null,"marginLendingClient":null},"security":{"id":'+id+',"exchangeSecurityId":'+exchangeSecurityid+',"marketProtectionPercentage":0,"divisor":100,"boardLotQuantity":1,"tickSize":0.1},"accountType":1,"cpMemberId":0,"buyOrSell":1},"orderPlacedBy":2,"exchangeOrderId":null}'
+
+    json_data = {
+    'orderBook': {
+        'orderBookExtensions': [
+            {
+                'orderTypes': {
+                    'id': 1,
+                    'orderTypeCode': 'LMT',
+                },
+                'disclosedQuantity': 0,
+                'orderValidity': {
+                    'id': 1,
+                    'orderValidityCode': 'DAY',
+                },
+                'triggerPrice': 0,
+                'orderPrice': orderPrice,
+                'orderQuantity': orderQuantity,
+                'remainingOrderQuantity': 10,
+                'marketType': {
+                    'id': 2,
+                    'marketType': 'Continuous',
+                },
+            },
+        ],
+        'exchange': {
+            'id': 1,
+        },
+        'dnaConnection': {},
+        'dealer': {},
+        'member': {},
+        'productType': {
+            'id': 1,
+            'productCode': 'CNC',
+        },
+        'instrumentType': {
+            'id': 1,
+            'code': 'EQ',
+        },
+        'client': {
+            'activeStatus': client_details['activeStatus'],
+            # client id
+            'id': client_details['id'] ,
+            'accountType':client_details['accountType'],
+            'allowedToTrade': client_details['allowedToTrade'],
+            'clientMemberCode': client_details['clientMemberCode'],
+            'clientOrDealer': client_details['clientOrDealer'],
+            'contactNumber': client_details['contactNumber'],
+            'emailId': None,
+            'notsUniqueClientCode': client_details['notsUniqueClientCode'],
+            'clientDealerType': None,
+            'clientGroup': {
+                'activeStatus': client_details['clientGroup']['activeStatus'],
+                'id': client_details['clientGroup']['id'],
+                'clientGroupCode': None,
+                'clientGroupName': None,
+            },
+            'memberBranch': {
+                'activeStatus': 'A',
+                'id': 1,
+                'branchLocation': None,
+                'branchName': None,
+                'hidden': None,
+                'branchProvince': None,
+                'branchDistrict': None,
+                'branchMunicipality': None,
+                'branchHead': None,
+                'branchPhoneNumber': None,
+            },
+            'clientDealerAddressDetails': None,
+            'clientDealerBankDetail': None,
+            'clientDealerIndividual': None,
+            'clientDealerPerTradeLimits': None,
+            'clientDealerProductMappings': None,
+            'clientDealerOrderTypeMappings': None,
+            'clientDealerTradingLimits': None,
+            'clientDepositoryDetail': None,
+            'corporateDetail': None,
+            'corporateOwnershipDetails': None,
+            'displayName': client_details['displayName'],
+            'blockedDate': None,
+            'remarks': None,
+            'parentId': None,
+            'recordType': None,
+            'collateralByEntities': None,
+            'shortSellMode': 0,
+            'onlineOrOffline': 1,
+            'panNumber': None,
+            'onlineFundTransfer': None,
+            'collateralCalculationMode': 1,
+            'isMarginLendingClient': None,
+            'clientRiskType': None,
+            'userAgreementChecked': None,
+            'referredBy': None,
+            'responseStatus': None,
+            'marginLendingClient': None,
+        },
+        'security': {
+            'id': security['id'],
+            'exchangeSecurityId': security['exchangeSecurityId'],
+            'marketProtectionPercentage': 0,
+            'divisor': 100,
+            'boardLotQuantity': 1,
+            'tickSize': 0.1,
+        },
+        'accountType': 1,
+        'cpMemberId': 0,
+        'buyOrSell': 1,
+    },
+    'orderPlacedBy': 2,
+    'exchangeOrderId': None,
+}
+    response = requests.post('https://tms35.nepsetms.com.np/tmsapi/orderApi/order/', headers=headers, cookies=cookies, json=json_data)
     if response.status_code==200:
         return json.loads(response.content)
     else:
         return json.loads(response.content)
-def time_logger(lastTradedTime,headers,):
+def log_time(last_traded_time,headers,response):
     time_server_response = requests.get('https://tms35.nepsetms.com.np/tmsapi/metadata/serverTime',headers=headers)
     time=time_server_response.json()['message'][:26]
     server_time = format_time(time)
-    lastTradedTime = format_time(lastTradedTime)
+    last_traded_time = format_time(last_traded_time)
     f = open("traded_difference.txt", "a")
-    f.write("\n\nserver time and last traded time difference is:"+str(server_time-lastTradedTime)+' \n response'+json.dumps(response.json()))
+    f.write("\nserver time and last traded time difference is:"+str(server_time-last_traded_time)+' \n response'+str(response))
     f.close()
 # Function to save tokens to a JSON file
 def save_tokens(username, tokens):

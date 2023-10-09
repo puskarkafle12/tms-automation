@@ -54,30 +54,30 @@ url=f'https://tms35.nepsetms.com.np/tmsapi/rtApi/ws/stockQuote/{id}'
                     
         #         print('fetch per second is ',round(fetch_count/fetch_time_taken.total_seconds(),2),'\n')
         #         print('maxorder limit left',maxorder_limit)
-        #         if previous_ltp<ltp:
-        #             print(f'previous ltp price is : {previous_ltp} new ltp price is : {ltp}')
-        #             print('ltp price:',ltp)
-        #             previous_ltp=ltp
-        #             if maxorder_limit<0:
-        #                 print('maximum order count limit reached')
-        #             else:
-        #                 lastTradedTime=lastTradedTime[:26]
-        #                 lastTradedTime= datetime.strptime(lastTradedTime,'%Y-%m-%d %H:%M:%S.%f')
-        #                 now=datetime.now()
-        #                 order_delay=(now-lastTradedTime).total_seconds()
-        #                 if order_delay<25:
-        #                     print("delay is less lets order")
-        #                     if changePercentage>7.9:
-        #                     # server time and last order time left to be substracted
-        #                         print("last order is executed with 50 kitta")
-        #                         order(high_price,50,exchangeSecurityid,id,token,headers,lastTradedTime)
-        #                         break
-        #                     else:
-        #                         order(high_price,orderQuantity,exchangeSecurityid,id,token,headers,lastTradedTime)
+                # if previous_ltp<ltp:
+                #     print(f'previous ltp price is : {previous_ltp} new ltp price is : {ltp}')
+                #     print('ltp price:',ltp)
+                #     previous_ltp=ltp
+                #     if maxorder_limit<0:
+                #         print('maximum order count limit reached')
+                #     else:
+                #         lastTradedTime=lastTradedTime[:26]
+                #         lastTradedTime= datetime.strptime(lastTradedTime,'%Y-%m-%d %H:%M:%S.%f')
+                #         now=datetime.now()
+                #         order_delay=(now-lastTradedTime).total_seconds()
+                        # if order_delay<25:
+                        #     print("delay is less lets order")
+                        #     if changePercentage>7.9:
+                        #     # server time and last order time left to be substracted
+                        #         print("last order is executed with 50 kitta")
+                        #         order(high_price,50,exchangeSecurityid,id,token,headers,lastTradedTime)
+                        #         break
+                        #     else:
+                        #         order(high_price,orderQuantity,exchangeSecurityid,id,token,headers,lastTradedTime)
         
 
-        #                 else:
-        #                     print('delay limit reached order hat ma xaina')
+                        # else:
+                        #     print('delay limit reached order hat ma xaina')
 
 
         # except Exception as e:
