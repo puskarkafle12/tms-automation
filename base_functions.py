@@ -341,3 +341,41 @@ def login():
     }
 
     response = requests.post('https://tms35.nepsetms.com.np/tmsapi/authApi/authenticate', headers=headers, json=json_data)
+
+def load_users(filename):
+    users = []
+    current_user = {}
+    
+    with open(filename, 'r') as file:
+        for line in file:
+            line = line.strip()
+            if not line:  # Skip empty lines
+                continue
+            
+            if line == 'end':
+                # End of user entry, save it and reset current_user
+                if current_user:
+                    users.append(current_user)
+                    current_user = {}
+            else:
+                key, value = line.split(' = ')
+                # Remove single quotes from values
+                value = value.strip('\'')
+                if key == 'broker_no' or key == 'previous_ltp' or key == 'request_per_sec' or key == 'order_quantity':
+                    current_user[key] = int(value)
+                else:
+                    current_user[key] = value
+
+    return users
+
+import os
+
+def find_file_in_directory(file_name):
+    root_dir= os.path.dirname(os.path.abspath(__file__))
+    for foldername, subfolders, filenames in os.walk(root_dir):
+        for filename in filenames:
+            if filename == file_name:
+                return os.path.join(foldername, filename)
+    return None  # File not found
+
+
