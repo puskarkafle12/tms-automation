@@ -1,6 +1,8 @@
 import requests
 import base64
 import json
+
+from get_tokens import get_tokens
 image_path='/Users/pkafle/tms-automation/tms_captcha_solver/img.png'
 def encode_image_to_base64(image_path):
     try:
@@ -14,10 +16,10 @@ def encode_image_to_base64(image_path):
     except Exception as e:
         print(f"An error occurred: {e}")
         return None
-def get_captcha():
+def get_captcha(tokens):
     cookies = {
-        'XSRF-TOKEN': 'eyJpdiI6IkVrOVduMzZ3QzEwV2s3QmVUYkdrSXc9PSIsInZhbHVlIjoiZU9BQlVvaHFmVTg0WFY1bVJzS014RisvMnBxMG1CU2dCK2hsa0RjR3RzeXpxUVFMZEJNWm1ORklqKytNTjhaMGdQSjMyaXpsTWU3YjU3NE1jOFA4aHJwanYxbXVlSy9aRE5XQmlvQVY5bGVySkNuTGo2Q2xSem9YUHg4Wk5odUgiLCJtYWMiOiIzOThkMzliM2JhODBiMzUzZjk1NzM2Y2Q3MjA1MTYyYzU0OGZiMjA5NWNhMDIxN2E1MTBiMTUyNDI1Y2JiYTliIiwidGFnIjoiIn0%3D',
-        'image_to_text_session': 'eyJpdiI6IkNaQXdLT0xFdDZucTlIK0x5WWJMenc9PSIsInZhbHVlIjoiUkRjTUlabjhLejNTQ3BjTmNSZVZab3NudFpkU0JGQlNIWC9ET2xKdWQrc0c3K1dLOERTNDVmNGZFTTdEWGI0enlJNWRab3lJbTUwRkk5STVaN2pWdlkwdG1MR1d3N2taWm5JaXJGN1BZeGI2NDhhbDlKMmd5c0o0dllmMVcxdnMiLCJtYWMiOiJmMWJiOThhODM3ZDljNDE1ODhhZTQ0YjdhYTk1M2M0M2UxMDg0NzdkODY3ODBiYzg1ZWZiYzg5YzU2MTY4MGRmIiwidGFnIjoiIn0%3D',
+        'XSRF-TOKEN': tokens.get('XSRF-TOKEN'),
+        'image_to_text_session': tokens.get('image_to_text_session'),
     }
 
     headers = {
@@ -43,10 +45,11 @@ def get_captcha():
         "imgname": "cap.png",
         "tool": "",
         "count": 0,
-        "_token": "BRWkDSZmg1CmVutEytV7mMb8uc1ktyTE9gzVsXdR",
+        "_token": tokens.get('token'),
     }
 
     response = requests.post('https://www.imagetotext.info/image-to-text', cookies=cookies, headers=headers, json=payload)
     return json.loads(response.text).get('text').split('\r\n')[-1]
 
-print(get_captcha())
+cookies=get_tokens()
+print(get_captcha(tokens=cookies))
