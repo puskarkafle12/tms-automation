@@ -1,7 +1,7 @@
 import json
 from time import sleep, time
 import math
-from base_functions import get_header, price_scanner
+from utils.base_functions import get_header, price_scanner
 import requests
 from requests.api import head
 from requests.exceptions import Timeout

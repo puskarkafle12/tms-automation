@@ -10,6 +10,7 @@ from requests.exceptions import Timeout
 import aiohttp
 import asyncio
 import time
+import os
 
 
 async def get_stock_details(session, headers, token, id):
@@ -103,11 +104,11 @@ def format_time(time_str):
     
     # Format the combined time string into a datetime object
     formatted_time = datetime.strptime(formatted_time_str, '%Y-%m-%d %H:%M:%S.%f')
-    
     return formatted_time
-def get_client_details(cookies,headers):
+    
+def get_client_details(cookies,headers,client_dealer_id):
     response = requests.get(
-    'https://tms35.nepsetms.com.np/tmsapi/clientApi/clientDealer/info/1974509',
+    f'https://tms35.nepsetms.com.np/tmsapi/clientApi/clientDealer/info/{client_dealer_id}',
     cookies=cookies,
     headers=headers,
 )
@@ -243,34 +244,20 @@ def log_time(last_traded_time,headers,response):
     f.write("\nserver time and last traded time difference is:"+str(server_time-last_traded_time)+' \n response'+str(response))
     f.close()
 # Function to save tokens to a JSON file
-def save_tokens(username, tokens):
+def save_tokens(username, login_response):
     data={}
-    data[username] = tokens
-
+    data[username] = login_response
     with open('tokens.json', 'w') as file:
         json.dump(data, file)
 
 # Function to get tokens for a user
-def get_token(username, driver,refresh=False):
-    try:
-        with open('tokens.json', 'r') as file:
-            data = json.load(file)
-            if username in data and not refresh:
-                return data[username]
-    except FileNotFoundError:
-        pass
-    except json.JSONDecodeError:
-        pass
-
-    # If tokens are not found, generate them and save them
-    cookies = driver.get_cookies()
-    tokens = {
-        'XSRF-TOKEN': cookies[1]['value'],
-        '_aid': cookies[0]['value'],
-        '_rid': cookies[2]['value']
-    }
-    save_tokens(username, tokens)
-    return tokens
+def get_token(username):
+    with open('tokens.json', 'r') as file:
+        data = json.load(file)
+        if username in data:
+            return data[username]
+        else:
+            raise KeyError(f"Token not found for username: {username}")
 
 def get_header(request_owner,token):
     header = {
@@ -281,7 +268,7 @@ def get_header(request_owner,token):
         # 'cookie': '_rid='+rid+'; _aid='+aid+'; XSRF-TOKEN='+xsrf_token,
         'host-session-id': 'TVRJPS1lYWU2MTU0ZS0xODkyLTQxNDEtYTczZS1kMGI1YmM5N2I1YzQ=',
         'referer': 'https://tms35.nepsetms.com.np/tms/me/memberclientorderentry',
-        'request-owner': request_owner,
+        'request-owner': str(request_owner),
         'sec-ch-ua': '"Google Chrome";v="117", "Not;A=Brand";v="8", "Chromium";v="117"',
         'sec-ch-ua-mobile': '?0',
         'sec-ch-ua-platform': '"macOS"',
@@ -362,13 +349,14 @@ def load_users(filename):
                 # Remove single quotes from values
                 value = value.strip('\'')
                 if key == 'broker_no' or key == 'previous_ltp' or key == 'request_per_sec' or key == 'order_quantity':
-                    current_user[key] = int(value)
+                    if '.' in value:
+                        current_user[key] = float(value)
+                    else:
+                        current_user[key] = int(value)
                 else:
                     current_user[key] = value
 
     return users
-
-import os
 
 def find_file_in_directory(file_name):
     root_dir= os.path.dirname(os.path.abspath(__file__))
