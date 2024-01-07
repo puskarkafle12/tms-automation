@@ -27,6 +27,7 @@ class StockOrderManager:
             self.tokens=self.login_response['tokens']
             self.headers = get_header(self.login_response['request_owner'], self.tokens)
             self.client_details=get_client_details(self.tokens,self.headers,self.login_response['client_dealer_id'])
+            print("token sucessfully loaded from the cache file")
         except Exception as e:
             # retry login from the post request 
             self.login_response = login(self.username, self.password)
@@ -39,20 +40,29 @@ class StockOrderManager:
 
     def stock_grabber(self, order_quantity, previous_ltp,order_limit=0):
         stock_details={}
+        total_orders=[]
         while stock_details.get('message') !='exit' and order_limit<3:
             stock_details = asyncio.run(price_scanner(self.security['id'], previous_ltp, self.session, self.headers, self.tokens,self.request_per_sec))
-            if stock_details.get('message') == 'ACCESS_TOKEN_EXPIRED':
+            if stock_details.get('message') == 'exit':
+                return {"message":"exit"}
+            elif stock_details.get('message') == 'ACCESS_TOKEN_EXPIRED':
                 # Handle token expiration or refresh here
-                return stock_details
+                return {"message":"ACCESS_TOKEN_EXPIRED"}
 
             order_response = order(stock_details['twoPercentHigh'], order_quantity,self.security, self.tokens, self.headers,self.client_details)
             if order_response.get('status') == '200':
                 log_time(stock_details['lastTradedTime'],self.headers,order_response)
                 order_limit+=1
-                return order_response
+                total_orders.append(order_response)
             elif order_response.get('status') == '400':
                 order_response['message']='ordered failed due to '+order_response['message']
                 log_time(stock_details['lastTradedTime'],self.headers,order_response)
                 return order_response
             else:
                 return order_response
+            
+        if len(total_orders)>0:
+            return {
+                "message":"sucessfully ordered shares",
+                "totalOrders":total_orders
+            }

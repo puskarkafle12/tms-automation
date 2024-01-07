@@ -1,4 +1,4 @@
-    
+
 from datetime import datetime
 import json
 import sys
@@ -32,9 +32,23 @@ async def get_stock_details(session, headers, token, id):
     print("Max retries reached, unable to fetch data.")
     return None
 
+
 async def price_scanner(id, previous_ltp, session, headers, token, request_per_sec):
+    """_Returns the stock details along with twoPercentHigh calculated field in dict return by server 
+
+    Args:
+        id (_type_): _description_
+        previous_ltp (_type_): _description_
+        session (_type_): _description_
+        headers (_type_): _description_
+        token (_type_): _description_
+        request_per_sec (_type_): _description_
+
+    Returns:
+        DICT: response received from get_stock_details function and add twoPercentHigh key to dict 
+    """
     fetch_count = 0
-    total_fetch_count=0
+    total_fetch_count = 0
     start_time = time.time()
     reset_time = 4  # Reset the fetch rate counter every 4 seconds
     fetch_rate = 0
@@ -58,7 +72,7 @@ async def price_scanner(id, previous_ltp, session, headers, token, request_per_s
                         return response
                     continue
             fetch_count += 1
-            total_fetch_count+=1
+            total_fetch_count += 1
         except Exception as e:
             print(f"Error fetching stock details: {e}")
             continue
@@ -67,190 +81,212 @@ async def price_scanner(id, previous_ltp, session, headers, token, request_per_s
         percentage_change = float(response['changePercentage'])
         print('Fetch per second:', fetch_rate)
         print('Fetched count:', total_fetch_count)
-        print('LTP:', ltp,'\n')
+        print('LTP:', ltp, '\n')
 
         if percentage_change > 9:
             print('Price already changed; you missed the chance. Try next day.')
-            sys.exit()
-            return {'message': 'exit'}  # Return None to indicate that the condition was met
+            return {'message': 'exit'}
 
         if previous_ltp < ltp:
+            response['fetchDetails'] = {
+                "fetchRate": fetch_rate,
+                "totalFetchCount": total_fetch_count,
+                "ltp": ltp
+            }
+            
             two_percent_high = calculate_high_price(ltp)
             print('The high price after calculation is', two_percent_high)
             response['twoPercentHigh'] = two_percent_high
             return response
-   
+
+
 def calculate_high_price(ltp):
     high_price = ltp + (2 / 100) * ltp
     high_price = math.floor(high_price * 10 ** 1) / 10 ** 1
     return high_price
 
 # '2023-09-29 19:16:39.806085' to datetime obj
+
+
 def format_time(time_str):
     # Split the time string into seconds and microseconds parts
     time_parts = time_str.split('.')
-    
+
     # Handle the seconds part
     seconds = time_parts[0]
     microseconds = 0  # Default value for microseconds
-    
+
     # If there is a microseconds part, truncate or round it to 6 decimal places
     if len(time_parts) > 1:
         microseconds_str = time_parts[1][:6]  # Limit to 6 decimal places
-        microseconds = int(microseconds_str.ljust(6, '0'))  # Ensure it's 6 digits
-    
+        microseconds = int(microseconds_str.ljust(6, '0')
+                           )  # Ensure it's 6 digits
+
     # Combine the seconds and microseconds parts
     formatted_time_str = seconds + '.' + str(microseconds).zfill(6)
-    
+
     # Format the combined time string into a datetime object
-    formatted_time = datetime.strptime(formatted_time_str, '%Y-%m-%d %H:%M:%S.%f')
+    formatted_time = datetime.strptime(
+        formatted_time_str, '%Y-%m-%d %H:%M:%S.%f')
     return formatted_time
-    
-def get_client_details(cookies,headers,client_dealer_id):
+
+
+def get_client_details(cookies, headers, client_dealer_id):
     response = requests.get(
-    f'https://tms35.nepsetms.com.np/tmsapi/clientApi/clientDealer/info/{client_dealer_id}',
-    cookies=cookies,
-    headers=headers,
-)
-    if response.status_code!=200:
+        f'https://tms35.nepsetms.com.np/tmsapi/clientApi/clientDealer/info/{client_dealer_id}',
+        cookies=cookies,
+        headers=headers,
+    )
+    if response.status_code != 200:
         response.raise_for_status()
     return json.loads(response.content)
-def order(orderPrice,orderQuantity,security,cookies,headers,client_details):
-    orderPrice=str(orderPrice)
-    orderPrice=157
-        # data = '{"orderBook":{"orderBookExtensions":[{"orderTypes":{"id":1,"orderTypeCode":"LMT"},"disclosedQuantity":0,"orderValidity":{"id":1,"orderValidityCode":"DAY"},"triggerPrice":0,"orderPrice":'+orderPrice+',"orderQuantity":'+orderQuantity+',"remainingOrderQuantity":10,"marketType":{"id":2,"marketType":"Continuous"}}],"exchange":{"id":1},"dnaConnection":{},"dealer":{},"member":{},"productType":{"id":1,"productCode":"CNC"},"instrumentType":{"id":1,"code":"EQ"},"client":{"activeStatus":"A","id":1974509,"accountType":"CLI","allowedToTrade":"Y","clientMemberCode":"PK479690","clientOrDealer":"C","contactNumber":null,"emailId":null,"notsUniqueClientCode":"201811021236758","clientDealerType":null,"clientGroup":{"activeStatus":"A","id":101,"clientGroupCode":null,"clientGroupName":null},"memberBranch":{"activeStatus":"A","id":1,"branchLocation":null,"branchName":null,"hidden":null,"branchProvince":null,"branchDistrict":null,"branchMunicipality":null,"branchHead":null,"branchPhoneNumber":null},"clientDealerAddressDetails":null,"clientDealerBankDetail":null,"clientDealerIndividual":null,"clientDealerPerTradeLimits":null,"clientDealerProductMappings":null,"clientDealerOrderTypeMappings":null,"clientDealerTradingLimits":null,"clientDepositoryDetail":null,"corporateDetail":null,"corporateOwnershipDetails":null,"displayName":"PUSKAR KAFLE","blockedDate":null,"remarks":null,"parentId":null,"recordType":null,"collateralByEntities":null,"shortSellMode":0,"onlineOrOffline":1,"panNumber":null,"onlineFundTransfer":null,"collateralCalculationMode":1,"isMarginLendingClient":null,"clientRiskType":null,"userAgreementChecked":null,"referredBy":null,"marginLendingClient":null},"security":{"id":'+id+',"exchangeSecurityId":'+exchangeSecurityid+',"marketProtectionPercentage":0,"divisor":100,"boardLotQuantity":1,"tickSize":0.1},"accountType":1,"cpMemberId":0,"buyOrSell":1},"orderPlacedBy":2,"exchangeOrderId":null}'
+
+
+def order(orderPrice, orderQuantity, security, cookies, headers, client_details):
+    orderPrice = str(orderPrice)
+    orderPrice = 157
+    # data = '{"orderBook":{"orderBookExtensions":[{"orderTypes":{"id":1,"orderTypeCode":"LMT"},"disclosedQuantity":0,"orderValidity":{"id":1,"orderValidityCode":"DAY"},"triggerPrice":0,"orderPrice":'+orderPrice+',"orderQuantity":'+orderQuantity+',"remainingOrderQuantity":10,"marketType":{"id":2,"marketType":"Continuous"}}],"exchange":{"id":1},"dnaConnection":{},"dealer":{},"member":{},"productType":{"id":1,"productCode":"CNC"},"instrumentType":{"id":1,"code":"EQ"},"client":{"activeStatus":"A","id":1974509,"accountType":"CLI","allowedToTrade":"Y","clientMemberCode":"PK479690","clientOrDealer":"C","contactNumber":null,"emailId":null,"notsUniqueClientCode":"201811021236758","clientDealerType":null,"clientGroup":{"activeStatus":"A","id":101,"clientGroupCode":null,"clientGroupName":null},"memberBranch":{"activeStatus":"A","id":1,"branchLocation":null,"branchName":null,"hidden":null,"branchProvince":null,"branchDistrict":null,"branchMunicipality":null,"branchHead":null,"branchPhoneNumber":null},"clientDealerAddressDetails":null,"clientDealerBankDetail":null,"clientDealerIndividual":null,"clientDealerPerTradeLimits":null,"clientDealerProductMappings":null,"clientDealerOrderTypeMappings":null,"clientDealerTradingLimits":null,"clientDepositoryDetail":null,"corporateDetail":null,"corporateOwnershipDetails":null,"displayName":"PUSKAR KAFLE","blockedDate":null,"remarks":null,"parentId":null,"recordType":null,"collateralByEntities":null,"shortSellMode":0,"onlineOrOffline":1,"panNumber":null,"onlineFundTransfer":null,"collateralCalculationMode":1,"isMarginLendingClient":null,"clientRiskType":null,"userAgreementChecked":null,"referredBy":null,"marginLendingClient":null},"security":{"id":'+id+',"exchangeSecurityId":'+exchangeSecurityid+',"marketProtectionPercentage":0,"divisor":100,"boardLotQuantity":1,"tickSize":0.1},"accountType":1,"cpMemberId":0,"buyOrSell":1},"orderPlacedBy":2,"exchangeOrderId":null}'
 
     json_data = {
-    'orderBook': {
-        'orderBookExtensions': [
-            {
-                'orderTypes': {
-                    'id': 1,
-                    'orderTypeCode': 'LMT',
+        'orderBook': {
+            'orderBookExtensions': [
+                {
+                    'orderTypes': {
+                        'id': 1,
+                        'orderTypeCode': 'LMT',
+                    },
+                    'disclosedQuantity': 0,
+                    'orderValidity': {
+                        'id': 1,
+                        'orderValidityCode': 'DAY',
+                    },
+                    'triggerPrice': 0,
+                    'orderPrice': orderPrice,
+                    'orderQuantity': orderQuantity,
+                    'remainingOrderQuantity': 10,
+                    'marketType': {
+                        'id': 2,
+                        'marketType': 'Continuous',
+                    },
                 },
-                'disclosedQuantity': 0,
-                'orderValidity': {
-                    'id': 1,
-                    'orderValidityCode': 'DAY',
-                },
-                'triggerPrice': 0,
-                'orderPrice': orderPrice,
-                'orderQuantity': orderQuantity,
-                'remainingOrderQuantity': 10,
-                'marketType': {
-                    'id': 2,
-                    'marketType': 'Continuous',
-                },
-            },
-        ],
-        'exchange': {
-            'id': 1,
-        },
-        'dnaConnection': {},
-        'dealer': {},
-        'member': {},
-        'productType': {
-            'id': 1,
-            'productCode': 'CNC',
-        },
-        'instrumentType': {
-            'id': 1,
-            'code': 'EQ',
-        },
-        'client': {
-            'activeStatus': client_details['activeStatus'],
-            # client id
-            'id': client_details['id'] ,
-            'accountType':client_details['accountType'],
-            'allowedToTrade': client_details['allowedToTrade'],
-            'clientMemberCode': client_details['clientMemberCode'],
-            'clientOrDealer': client_details['clientOrDealer'],
-            'contactNumber': client_details['contactNumber'],
-            'emailId': None,
-            'notsUniqueClientCode': client_details['notsUniqueClientCode'],
-            'clientDealerType': None,
-            'clientGroup': {
-                'activeStatus': client_details['clientGroup']['activeStatus'],
-                'id': client_details['clientGroup']['id'],
-                'clientGroupCode': None,
-                'clientGroupName': None,
-            },
-            'memberBranch': {
-                'activeStatus': 'A',
+            ],
+            'exchange': {
                 'id': 1,
-                'branchLocation': None,
-                'branchName': None,
-                'hidden': None,
-                'branchProvince': None,
-                'branchDistrict': None,
-                'branchMunicipality': None,
-                'branchHead': None,
-                'branchPhoneNumber': None,
             },
-            'clientDealerAddressDetails': None,
-            'clientDealerBankDetail': None,
-            'clientDealerIndividual': None,
-            'clientDealerPerTradeLimits': None,
-            'clientDealerProductMappings': None,
-            'clientDealerOrderTypeMappings': None,
-            'clientDealerTradingLimits': None,
-            'clientDepositoryDetail': None,
-            'corporateDetail': None,
-            'corporateOwnershipDetails': None,
-            'displayName': client_details['displayName'],
-            'blockedDate': None,
-            'remarks': None,
-            'parentId': None,
-            'recordType': None,
-            'collateralByEntities': None,
-            'shortSellMode': 0,
-            'onlineOrOffline': 1,
-            'panNumber': None,
-            'onlineFundTransfer': None,
-            'collateralCalculationMode': 1,
-            'isMarginLendingClient': None,
-            'clientRiskType': None,
-            'userAgreementChecked': None,
-            'referredBy': None,
-            'responseStatus': None,
-            'marginLendingClient': None,
+            'dnaConnection': {},
+            'dealer': {},
+            'member': {},
+            'productType': {
+                'id': 1,
+                'productCode': 'CNC',
+            },
+            'instrumentType': {
+                'id': 1,
+                'code': 'EQ',
+            },
+            'client': {
+                'activeStatus': client_details['activeStatus'],
+                # client id
+                'id': client_details['id'],
+                'accountType': client_details['accountType'],
+                'allowedToTrade': client_details['allowedToTrade'],
+                'clientMemberCode': client_details['clientMemberCode'],
+                'clientOrDealer': client_details['clientOrDealer'],
+                'contactNumber': client_details['contactNumber'],
+                'emailId': None,
+                'notsUniqueClientCode': client_details['notsUniqueClientCode'],
+                'clientDealerType': None,
+                'clientGroup': {
+                    'activeStatus': client_details['clientGroup']['activeStatus'],
+                    'id': client_details['clientGroup']['id'],
+                    'clientGroupCode': None,
+                    'clientGroupName': None,
+                },
+                'memberBranch': {
+                    'activeStatus': 'A',
+                    'id': 1,
+                    'branchLocation': None,
+                    'branchName': None,
+                    'hidden': None,
+                    'branchProvince': None,
+                    'branchDistrict': None,
+                    'branchMunicipality': None,
+                    'branchHead': None,
+                    'branchPhoneNumber': None,
+                },
+                'clientDealerAddressDetails': None,
+                'clientDealerBankDetail': None,
+                'clientDealerIndividual': None,
+                'clientDealerPerTradeLimits': None,
+                'clientDealerProductMappings': None,
+                'clientDealerOrderTypeMappings': None,
+                'clientDealerTradingLimits': None,
+                'clientDepositoryDetail': None,
+                'corporateDetail': None,
+                'corporateOwnershipDetails': None,
+                'displayName': client_details['displayName'],
+                'blockedDate': None,
+                'remarks': None,
+                'parentId': None,
+                'recordType': None,
+                'collateralByEntities': None,
+                'shortSellMode': 0,
+                'onlineOrOffline': 1,
+                'panNumber': None,
+                'onlineFundTransfer': None,
+                'collateralCalculationMode': 1,
+                'isMarginLendingClient': None,
+                'clientRiskType': None,
+                'userAgreementChecked': None,
+                'referredBy': None,
+                'responseStatus': None,
+                'marginLendingClient': None,
+            },
+            'security': {
+                'id': security['id'],
+                'exchangeSecurityId': security['exchangeSecurityId'],
+                'marketProtectionPercentage': 0,
+                'divisor': 100,
+                'boardLotQuantity': 1,
+                'tickSize': 0.1,
+            },
+            'accountType': 1,
+            'cpMemberId': 0,
+            'buyOrSell': 1,
         },
-        'security': {
-            'id': security['id'],
-            'exchangeSecurityId': security['exchangeSecurityId'],
-            'marketProtectionPercentage': 0,
-            'divisor': 100,
-            'boardLotQuantity': 1,
-            'tickSize': 0.1,
-        },
-        'accountType': 1,
-        'cpMemberId': 0,
-        'buyOrSell': 1,
-    },
-    'orderPlacedBy': 2,
-    'exchangeOrderId': None,
-}
-    response = requests.post('https://tms35.nepsetms.com.np/tmsapi/orderApi/order/', headers=headers, cookies=cookies, json=json_data)
-    if response.status_code==200:
+        'orderPlacedBy': 2,
+        'exchangeOrderId': None,
+    }
+    response = requests.post('https://tms35.nepsetms.com.np/tmsapi/orderApi/order/',
+                             headers=headers, cookies=cookies, json=json_data)
+    if response.status_code == 200:
         return json.loads(response.content)
     else:
         return json.loads(response.content)
-def log_time(last_traded_time,headers,response):
-    time_server_response = requests.get('https://tms35.nepsetms.com.np/tmsapi/metadata/serverTime',headers=headers)
-    time=time_server_response.json()['message'][:26]
+
+
+def log_time(last_traded_time, headers, response):
+    time_server_response = requests.get(
+        'https://tms35.nepsetms.com.np/tmsapi/metadata/serverTime', headers=headers)
+    time = time_server_response.json()['message'][:26]
     server_time = format_time(time)
     last_traded_time = format_time(last_traded_time)
     f = open("traded_difference.txt", "a")
-    f.write("\nserver time and last traded time difference is:"+str(server_time-last_traded_time)+' \n response'+str(response))
+    f.write("\nserver time and last traded time difference is:" +
+            str(server_time-last_traded_time)+' \n response'+str(response))
     f.close()
 # Function to save tokens to a JSON file
+
+
 def save_tokens(username, login_response):
-    data={}
+    data = {}
     data[username] = login_response
     with open('tokens.json', 'w') as file:
         json.dump(data, file)
 
 # Function to get tokens for a user
+
+
 def get_token(username):
     with open('tokens.json', 'r') as file:
         data = json.load(file)
@@ -259,7 +295,8 @@ def get_token(username):
         else:
             raise KeyError(f"Token not found for username: {username}")
 
-def get_header(request_owner,token):
+
+def get_header(request_owner, token):
     header = {
         'authority': 'tms35.nepsetms.com.np',
         'accept': 'application/json, text/plain, */*',
@@ -280,20 +317,24 @@ def get_header(request_owner,token):
     }
     return header
 
-def get_request_owner(cookies,headers):
+
+def get_request_owner(cookies, headers):
     response = requests.get(
-    'https://tms35.nepsetms.com.np/tmsapi/exchangeIndex/getExchangeIndexForCurrentUser',
-    cookies=cookies,
-    headers=headers,
-)
+        'https://tms35.nepsetms.com.np/tmsapi/exchangeIndex/getExchangeIndexForCurrentUser',
+        cookies=cookies,
+        headers=headers,
+    )
     return json.loads(response.content)['data'][0]['userId']
-def get_securities_ids(symbol,cookies,headers):
-    symbol=symbol.upper()
-    response = requests.get('https://tms35.nepsetms.com.np/tmsapi/stock/securities', cookies=cookies, headers=headers)
+
+
+def get_securities_ids(symbol, cookies, headers):
+    symbol = symbol.upper()
+    response = requests.get(
+        'https://tms35.nepsetms.com.np/tmsapi/stock/securities', cookies=cookies, headers=headers)
     import json
-    stocks=json.loads(response.content)
+    stocks = json.loads(response.content)
     for stock in stocks:
-        if stock['symbol'] ==symbol:
+        if stock['symbol'] == symbol:
             return stock
     return {}
 
@@ -327,18 +368,20 @@ def login():
         'userCaptcha': 'v5y8pm',
     }
 
-    response = requests.post('https://tms35.nepsetms.com.np/tmsapi/authApi/authenticate', headers=headers, json=json_data)
+    response = requests.post(
+        'https://tms35.nepsetms.com.np/tmsapi/authApi/authenticate', headers=headers, json=json_data)
+
 
 def load_users(filename):
     users = []
     current_user = {}
-    
+
     with open(filename, 'r') as file:
         for line in file:
             line = line.strip()
             if not line:  # Skip empty lines
                 continue
-            
+
             if line == 'end':
                 # End of user entry, save it and reset current_user
                 if current_user:
@@ -358,12 +401,11 @@ def load_users(filename):
 
     return users
 
+
 def find_file_in_directory(file_name):
-    root_dir= os.path.dirname(os.path.abspath(__file__))
+    root_dir = os.path.dirname(os.path.abspath(__file__))
     for foldername, subfolders, filenames in os.walk(root_dir):
         for filename in filenames:
             if filename == file_name:
                 return os.path.join(foldername, filename)
     return None  # File not found
-
-
