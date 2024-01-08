@@ -79,9 +79,10 @@ async def price_scanner(id, previous_ltp, session, headers, token, request_per_s
 
         ltp = float(response['ltp'])
         percentage_change = float(response['changePercentage'])
+        print(response['security']['symbol'])
         print('Fetch per second:', fetch_rate)
-        print('Fetched count:', total_fetch_count)
-        print('LTP:', ltp, '\n')
+        print('Fetched count:', str(total_fetch_count))
+        print('LTP:', ltp,'\n')
 
         if percentage_change > 9:
             print('Price already changed; you missed the chance. Try next day.')
@@ -91,7 +92,8 @@ async def price_scanner(id, previous_ltp, session, headers, token, request_per_s
             response['fetchDetails'] = {
                 "fetchRate": fetch_rate,
                 "totalFetchCount": total_fetch_count,
-                "ltp": ltp
+                "ltp": ltp,
+                "script":response['security']['symbol']
             }
             
             two_percent_high = calculate_high_price(ltp)
