@@ -262,9 +262,20 @@ def order(orderPrice, orderQuantity, security, cookies, headers, client_details)
     response = requests.post('https://tms35.nepsetms.com.np/tmsapi/orderApi/order/',
                              headers=headers, cookies=cookies, json=json_data)
     if response.status_code == 200:
-        return json.loads(response.content)
+
+        return {
+            "status":response.status_code,
+            "message":str(response.content)}
     else:
-        return json.loads(response.content)
+        try:
+            return {
+                "status":response.status_code,
+                "message": json.loads(response.content)}
+        except:
+            return {
+                "status":500 ,
+                "message":"exception occured while loading json"+str(response.content)
+            }
 
 
 def log_time(last_traded_time, headers, response):

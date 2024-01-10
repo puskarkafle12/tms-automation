@@ -4,3 +4,4 @@ __pycache__
 users.txt
 tokens.json
 traded_difference.txt
+test.py

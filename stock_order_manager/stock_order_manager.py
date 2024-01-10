@@ -48,14 +48,16 @@ class StockOrderManager:
             elif stock_details.get('message') == 'ACCESS_TOKEN_EXPIRED':
                 # Handle token expiration or refresh here
                 return {"message":"ACCESS_TOKEN_EXPIRED"}
-
-            order_response = order(stock_details['twoPercentHigh'], order_quantity,self.security, self.tokens, self.headers,self.client_details)
-            if order_response.get('status') == '200':
+            if stock_details['changePercentage']>7.3:
+                order_response = order(stock_details['twoPercentHigh'], 100,self.security, self.tokens, self.headers,self.client_details)
+            else:
+                order_response = order(stock_details['twoPercentHigh'], order_quantity,self.security, self.tokens, self.headers,self.client_details)
+            if order_response.get('status') == 200:
                 log_time(stock_details['lastTradedTime'],self.headers,order_response)
                 order_limit+=1
                 total_orders.append(order_response)
-            elif order_response.get('status') == '400':
-                order_response['message']='ordered failed due to '+order_response['message']
+            elif order_response.get('status') == 400:
+                order_response['message']='ordered failed due to '+str(order_response['message'])
                 log_time(stock_details['lastTradedTime'],self.headers,order_response)
                 return order_response
             else:
