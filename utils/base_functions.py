@@ -84,10 +84,9 @@ async def price_scanner(id, previous_ltp, session, headers, token, request_per_s
         print('Fetched count:', str(total_fetch_count))
         print('LTP:', ltp,'\n')
 
-        if percentage_change > 9:
-            print('Price already changed; you missed the chance. Try next day.')
-            return {'message': 'exit'}
-
+        # if percentage_change > 9:
+        #     print('Price already changed; you missed the chance. Try next day.')
+        #     return {'message': 'exit'}
         if previous_ltp < ltp:
             response['fetchDetails'] = {
                 "fetchRate": fetch_rate,
@@ -96,14 +95,21 @@ async def price_scanner(id, previous_ltp, session, headers, token, request_per_s
                 "script":response['security']['symbol']
             }
             
-            two_percent_high = calculate_high_price(ltp)
+            two_percent_high = calculate_high_price(ltp,percentage_change)
             print('The high price after calculation is', two_percent_high)
             response['twoPercentHigh'] = two_percent_high
             return response
 
 
-def calculate_high_price(ltp):
+def calculate_high_price(ltp, change_in_percentage):
+    if change_in_percentage > 7.843:
+        original_price = ltp*100/(change_in_percentage+100)
+        ten_percent_change = (original_price * 10/ 100 )+ original_price
+        high_price = math.floor(ten_percent_change * 10 ** 1) / 10 ** 1
+        return high_price
+
     high_price = ltp + (2 / 100) * ltp
+    # truncating the decimal e.g., 12.343 to 12.3
     high_price = math.floor(high_price * 10 ** 1) / 10 ** 1
     return high_price
 
@@ -146,7 +152,7 @@ def get_client_details(cookies, headers, client_dealer_id):
 
 def order(orderPrice, orderQuantity, security, cookies, headers, client_details):
     orderPrice = str(orderPrice)
-    orderPrice = 157
+    # orderPrice = 157
     # data = '{"orderBook":{"orderBookExtensions":[{"orderTypes":{"id":1,"orderTypeCode":"LMT"},"disclosedQuantity":0,"orderValidity":{"id":1,"orderValidityCode":"DAY"},"triggerPrice":0,"orderPrice":'+orderPrice+',"orderQuantity":'+orderQuantity+',"remainingOrderQuantity":10,"marketType":{"id":2,"marketType":"Continuous"}}],"exchange":{"id":1},"dnaConnection":{},"dealer":{},"member":{},"productType":{"id":1,"productCode":"CNC"},"instrumentType":{"id":1,"code":"EQ"},"client":{"activeStatus":"A","id":1974509,"accountType":"CLI","allowedToTrade":"Y","clientMemberCode":"PK479690","clientOrDealer":"C","contactNumber":null,"emailId":null,"notsUniqueClientCode":"201811021236758","clientDealerType":null,"clientGroup":{"activeStatus":"A","id":101,"clientGroupCode":null,"clientGroupName":null},"memberBranch":{"activeStatus":"A","id":1,"branchLocation":null,"branchName":null,"hidden":null,"branchProvince":null,"branchDistrict":null,"branchMunicipality":null,"branchHead":null,"branchPhoneNumber":null},"clientDealerAddressDetails":null,"clientDealerBankDetail":null,"clientDealerIndividual":null,"clientDealerPerTradeLimits":null,"clientDealerProductMappings":null,"clientDealerOrderTypeMappings":null,"clientDealerTradingLimits":null,"clientDepositoryDetail":null,"corporateDetail":null,"corporateOwnershipDetails":null,"displayName":"PUSKAR KAFLE","blockedDate":null,"remarks":null,"parentId":null,"recordType":null,"collateralByEntities":null,"shortSellMode":0,"onlineOrOffline":1,"panNumber":null,"onlineFundTransfer":null,"collateralCalculationMode":1,"isMarginLendingClient":null,"clientRiskType":null,"userAgreementChecked":null,"referredBy":null,"marginLendingClient":null},"security":{"id":'+id+',"exchangeSecurityId":'+exchangeSecurityid+',"marketProtectionPercentage":0,"divisor":100,"boardLotQuantity":1,"tickSize":0.1},"accountType":1,"cpMemberId":0,"buyOrSell":1},"orderPlacedBy":2,"exchangeOrderId":null}'
 
     json_data = {
@@ -401,7 +407,7 @@ def load_users(filename):
                     users.append(current_user)
                     current_user = {}
             else:
-                key, value = line.split(' = ')
+                key, value = list(map(lambda x:x.strip(),line.split('=',1)))
                 # Remove single quotes from values
                 value = value.strip('\'')
                 if key == 'broker_no' or key == 'previous_ltp' or key == 'request_per_sec' or key == 'order_quantity':
