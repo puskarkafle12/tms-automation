@@ -11,6 +11,7 @@ def run_stock_order_manager(username, password, stock_symbol, request_per_sec, b
     print(stock_grab_response)
 
 if __name__ == "__main__":
+    
     user_file_path='/Users/pkafle/tms-automation/users.txt'
     if not user_file_path:
         print("user credintial file not found,\nexiting... ")

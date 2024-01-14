@@ -41,14 +41,14 @@ class StockOrderManager:
     def stock_grabber(self, order_quantity, previous_ltp,order_limit=0):
         stock_details={}
         total_orders=[]
-        while stock_details.get('message') !='exit' and order_limit<3:
+        while stock_details.get('message') !='exit' and order_limit<4:
             stock_details = asyncio.run(price_scanner(self.security['id'], previous_ltp, self.session, self.headers, self.tokens,self.request_per_sec))
             if stock_details.get('message') == 'exit':
                 return {"message":"exit"}
             elif stock_details.get('message') == 'ACCESS_TOKEN_EXPIRED':
                 # Handle token expiration or refresh here
                 return {"message":"ACCESS_TOKEN_EXPIRED"}
-            if stock_details['changePercentage']>7.3:
+            if stock_details['changePercentage']>7.4:
                 order_response = order(stock_details['twoPercentHigh'], 100,self.security, self.tokens, self.headers,self.client_details)
             else:
                 order_response = order(stock_details['twoPercentHigh'], order_quantity,self.security, self.tokens, self.headers,self.client_details)
@@ -62,7 +62,6 @@ class StockOrderManager:
                 return order_response
             else:
                 return order_response
-            
         if len(total_orders)>0:
             return {
                 "message":"sucessfully ordered shares",
