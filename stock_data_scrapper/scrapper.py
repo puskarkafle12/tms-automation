@@ -62,7 +62,7 @@ def get_stock_details():
                 table_data.append(row_data)
 
         # Use ThreadPoolExecutor to fetch stock details concurrently
-        with ThreadPoolExecutor(max_workers=30) as executor:
+        with ThreadPoolExecutor(max_workers=15) as executor:
             futures = [executor.submit(fetch_stock_details, row_data)
                        for row_data in table_data]
 

@@ -18,6 +18,19 @@ To run this project, follow these steps:
 
 ## Usage
 
+3. create .env file 
+DB_USER=pk
+DB_PASSWORD=
+DB_HOST=localhost
+DB_NAME=stock
+
+4. alembic is used as orm so go to alembic .ini and env file configure to make sure its working 
+    in alembic env add these 
+    from models import user
+    target_metadata = user.Base.metadata
+    in alembic.ini file add database configuration
+    sqlalchemy.url = postgresql://pk:@localhost/stock
+
 ### Configuring Login Details
 
 Create a `users.txt` file in the project folder with the following format:

@@ -1,7 +1,10 @@
-myenv
+tmsenv
 *.pyc
 __pycache__
 users.txt
 tokens.json
 traded_difference.txt
 test.py
+.env
+/alembic
+alembic.ini

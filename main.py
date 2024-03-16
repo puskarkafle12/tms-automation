@@ -1,45 +1,74 @@
-import multiprocessing
+import asyncio
 import sys
+from typing import Dict
+from fastapi import FastAPI, HTTPException, BackgroundTasks
+from database import get_db
+from models.order import Order
+from schemas.schemas import OrderCreateRequest
+from utils.base_functions import load_users
+from utils.tms import Tms
+import uvicorn
+# Define the FastAPI application instance
 
-from utils.base_functions import find_file_in_directory, load_users
+app = FastAPI(debug=True)
+db=get_db()
 
-from stock_order_manager.stock_order_manager import StockOrderManager
+# Load user credentials
+user_file_path = '/Users/pkafle/tms-automation/users.txt'
+if not user_file_path:
+    print("User credential file not found, exiting... ")
+    sys.exit()
+user = load_users(user_file_path)[0]
 
-def run_stock_order_manager(username, password, stock_symbol, request_per_sec, broker_no, order_quantity, previous_ltp):
-    stock_order_manager = StockOrderManager(username, password, stock_symbol, request_per_sec, broker_no)
-    stock_grab_response = stock_order_manager.stock_grabber(order_quantity, previous_ltp)
-    print(stock_grab_response)
-
-if __name__ == "__main__":
-    
-    user_file_path='/Users/pkafle/tms-automation/users.txt'
-    if not user_file_path:
-        print("user credintial file not found,\nexiting... ")
-        sys.exit()
-    user =load_users(user_file_path)[0]
-    run_stock_order_manager(
+# Create an instance of Tms
+tms = Tms(
     user['username'], user['password'], user['stock_symbol'],
-    user['request_per_sec'], user['broker_no'],
-    user['order_quantity'], user['previous_ltp']
+    user['request_per_sec'], user['broker_no']
 )
-    
-    
-    
-    
-    # multithreading code 
-    # Define the parameters for the first user
-    # user_file_path=find_file_in_directory('users.txt')
-    # if not user_file_path:
-    #     print("user credintial file not found,\nexiting... ")
-    #     sys.exit()
-    # users =load_users(user_file_path)
-    # # Create two processes to run the code for both users concurrently
-    # processes = []
 
-    # for user in users:  # Use values() to get the dictionary values
-    #     process = multiprocessing.Process(target=run_stock_order_manager, args=(user['username'], user['password'], user['stock_symbol'], user['request_per_sec'], user['broker_no'], user['request_owner'], user['order_quantity'], user['previous_ltp']))
-    #     processes.append(process)
-    #     process.start()
+# Define your routes
+@app.get("/")
+async def read_root():
+    return {"message": "Hello, FastAPI"}
 
-    # for process in processes:
-    #     process.join()
+@app.post("/add_order/")
+async def add_order(order_data: OrderCreateRequest):
+    db = get_db()
+    order = Order(order_data.client_id, order_data.security_details, order_data.price, order_data.qty, order_data.status)
+    db.add(order)
+    db.commit()
+    return {"message": "Order added successfully"}
+
+@app.get("/check_orders/")
+async def check_orders():
+    while True:
+        db = get_db()
+        orders = db.query(Order).filter_by(status="pending").all()
+        for order in orders:
+            current_price = tms.get_stock_details(order.security_details['id']).get('ltp')
+            if current_price <= order.price:
+                order_response = tms.order(current_price, order.qty, order.security_details)
+                order.status = "completed"
+                db.commit()
+        await asyncio.sleep(4)
+
+
+# @app.post("/start_order_loop/")
+# async def start_order_loop(background_tasks: BackgroundTasks):
+#     background_tasks.add_task(check_orders)
+#     return {"message": "Order loop started"}
+
+# @app.post("/stop_order_loop/")
+# async def stop_order_loop():
+#     # Add logic to stop the order loop
+#     return {"message": "Order loop stopped"}
+
+
+@app.get("/{path:path}")
+async def catch_all(path: str):
+    raise HTTPException(status_code=404, detail="Route not found")
+
+# Run the FastAPI application
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8003 ,reload=True)
+    print("Server is running at http://0.0.0.0:8000")
