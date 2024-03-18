@@ -8,9 +8,22 @@ import math
 import os
 
 from database import  get_db
-from models.user import User
+from models.logged_in_users import LoggedInUsers
 from sqlalchemy.exc import SQLAlchemyError
 
+from functools import wraps
+import time
+
+def get_function_time(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        start_time = time.time()
+        result = func(*args, **kwargs)
+        end_time = time.time()
+        execution_time = end_time - start_time
+        print(f"Function '{func.__name__}' executed in {execution_time:.6f} seconds")
+        return result
+    return wrapper
 
 
 def calculate_high_price(ltp, change_in_percentage):
@@ -70,14 +83,15 @@ def log_time(last_traded_time, headers, response):
     # with open('tokens.json', 'w') as file:
     #     json.dump(data, file)
 
-def save_tokens(user_id, tokens):
+def save_tokens(client_id, tokens,expires,broker_no):
     try:
         db=get_db()
-        user = db.query(User).filter_by(user_id=user_id).first()
+        user = db.query(LoggedInUsers).filter_by(client_id=client_id).first()
         if user:
             user.tokens = tokens
+            user.expires=expires
         else:
-            user = User(user_id=user_id, tokens=tokens)
+            user = LoggedInUsers(client_id=client_id, tokens=tokens,expires=expires,broker_no=broker_no)
             db.add(user)
         db.commit()
         return True
@@ -87,12 +101,12 @@ def save_tokens(user_id, tokens):
         return False
 
 # Function to get tokens for a user
-def get_tokens(user_id):
+def get_tokens(client_id):
     try:
         db=get_db()
-        user = db.query(User).filter_by(user_id=user_id).first()
+        user = db.query(LoggedInUsers).filter_by(client_id=client_id).first()
         if user:
-            return user.tokens
+            return user.tokens , user.expires ,user.broker_no
         else:
             return None
     except SQLAlchemyError as e:
