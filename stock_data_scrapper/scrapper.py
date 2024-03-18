@@ -1,9 +1,12 @@
 from datetime import datetime
 import re
+import sys
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor
+sys.path.append('/Users/pkafle/tms-automation')
+from utils.base_functions import get_function_time
 
 def convert_to_numeric(value):
     try:
@@ -40,7 +43,7 @@ def fetch_stock_details(row_data):
     row_data.update(stock_detail)
     return row_data
 
-
+@get_function_time
 def get_stock_details():
     url = 'https://merolagani.com/latestmarket.aspx'
     response = requests.get(url)
@@ -62,7 +65,7 @@ def get_stock_details():
                 table_data.append(row_data)
 
         # Use ThreadPoolExecutor to fetch stock details concurrently
-        with ThreadPoolExecutor(max_workers=15) as executor:
+        with ThreadPoolExecutor(max_workers=10) as executor:
             futures = [executor.submit(fetch_stock_details, row_data)
                        for row_data in table_data]
 
@@ -76,11 +79,10 @@ def get_stock_details():
                        '30-Day Avg Volume', 'Market Capitalization'
                        ]
         df = pd.DataFrame(stock_details)
-        df[numeric_columns] = df[numeric_columns].applymap(convert_to_numeric)
+        df[numeric_columns] = df[numeric_columns].map(convert_to_numeric)
         df['EPS'] = df["EPS"].apply(extract_numeric_value)
 
         return df
-
 
 # Call the function to fetch stock details
 stock_df=get_stock_details()
