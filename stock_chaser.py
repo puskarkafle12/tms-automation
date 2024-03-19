@@ -3,7 +3,8 @@ from utils.base_functions import load_users
 from utils.tms import TmsUser
 
 def run_stock_order_manager(username, password, stock_symbol, request_per_sec, broker_no, order_quantity, previous_ltp):
-    user_tms = TmsUser(username, password, stock_symbol, request_per_sec, broker_no)
+    user_tms = TmsUser(username=username, password=password, stock_symbol=stock_symbol, request_per_sec=request_per_sec, broker_no=broker_no)
+    user_tms.try_cached_login()
     stock_grab_response = user_tms.stock_grabber(order_quantity, previous_ltp)
     print(stock_grab_response)
 

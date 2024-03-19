@@ -6,6 +6,7 @@ import requests
 
 from database import get_db
 from exceptions.login_exceptions import LoginFailedException
+from models.logged_in_users import LoggedInUsers
 from models.user import User
 from tms_captcha_solver.imgto_txt import solve_captcha
 from utils.base_functions import calculate_high_price, get_tokens, log_time, save_tokens
@@ -51,15 +52,43 @@ class TmsUser:
                 self.tokens=self.tokens['tokens']
                 self.headers = self.get_header(request_owner, self.tokens)
                 self.client_details = self.get_client_details(self.tokens, self.headers, self.login_response['client_dealer_id'])
-            except:
+            except Exception as e:
                 db=get_db()
                 user=db.query(User).filter(User.client_id == self.client_id).first()
+                if not user:
+                    print()
                 if user.auto_login:
                     self.password=user.password
                     self.broker_no=user.broker_no
-                    self.try_cached_login()
+                    try:
+                        self.try_cached_login()
+                    except Exception as e :
+                        logged_in_user=db.query(LoggedInUsers).filter(LoggedInUsers.client_id == self.client_id).first()
+                        logged_in_user.status="logged_out"
+                        logged_in_user.message="exception while login error message ::"+str(e)
+                        db.commit()
+                        raise LoginFailedException("login failed "+str(e))
                 else:
-                    raise LoginFailedException("Cannot login from tokens please login again.")
+                    logged_in_user=db.query(LoggedInUsers).filter(LoggedInUsers.client_id == self.client_id).first()
+                    logged_in_user.status="logged_out"
+                    logged_in_user.message="auto login disabled user token expire re-login again::"+str(e)
+                    db.commit()
+                    raise LoginFailedException("login failed "+str(e))
+
+    # def cancel_order(self):
+    #     json_data = {
+    #             'orderBook': None,
+    #             'orderPlacedBy': 2,
+    #             'exchangeOrderId': '2024031901053235',
+    #         }
+
+    #     response = requests.post(
+    #                             'https://tms35.nepsetms.com.np/tmsapi/orderApi/order/cancel/',
+    #                             cookies=self.tokens,
+    #                             headers=self.headers,
+    #                             json=json_data
+    #                     )
+    #     return json.loads(response.content)
     def try_cached_login(self):
         try:
             self.login_response, self.expires ,self.broker_no = get_tokens(self.client_id)
@@ -71,18 +100,20 @@ class TmsUser:
                 "message": "token successfully loaded from the cache file"
             }
         except Exception as e:
-
-            # retry login from the post request 
-            self.login_response = self.login()
-            self.tokens = self.login_response['tokens']
-            self.expires = self.login_response['expires']
-            save_tokens(self.client_id, self.login_response, self.expires,self.broker_no)
-            self.headers = self.get_header(self.login_response['request_owner'], self.tokens)
-            self.client_details = self.get_client_details(self.tokens, self.headers, self.login_response['client_dealer_id'])
-            return {
-                "status": "success",
-                "message": "token refreshed and stored in the database"
-            }
+            try:
+                # retry login from the post request 
+                self.login_response = self.login()
+                self.tokens = self.login_response['tokens']
+                self.expires = self.login_response['expires']
+                save_tokens(self.client_id, self.login_response, self.expires,self.broker_no)
+                self.headers = self.get_header(self.login_response['request_owner'], self.tokens)
+                self.client_details = self.get_client_details(self.tokens, self.headers, self.login_response['client_dealer_id'])
+                return {
+                    "status": "success",
+                    "message": "token refreshed and stored in the database"
+                }
+            except Exception as e:
+                raise LoginFailedException("cannot login "+str(e))
 
                 
     @staticmethod
@@ -95,7 +126,7 @@ class TmsUser:
         return response.content
         
     @staticmethod
-    async def get_stock_details(session, headers, token, id):
+    async def get_stock_details_async(session, headers, token, id):
         for attempt in range(3):  # Retry up to 3 times
             try:
                 url = f'https://tms35.nepsetms.com.np/tmsapi/rtApi/ws/stockQuote/{id}'
@@ -162,7 +193,7 @@ class TmsUser:
         return json.loads(response.content)['data'][0]['userId']
 
     
-    def get_securities_ids(self,symbol):
+    def get_security_id(self,symbol):
         symbol = symbol.upper()
         response = requests.get(
             'https://tms35.nepsetms.com.np/tmsapi/stock/securities', cookies=self.tokens, headers=self.headers)
@@ -417,7 +448,7 @@ class TmsUser:
 
             try:
                 async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(keepalive_timeout=30)) as session:
-                    response = await self.get_stock_details(session, self.headers, self.tokens, id)
+                    response = await self.get_stock_details_async(session, self.headers, self.tokens, id)
 
                 if response.get('status'):
                     if response['status'] == '401':
@@ -455,6 +486,7 @@ class TmsUser:
     def stock_grabber(self, order_quantity, previous_ltp,order_limit=0):
         stock_details={}
         total_orders=[]
+        self.security=self.get_security_id(self.stock_symbol)
         while stock_details.get('message') !='exit' and order_limit<4:
             stock_details = asyncio.run(self.price_scanner(self.security['id'], previous_ltp))
             if stock_details.get('message') == 'exit':
