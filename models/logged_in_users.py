@@ -11,5 +11,7 @@ class LoggedInUsers(Base):
     date_created=Column(DateTime,default=func.now())
     expires=Column(INTEGER)
     broker_no=Column(String)
+    status=Column(String)
+    message=Column(String)
     def __repr__(self):
-        return f"<User(client_id='{self.client_id}', tokens={self.tokens}, date_created={self.date_created}, expires={self.expires}, broker_no={self.broker_no})>"
+        return f"<User(client_id='{self.client_id}', tokens={self.tokens}, date_created={self.date_created}, expires={self.expires}, broker_no={self.broker_no}, status={self.status}, message={self.message})>"

@@ -90,8 +90,9 @@ def save_tokens(client_id, tokens,expires,broker_no):
         if user:
             user.tokens = tokens
             user.expires=expires
+            user.status="logged_in"
         else:
-            user = LoggedInUsers(client_id=client_id, tokens=tokens,expires=expires,broker_no=broker_no)
+            user = LoggedInUsers(client_id=client_id, tokens=tokens,expires=expires,broker_no=broker_no,status="logged_in")
             db.add(user)
         db.commit()
         return True

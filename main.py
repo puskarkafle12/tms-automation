@@ -1,21 +1,17 @@
 import asyncio
 import sys
 from typing import Dict
-from fastapi import FastAPI, HTTPException, BackgroundTasks,Depends, Query
-from database import SessionLocal, get_db
-from sqlalchemy import cast, Column, DateTime, func, Integer, String, JSON
-from models.order import SheduldedOrder
+from fastapi import FastAPI, HTTPException,Depends, Query
+from database import get_db
+from sqlalchemy import cast, DateTime
+from models.scheduled_order import ScheduledOrder
 from models.order_status_log import OrderStatusLog
 from schemas.schemas import LoginRequest, OrderCreateRequest
 from utils.base_functions import load_users
 from utils.tms import TmsUser
 import uvicorn
-from sqlalchemy.orm import joinedload
-
 from sqlalchemy.orm import Session
-from fastapi import HTTPException, status
-from datetime import datetime, date, timedelta
-from datetime import datetime, timedelta
+from datetime import date,time, timedelta,datetime
 
 from utils.tms_user_loader import load_tms_users_instances
 
@@ -50,11 +46,35 @@ async def login(login_request: LoginRequest):
             raise HTTPException(status_code=500, detail=login_status)
 @app.post("/add_order/")
 async def add_order(order_data: OrderCreateRequest,db: Session = Depends(get_db)):
-    order = SheduldedOrder(order_data)
+    order = ScheduledOrder(order_data)
     db.add(order)
     db.commit()
     return {"message": "Order added successfully"}
-from sqlalchemy.orm import join
+
+@app.delete("/delete_scheduled_order/")
+async def delete_scheduled_order(
+    order_id: int =  Query(None),
+    client_id: str =  Query(None),
+    script_name: str =  Query(None),
+    db: Session = Depends(get_db)
+):
+    if order_id:
+        deleted_count = db.query(ScheduledOrder).filter(ScheduledOrder.order_id == order_id).delete()
+    elif client_id and script_name:
+        deleted_count = db.query(ScheduledOrder).filter(
+            ScheduledOrder.client_id == client_id,
+            ScheduledOrder.script_name == script_name
+        ).delete()
+    else:
+        raise HTTPException(status_code=400, detail="Invalid parameters. Specify order_id or client_id and script_name.")
+
+    db.commit()
+
+    if deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    return {"message": "Order deleted successfully"}
+
 
 @app.get("/order_status_logs/")
 async def get_order_status_logs(
@@ -86,8 +106,8 @@ async def get_order_status_logs(
 
     order_logs = query.all()
 
-    # Perform a separate query to retrieve SheduldedOrder data
-    scheduled_orders = db.query(SheduldedOrder).filter(SheduldedOrder.client_id == client_id).all()
+    # Perform a separate query to retrieve ScheduledOrder data
+    scheduled_orders = db.query(ScheduledOrder).filter(ScheduledOrder.client_id == client_id).all()
 
     # Combine the results
     combined_results = {
@@ -96,36 +116,47 @@ async def get_order_status_logs(
     }
 
     return combined_results
-    
+def is_within_time_range(start_time, end_time, current_time):
+    return True
+    # return start_time.hour <= current_time.hour <= end_time.hour
+
 @app.get("/check_orders/")
 async def check_orders(db: Session = Depends(get_db)):
     tms_users_instances={}
+    # Define start and end times
+    start_time = time(hour=11, minute=0)
+    end_time = time(hour=15, minute=0)
     while True:
-        try:
-            pending_orders = db.query(SheduldedOrder).filter_by(status="pending").all()
-            client_ids=[order.client_id for order in pending_orders ]
-            for client_id in client_ids:
-                if client_id not in tms_users_instances.keys():
-                    try:
-                        tms_users_instances:Dict=load_tms_users_instances(client_ids,tms_users_instances)
-                    except Exception as e:
-                        pass
-            for order in pending_orders:
-                security_details = tms_users_instances[order.client_id].get_securities_ids(order.script_name)
-                current_price = tms_users_instances[order.client_id].get_stock_details(security_details['id']).get('ltp')
-                if current_price * 0.98 <= order.price <= current_price * 1.02 or current_price<=order.price:
-                    order_response = tms_users_instances[order.client_id].order(current_price, order.qty, security_details)
-                    if order_response.get('status')==200:
-                        order.status="completed"
-                    else :
-                        order.status="failed::"+str(order_response.get('message'))
-                    db.delete(order)
-                    db.commit()
-        except Exception as e:
-            # Log the exception
-            print(f"An error occurred: {e}")
-        await asyncio.sleep(4)
-
+        current_time = datetime.now().time()
+        if is_within_time_range(start_time, end_time, current_time):
+            print("It's time to run the loop!")
+            try:
+                pending_orders = db.query(ScheduledOrder).filter_by(status="pending").all()
+                client_ids=set(order.client_id for order in pending_orders )
+                for client_id in client_ids:
+                    if client_id not in tms_users_instances.keys():
+                        try:
+                            tms_users_instances:Dict=load_tms_users_instances(client_ids,tms_users_instances)
+                        except Exception as e:
+                            pass
+                for order in pending_orders:
+                    if order.client_id in tms_users_instances.keys():
+                        security_details = tms_users_instances[order.client_id].get_securities_ids(order.script_name)
+                        current_price = tms_users_instances[order.client_id].get_stock_details(security_details['id']).get('ltp')
+                        if current_price * 0.98 <= order.price <= current_price * 1.02:
+                            order_response = tms_users_instances[order.client_id].order(order.price, order.qty, security_details)
+                            if order_response.get('status')==200:
+                                order.status="completed"
+                            else :
+                                order.status="failed::"+str(order_response.get('message'))
+                            db.delete(order)
+                            db.commit()
+            except Exception as e:
+                # Log the exception
+                print(f"An error occurred: {e}")
+            await asyncio.sleep(20)
+        else:
+            return {"message":"Session not active"}
 
 
 # @app.post("/start_order_loop/")
@@ -145,5 +176,5 @@ async def catch_all(path: str):
 
 # Run the FastAPI application
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8003 ,reload=True)
+    uvicorn.run(app, host="0.0.0.0", port=8000 ,reload=True)
     print("Server is running at http://0.0.0.0:8000")

@@ -3,7 +3,7 @@ from database import Base, get_db
 from models.order_status_log import OrderStatusLog
 from schemas.schemas import OrderCreateRequest
 
-class SheduldedOrder(Base):
+class ScheduledOrder(Base):
     __tablename__ = 'scheduled_orders'
 
     order_id = Column(Integer, primary_key=True, autoincrement=True)
@@ -26,9 +26,9 @@ class SheduldedOrder(Base):
         self.qty = order_data.qty
         self.status = order_data.status
 
-@event.listens_for(SheduldedOrder, 'after_delete')
+@event.listens_for(ScheduledOrder, 'after_delete')
 def after_delete_order(mapper, connection, target):
     with get_db() as db:
-        log_entry = OrderStatusLog(order_id=target.order_id, client_id=target.client_id, security_details=target.security_details, script_name=target.script_name, qty=target.qty, status=target.status)
+        log_entry = OrderStatusLog(order_id=target.order_id, client_id=target.client_id, security_details=target.security_details, script_name=target.script_name, qty=target.qty, status=target.status,price=target.price)
         db.add(log_entry)
         db.commit()
