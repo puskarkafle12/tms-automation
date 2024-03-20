@@ -10,7 +10,7 @@ from exceptions.login_exceptions import LoginFailedException
 from models.logged_in_users import LoggedInUsers
 from models.user import User
 from tms_captcha_solver.imgto_txt import solve_captcha
-from utils.base_functions import calculate_high_price, get_tokens, log_time, save_tokens
+from utils.base_functions import calculate_high_price, get_tokens, log_time, logout_user, save_tokens
 
 class TmsUser:
     def __init__(self,broker_no, username=None, password=None, tokens=None, expires=None, stock_symbol=None, request_per_sec=2):
@@ -200,6 +200,11 @@ class TmsUser:
             'https://tms35.nepsetms.com.np/tmsapi/stock/securities', cookies=self.tokens, headers=self.headers)
         import json
         stocks = json.loads(response.content)
+        if response.status_code==401:
+            """
+            access token expired
+            """
+            logout_user(self.client_id,"access token expired")
         for stock in stocks:
             if stock['symbol'] == symbol:
                 return stock
