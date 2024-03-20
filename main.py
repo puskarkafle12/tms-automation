@@ -1,13 +1,14 @@
 import asyncio
 import sys
-from typing import Dict
+from typing import Dict, Type
 from fastapi import FastAPI, HTTPException,Depends, Query
 from database import get_db
 from sqlalchemy import cast, DateTime
+from models.logged_in_users import LoggedInUsers
 from models.scheduled_order import ScheduledOrder
 from models.order_status_log import OrderStatusLog
 from schemas.schemas import LoginRequest, OrderCreateRequest
-from utils.base_functions import load_users
+from utils.base_functions import load_users, truncate_to_one_decimal_place
 from utils.tms import TmsUser
 import uvicorn
 from sqlalchemy.orm import Session
@@ -17,6 +18,9 @@ from utils.tms_user_loader import load_tms_users_instances
 
 app = FastAPI(debug=True)
 # Load user credentials
+import logging
+# to disable the warnings in the logs
+logging.disable(logging.WARNING)
 user_file_path = '/Users/pkafle/tms-automation/users.txt'
 if not user_file_path:
     print("User credential file not found, exiting... ")
@@ -122,17 +126,24 @@ def is_within_time_range(start_time, end_time, current_time):
 
 @app.get("/check_orders/")
 async def check_orders(db: Session = Depends(get_db)):
-    tms_users_instances={}
+    tms_users_instances: Dict[str, Type[TmsUser]]={}
     # Define start and end times
     start_time = time(hour=11, minute=0)
     end_time = time(hour=15, minute=0)
+    count=0
     while True:
+        count+=1
+        print("check_order_loop_count",count)
         current_time = datetime.now().time()
         if is_within_time_range(start_time, end_time, current_time):
-            print("It's time to run the loop!")
             try:
                 pending_orders = db.query(ScheduledOrder).filter_by(status="pending").all()
+                # filtering logged out memeber and substracting the instances 
                 client_ids=set(order.client_id for order in pending_orders )
+                logged_out_clients = db.query(LoggedInUsers).filter(LoggedInUsers.status == "logged_out").all()
+                logged_out_client_ids = [user.client_id for user in logged_out_clients]                
+                for client_id in logged_out_client_ids:
+                    tms_users_instances.pop(client_id, None)
                 for client_id in client_ids:
                     if client_id not in tms_users_instances.keys():
                         try:
@@ -141,9 +152,11 @@ async def check_orders(db: Session = Depends(get_db)):
                             pass
                 for order in pending_orders:
                     if order.client_id in tms_users_instances.keys():
-                        security_details = tms_users_instances[order.client_id].get_securities_ids(order.script_name)
+                        security_details = tms_users_instances[order.client_id].get_security_id(order.script_name)
                         current_price = tms_users_instances[order.client_id].get_stock_details(security_details['id']).get('ltp')
-                        if current_price * 0.98 <= order.price <= current_price * 1.02:
+                        if truncate_to_one_decimal_place(current_price* 0.98)  <= truncate_to_one_decimal_place(order.price) <= truncate_to_one_decimal_place(current_price* 1.02) :
+                            print("order executed for ",order.client_id,order.script_name)
+                            order.price=truncate_to_one_decimal_place(order.price)
                             order_response = tms_users_instances[order.client_id].order(order.price, order.qty, security_details)
                             if order_response.get('status')==200:
                                 order.status="completed"
@@ -154,7 +167,7 @@ async def check_orders(db: Session = Depends(get_db)):
             except Exception as e:
                 # Log the exception
                 print(f"An error occurred: {e}")
-            await asyncio.sleep(20)
+            await asyncio.sleep(10)
         else:
             return {"message":"Session not active"}
 

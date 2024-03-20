@@ -24,7 +24,18 @@ def get_function_time(func):
         print(f"Function '{func.__name__}' executed in {execution_time:.6f} seconds")
         return result
     return wrapper
-
+def truncate_to_one_decimal_place(number):
+    return round(number, 1)
+def logout_user(client_id: str,message):
+    db=get_db()
+    user = db.query(LoggedInUsers).filter(LoggedInUsers.client_id == client_id).first()
+    if user:
+        user.status = "logged_out"
+        user.message = message
+        db.commit()
+        return True
+    else:
+        return False
 
 def calculate_high_price(ltp, change_in_percentage):
     if change_in_percentage > 7.843:
