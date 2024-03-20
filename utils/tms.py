@@ -1,6 +1,7 @@
 import asyncio
 import json
 import time
+from typing import Dict
 import aiohttp
 import requests
 
@@ -193,7 +194,7 @@ class TmsUser:
         return json.loads(response.content)['data'][0]['userId']
 
     
-    def get_security_id(self,symbol):
+    def get_security_id(self,symbol)->Dict:
         symbol = symbol.upper()
         response = requests.get(
             'https://tms35.nepsetms.com.np/tmsapi/stock/securities', cookies=self.tokens, headers=self.headers)
@@ -483,10 +484,11 @@ class TmsUser:
                 print('The high price after calculation is', two_percent_high)
                 response['twoPercentHigh'] = two_percent_high
                 return response
-    def stock_grabber(self, order_quantity, previous_ltp,order_limit=0):
+    def stock_grabber(self, order_quantity,order_limit=0):
         stock_details={}
         total_orders=[]
         self.security=self.get_security_id(self.stock_symbol)
+        previous_ltp=previous_ltp=self.get_stock_details(self.security.get('id')).get('ltp')
         while stock_details.get('message') !='exit' and order_limit<4:
             stock_details = asyncio.run(self.price_scanner(self.security['id'], previous_ltp))
             if stock_details.get('message') == 'exit':
@@ -502,14 +504,15 @@ class TmsUser:
                 log_time(stock_details['lastTradedTime'],self.headers,order_response)
                 order_limit+=1
                 total_orders.append(order_response)
-            elif order_response.get('status') == 400:
+            else :
                 order_response['message']='ordered failed due to '+str(order_response['message'])
                 log_time(stock_details['lastTradedTime'],self.headers,order_response)
-                return order_response
-            else:
-                return order_response
+            # this can make slow change this code 
+            previous_ltp=stock_details.get('ltp')
         if len(total_orders)>0:
             return {
                 "message":"sucessfully ordered shares",
                 "totalOrders":total_orders
             }
+            
+        
