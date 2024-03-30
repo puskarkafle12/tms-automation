@@ -4,19 +4,32 @@ from typing import Dict, Type
 from fastapi import FastAPI, HTTPException,Depends, Query
 from database import get_db
 from sqlalchemy import cast, DateTime
-from models.logged_in_users import LoggedInUsers
+from models.frontend_user import FrontendUser
+from models.logged_in_user import LoggedInUsers
 from models.scheduled_order import ScheduledOrder
 from models.order_status_log import OrderStatusLog
-from schemas.schemas import LoginRequest, OrderCreateRequest
+from schemas.schemas import LoginRequest, OrderCreateRequest, UserLogin
 from utils.base_functions import load_users, truncate_to_one_decimal_place
 from utils.tms import TmsUser
 import uvicorn
+import jwt
+
 from sqlalchemy.orm import Session
 from datetime import date,time, timedelta,datetime
 
 from utils.tms_user_loader import load_tms_users_instances
 
 app = FastAPI(debug=True)
+SECRET_KEY = "your_secret_key_here"
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
 # Load user credentials
 import logging
 # to disable the warnings in the logs
@@ -171,6 +184,22 @@ async def check_orders(db: Session = Depends(get_db)):
         else:
             return {"message":"Session not active"}
 
+@app.post("/frontend-login")
+def frontend_login(user_login: UserLogin, db: Session = Depends(get_db)):
+    user = FrontendUser.authenticate(user_login.username, user_login.password, db)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    
+    # Generate JWT token
+    timestamp = datetime.utcnow().timestamp()
+    payload = {
+        "username": user_login.username,
+        "password": user_login.password,
+        "timestamp": timestamp
+    }
+    access_token = jwt.encode(payload, SECRET_KEY, algorithm="HS256")
+
+    return {"message": "Login successful", "user_id": user.id, "access_token": access_token}
 
 # @app.post("/start_order_loop/")
 # async def start_order_loop(background_tasks: BackgroundTasks):

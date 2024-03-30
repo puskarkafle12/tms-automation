@@ -8,7 +8,7 @@ import math
 import os
 
 from database import  get_db
-from models.logged_in_users import LoggedInUsers
+from models.logged_in_user import LoggedInUsers
 from sqlalchemy.exc import SQLAlchemyError
 
 from functools import wraps
