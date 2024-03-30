@@ -16,3 +16,8 @@ class LoginRequest(BaseModel):
     stock_symbol: str
     broker_no: str
     request_per_sec: int
+
+
+class UserLogin(BaseModel):
+    username: str
+    password: str

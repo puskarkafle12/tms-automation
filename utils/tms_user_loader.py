@@ -3,7 +3,7 @@ from typing import Dict
 
 from fastapi import Depends
 from database import get_db
-from models.logged_in_users import LoggedInUsers
+from models.logged_in_user import LoggedInUsers
 from utils.base_functions import load_users
 from utils.tms import TmsUser
 from sqlalchemy.orm import Session
