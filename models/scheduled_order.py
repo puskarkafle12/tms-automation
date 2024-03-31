@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, JSON, DateTime, func, event
+from sqlalchemy import Column, Float, Integer, String, JSON, DateTime, func, event
 from database import Base, get_db
 from models.order_status_log import OrderStatusLog
 from schemas.schemas import OrderCreateRequest
@@ -10,7 +10,7 @@ class ScheduledOrder(Base):
     client_id = Column(String)
     security_details = Column(JSON)
     script_name = Column(String)
-    price = Column(Integer)
+    price = Column(Float)
     qty = Column(Integer)
     status = Column(String)
     last_updated = Column(DateTime, default=func.now(), onupdate=func.now())
