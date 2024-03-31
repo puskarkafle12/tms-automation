@@ -13,6 +13,7 @@ class ScheduledOrder(Base):
     price = Column(Float)
     qty = Column(Integer)
     status = Column(String)
+    order_type = Column(String)
     last_updated = Column(DateTime, default=func.now(), onupdate=func.now())
 
     def __repr__(self):
@@ -24,11 +25,12 @@ class ScheduledOrder(Base):
         self.script_name = order_data.script_name
         self.price = order_data.price
         self.qty = order_data.qty
+        self.order_type = order_data.order_type
         self.status = order_data.status
 
 @event.listens_for(ScheduledOrder, 'after_delete')
 def after_delete_order(mapper, connection, target):
     with get_db() as db:
-        log_entry = OrderStatusLog(order_id=target.order_id, client_id=target.client_id, security_details=target.security_details, script_name=target.script_name, qty=target.qty, status=target.status,price=target.price)
+        log_entry = OrderStatusLog(order_id=target.order_id, client_id=target.client_id, security_details=target.security_details, script_name=target.script_name, qty=target.qty, status=target.status,price=target.price,order_type=target.order_type)
         db.add(log_entry)
         db.commit()

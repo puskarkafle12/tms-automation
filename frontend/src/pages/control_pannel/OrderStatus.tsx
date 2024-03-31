@@ -152,7 +152,8 @@ const GetOrderStatus: React.FC = () => {
                   <td>{order.qty}</td>
                   <td>{order.last_updated}</td>
                   <td>
-                    <button onClick={() => handleDelete(order.order_id)}>Delete</button>
+                    {order.status === 'order_placed' && <button style={{ color: 'red' }}>Cancel</button>}
+                    {order.status === 'pending' && <button onClick={() => handleDelete(order.order_id)}>Delete</button>}
                   </td>
                 </tr>
               ))}

@@ -8,6 +8,7 @@ class OrderCreateRequest(BaseModel):
     script_name:str
     price: float
     qty: int
+    order_type: str
     status: str = "pending"
 
 class LoginRequest(BaseModel):
