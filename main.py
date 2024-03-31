@@ -217,14 +217,15 @@ async def check_orders_task_func(db: Session):
                             pass
                 for order in pending_orders:
                     if order.client_id in tms_users_instances.keys():
-                        await send_logs(str(tms_users_instances))
+                        await send_logs(str(client_ids))
                         security_details = tms_users_instances[order.client_id].get_security_id(
                             order.script_name)
                         current_price = tms_users_instances[order.client_id].get_stock_details(
                             security_details['id']).get('ltp')
-                        await send_logs(str(security_details))
-                        await send_logs(str(current_price))
+                        await send_logs(f"scanning count {count} ...")
+                        await send_logs(f"{order.script_name} {str(current_price)}")
                         if truncate_to_one_decimal_place(current_price * 0.98) <= truncate_to_one_decimal_place(order.price) <= truncate_to_one_decimal_place(current_price * 1.02):
+                            await send_logs(f"price matched trying to order ...")
                             logs = f"Order executed for {
                                 order.client_id}, script_name: {order.script_name}"
                             await send_logs(logs)
@@ -246,7 +247,7 @@ async def check_orders_task_func(db: Session):
             except Exception as e:
                 logs = f"An error occurred: {e}"
                 await send_logs(logs)
-            await asyncio.sleep(10)
+            await asyncio.sleep(20)
         else:
             logs = "Session not active, Check orders loop stopped."
             is_running=False

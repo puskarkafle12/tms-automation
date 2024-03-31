@@ -1,9 +1,11 @@
 import React, { useEffect, useState } from 'react';
+import MonitorOrders from './MonitorOrders';
 
 const CheckOrders: React.FC = () => {
+  const wsUrl = process.env.REACT_APP_WS_URL;
   const [logs, setLogs] = useState<string[]>([]);
   const [socket, setSocket] = useState<WebSocket | null>(null);
-
+  // console.log(wsUrl);
   useEffect(() => {
     let newSocket: WebSocket | null = null;
     const savedLogs = localStorage.getItem('logs');
@@ -12,7 +14,7 @@ const CheckOrders: React.FC = () => {
     }
 
     const connectSocket = () => {
-      newSocket = new WebSocket('ws://localhost:8000/ws');
+      newSocket = new WebSocket(wsUrl+'/ws');
       newSocket.onopen = () => {
         console.log('WebSocket connected');
         setSocket(newSocket);
@@ -56,8 +58,9 @@ const CheckOrders: React.FC = () => {
   return (
     <div>
       <h2>Check Orders Logs</h2>
+      <MonitorOrders />
       <button onClick={clearLogs}>Clear Logs</button>
-      <div>
+      <div >
         {logs.map((log, index) => (
           <p key={index}>{log}</p>
         ))}

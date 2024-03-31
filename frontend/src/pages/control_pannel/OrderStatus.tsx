@@ -8,6 +8,7 @@ const GetOrderStatus: React.FC = () => {
   const [orderLogs, setOrderLogs] = useState<any[]>([]);
   const [scheduledOrders, setScheduledOrders] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const apiUrl = process.env.REACT_APP_API_URL;
 
   useEffect(() => {
     // Automatically submit the form for the default client ID
@@ -23,15 +24,15 @@ const GetOrderStatus: React.FC = () => {
   const handleSubmit = async () => {
     setIsLoading(true);
     try {
-      const response = await fetch(`http://localhost:8000/order_status_logs/?client_id=${clientID}&script_name=${scriptName}&ordered_date=${orderedDate}`, {
+      const response = await fetch(apiUrl+`/order_status_logs/?client_id=${clientID}&script_name=${scriptName}&ordered_date=${orderedDate}`, {
         headers: {
           'Accept': 'application/json'
         }
       });
       if (response.ok) {
         const data = await response.json();
-        setOrderLogs(data.order_logs);
-        setScheduledOrders(data.scheduled_orders);
+        setOrderLogs(data.order_logs.map((log: any) => ({ ...log, order_type: log.order_type })));
+        setScheduledOrders(data.scheduled_orders.map((order: any) => ({ ...order, order_type: order.order_type })));
 
         // Save the clientID into local storage
         const savedClientIDs = JSON.parse(localStorage.getItem('clientIDs') || '[]');
@@ -44,7 +45,6 @@ const GetOrderStatus: React.FC = () => {
         console.error('Failed to fetch data');
       }
     } catch (error) {
-      alert("Error fetching data");
       console.error('Error fetching data:', error);
     } finally {
       setIsLoading(false);
@@ -53,7 +53,7 @@ const GetOrderStatus: React.FC = () => {
 
   const handleDelete = async (orderId: number) => {
     try {
-      const response = await fetch(`http://localhost:8000/delete_scheduled_order/?order_id=${orderId}`, {
+      const response = await fetch(apiUrl+`/delete_scheduled_order/?order_id=${orderId}`, {
         method: 'DELETE'
       });
       if (response.ok) {
@@ -108,6 +108,7 @@ const GetOrderStatus: React.FC = () => {
                 <th>Status</th>
                 <th>Price</th>
                 <th>Qty</th>
+                <th>Order Type</th>
                 <th>Timestamp</th>
               </tr>
             </thead>
@@ -119,6 +120,7 @@ const GetOrderStatus: React.FC = () => {
                   <td>{log.status}</td>
                   <td>{log.price}</td>
                   <td>{log.qty}</td>
+                  <td>{log.order_type}</td>
                   <td>{log.timestamp}</td>
                 </tr>
               ))}
@@ -138,6 +140,7 @@ const GetOrderStatus: React.FC = () => {
                 <th>Status</th>
                 <th>Price</th>
                 <th>Qty</th>
+                <th>Order Type</th>
                 <th>Last Updated</th>
                 <th>Action</th>
               </tr>
@@ -150,6 +153,7 @@ const GetOrderStatus: React.FC = () => {
                   <td>{order.status}</td>
                   <td>{order.price}</td>
                   <td>{order.qty}</td>
+                  <td>{order.order_type}</td>
                   <td>{order.last_updated}</td>
                   <td>
                     {order.status === 'order_placed' && <button style={{ color: 'red' }}>Cancel</button>}

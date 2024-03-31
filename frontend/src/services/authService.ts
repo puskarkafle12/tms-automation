@@ -1,6 +1,7 @@
 import axios from 'axios';
+const apiUrl = process.env.REACT_APP_API_URL;
 
-const BASE_URL = 'http://localhost:8000/frontend-login'; // Replace with your actual API endpoint for frontend login
+const BASE_URL = apiUrl+'/frontend-login'; // Replace with your actual API endpoint for frontend login
 
 export const authService = {
   login: async (username: string, password: string) => {
