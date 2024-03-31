@@ -67,7 +67,7 @@ const GetOrderStatus: React.FC = () => {
   };
 
   return (
-    <div>
+    <div className='order-status-container'>
       <h2>Get Order Status</h2>
       <form onSubmit={(e) => { e.preventDefault(); handleSubmit(); }}>
         <label>
