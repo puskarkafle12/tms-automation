@@ -94,6 +94,10 @@ def log_time(last_traded_time, headers, response):
     # with open('tokens.json', 'w') as file:
     #     json.dump(data, file)
 
+def is_within_time_range(start_time, end_time, current_time):
+    return True
+    return (start_time.hour, start_time.minute, start_time.second) <= (current_time.hour, current_time.minute, current_time.second) <= (end_time.hour, end_time.minute, end_time.second)
+
 def save_tokens(client_id, tokens,expires,broker_no):
     try:
         db=get_db()
