@@ -13,7 +13,7 @@ from models.logged_in_user import LoggedInUsers
 from models.scheduled_order import ScheduledOrder
 from models.order_status_log import OrderStatusLog
 from schemas.schemas import LoginRequest, OrderCreateRequest, UserLogin
-from utils.base_functions import load_users, truncate_to_one_decimal_place
+from utils.base_functions import is_within_time_range, load_users, truncate_to_one_decimal_place
 from utils.tms import TmsUser
 import uvicorn
 import jwt
@@ -148,9 +148,6 @@ async def get_order_status_logs(
 
     return combined_results
 
-
-def is_within_time_range(start_time, end_time, current_time):
-    return (start_time.hour, start_time.minute, start_time.second) <= (current_time.hour, current_time.minute, current_time.second) <= (end_time.hour, end_time.minute, end_time.second)
 
 
 # Keep track of connected WebSocket clients
@@ -314,5 +311,7 @@ async def catch_all(path: str):
 
 # Run the FastAPI application
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
-    print("Server is running at http://0.0.0.0:8000")
+    host="0.0.0.0"
+    port=8000
+    uvicorn.run(app, host=host, port=port, reload=True)
+    print(f"Server is running at {host}:{port} ")
