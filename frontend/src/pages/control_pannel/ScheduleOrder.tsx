@@ -10,6 +10,7 @@ const ScheduleOrder: React.FC = () => {
   const [qty, setQty] = useState('');
   const [status, setStatus] = useState('');
   const [clientIDs, setClientIDs] = useState<string[]>([]);
+  const [orderType, setOrderType] = useState('buy'); // Default order type is 'buy'
 
   useEffect(() => {
     // Retrieve client IDs from local storage
@@ -23,7 +24,7 @@ const ScheduleOrder: React.FC = () => {
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     try {
-      console.log(apiUrl)
+      console.log(apiUrl);
       const response = await fetch(apiUrl + '/add_order/', {
         method: 'POST',
         headers: {
@@ -34,7 +35,8 @@ const ScheduleOrder: React.FC = () => {
           client_id: clientID,
           script_name: scriptName,
           price: parseInt(price),
-          qty: parseInt(qty)
+          qty: parseInt(qty),
+          order_type: orderType // Include order type in the request body
         })
       });
       if (response.ok) {
@@ -67,6 +69,12 @@ const ScheduleOrder: React.FC = () => {
     <div>
       <h2>Add Order</h2>
       <form onSubmit={handleSubmit}>
+        <span style={{ display: 'flex', alignItems: 'center', padding: '15px' }}>
+          New Client ID:
+          <input type="text" value={newClientID} onChange={(e) => setNewClientID(e.target.value)} style={{ margin: '5px', padding: '3px' }} />
+          <button type="button" style={{ margin: '5px' }} onClick={handleAddNewClientID}>Add</button>
+          <button style={{ marginLeft: '5px' }} onClick={() => handleDeleteClientID(clientID)}>Delete</button>
+        </span>
         <label>
           Client ID:
           <select value={clientID} onChange={(e) => setClientID(e.target.value)}>
@@ -74,21 +82,6 @@ const ScheduleOrder: React.FC = () => {
               <option key={index} value={id}>{id}</option>
             ))}
           </select>
-        </label>
-        <br />
-        <label>
-          <label>
-            <span style={{ display: 'flex', alignItems: 'center', padding: '5px' }}>
-              New Client ID:
-              <input type="text" value={newClientID} onChange={(e) => setNewClientID(e.target.value)} style={{ marginLeft: '5px', marginRight: '5px', padding: '3px' }} />
-              <button type="button" style={{ marginRight: '5px' }}  onClick={handleAddNewClientID}>Add</button>
-              <button style={{ marginLeft: '5px' }} onClick={() => handleDeleteClientID(clientID)}>Delete</button>
-            </span>
-
-
-
-          </label>
-
         </label>
         <br />
         <label>
@@ -104,6 +97,14 @@ const ScheduleOrder: React.FC = () => {
         <label>
           Quantity:
           <input type="text" value={qty} onChange={(e) => setQty(e.target.value)} />
+        </label>
+        <br/>
+        <label>
+          Order Type:
+          <select value={orderType} onChange={(e) => setOrderType(e.target.value)}>
+            <option value="buy">Buy</option>
+            <option value="sell">Sell</option>
+          </select>
         </label>
         <br />
         <button type="submit">Submit</button>

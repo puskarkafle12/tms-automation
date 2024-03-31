@@ -13,11 +13,12 @@ class OrderStatusLog(Base):
     status = Column(String)
     timestamp = Column(DateTime, default=func.now())
     price = Column(Float)
+    order_type = Column(String)
 
     def __repr__(self):
         return f"<Order(order_id='{self.order_id}', client_id='{self.client_id}', security_details={self.security_details}, price={self.price}, status='{self.status}', last_updated='{self.last_updated}, qty {self.qty}')>"
         
-    def __init__(self, client_id, security_details,script_name, order_id, qty, status,price):
+    def __init__(self, client_id, security_details,script_name, order_id, qty, status,price,order_type):
         self.client_id = client_id
         self.security_details = security_details
         self.script_name=script_name
@@ -25,3 +26,4 @@ class OrderStatusLog(Base):
         self.qty = qty
         self.status = status
         self.price = price
+        self.order_type = order_type

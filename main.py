@@ -4,6 +4,7 @@ import asyncio
 import sys
 from typing import Dict, Type
 from fastapi import FastAPI, HTTPException, Depends, Query, WebSocketDisconnect
+from fastapi.responses import JSONResponse
 import websockets
 from database import get_db
 from sqlalchemy import cast, DateTime
@@ -149,8 +150,7 @@ async def get_order_status_logs(
 
 
 def is_within_time_range(start_time, end_time, current_time):
-    return True
-    # return start_time.hour <= current_time.hour <= end_time.hour
+    return (start_time.hour, start_time.minute, start_time.second) <= (current_time.hour, current_time.minute, current_time.second) <= (end_time.hour, end_time.minute, end_time.second)
 
 
 # Keep track of connected WebSocket clients
@@ -183,13 +183,21 @@ async def websocket_endpoint(websocket: WebSocket):
         del active_websockets[websocket]
 
 
-@app.get("/check_orders/")
-async def check_orders(db: Session = Depends(get_db)):
+start_time = time(hour=11, minute=0)
+end_time = time(hour=15, minute=0)
+count = 0
+is_running = False
+check_orders_task = None
+
+async def check_orders_task_func(db: Session):
+    global is_running
     tms_users_instances: Dict[str, Type[TmsUser]] = {}
-    start_time = time(hour=11, minute=0)
-    end_time = time(hour=15, minute=0)
-    count = 0
-    while True:
+    global start_time
+    global end_time
+    global count
+
+    is_running = True
+    while is_running:
         count += 1
         current_time = datetime.now().time()
         if is_within_time_range(start_time, end_time, current_time):
@@ -228,11 +236,11 @@ async def check_orders(db: Session = Depends(get_db)):
                             order_response = tms_users_instances[order.client_id].order(
                                 order.price, order.qty, security_details)
                             if order_response.get('status') == 200:
-                                order.status = "completed"
+                                order.status = "order_placed"
                             else:
                                 order.status = "failed::" + \
                                     str(order_response.get('message'))
-                            db.delete(order)
+                                db.delete(order)
                             db.commit()
             except websockets.exceptions.ConnectionClosedError:
                 # Handle the ConnectionClosedError
@@ -240,13 +248,35 @@ async def check_orders(db: Session = Depends(get_db)):
                 # await send_logs(logs)
             except Exception as e:
                 logs = f"An error occurred: {e}"
-                # await send_logs(logs)
+                await send_logs(logs)
             await asyncio.sleep(10)
         else:
-            logs = "Session not active"
+            logs = "Session not active, Check orders loop stopped."
+            is_running=False
             await send_logs(logs)
-            return {"message": logs}
 
+@app.get("/check_orders/")
+async def check_orders_endpoint(db: Session = Depends(get_db)):
+    global is_running
+    global check_orders_task
+
+    if is_running:
+        return JSONResponse(status_code=400, content={"message": "Check orders loop is already running."})
+
+    check_orders_task = asyncio.create_task(check_orders_task_func(db))
+    return {"message": "Check orders loop started."}
+
+@app.get("/stop_check_orders/")
+async def stop_check_orders_endpoint():
+    global is_running
+    global check_orders_task
+
+    if not is_running:
+        return JSONResponse(status_code=400, content={"message": "Check orders loop is not running."})
+
+    is_running = False
+    check_orders_task.cancel()
+    return {"message": "Check orders loop stopped."}
 
 @app.post("/frontend-login")
 def frontend_login(user_login: UserLogin, db: Session = Depends(get_db)):
