@@ -1,0 +1,23 @@
+.order-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 20px;
+}
+
+.order-table th, .order-table td {
+  border: 1px solid #ddd;
+  padding: 8px;
+  max-width: 10px; /* Set the maximum width for columns */
+  white-space: nowrap; /* Prevent text wrapping */
+  overflow: scroll; /* Hide overflow text */
+  /* text-overflow: ellipsis; Show ellipsis for overflow text */
+}
+
+.order-table th {
+  background-color: #f2f2f2;
+}
+
+.order-table tbody {
+  overflow-y: auto; /* Enable vertical scrolling for tbody */
+  max-height: 200px; /* Set the maximum height for vertical scrolling */
+}

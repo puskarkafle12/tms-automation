@@ -6,7 +6,7 @@ class OrderCreateRequest(BaseModel):
     client_id: str
     security_details: Dict={}
     script_name:str
-    price: int
+    price: float
     qty: int
     status: str = "pending"
 
