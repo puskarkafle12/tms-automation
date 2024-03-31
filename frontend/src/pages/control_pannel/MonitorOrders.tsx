@@ -2,11 +2,13 @@ import React, { useState } from 'react';
 import ErrorMessage from '../../components/ErrorMessage';
 
 const MonitorOrders: React.FC = () => {
+  const apiUrl = process.env.REACT_APP_API_URL;
+
   const [errorMessage, setErrorMessage] = useState<string>('');
 
   const handleStartClick = async () => {
     try {
-      const response = await fetch('http://127.0.0.1:8000/check_orders/', {
+      const response = await fetch(apiUrl+'/check_orders/', {
         headers: {
           'accept': 'application/json'
         }
@@ -26,7 +28,7 @@ const MonitorOrders: React.FC = () => {
 
   const handleStopClick = async () => {
     try {
-      const response = await fetch('http://127.0.0.1:8000/stop_check_orders/', {
+      const response = await fetch(apiUrl+'/stop_check_orders/', {
         headers: {
           'accept': 'application/json'
         }
@@ -46,7 +48,7 @@ const MonitorOrders: React.FC = () => {
 
   return (
     <div>
-      <button onClick={handleStartClick}>Start Monitoring stocks</button>
+      <button onClick={handleStartClick} >Start Monitoring stocks</button>
       <button onClick={handleStopClick}>Stop Monitoring stocks</button>
       {errorMessage && <ErrorMessage message={errorMessage} />} {/* Use the ErrorMessage component */}
     </div>

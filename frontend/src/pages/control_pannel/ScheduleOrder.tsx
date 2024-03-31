@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 
-const apiUrl = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+const apiUrl = process.env.REACT_APP_API_URL;
 
 const ScheduleOrder: React.FC = () => {
   const [clientID, setClientID] = useState('');
@@ -69,7 +69,7 @@ const ScheduleOrder: React.FC = () => {
     <div>
       <h2>Add Order</h2>
       <form onSubmit={handleSubmit}>
-        <span style={{ display: 'flex', alignItems: 'center', padding: '15px' }}>
+        <span style={{ display: 'flex', alignItems: 'center'}}>
           New Client ID:
           <input type="text" value={newClientID} onChange={(e) => setNewClientID(e.target.value)} style={{ margin: '5px', padding: '3px' }} />
           <button type="button" style={{ margin: '5px' }} onClick={handleAddNewClientID}>Add</button>
