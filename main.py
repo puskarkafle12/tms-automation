@@ -8,10 +8,12 @@ from fastapi.responses import JSONResponse
 import websockets
 from database import get_db
 from sqlalchemy import cast, DateTime
+from exceptions.login_exceptions import LoginFailedException
 from models.frontend_user import FrontendUser
 from models.logged_in_user import LoggedInUsers
 from models.scheduled_order import ScheduledOrder
 from models.order_status_log import OrderStatusLog
+from models.user import User
 from schemas.schemas import LoginRequest, OrderCreateRequest, UserLogin
 from utils.base_functions import is_within_time_range, load_users, truncate_to_one_decimal_place
 from utils.tms import TmsUser
@@ -55,18 +57,31 @@ user = load_users(user_file_path)[0]
 @app.get("/")
 async def read_root():
     return {"message": "Hello, FastAPI"}
-
-
+    
 @app.post("/login/")
-async def login(login_request: LoginRequest):
-    tms_instance = TmsUser(username=login_request.username, password=login_request.password, stock_symbol=login_request.stock_symbol,
-                           broker_no=login_request.broker_no, request_per_sec=login_request.request_per_sec)
-    login_status = tms_instance.try_cached_login()
+async def login(login_request: LoginRequest, db: Session = Depends(get_db)):
+    tms_instance = TmsUser(
+        username=login_request.username, password=login_request.password, stock_symbol=login_request.stock_symbol,
+        broker_no=login_request.broker_no, request_per_sec=login_request.request_per_sec
+    )
+    try:
+        login_status = tms_instance.try_cached_login()
+    except LoginFailedException as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
     if login_status.get("status") == "success":
-        return {"message": login_status}
+        user = db.query(User).filter(User.client_id == login_request.username, User.broker_no == login_request.broker_no).first()
+        if user:
+            if user.password != login_request.password:
+                user.password = login_request.password
+                db.commit()
+        else:
+            new_user = User(client_id=login_request.username, password=login_request.password, broker_no=login_request.broker_no)
+            db.add(new_user)
+            db.commit()
+        return {"message": login_status}, 200
     else:
-        raise HTTPException(status_code=500, detail=login_status)
-
+        raise HTTPException(status_code=401, detail="Login failed")
 
 @app.post("/add_order/")
 async def add_order(order_data: OrderCreateRequest, db: Session = Depends(get_db)):
@@ -235,6 +250,7 @@ async def check_orders_task_func(db: Session):
                                 order.price, order.qty, security_details)
                             if order_response.get('status') == 200:
                                 order.status = "order_placed"
+                                # db.delete(order)
                             else:
                                 order.status = "failed::" + \
                                     str(order_response.get('message'))
@@ -247,7 +263,7 @@ async def check_orders_task_func(db: Session):
             except Exception as e:
                 logs = f"An error occurred: {e}"
                 await send_logs(logs)
-            await asyncio.sleep(20)
+            await asyncio.sleep(1)
         else:
             logs = "Session not active, Check orders loop stopped."
             is_running=False

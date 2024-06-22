@@ -261,6 +261,9 @@ class TmsUser:
                 binary_captcha_image=self.get_captcha_image(self.headers,login_data["captcha_id"])
                 login_data["captcha"]=solve_captcha(binary_captcha_image)
                 response = self.login_request(login_data)
+                if 'Credentials Not Found' in response.json().get('message'):
+                    print('Login failed : invalid username or password', self.client_id)
+                    break
                 if response.status_code == 200:
                     selected_cookie = next(iter(response.cookies), None)
                     tokens_dict=requests.utils.dict_from_cookiejar(response.cookies)
