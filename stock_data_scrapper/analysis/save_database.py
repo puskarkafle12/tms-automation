@@ -3,7 +3,7 @@ import pymysql
 from sqlalchemy import create_engine
 
 # Assuming df is your DataFrame with the specified column names
-data_path="/Users/pkafle/tms-automation/data/share_data_2024-01-11.csv"
+data_path="/Users/pkafle/tms-automation/data/share_data_2024-04-24.csv"
 # Connection parameters
 host = 'localhost'
 database = 'stock_details'
