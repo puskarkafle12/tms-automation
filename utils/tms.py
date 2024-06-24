@@ -13,6 +13,27 @@ from tms_captcha_solver.imgto_txt import solve_captcha
 from utils.base_functions import calculate_high_price, get_tokens, log_time, logout_user, save_tokens
 
 class TmsUser:
+    """
+    Here's a concise summary of each function in the `TmsUser` class:
+
+1. `__init__`: Initializes a TmsUser instance with provided credentials and configuration.
+2. `try_token_login`: Attempts login using stored tokens, falls back to cached login if tokens are invalid.
+3. `try_cached_login`: Attempts to login using cached tokens; if unsuccessful, retries with new credentials.
+4. `get_captcha_id`: Fetches the captcha ID required for login.
+5. `get_captcha_image`: Retrieves the captcha image using the captcha ID.
+6. `get_stock_details_async`: Asynchronously fetches stock details, retrying up to three times if necessary.
+7. `get_stock_details`: Synchronously fetches stock details, retrying up to three times if necessary.
+8. `get_header`: Constructs and returns headers for requests using provided tokens.
+9. `get_request_owner`: Retrieves the request owner ID from the server.
+10. `get_security_id`: Fetches security details for a given stock symbol.
+11. `login_request`: Sends a login request with provided credentials and captcha solution.
+12. `get_client_details`: Retrieves client details using cookies, headers, and client dealer ID.
+13. `login`: Attempts to login by solving captcha and sending credentials; retries with new captcha if necessary.
+14. `order`: Places an order with given price and quantity, including extensive client and security details.
+15. `price_scanner`: Continuously scans stock prices, calculates high price, and fetches stock details asynchronously.
+16. `stock_grabber`: Manages stock orders, checking price changes, and placing orders based on certain conditions.
+17 . get_order_book
+"""
     def __init__(self,broker_no, username=None, password=None, tokens=None, expires=None, stock_symbol=None, request_per_sec=2):
        
         self.final_order_quantity = 100
@@ -109,28 +130,27 @@ class TmsUser:
                 save_tokens(self.client_id, self.login_response, self.expires,self.broker_no)
                 self.headers = self.get_header(self.login_response['request_owner'], self.tokens)
                 self.client_details = self.get_client_details(self.tokens, self.headers, self.login_response['client_dealer_id'])
+                self.save_login_info()
                 return {
                     "status": "success",
                     "message": "token refreshed and stored in the database"
                 }
+                
             except Exception as e:
                 raise LoginFailedException("cannot login "+str(e))
 
                 
-    @staticmethod
-    def get_captcha_id(headers):
-        response = requests.get('https://tms35.nepsetms.com.np/tmsapi/authApi/captcha/id', headers=headers)
+    def get_captcha_id(self,headers):
+        response = requests.get(f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/authApi/captcha/id', headers=headers)
         return json.loads(response.content)['id']
-    @staticmethod
-    def get_captcha_image(headers,captcha_id):
-        response = requests.get(f'https://tms35.nepsetms.com.np/tmsapi/authApi/captcha/image/{captcha_id}', headers=headers)
+    def get_captcha_image(self,headers,captcha_id):
+        response = requests.get(f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/authApi/captcha/image/{captcha_id}', headers=headers)
         return response.content
         
-    @staticmethod
-    async def get_stock_details_async(session, headers, token, id):
+    async def get_stock_details_async(self,session, headers, token, id):
         for attempt in range(3):  # Retry up to 3 times
             try:
-                url = f'https://tms35.nepsetms.com.np/tmsapi/rtApi/ws/stockQuote/{id}'
+                url = f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/rtApi/ws/stockQuote/{id}'
                 async with session.get(url, headers=headers, cookies=token, timeout=5) as responsee:
                     responsee.raise_for_status()
                     response = await responsee.json()
@@ -149,7 +169,7 @@ class TmsUser:
     def get_stock_details(self, id):
         for attempt in range(3):  # Retry up to 3 times
             try:
-                url = f'https://tms35.nepsetms.com.np/tmsapi/rtApi/ws/stockQuote/{id}'
+                url = f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/rtApi/ws/stockQuote/{id}'
                 with requests.get(url, headers=self.headers, cookies=self.tokens, timeout=5) as response:
                     response.raise_for_status()
                     data = response.json()
@@ -162,10 +182,9 @@ class TmsUser:
                 if data.get('message') == 'ACCESS_TOKEN_EXPIRED':
                     return data
 
-    @staticmethod
-    def get_header(request_owner, token):
+    def get_header(self,request_owner, token):
         header = {
-            'authority': 'tms35.nepsetms.com.np',
+            'authority': f'tms{self.broker_no}.nepsetms.com.np',
             'accept': 'application/json, text/plain, */*',
             'accept-language': 'en-US,en;q=0.9',
             # Requests sorts cookies= alphabetically
@@ -195,7 +214,7 @@ class TmsUser:
 
     
     def get_security_id(self,symbol)->Dict:
-        symbol = symbol.upper()
+        symbol = symbol.upper().strip()
         response = requests.get(
             'https://tms35.nepsetms.com.np/tmsapi/stock/securities', cookies=self.tokens, headers=self.headers)
         import json
@@ -212,9 +231,6 @@ class TmsUser:
 
 
     def login_request(self,logindata):
-        
-        
-
         json_data = {
             'userName':logindata['username'] ,
             'password': logindata['password'],
@@ -232,17 +248,26 @@ class TmsUser:
         )
         return response
     
-    @staticmethod
-    def get_client_details(cookies, headers, client_dealer_id):
+    def get_client_details(self,cookies, headers, client_dealer_id):
         response = requests.get(
-            f'https://tms35.nepsetms.com.np/tmsapi/clientApi/clientDealer/info/{client_dealer_id}',
+            f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/clientApi/clientDealer/info/{client_dealer_id}',
             cookies=cookies,
             headers=headers,
         )
         if response.status_code != 200:
             response.raise_for_status()
         return json.loads(response.content)
-
+    def save_login_info(self):
+        db=get_db()
+        user = db.query(User).filter(User.client_id == self.client_id, User.broker_no ==self.broker_no).first()
+        if user:
+            if user.password != self.password:
+                user.password = self.password
+                db.commit()
+        else:
+            new_user = User(client_id=self.client_id, password=self.password, broker_no=self.broker_no)
+            db.add(new_user)
+            db.commit()
     def login(self):
         captcha_id=self.get_captcha_id(self.headers)
         binary_captcha_image=self.get_captcha_image(self.headers,captcha_id)
@@ -278,6 +303,7 @@ class TmsUser:
                                     }  # Break out of the loop if the status is not '108'
             else:
                 print("Maximum number of retries reached.Captcha cannot be solved")
+                raise LoginFailedException()
 
         elif json.loads(response.content)['status']!='202':
             raise LoginFailedException()
@@ -293,11 +319,28 @@ class TmsUser:
                                 "expires": selected_cookie.expires
 
                             }  # Break out of the loop if the status is not '108'
+    def get_order_book(self):
+        url = f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/orderTradeApi/orderbook-v2/client/{self.client_details['id']}?&activeStatus=OPEN&activeStatus=PARTIALLY_TRADED&activeStatus=MODIFIED&activeStatus=PENDING'
+        
+        response = requests.get(url, headers=self.headers, cookies=self.tokens)
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            response.raise_for_status()
 
-    def order(self,orderPrice, orderQuantity,security=None):
+
+    def order(self, orderPrice, orderQuantity,order_type, security=None):
         if not security:
-            security=self.security
+            security = self.security
         orderPrice = str(orderPrice)
+        # Determine buy or sell based on order_type
+        if order_type.lower() == 'buy':
+            buyOrSell = 1  # 1 for buy
+        elif order_type.lower() == 'sell':
+            buyOrSell = 2  # 2 for sell
+        else:
+            raise ValueError("Invalid order_type. Please use 'buy' or 'sell'.")
         json_data = {
             'orderBook': {
                 'orderBookExtensions': [
@@ -403,7 +446,7 @@ class TmsUser:
                 },
                 'accountType': 1,
                 'cpMemberId': 0,
-                'buyOrSell': 1,
+                'buyOrSell': buyOrSell,  # Adjusted for buy or sell
             },
             'orderPlacedBy': 2,
             'exchangeOrderId': None,
@@ -411,21 +454,20 @@ class TmsUser:
         response = requests.post('https://tms35.nepsetms.com.np/tmsapi/orderApi/order/',
                                 headers=self.headers, cookies=self.tokens, json=json_data)
         if response.status_code == 200:
-
             return {
-                "status":response.status_code,
-                "message":str(response.content)}
+                "status": response.status_code,
+                "message": str(response.content)}
         else:
             try:
                 return {
-                    "status":response.status_code,
+                    "status": response.status_code,
                     "message": json.loads(response.content)}
             except:
                 return {
-                    "status":500 ,
-                    "message":"exception occured while loading json"+str(response.content)
+                    "status": 500,
+                    "message": "exception occurred while loading json" + str(response.content)
                 }
-    
+
     async def price_scanner(self,id,previous_ltp):
         """_Returns the stock details along with twoPercentHigh calculated field in dict return by server 
 

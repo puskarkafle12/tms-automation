@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import './ErrorMessage.css';
 
-const ErrorMessage: React.FC<{ message: string }> = ({ message }) => {
+const ErrorMessage: React.FC<{ message: string, color?: string }> = ({ message, color = 'lightred' }) => {
   const [isVisible, setIsVisible] = useState(true);
 
   useEffect(() => {
@@ -12,10 +12,14 @@ const ErrorMessage: React.FC<{ message: string }> = ({ message }) => {
     return () => clearTimeout(timer);
   }, []);
 
+  const errorMessageStyle = {
+    backgroundColor: color, // Set the background color dynamically
+  };
+
   return (
     <>
       {isVisible && (
-        <div className="error-message show"> {/* Add the 'show' class conditionally */}
+        <div className="error-message show" style={errorMessageStyle}>
           <div>{message}</div>
           <button onClick={() => setIsVisible(false)}>Close</button>
         </div>
