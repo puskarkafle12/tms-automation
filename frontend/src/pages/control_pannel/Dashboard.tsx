@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import ScheduleOrder from './ScheduleOrder';
-import OrderStatus from './OrderStatus';
+import OrderStatus from './OrderLogs';
 import CheckOrders from './CheckOrders';
 import Login from './Login';
 import './Dashboard.css';

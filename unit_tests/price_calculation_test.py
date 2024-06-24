@@ -40,6 +40,9 @@ class TestCalculateHighPrice(unittest.TestCase):
     def test6(self):
         result = calculate_high_price(351.5,9.91)
         self.assertEqual(result, 351.7) 
+    def test7(self):
+        result = calculate_high_price(141,-0.704225)
+        self.assertEqual(result, 143.8) 
 
 if __name__ == '__main__':
     unittest.main()
