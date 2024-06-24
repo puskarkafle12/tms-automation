@@ -250,7 +250,7 @@ async def check_orders_task_func(db: Session):
                                 order.price, order.qty, security=security_details,order_type=order.order_type)
                             if order_response.get('status') == 200:
                                 order.status = "order_placed"
-                                # db.delete(order)
+                                db.delete(order)
                             else:
                                 order.status = "failed::" + \
                                     str(order_response.get('message'))
@@ -263,7 +263,7 @@ async def check_orders_task_func(db: Session):
             except Exception as e:
                 logs = f"An error occurred: {e}"
                 await send_logs(logs)
-            await asyncio.sleep(1)
+            await asyncio.sleep(5)
         else:
             logs = "Session not active, Check orders loop stopped."
             is_running=False

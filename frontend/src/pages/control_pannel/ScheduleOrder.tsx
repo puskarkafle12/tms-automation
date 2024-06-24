@@ -9,7 +9,7 @@ const ScheduleOrder: React.FC = () => {
   const [price, setPrice] = useState('');
   const [qty, setQty] = useState('');
   const [status, setStatus] = useState('');
-  const [clientIDs, setClientIDs] = useState<string[]>([]);
+  const [loggedInClientIDs, setClientIDs] = useState<string[]>([]);
   const [orderType, setOrderType] = useState('buy'); // Default order type is 'buy'
 
   useEffect(() => {
@@ -66,10 +66,13 @@ const ScheduleOrder: React.FC = () => {
         <label>
           Client ID:
           <select value={clientID} onChange={(e) => setClientID(e.target.value)}>
-            {clientIDs.map((id, index) => (
+            {loggedInClientIDs.map((id, index) => (
               <option key={index} value={id}>{id}</option>
             ))}
           </select>
+          {loggedInClientIDs.length === 0 && (
+            <span style={{ color: 'red', marginLeft: '10px' }}>No logged in user found</span>
+          )}
         </label>
         <br />
         <label>
