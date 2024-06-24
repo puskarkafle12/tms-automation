@@ -57,7 +57,7 @@ user = load_users(user_file_path)[0]
 @app.get("/")
 async def read_root():
     return {"message": "Hello, FastAPI"}
-    
+  
 @app.post("/login/")
 async def login(login_request: LoginRequest, db: Session = Depends(get_db)):
     tms_instance = TmsUser(
@@ -70,15 +70,7 @@ async def login(login_request: LoginRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
     
     if login_status.get("status") == "success":
-        user = db.query(User).filter(User.client_id == login_request.username, User.broker_no == login_request.broker_no).first()
-        if user:
-            if user.password != login_request.password:
-                user.password = login_request.password
-                db.commit()
-        else:
-            new_user = User(client_id=login_request.username, password=login_request.password, broker_no=login_request.broker_no)
-            db.add(new_user)
-            db.commit()
+
         return {"message": login_status}, 200
     else:
         raise HTTPException(status_code=401, detail="Login failed")
@@ -90,6 +82,14 @@ async def add_order(order_data: OrderCreateRequest, db: Session = Depends(get_db
     db.commit()
     return {"message": "Order added successfully"}
 
+@app.get("/logged_in_clients/")
+async def get_logged_in_clients(db: Session = Depends(get_db)):
+    try:
+        logged_in_users = db.query(LoggedInUsers).filter(LoggedInUsers.status == "logged_in").all()
+        client_ids = [user.client_id for user in logged_in_users]
+        return {"logged_in_client_ids": client_ids}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/delete_scheduled_order/")
 async def delete_scheduled_order(
@@ -247,7 +247,7 @@ async def check_orders_task_func(db: Session):
                             order.price = truncate_to_one_decimal_place(
                                 order.price)
                             order_response = tms_users_instances[order.client_id].order(
-                                order.price, order.qty, security_details)
+                                order.price, order.qty, security=security_details,order_type=order.order_type)
                             if order_response.get('status') == 200:
                                 order.status = "order_placed"
                                 # db.delete(order)
@@ -268,6 +268,30 @@ async def check_orders_task_func(db: Session):
             logs = "Session not active, Check orders loop stopped."
             is_running=False
             await send_logs(logs)
+
+@app.get("/get_order_book")
+async def get_order_book(client_id: str):
+    try:
+        db = get_db()
+        user = db.query(User).filter(User.client_id == client_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        tms_user_instance = TmsUser(
+            broker_no=user.broker_no,
+            username=user.client_id,
+            password=user.password,
+        )
+
+        tms_user_instance.try_cached_login()
+
+        order_book = tms_user_instance.get_order_book()
+        return order_book
+
+    except LoginFailedException as e:
+        raise HTTPException(status_code=401, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/check_orders/")
 async def check_orders_endpoint(db: Session = Depends(get_db)):

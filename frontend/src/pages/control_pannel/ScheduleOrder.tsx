@@ -13,18 +13,28 @@ const ScheduleOrder: React.FC = () => {
   const [orderType, setOrderType] = useState('buy'); // Default order type is 'buy'
 
   useEffect(() => {
-    // Retrieve client IDs from local storage
-    const storedClientIDs = localStorage.getItem('clientIDs');
-    if (storedClientIDs) {
-      setClientIDs(JSON.parse(storedClientIDs));
-      setClientID(JSON.parse(storedClientIDs)[0]); // Set default client ID to the first one
-    }
-  }, []);
+    // Fetch logged-in client IDs from the API
+    const fetchLoggedInClientIDs = async () => {
+      try {
+        const response = await fetch(apiUrl + '/logged_in_clients/');
+        if (response.ok) {
+          const data = await response.json();
+          setClientIDs(data.logged_in_client_ids);
+          setClientID(data.logged_in_client_ids[0]); // Set default client ID to the first one
+        } else {
+          console.error('Failed to fetch logged-in client IDs');
+        }
+      } catch (error) {
+        console.error('Error fetching logged-in client IDs:', error);
+      }
+    };
+
+    fetchLoggedInClientIDs();
+  }, []); // Empty dependency array ensures this runs only once when the component mounts
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     try {
-      console.log(apiUrl);
       const response = await fetch(apiUrl + '/add_order/', {
         method: 'POST',
         headers: {
@@ -49,32 +59,10 @@ const ScheduleOrder: React.FC = () => {
     }
   };
 
-  const handleDeleteClientID = (id: string) => {
-    const updatedClientIDs = clientIDs.filter(clientID => clientID !== id);
-    setClientIDs(updatedClientIDs);
-    localStorage.setItem('clientIDs', JSON.stringify(updatedClientIDs));
-    setClientID(updatedClientIDs[0]); // Set default client ID to the first one after deletion
-  };
-
-  const handleAddNewClientID = () => {
-    if (newClientID.trim() !== '' && !clientIDs.includes(newClientID)) {
-      setClientIDs([...clientIDs, newClientID]);
-      localStorage.setItem('clientIDs', JSON.stringify([...clientIDs, newClientID]));
-      setClientID(newClientID); // Set the new client ID as selected
-      setNewClientID(''); // Clear the input field
-    }
-  };
-
   return (
     <div>
       <h2>Add Order</h2>
       <form onSubmit={handleSubmit}>
-        <span style={{ display: 'flex', alignItems: 'center'}}>
-          New Client ID:
-          <input type="text" value={newClientID} onChange={(e) => setNewClientID(e.target.value)} style={{ margin: '5px', padding: '3px' }} />
-          <button type="button" style={{ margin: '5px' }} onClick={handleAddNewClientID}>Add</button>
-          <button style={{ marginLeft: '5px' }} onClick={() => handleDeleteClientID(clientID)}>Delete</button>
-        </span>
         <label>
           Client ID:
           <select value={clientID} onChange={(e) => setClientID(e.target.value)}>

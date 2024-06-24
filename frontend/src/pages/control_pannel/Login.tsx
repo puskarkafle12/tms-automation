@@ -9,11 +9,13 @@ const Login: React.FC = () => {
   const [password, setPassword] = useState('');
   const [message, setMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
+  const [color, setColor] = useState('lightred');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setMessage(''); // Clear any previous success message
     setErrorMessage(''); // Clear any previous error message
+    let color = 'red';
     try {
       const response = await axios.post('http://localhost:8000/login/', {
         username: clientId,
@@ -23,7 +25,8 @@ const Login: React.FC = () => {
         request_per_sec: 5 // Adjust as needed
       });
       if (response.status === 200) {
-        setMessage(`Login successful: ${JSON.stringify(response.data.message)}`);
+        setColor('lightgreen')
+        setErrorMessage(`Login successful: ${JSON.stringify(response.data[0].message.message)}`);
       } else {
         setErrorMessage('Login failed');
       }
@@ -32,6 +35,7 @@ const Login: React.FC = () => {
         setErrorMessage(`Error: ${error.response?.data.detail}`);
       } else {
         setErrorMessage('An unexpected error occurred');
+
       }
     }
   };
@@ -73,7 +77,7 @@ const Login: React.FC = () => {
         <button type="submit" className="login-button">Login</button>
       </form>
       {message && <div className="message">{message}</div>}
-      {errorMessage && <ErrorMessage message={errorMessage} />}
+      {errorMessage && <ErrorMessage message={errorMessage} color={color} />}
     </div>
   );
 };
