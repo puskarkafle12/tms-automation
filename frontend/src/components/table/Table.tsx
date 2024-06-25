@@ -7,28 +7,33 @@ interface TableRow {
 
 interface CommonTableProps {
   data: TableRow[];
-  onAction?: (id: any, actionType: string) => void;
+  onAction?: (row: TableRow, actionType: string) => void;
   columns?: string[]; // Optional prop for specifying columns to display
 }
 
 const CommonTable: React.FC<CommonTableProps> = ({ data, onAction, columns }) => {
-
   if (data.length === 0) {
     return <p>No data available</p>;
   }
-console.log(data)
-  // Determine which columns to render
+
   const columnsToRender = columns ? columns : Object.keys(data[0]);
 
-  const renderActions = (row: TableRow, actionType: string) => {
-    if (onAction) {
-      return (
-        <td>
-          <button onClick={() => onAction(row['order_id'], actionType)}>{actionType}</button>
-        </td>
-      );
-    }
-    return null;
+  const renderActions = (row: TableRow) => {
+    console.log(row)
+    return (
+      <>
+        {onAction && row.hasOwnProperty('exchangeOrderId') && (
+          <td>
+            <button onClick={() => onAction(row, 'Cancel')}>Cancel</button>
+          </td>
+        )}
+        {onAction && row.hasOwnProperty('order_id') && (
+          <td>
+            <button onClick={() => onAction(row, 'Delete')}>Delete</button>
+          </td>
+        )}
+      </>
+    );
   };
 
   const formatValue = (value: any) => {
@@ -54,9 +59,7 @@ console.log(data)
             {columnsToRender.map((column, colIndex) => (
               <td key={colIndex}>{formatValue(row[column])}</td>
             ))}
-
-            {onAction && renderActions(row, 'Delete')}
-            {onAction && row.status === 'order_placed'&& renderActions(row, 'Cancel')}
+            {onAction && renderActions(row)}
           </tr>
         ))}
       </tbody>

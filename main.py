@@ -57,7 +57,7 @@ user = load_users(user_file_path)[0]
 @app.get("/")
 async def read_root():
     return {"message": "Hello, FastAPI"}
-  
+
 @app.post("/login/")
 async def login(login_request: LoginRequest, db: Session = Depends(get_db)):
     tms_instance = TmsUser(
@@ -74,6 +74,38 @@ async def login(login_request: LoginRequest, db: Session = Depends(get_db)):
         return {"message": login_status}, 200
     else:
         raise HTTPException(status_code=401, detail="Login failed")
+
+@app.delete("/cancel_order/")
+async def cancel_order(client_id: str, exchange_order_id: str):
+    try:
+        # Retrieve user from the database based on client_id
+        db = get_db()
+        user = db.query(User).filter(User.client_id == client_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        # Instantiate TmsUser with user credentials
+        tms_user_instance = TmsUser(
+            broker_no=user.broker_no,
+            username=user.client_id,
+            password=user.password,
+        )
+
+        # Try to login
+        tms_user_instance.try_cached_login()
+
+        # Cancel the order
+        response = tms_user_instance.cancel_order(exchange_order_id)
+
+        # Return the response
+        return response
+
+    except LoginFailedException as e:
+        # Handle login failure
+        raise HTTPException(status_code=401, detail=str(e))
+    except Exception as e:
+        # Handle other errors
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/add_order/")
 async def add_order(order_data: OrderCreateRequest, db: Session = Depends(get_db)):
@@ -268,6 +300,32 @@ async def check_orders_task_func(db: Session):
             logs = "Session not active, Check orders loop stopped."
             is_running=False
             await send_logs(logs)
+@app.get("/order_history")
+async def get_order_history(client_id: str, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.client_id == client_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    tms_user = TmsUser(broker_no=user.broker_no, username=user.client_id, password=user.password)
+    tms_user.try_cached_login()
+    try:
+        order_history = tms_user.get_order_history()
+        return order_history
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+@app.get("/dp_holdings")
+async def get_dp_holdings(client_id: str, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.client_id == client_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    tms_user = TmsUser(broker_no=user.broker_no, username=user.client_id, password=user.password)
+    tms_user.try_cached_login()
+    try:
+        dp_holdings = tms_user.get_user_stock_details()
+        return dp_holdings
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/get_order_book")
 async def get_order_book(client_id: str):
