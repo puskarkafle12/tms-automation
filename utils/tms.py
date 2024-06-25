@@ -53,8 +53,8 @@ class TmsUser:
             'accept': 'application/json, text/plain, */*',
             'accept-language': 'en-US,en;q=0.7',
             'content-type': 'application/json',
-            'origin': 'https://tms35.nepsetms.com.np',
-            'referer': 'https://tms35.nepsetms.com.np/login',
+            'origin': f'https://tms{self.broker_no}.nepsetms.com.np',
+            'referer': f'https://tms{self.broker_no}.nepsetms.com.np/login',
             'sec-ch-ua': '"Not.A/Brand";v="8", "Chromium";v="114", "Brave";v="114"',
             'sec-ch-ua-mobile': '?0',
             'sec-ch-ua-platform': '"macOS"',
@@ -190,7 +190,7 @@ class TmsUser:
             # Requests sorts cookies= alphabetically
             # 'cookie': '_rid='+rid+'; _aid='+aid+'; XSRF-TOKEN='+xsrf_token,
             'host-session-id': 'TVRJPS1lYWU2MTU0ZS0xODkyLTQxNDEtYTczZS1kMGI1YmM5N2I1YzQ=',
-            'referer': 'https://tms35.nepsetms.com.np/tms/me/memberclientorderentry',
+            'referer': f'https://tms{self.broker_no}.nepsetms.com.np/tms/me/memberclientorderentry',
             'request-owner': str(request_owner),
             'sec-ch-ua': '"Google Chrome";v="117", "Not;A=Brand";v="8", "Chromium";v="117"',
             'sec-ch-ua-mobile': '?0',
@@ -203,10 +203,9 @@ class TmsUser:
         }
         return header
 
-    @staticmethod
-    def get_request_owner(cookies, headers):
+    def get_request_owner(self,cookies, headers):
         response = requests.get(
-            'https://tms35.nepsetms.com.np/tmsapi/exchangeIndex/getExchangeIndexForCurrentUser',
+        f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/exchangeIndex/getExchangeIndexForCurrentUser',
             cookies=cookies,
             headers=headers,
         )
@@ -216,7 +215,7 @@ class TmsUser:
     def get_security_id(self,symbol)->Dict:
         symbol = symbol.upper().strip()
         response = requests.get(
-            'https://tms35.nepsetms.com.np/tmsapi/stock/securities', cookies=self.tokens, headers=self.headers)
+           f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/stock/securities', cookies=self.tokens, headers=self.headers)
         import json
         stocks = json.loads(response.content)
         if response.status_code==401:
@@ -241,7 +240,7 @@ class TmsUser:
         }
 
         response = requests.post(
-            'https://tms35.nepsetms.com.np/tmsapi/authApi/authenticate',
+            f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/authApi/authenticate',
             # cookies=cookies,
             headers=self.headers,
             json=json_data,
@@ -328,7 +327,40 @@ class TmsUser:
             return response.json()
         else:
             response.raise_for_status()
+    def get_user_stock_details(self):
+        response = requests.get(
+                                f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/dp-holding/client/freebalance/{self.client_details["id"]}/CLI',
+                                cookies=self.tokens,
+                                headers=self.headers,
+                            )
+        if response.status_code == 200:
+            return response.json()
+        else:
+            response.raise_for_status()
 
+    def get_order_history(self):
+        url = f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/orderTradeApi/orderbook-v2/client/{self.client_details["id"]}?&activeStatus=COMPLETED&activeStatus=CANCELLED&activeStatus=REJECTED&activeStatus=TMS_REJECTED&activeStatus=PARTIALLY_CANCELLED&activeStatus=MODIFIED_CANCELLED'
+        
+        response = requests.get(url, headers=self.headers, cookies=self.tokens)
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            response.raise_for_status()
+    def cancel_order(self, exchange_order_id):
+        json_data = {
+            'orderBook': None,
+            'orderPlacedBy': self.client_details['clientDealerType']['id'],
+            'exchangeOrderId': exchange_order_id,
+        }
+
+        response = requests.post(
+                                f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/orderApi/order/cancel/',
+                                cookies=self.tokens,
+                                headers=self.headers,
+                                json=json_data
+                        )
+        return json.loads(response.content)
 
     def order(self, orderPrice, orderQuantity,order_type, security=None):
         if not security:
@@ -451,7 +483,7 @@ class TmsUser:
             'orderPlacedBy': 2,
             'exchangeOrderId': None,
         }
-        response = requests.post('https://tms35.nepsetms.com.np/tmsapi/orderApi/order/',
+        response = requests.post(f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/orderApi/order/',
                                 headers=self.headers, cookies=self.tokens, json=json_data)
         if response.status_code == 200:
             return {

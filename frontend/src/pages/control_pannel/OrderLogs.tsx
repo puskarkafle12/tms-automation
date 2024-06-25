@@ -10,6 +10,7 @@ const GetOrderStatus: React.FC = () => {
   const [orderLogs, setOrderLogs] = useState<any[]>([]);
   const [scheduledOrders, setScheduledOrders] = useState<any[]>([]);
   const [orderBook, setOrderBook] = useState<any[]>([]);
+  const [orderHistory, setOrderHistory] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [loggedInClientIDs, setLoggedInClientIDs] = useState<string[]>([]);
   const [dialogVisible, setDialogVisible] = useState(false);
@@ -23,7 +24,6 @@ const GetOrderStatus: React.FC = () => {
       if (response.ok) {
         const data = await response.json();
         setLoggedInClientIDs(data.logged_in_client_ids);
-
         if (data.logged_in_client_ids.length > 0) {
           setClientID(data.logged_in_client_ids[0]);
         }
@@ -76,6 +76,20 @@ const GetOrderStatus: React.FC = () => {
     }
   };
 
+  const fetchOrderHistory = async (clientID: string) => {
+    try {
+      const response = await fetch(`${apiUrl}/order_history?client_id=${clientID}`);
+      if (response.ok) {
+        const data = await response.json();
+        setOrderHistory(data);
+      } else {
+        console.error('Failed to fetch order history data');
+      }
+    } catch (error) {
+      console.error('Error fetching order history data:', error);
+    }
+  };
+
   const handleSubmit = async () => {
     if (!clientID) {
       alert("Please select a client ID");
@@ -84,14 +98,30 @@ const GetOrderStatus: React.FC = () => {
 
     await fetchOrderStatusLogs(clientID);
     await fetchOrderBook(clientID);
+    await fetchOrderHistory(clientID);
   };
 
-  const handleAction = async (orderId: number, actionType: string) => {
+  const handleCancelOrder = async (exchangeOrderId: number) => {
+    try {
+      const response = await fetch(`${apiUrl}/cancel_order/?client_id=${clientID}&exchange_order_id=${exchangeOrderId}`, {
+        method: 'DELETE'
+      });
+      if (response.ok) {
+        console.log('Order canceled successfully');
+      } else {
+        console.error('Failed to cancel order');
+      }
+    } catch (error) {
+      console.error('Error canceling order:', error);
+    }
+  };
+
+  const handleAction = async (row: any, actionType: string) => {
     if (actionType === 'Delete') {
       setDialogMessage('Are you sure you want to delete this order?');
       setDialogAction(() => async () => {
         try {
-          console.log(orderId)
+          let orderId = row.order_id;
           const response = await fetch(`${apiUrl}/delete_scheduled_order/?order_id=${orderId}`, {
             method: 'DELETE'
           });
@@ -110,7 +140,7 @@ const GetOrderStatus: React.FC = () => {
     } else if (actionType === 'Cancel') {
       setDialogMessage('Are you sure you want to cancel this order?');
       setDialogAction(() => () => {
-        // Handle cancel action
+        handleCancelOrder(row.exchangeOrderId);
         setDialogVisible(false);
       });
       setDialogVisible(true);
@@ -147,14 +177,54 @@ const GetOrderStatus: React.FC = () => {
       </form>
 
       {isLoading && <p>Loading...</p>}
-      <h1>Order Logs:</h1>
-      <CommonTable data={orderLogs} columns={['client_id','script_name', 'qty', 'price', 'order_type', 'status', 'timestamp']}/>
 
-      <h1>Order ScheduledOrders:</h1>
-      <CommonTable data={scheduledOrders} onAction={handleAction} columns={['client_id', 'script_name', 'order_type', 'price', 'status', 'qty', 'Action']} />
+      <h1>Order Logs:</h1>
+      <CommonTable
+        data={orderLogs}
+        onAction={handleAction}
+        columns={['client_id', 'script_name', 'qty', 'price', 'order_type', 'status', 'timestamp']}
+      />
+
+      <h1>Scheduled Orders:</h1>
+      <CommonTable
+        data={scheduledOrders}
+        onAction={handleAction}
+        columns={['client_id', 'script_name', 'order_type', 'price', 'status', 'qty']}
+      />
 
       <h1>Order Book:</h1>
-      <CommonTable data={orderBook}  columns={['clientMemberCode', 'symbol', 'buyOrSell', 'orderQuantity', 'orderPrice', 'orderTime', 'activeStatus', 'totalTradedQuantity', 'remainingOrderQuantity']}/>
+      <CommonTable
+        data={orderBook}
+        columns={[
+          'clientMemberCode',
+          'symbol',
+          'buyOrSell',
+          'orderQuantity',
+          'orderPrice',
+          'orderTime',
+          'activeStatus',
+          'totalTradedQuantity',
+          'remainingOrderQuantity',
+          'Action'
+        ]}
+        onAction={handleAction}
+      />
+
+      <h1>Order History:</h1>
+      <CommonTable
+        data={orderHistory}
+        columns={[
+          'clientMemberCode',
+          'symbol',
+          'buyOrSell',
+          'orderQuantity',
+          'orderPrice',
+          'orderTime',
+          'activeStatus',
+          'totalTradedQuantity',
+          'remainingOrderQuantity'
+        ]}
+      />
 
       {dialogVisible && (
         <DialogBox
