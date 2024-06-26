@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import './OrderLogs.css';
 import CommonTable from '../../components/table/Table';
 import DialogBox from '../../components/dialog_box/DialogBox';
+import Message from '../../components/message/Message';
 
 const GetOrderStatus: React.FC = () => {
   const [clientID, setClientID] = useState('');
@@ -14,7 +15,9 @@ const GetOrderStatus: React.FC = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [loggedInClientIDs, setLoggedInClientIDs] = useState<string[]>([]);
   const [dialogVisible, setDialogVisible] = useState(false);
+  const [messageVisible, setMessageVisible] = useState(false);
   const [dialogMessage, setDialogMessage] = useState('');
+  const [message, setMessage] = useState('');
   const [dialogAction, setDialogAction] = useState<() => void>(() => {});
   const apiUrl = process.env.REACT_APP_API_URL;
 
@@ -29,11 +32,18 @@ const GetOrderStatus: React.FC = () => {
         }
       } else {
         console.error('Failed to fetch logged-in client IDs');
+        setLoggedInClientIDs([]); // Set loggedInClientIDs to an empty array when API fails
+        setMessageVisible(true); // Show the error dialog
+        setMessage('Failed to fetch logged-in client IDs'); // Set the error message
       }
-    } catch (error) {
+    } catch (error:any) {
       console.error('Error fetching logged-in client IDs:', error);
+      setLoggedInClientIDs([]); // Set loggedInClientIDs to an empty array when API fails
+      setMessageVisible(true); // Show the error dialog
+      setMessage(`Error fetching logged-in client IDs: ${error.message}`); // Set the error message
     }
   };
+  
 
   useEffect(() => {
     fetchLoggedInClientIDs();
@@ -101,13 +111,15 @@ const GetOrderStatus: React.FC = () => {
     await fetchOrderHistory(clientID);
   };
 
-  const handleCancelOrder = async (exchangeOrderId: number) => {
+  const handleCancelOrder = async (exchangeSecurityID: number) => {
     try {
-      const response = await fetch(`${apiUrl}/cancel_order/?client_id=${clientID}&exchange_order_id=${exchangeOrderId}`, {
+      const response = await fetch(`${apiUrl}/cancel_order/?client_id=${clientID}&exchange_order_id=${exchangeSecurityID}`, {
         method: 'DELETE'
       });
       if (response.ok) {
         console.log('Order canceled successfully');
+        // Fetch updated order book data after cancellation
+        await fetchOrderBook(clientID); // Add this line
       } else {
         console.error('Failed to cancel order');
       }
@@ -115,6 +127,7 @@ const GetOrderStatus: React.FC = () => {
       console.error('Error canceling order:', error);
     }
   };
+  
 
   const handleAction = async (row: any, actionType: string) => {
     if (actionType === 'Delete') {
@@ -205,7 +218,6 @@ const GetOrderStatus: React.FC = () => {
           'activeStatus',
           'totalTradedQuantity',
           'remainingOrderQuantity',
-          'Action'
         ]}
         onAction={handleAction}
       />
@@ -231,6 +243,12 @@ const GetOrderStatus: React.FC = () => {
           message={dialogMessage}
           onConfirm={dialogAction}
           onCancel={() => setDialogVisible(false)}
+        />
+      )}
+        {messageVisible && (
+        <Message
+          message={message}
+          onClose={() => setMessageVisible(false)} // Close the message when the close button is clicked
         />
       )}
     </div>

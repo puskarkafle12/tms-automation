@@ -1,0 +1,39 @@
+.message-container {
+  position: fixed;
+  top: 50%;
+  left: 0;
+  transform: translateX(-100%);
+  transition: transform 2s ease-in-out; /* Slide from left to right over 2 seconds */
+  z-index: 9999;
+}
+
+.message-container.show {
+  transform: translateX(0);
+}
+
+.message {
+  padding: 10px 20px;
+  background-color: #f8d7da; /* Red background color (example) */
+  color: #721c24; /* Dark red text color (example) */
+  border: 1px solid #f5c6cb; /* Red border (example) */
+  border-radius: 4px; /* Rounded corners (example) */
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  margin-bottom: 10px; /* Bottom margin (example) */
+  position: relative;
+}
+
+.close-btn {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 16px;
+  color: #721c24; /* Dark red color (example) */
+  padding: 0;
+}
+
+.close-btn:focus {
+  outline: none; /* Remove focus outline */
+}

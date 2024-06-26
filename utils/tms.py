@@ -9,7 +9,7 @@ from database import get_db
 from exceptions.login_exceptions import LoginFailedException
 from models.logged_in_user import LoggedInUsers
 from models.user import User
-from tms_captcha_solver.imgto_txt import solve_captcha
+from utils.tms_captcha_solver.imgto_txt import solve_captcha
 from utils.base_functions import calculate_high_price, get_tokens, log_time, logout_user, save_tokens
 
 class TmsUser:
