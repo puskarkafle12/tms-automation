@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bulk Apply</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+
+        #text-input {
+            width: 50%;
+            padding: 10px;
+            font-size: 16px;
+        }
+
+        #save-button {
+            margin-top: 10px;
+            padding: 10px;
+            background-color: #007bff;
+            color: #fff;
+            border: none;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <h1>Enter User Data in Json array format to bulk apply</h1>
+    <form action="/bulk-share-apply" method="post">
+        <textarea id="text-input" name="json_data" style="height: 532px; width: 947px;">[
+
+{"dematNo": "1311170000244457", "password": "lsjf!@@", "crnNumber": "12312312", "pin": "2345","bankName": "siddhartha bank"},
+
+{"dematNo": "1311170000244457", "password": "lsjf!@@", "crnNumber": "12312312", "pin": "2345"},
+
+{"dematNo": "1311170000244457", "password": "lsjf!@@", "crnNumber": "12312312", "pin": "2345"}
+
+]
+            </textarea></br>
+            
+
+        <label for="limit">Past result count:</label>
+        <input type="number" id="limit" name="limit" placeholder="Enter limit" required>
+        <br>
+        <label for="kitta">Enter amount of kitta:</label>
+        <input type="number" id="kitta" name="kitta" placeholder="Enter kitta" required>
+        <br>
+        <button id="save-button" type="submit">Bulk Apply</button>
+    </form>
+    
+    <script>
+        // Check if local storage has a value for 'input' and auto-fill the text input
+        const savedInput = localStorage.getItem('input');
+        const savedLimit = localStorage.getItem('limit');
+        const savedKitta = localStorage.getItem('kitta');
+        if (savedInput) {
+            document.getElementById('text-input').value = savedInput;
+            document.getElementById('limit').value = savedLimit;
+            document.getElementById('kitta').value = savedKitta;
+        }
+
+        // Add a click event listener to the save button
+        document.getElementById('save-button').addEventListener('click', () => {
+            const textInput = document.getElementById('text-input');
+            const inputValue = textInput.value;
+            const limit = document.getElementById('limit').value;
+            const kitta = document.getElementById('kitta').value;
+
+            // Save the input value to local storage
+            localStorage.setItem('input', inputValue);
+            localStorage.setItem('limit', limit);
+            localStorage.setItem('kitta', kitta);
+
+        });
+    </script>
+</body>
+</html>

@@ -9,6 +9,8 @@ test.py
 /alembic
 alembic.ini
 *.log
+*.json
+*.jsonl
 
 
 node_modules
