@@ -1,0 +1,27 @@
+.common-table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+  
+  .common-table th, .common-table td {
+    border: 1px solid #ddd;
+    padding: 8px;
+    text-align: left;
+  }
+  
+  .common-table th {
+    background-color: #f2f2f2;
+  }
+  
+  .common-table tr:nth-child(even) {
+    background-color: #f9f9f9;
+  }
+  
+  .common-table tr:hover {
+    background-color: #f1f1f1;
+  }
+  
+  .stock-table-container {
+    padding: 20px;
+  }
+  

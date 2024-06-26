@@ -1,0 +1,25 @@
+.stock-details {
+    padding: 10px;
+    background-color: #f9f9f9;
+    margin-bottom: 20px;
+  }
+  
+  .stock-details h3 {
+    font-size: 1.2em;
+    margin-bottom: 10px;
+  }
+  
+  .stock-details ul {
+    list-style-type: none;
+    padding: 0;
+  }
+  
+  .stock-details ul li {
+    margin-bottom: 8px;
+  }
+  
+  .data-name {
+    font-weight: bold;
+    color: #333;
+  }
+  

@@ -3,6 +3,7 @@ import './Table.css';
 
 interface TableRow {
   [key: string]: any;
+  color?: string; // Add optional color property to TableRow interface
 }
 
 interface CommonTableProps {
@@ -18,23 +19,20 @@ const CommonTable: React.FC<CommonTableProps> = ({ data, onAction, columns }) =>
 
   const columnsToRender = columns ? columns : Object.keys(data[0]);
 
-  const renderActions = (row: TableRow) => {
-    console.log(row)
-    return (
-      <>
-        {onAction && row.hasOwnProperty('exchangeOrderId') && (
-          <td>
-            <button onClick={() => onAction(row, 'Cancel')}>Cancel</button>
-          </td>
-        )}
-        {onAction && row.hasOwnProperty('order_id') && (
-          <td>
-            <button onClick={() => onAction(row, 'Delete')}>Delete</button>
-          </td>
-        )}
-      </>
-    );
-  };
+  const renderActions = (row: TableRow) => (
+    <>
+      {onAction && row.hasOwnProperty('exchangeOrderId') && (
+        <td>
+          <button onClick={() => onAction(row, 'Cancel')}>Cancel</button>
+        </td>
+      )}
+      {onAction && row.hasOwnProperty('order_id') && (
+        <td>
+          <button onClick={() => onAction(row, 'Delete')}>Delete</button>
+        </td>
+      )}
+    </>
+  );
 
   const formatValue = (value: any) => {
     if (typeof value === 'object' && value !== null) {
@@ -55,7 +53,7 @@ const CommonTable: React.FC<CommonTableProps> = ({ data, onAction, columns }) =>
       </thead>
       <tbody>
         {data.map((row, rowIndex) => (
-          <tr key={rowIndex}>
+          <tr key={rowIndex} style={{ backgroundColor: row.color }}>
             {columnsToRender.map((column, colIndex) => (
               <td key={colIndex}>{formatValue(row[column])}</td>
             ))}
