@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import './DpHolding.css';
-import CommonTable from '../../components/table/Table';
+import CommonTable from '../../components/Table/Table';
 
 const DPHoldings: React.FC = () => {
   const [clientID, setClientID] = useState('');

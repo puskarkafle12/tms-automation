@@ -246,7 +246,14 @@ class TmsUser:
             json=json_data,
         )
         return response
-    
+    def fetch_securities_details(self):
+        url = f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/rtApi/ws/top25securities'
+        try:
+            response = requests.get(url, headers=self.headers,cookies=self.tokens)
+            response.raise_for_status()  # Raise an error for bad status codes
+            return response.json()  # Return the response as a JSON object
+        except requests.exceptions.RequestException as e:
+            return {"error": str(e)}
     def get_client_details(self,cookies, headers, client_dealer_id):
         response = requests.get(
             f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/clientApi/clientDealer/info/{client_dealer_id}',

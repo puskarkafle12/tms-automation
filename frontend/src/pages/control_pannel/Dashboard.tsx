@@ -5,6 +5,7 @@ import CheckOrders from './CheckOrders';
 import Login from './Login';
 import './Dashboard.css';
 import DPHoldings from './DpHolding';
+import StockTable from './StockTable';
 
 const Home: React.FC = () => {
   const [activeComponent, setActiveComponent] = useState<string | null>(null);
@@ -22,6 +23,7 @@ const Home: React.FC = () => {
         <button onClick={() => handleButtonClick('OrderStatus')}>Show Order Logs</button>
         <button onClick={() => handleButtonClick('CheckOrders')}>Check Order Logs</button>
         <button onClick={() => handleButtonClick('DPHoldings')}>DP Holdings</button>
+        <button onClick={() => handleButtonClick('StockTable')}>Stock Table</button>
       </div>
 
       {activeComponent === 'Login' && <Login />}
@@ -29,6 +31,7 @@ const Home: React.FC = () => {
       {activeComponent === 'OrderStatus' && <OrderStatus />}
       {activeComponent === 'CheckOrders' && <CheckOrders />}
       {activeComponent === 'DPHoldings' && <DPHoldings />}
+      {activeComponent === 'StockTable' && <StockTable />}
     </div>
   );
 };

@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import './OrderLogs.css';
-import CommonTable from '../../components/table/Table';
+import CommonTable from '../../components/Table/Table';
 import DialogBox from '../../components/dialog_box/DialogBox';
-import Message from '../../components/message/Message';
+import Message from '../../components/Message/Message';
 
 const GetOrderStatus: React.FC = () => {
   const [clientID, setClientID] = useState('');

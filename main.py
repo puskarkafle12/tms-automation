@@ -350,6 +350,29 @@ async def get_order_book(client_id: str):
         raise HTTPException(status_code=401, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+@app.get("/get_script_details")
+async def get_script_details(client_id: str):
+    try:
+        db = get_db()
+        user = db.query(User).filter(User.client_id == client_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        tms_user_instance = TmsUser(
+            broker_no=user.broker_no,
+            username=user.client_id,
+            password=user.password,
+        )
+
+        tms_user_instance.try_cached_login()
+
+        stock_data = tms_user_instance.fetch_securities_details()
+        return stock_data
+
+    except LoginFailedException as e:
+        raise HTTPException(status_code=401, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/check_orders/")
 async def check_orders_endpoint(db: Session = Depends(get_db)):
