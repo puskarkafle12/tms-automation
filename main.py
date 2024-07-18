@@ -16,6 +16,8 @@ from models.order_status_log import OrderStatusLog
 from models.user import User
 from schemas.schemas import LoginRequest, OrderCreateRequest, UserLogin
 from utils.base_functions import is_within_time_range, load_users, truncate_to_one_decimal_place
+from  utils.log_sender import active_websockets
+from utils.monitor_order import monitor_order_task_func
 from utils.tms import TmsUser
 import uvicorn
 import jwt
@@ -25,10 +27,9 @@ from sqlalchemy.orm import Session
 from datetime import date, time, timedelta, datetime
 
 from utils.tms_user_loader import load_tms_users_instances
-
+import config.tms_config as tms_config
 app = FastAPI(debug=True)
 SECRET_KEY = "your_secret_key_here"
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -197,21 +198,6 @@ async def get_order_status_logs(
 
 
 
-# Keep track of connected WebSocket clients
-active_websockets: Dict[WebSocket, str] = {}
-
-# Function to send logs to all connected clients
-
-
-async def send_logs(logs: str):
-    # Create a copy of the dictionary to avoid RuntimeError
-    for ws, _ in list(active_websockets.items()):
-        try:
-            await ws.send_text(logs)
-        except websockets.exceptions.ConnectionClosedError:
-            del active_websockets[ws]
-        except websockets.ConnectionClosedOK:
-            del active_websockets[ws]
 
 
 @app.websocket("/ws")
@@ -227,79 +213,7 @@ async def websocket_endpoint(websocket: WebSocket):
         del active_websockets[websocket]
 
 
-start_time = time(hour=11, minute=0)
-end_time = time(hour=15, minute=0)
-count = 0
-is_running = False
-check_orders_task = None
 
-async def check_orders_task_func(db: Session):
-    global is_running
-    tms_users_instances: Dict[str, Type[TmsUser]] = {}
-    global start_time
-    global end_time
-    global count
-
-    is_running = True
-    while is_running:
-        count += 1
-        current_time = datetime.now().time()
-        if is_within_time_range(start_time, end_time, current_time):
-            try:
-                pending_orders = db.query(ScheduledOrder).filter_by(
-                    status="pending").all()
-                client_ids = set(order.client_id for order in pending_orders)
-                logged_out_clients = db.query(LoggedInUsers).filter(
-                    LoggedInUsers.status == "logged_out").all()
-                logged_out_client_ids = [
-                    user.client_id for user in logged_out_clients]
-                for client_id in logged_out_client_ids:
-                    tms_users_instances.pop(client_id, None)
-                for client_id in client_ids:
-                    if client_id not in tms_users_instances.keys():
-                        try:
-                            tms_users_instances: Dict = load_tms_users_instances(
-                                client_ids, tms_users_instances)
-                        except Exception as e:
-                            pass
-                for order in pending_orders:
-                    if order.client_id in tms_users_instances.keys():
-                        await send_logs(str(client_ids))
-                        security_details = tms_users_instances[order.client_id].get_security_id(
-                            order.script_name)
-                        current_price = tms_users_instances[order.client_id].get_stock_details(
-                            security_details['id']).get('ltp')
-                        await send_logs(f"scanning count {count} ...")
-                        await send_logs(f"{order.script_name} {str(current_price)}")
-                        if truncate_to_one_decimal_place(current_price * 0.98) <= truncate_to_one_decimal_place(order.price) <= truncate_to_one_decimal_place(current_price * 1.02):
-                            await send_logs(f"price matched trying to order ...")
-                            logs = f"Order executed for {
-                                order.client_id}, script_name: {order.script_name}"
-                            await send_logs(logs)
-                            order.price = truncate_to_one_decimal_place(
-                                order.price)
-                            order_response = tms_users_instances[order.client_id].order(
-                                order.price, order.qty, security=security_details,order_type=order.order_type)
-                            if order_response.get('status') == 200:
-                                order.status = "order_placed"
-                                db.delete(order)
-                            else:
-                                order.status = "failed::" + \
-                                    str(order_response.get('message'))
-                                db.delete(order)
-                            db.commit()
-            except websockets.exceptions.ConnectionClosedError:
-                # Handle the ConnectionClosedError
-                logs = "WebSocket connection closed unexpectedly"
-                # await send_logs(logs)
-            except Exception as e:
-                logs = f"An error occurred: {e}"
-                await send_logs(logs)
-            await asyncio.sleep(5)
-        else:
-            logs = "Session not active, Check orders loop stopped."
-            is_running=False
-            await send_logs(logs)
 @app.get("/order_history")
 async def get_order_history(client_id: str, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.client_id == client_id).first()
@@ -350,6 +264,7 @@ async def get_order_book(client_id: str):
         raise HTTPException(status_code=401, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+        
 @app.get("/get_script_details")
 async def get_script_details(client_id: str):
     try:
@@ -376,24 +291,23 @@ async def get_script_details(client_id: str):
 
 @app.get("/check_orders/")
 async def check_orders_endpoint(db: Session = Depends(get_db)):
-    global is_running
+
+
+    if tms_config.is_running:
+        return JSONResponse(status_code=400, content={"message": "Check orders loop is already running."})
     global check_orders_task
 
-    if is_running:
-        return JSONResponse(status_code=400, content={"message": "Check orders loop is already running."})
-
-    check_orders_task = asyncio.create_task(check_orders_task_func(db))
+    check_orders_task = asyncio.create_task(monitor_order_task_func(db))
     return {"message": "Check orders loop started."}
 
 @app.get("/stop_check_orders/")
 async def stop_check_orders_endpoint():
-    global is_running
     global check_orders_task
 
-    if not is_running:
+    if not tms_config.is_running:
         return JSONResponse(status_code=400, content={"message": "Check orders loop is not running."})
 
-    is_running = False
+    tms_config.is_running = False
     check_orders_task.cancel()
     return {"message": "Check orders loop stopped."}
 
