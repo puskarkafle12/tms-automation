@@ -15,7 +15,7 @@ from models.scheduled_order import ScheduledOrder
 from models.order_status_log import OrderStatusLog
 from models.user import User
 from schemas.schemas import LoginRequest, OrderCreateRequest, UserLogin
-from utils.base_functions import is_within_time_range, load_users, truncate_to_one_decimal_place
+from utils.base_functions import is_within_time_range, truncate_to_one_decimal_place
 from  utils.log_sender import active_websockets
 from utils.monitor_order import monitor_order_task_func
 from utils.tms import TmsUser
@@ -40,11 +40,11 @@ app.add_middleware(
 # Load user credentials
 # to disable the warnings in the logs
 logging.disable(logging.WARNING)
-user_file_path = '/Users/pkafle/tms-automation/users.txt'
-if not user_file_path:
-    print("User credential file not found, exiting... ")
-    sys.exit()
-user = load_users(user_file_path)[0]
+# user_file_path = '/Users/pkafle/tms-automation/users.txt'
+# if not user_file_path:
+#     print("User credential file not found, exiting... ")
+#     sys.exit()
+# user = load_users(user_file_path)[0]
 
 # Create an instance of Tms
 # tms = TmsUser(

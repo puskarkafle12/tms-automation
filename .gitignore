@@ -9,6 +9,4 @@ test.py
 *.log
 *.json
 *.jsonl
-
-
 node_modules
