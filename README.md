@@ -25,37 +25,12 @@ DB_HOST=localhost
 DB_NAME=stock
 
 4. alembic is used as orm so go to alembic .ini and env file configure to make sure its working 
-    in alembic env add these 
-    from models import user
+in alembic env add these 
+    from models import frontend_user, logged_in_user, order_status_log, scheduled_order, user
+    target_metadata = logged_in_user.Base.metadata
+    target_metadata = scheduled_order.Base.metadata
+    target_metadata = order_status_log.Base.metadata
     target_metadata = user.Base.metadata
-    in alembic.ini file add database configuration
+    target_metadata = frontend_user.Base.metadata
+in alembic.ini configuration
     sqlalchemy.url = postgresql://pk:@localhost/stock
-
-### Configuring Login Details
-
-Create a `users.txt` file in the project folder with the following format:
-
-```plaintext
-username = PK479690
-password = 
-stock_symbol = prvu
-broker_no = 35
-previous_ltp = 400
-request_per_sec = 3
-order_quantity = 10
-end
-
-username = AnotherUsername
-password = AnotherPassword
-stock_symbol = prvu
-broker_no = 42
-previous_ltp = 300
-request_per_sec = 2
-order_quantity = 15
-end
-
-### Running the main file 
-'''
-python main.py
-
-'''

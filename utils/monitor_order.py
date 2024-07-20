@@ -16,7 +16,6 @@ from models.logged_in_user import LoggedInUsers
 import config.tms_config as config  # Import the config module
 
 async def monitor_order_task_func(db: Session):
-    await send_logs("hello")
     tms_users_instances: Dict[str, Type[TmsUser]] = {}
     config.is_running = True  # Access the global variable using config module
 
