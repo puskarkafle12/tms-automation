@@ -9,11 +9,6 @@ from utils.tms import TmsUser
 from sqlalchemy.orm import Session
 
 
-user_file_path = '/Users/pkafle/tms-automation/users.txt'
-if not user_file_path:
-    print("User credential file not found, exiting... ")
-    sys.exit()
-user = load_users(user_file_path)[0]
 
 # Create an instance of Tms
 
@@ -39,7 +34,3 @@ def load_tms_users_instances(client_ids,tms_instances:Dict):
     return tms_instances
 
         
-#     tms = TmsUser(
-# username=user['username'], password=user['password'], stock_symbol=user['stock_symbol'],
-#     request_per_sec=user['request_per_sec'],broker_no= user['broker_no']
-# )
