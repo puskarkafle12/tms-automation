@@ -29,7 +29,7 @@ def load_tms_users_instances(client_ids,tms_instances:Dict):
                 try:
                     tms_instances.pop(tms_user.client_id)
                 except:
-                    pass
+                    continue
             tms_instances[tms_user.client_id] = tms_user_instance
     return tms_instances
 
