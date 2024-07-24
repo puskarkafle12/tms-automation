@@ -61,8 +61,9 @@ async def read_root():
 
 @app.post("/login/")
 async def login(login_request: LoginRequest, db: Session = Depends(get_db)):
+    enc_password=TmsUser.encode_base64(login_request.password)
     tms_instance = TmsUser(
-        username=login_request.username, password=login_request.password, stock_symbol=login_request.stock_symbol,
+        username=login_request.username, password=enc_password, stock_symbol=login_request.stock_symbol,
         broker_no=login_request.broker_no, request_per_sec=login_request.request_per_sec
     )
     try:
@@ -291,8 +292,6 @@ async def get_script_details(client_id: str):
 
 @app.get("/check_orders/")
 async def check_orders_endpoint(db: Session = Depends(get_db)):
-
-
     if tms_config.is_running:
         return JSONResponse(status_code=400, content={"message": "Check orders loop is already running."})
     global check_orders_task

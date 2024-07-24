@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import time
 from typing import Dict
@@ -264,16 +265,20 @@ class TmsUser:
             response.raise_for_status()
         return json.loads(response.content)
     def save_login_info(self):
-        db=get_db()
-        user = db.query(User).filter(User.client_id == self.client_id, User.broker_no ==self.broker_no).first()
-        if user:
-            if user.password != self.password:
-                user.password = self.password
+        try:
+            db=get_db()
+            user = db.query(User).filter(User.client_id == self.client_id, User.broker_no ==self.broker_no).first()
+            if user:
+                user.auto_login=True
+                if user.password != self.password:
+                    user.password = self.password
+                    db.commit()
+            else:
+                new_user = User(client_id=self.client_id, password=self.password, broker_no=self.broker_no,auto_login=True)
+                db.add(new_user)
                 db.commit()
-        else:
-            new_user = User(client_id=self.client_id, password=self.password, broker_no=self.broker_no)
-            db.add(new_user)
-            db.commit()
+        except:
+            print("cannot save the login info to db")
     def login(self):
         captcha_id=self.get_captcha_id(self.headers)
         binary_captcha_image=self.get_captcha_image(self.headers,captcha_id)
@@ -334,6 +339,15 @@ class TmsUser:
             return response.json()
         else:
             response.raise_for_status()
+    @staticmethod
+    def encode_base64(input_string: str) -> str:
+        input_bytes = input_string.encode('utf-8')
+        # Encode the bytes in Base64
+        base64_encoded_bytes = base64.b64encode(input_bytes)
+        # Convert the Base64 encoded bytes to a UTF-8 string
+        return base64_encoded_bytes.decode('utf-8')
+
+
     def get_user_stock_details(self):
         response = requests.get(
                                 f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/dp-holding/client/freebalance/{self.client_details["id"]}/CLI',

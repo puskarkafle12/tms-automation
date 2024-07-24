@@ -1,8 +1,6 @@
 tmsenv
 *.pyc
 __pycache__
-users.txt
-tokens.json
 traded_difference.txt
 test.py
 .env
@@ -10,3 +8,7 @@ test.py
 *.json
 *.jsonl
 node_modules
+# Ignore everything in the alembic folder
+alembic/*
+# Do not ignore the .env file inside the alembic folder
+!alembic/.env

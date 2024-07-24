@@ -1,7 +1,5 @@
 from sqlalchemy import Column, Integer, String
-
 from database import Base
-
 
 class FrontendUser(Base):
     __tablename__ = 'frontend_users'
