@@ -1,14 +1,13 @@
 # tasks.py
 
 import asyncio
-from datetime import datetime, time
+from datetime import datetime
 from typing import Dict, Type
 from sqlalchemy.orm import Session
-from websockets.exceptions import ConnectionClosedError
 from database import get_db
 
 from utils.base_functions import is_within_time_range, truncate_to_one_decimal_place
-from utils.log_sender import send_logs
+from utils.log_sender import store_or_update_logs  # Import store_or_update_logs function
 from utils.tms import TmsUser
 from utils.tms_user_loader import load_tms_users_instances
 from models.scheduled_order import ScheduledOrder
@@ -17,10 +16,11 @@ import config.tms_config as config  # Import the config module
 
 async def monitor_order_task_func(db: Session):
     tms_users_instances: Dict[str, Type[TmsUser]] = {}
-    config.is_running = True  # Access the global variable using config module
+    config.is_running = True
+    # Create a dictionary to keep counts for each (client_id, script_name) pair
+    count_dict = {}
 
     while config.is_running:
-        config.count += 1  # Access and modify the global variable using config module
         current_time = datetime.now().time()
 
         if is_within_time_range(config.start_time, config.end_time, current_time):
@@ -41,35 +41,44 @@ async def monitor_order_task_func(db: Session):
                             pass
 
                 for order in pending_orders:
+                    # Initialize the count for the (client_id, script_name) if not present
+                    key = (order.client_id, order.script_name)
+                    if key not in count_dict:
+                        count_dict[key] = 0
+                    count_dict[key] += 1  # Increment the count for this specific client_id and script_name
+
                     if order.client_id in tms_users_instances:
-                        await send_logs(str(client_ids))
                         security_details = tms_users_instances[order.client_id].get_security_id(order.script_name)
                         current_price = tms_users_instances[order.client_id].get_stock_details(security_details['id']).get('ltp')
-                        await send_logs(f"scanning count {config.count} ...")
-                        await send_logs(f"{order.script_name} {str(current_price)}")
+
+                        await store_or_update_logs(db, order.client_id, order.script_name, count_dict[key], current_price, False)
 
                         if truncate_to_one_decimal_place(current_price * 0.98) <= truncate_to_one_decimal_place(order.price) <= truncate_to_one_decimal_place(current_price * 1.02):
-                            await send_logs(f"price matched trying to order ...")
-                            logs = f"Order executed for {order.client_id}, script_name: {order.script_name}"
-                            await send_logs(logs)
                             order.price = truncate_to_one_decimal_place(order.price)
                             order_response = tms_users_instances[order.client_id].order(order.price, order.qty, security=security_details, order_type=order.order_type)
 
                             if order_response.get('status') == 200:
                                 order.status = "order_placed"
+                                await store_or_update_logs(db, order.client_id, order.script_name, count_dict[key], current_price, True, f"Order placed for {order.script_name}")
                                 db.delete(order)
                             else:
+                                await store_or_update_logs(db, order.client_id, order.script_name, count_dict[key], current_price, False, f"Failed to place order for {order.script_name}: {order_response.get('message')}")
                                 order.status = "failed::" + str(order_response.get('message'))
                                 db.delete(order)
                             db.commit()
-            except ConnectionClosedError:
-                logs = "WebSocket connection closed unexpectedly"
+                    else:
+                        logs = f"Client ID {order.client_id} is not logged in."
+                        await store_or_update_logs(db, order.client_id, order.script_name, count_dict[key], current_price, False, logs)
+
             except Exception as e:
-                logs = f"An error occurred: {e}"
-                await send_logs(logs)
+                # Log the error with client_id and script_name if available
+                for order in pending_orders:
+                    await store_or_update_logs(db, order.client_id, order.script_name, count_dict[(order.client_id, order.script_name)], 0, False, f"An error occurred: {e}")
 
             await asyncio.sleep(5)
         else:
             logs = "Session not active, Check orders loop stopped."
             config.is_running = False
-            await send_logs(logs)
+            # Log the session end message for each client_id and script_name
+            for order in pending_orders:
+                await store_or_update_logs(db, order.client_id, order.script_name, count_dict[(order.client_id, order.script_name)], 0, False, logs)
