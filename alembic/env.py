@@ -4,7 +4,7 @@ from sqlalchemy import engine_from_config, pool
 from alembic import context
 
 # Import your models here
-from models import frontend_user, logged_in_user, order_status_log, scheduled_order, user
+from models import frontend_user, logged_in_user, order_status_log, scheduled_order, user,order_log
 from database import Base  # Import Base from the database module
 
 # Alembic Config object, which provides access to the values within the .ini file

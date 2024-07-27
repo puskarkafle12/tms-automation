@@ -2,7 +2,7 @@ import logging
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import sys
-from typing import Dict, Type
+from typing import Dict, List, Type
 from fastapi import FastAPI, HTTPException, Depends, Query, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 import websockets
@@ -11,12 +11,12 @@ from sqlalchemy import cast, DateTime
 from exceptions.login_exceptions import LoginFailedException
 from models.frontend_user import FrontendUser
 from models.logged_in_user import LoggedInUsers
+from models.order_log import OrderLog
 from models.scheduled_order import ScheduledOrder
 from models.order_status_log import OrderStatusLog
 from models.user import User
 from schemas.schemas import LoginRequest, OrderCreateRequest, UserLogin
 from utils.base_functions import is_within_time_range, truncate_to_one_decimal_place
-from  utils.log_sender import active_websockets
 from utils.monitor_order import monitor_order_task_func
 from utils.tms import TmsUser
 import uvicorn
@@ -201,17 +201,17 @@ async def get_order_status_logs(
 
 
 
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    active_websockets[websocket] = ""
-    try:
-        while True:
-            await asyncio.sleep(5)  # Keep WebSocket connection alive
-    except WebSocketDisconnect:
-        del active_websockets[websocket]
-    except websockets.ConnectionClosedOK:
-        del active_websockets[websocket]
+# @app.websocket("/ws")
+# async def websocket_endpoint(websocket: WebSocket):
+#     await websocket.accept()
+#     active_websockets[websocket] = ""
+#     try:
+#         while True:
+#             await asyncio.sleep(5)  # Keep WebSocket connection alive
+#     except WebSocketDisconnect:
+#         del active_websockets[websocket]
+#     except websockets.ConnectionClosedOK:
+#         del active_websockets[websocket]
 
 
 
@@ -310,6 +310,67 @@ async def stop_check_orders_endpoint():
     check_orders_task.cancel()
     return {"message": "Check orders loop stopped."}
 
+@app.delete("/logs/")
+def clear_logs(client_ids: List[str] = Query(...), db: Session = Depends(get_db)):
+    """
+    Clear logs for the specified client IDs.
+
+    Args:
+        client_ids (List[str]): List of client IDs for which logs need to be cleared.
+        db (Session): Database session.
+
+    Returns:
+        JSON response indicating the result of the operation.
+    """
+    try:
+        # Deleting logs for the specified client IDs
+        deleted_count = db.query(OrderLog).filter(OrderLog.client_id.in_(client_ids)).delete(synchronize_session=False)
+        db.commit()
+
+        if deleted_count == 0:
+            raise HTTPException(status_code=404, detail="No logs found for the specified client IDs.")
+
+        return {"message": f"Logs cleared successfully for {deleted_count} specified client IDs"}
+    except Exception as e:
+        db.rollback()  # Rollback in case of error
+        raise HTTPException(status_code=500, detail="Failed to clear logs: " + str(e))
+
+@app.get("/logs/")
+async def get_order_logs(client_ids: List[str] = Query(...), db: Session = Depends(get_db)):
+    """
+    Retrieve order logs for the specified client IDs.
+    
+    Args:
+        client_ids (List[str]): List of client IDs to fetch logs for.
+        db (Session): Database session.
+
+    Returns:
+        JSON response containing the order logs.
+    """
+    try:
+        # Querying the OrderLog table for the list of client_ids
+        client_ids = list(map(str.strip, client_ids))
+        order_logs = db.query(OrderLog).filter(OrderLog.client_id.in_(client_ids)).all()
+        
+        if not order_logs:
+            raise HTTPException(status_code=404, detail="No order logs found for the given client IDs.")
+        
+        # Transforming the logs into a serializable format
+        logs_list = [{ 
+            "id": log.id, 
+            "client_id": log.client_id, 
+            "script_name": log.script_name, 
+            "scanning_count": log.scanning_count, 
+            "current_price": log.current_price, 
+            "order_placed": log.order_placed, 
+            "timestamp": log.timestamp.isoformat(),  # Convert datetime to ISO format for JSON
+            "logs": log.logs 
+        } for log in order_logs]
+
+        return {"order_logs": logs_list}
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 @app.post("/frontend-login")
 def frontend_login(user_login: UserLogin, db: Session = Depends(get_db)):
     user = FrontendUser.authenticate(

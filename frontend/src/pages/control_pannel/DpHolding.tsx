@@ -1,10 +1,20 @@
 import React, { useState, useEffect } from 'react';
 import './DpHolding.css';
 import CommonTable from '../../components/Table/Table';
+import axios from 'axios';
+
+interface DPHolding {
+  // Define the structure of your DPHolding data based on your API response
+  clientID: string;
+  valueAsOfPreviousClosePrice: number;
+  valueAsOfLTP: number;
+  // Add other properties as necessary
+  color?: string; // Optional color property for row coloring
+}
 
 const DPHoldings: React.FC = () => {
   const [clientID, setClientID] = useState('');
-  const [dpHoldings, setDPHoldings] = useState<any[]>([]);
+  const [dpHoldings, setDPHoldings] = useState<DPHolding[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const apiUrl = process.env.REACT_APP_API_URL;
 
@@ -33,7 +43,18 @@ const DPHoldings: React.FC = () => {
       });
       if (response.ok) {
         const data = await response.json();
-        setDPHoldings(data);
+        
+        // Map the data to include the color property
+        const coloredData = data.map((holding: DPHolding) => ({
+          ...holding,
+          color: holding.valueAsOfLTP > holding.valueAsOfPreviousClosePrice
+            ? 'lightgreen'
+            : holding.valueAsOfLTP < holding.valueAsOfPreviousClosePrice
+            ? 'red'
+            : 'lightyellow' // For no change
+        }));
+
+        setDPHoldings(coloredData);
       } else {
         alert("Failed to fetch DP holdings");
         console.error('Failed to fetch DP holdings');
@@ -45,7 +66,7 @@ const DPHoldings: React.FC = () => {
     }
   };
 
-  const calculateTotals = (data: any[]) => {
+  const calculateTotals = (data: DPHolding[]) => {
     const totals = data.reduce((acc, row) => {
       acc.valueAsOfPreviousClosePrice += row.valueAsOfPreviousClosePrice || 0;
       acc.valueAsOfLTP += row.valueAsOfLTP || 0;
@@ -79,7 +100,9 @@ const DPHoldings: React.FC = () => {
 
       {!isLoading && dpHoldings.length > 0 && (
         <>
-          <CommonTable data={dpHoldings} />
+          <CommonTable
+            data={dpHoldings} // Pass the colored data to the CommonTable
+          />
           <table className="common-table">
             <tfoot>
               <tr>
