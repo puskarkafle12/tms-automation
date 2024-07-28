@@ -19,7 +19,7 @@ const GetOrderStatus: React.FC = () => {
   const [dialogMessage, setDialogMessage] = useState('');
   const [message, setMessage] = useState('');
   const [dialogAction, setDialogAction] = useState<() => void>(() => {});
-  const apiUrl = process.env.REACT_APP_API_URL;
+  const apiUrl = localStorage.getItem('apiUrl') || '';
 
   const fetchLoggedInClientIDs = async () => {
     try {

@@ -16,7 +16,7 @@ const DPHoldings: React.FC = () => {
   const [clientID, setClientID] = useState('');
   const [dpHoldings, setDPHoldings] = useState<DPHolding[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const apiUrl = process.env.REACT_APP_API_URL;
+  const apiUrl = localStorage.getItem('apiUrl') || '';
 
   useEffect(() => {
     const fetchLoggedInClients = async () => {

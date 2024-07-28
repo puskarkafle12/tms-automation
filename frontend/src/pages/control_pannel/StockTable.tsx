@@ -19,12 +19,14 @@ interface StockData {
 
 const StockTable: React.FC = () => {
   const [stockData, setStockData] = useState<StockData[]>([]);
-  const apiUrl = 'http://localhost:8000/get_script_details?client_id=PK479690';
+
+  const apiUrl = localStorage.getItem('apiUrl') || '';
+  const clientIds = JSON.parse(localStorage.getItem('clientIDs') || '')
 
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const response = await axios.get(apiUrl);
+        const response = await axios.get(apiUrl+'/get_script_details?client_id='+clientIds[0]);
         const data = response.data.payload.data.map((stock: StockData) => ({
           ...stock,
           color: stock.percentChange > 0 ? 'lightgreen' : stock.percentChange < 0 ? 'red' : 'lightyellow'

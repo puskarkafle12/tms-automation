@@ -17,7 +17,9 @@ const Login: React.FC = () => {
     setErrorMessage(''); // Clear any previous error message
     let color = 'red';
     try {
-      const response = await axios.post('http://localhost:8000/login/', {
+         const apiUrl = localStorage.getItem('apiUrl') ;
+
+      const response = await axios.post(apiUrl+'/login/', {
         username: clientId,
         password: password,
         broker_no: brokerNo,

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import StockDetails from './StockDetails';
 
-const apiUrl = process.env.REACT_APP_API_URL;
+const apiUrl = localStorage.getItem('apiUrl') || '';
 
 const ScheduleOrder: React.FC = () => {
   const [clientID, setClientID] = useState('');
@@ -37,7 +37,7 @@ const ScheduleOrder: React.FC = () => {
     // Fetch stock details from the API
     const fetchStockDetails = async () => {
       try {
-        const response = await fetch('http://localhost:8000/get_script_details?client_id=PK479690');
+        const response = await fetch(apiUrl+'/get_script_details?client_id=PK479690');
         if (response.ok) {
           const data = await response.json();
           setStockDetails(data.payload.data);
