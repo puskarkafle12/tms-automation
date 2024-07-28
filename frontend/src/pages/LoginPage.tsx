@@ -1,14 +1,29 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { authService } from '../services/authService';
 import './LoginPage.css'; // Assuming your CSS file is named LoginPage.css
 import { useNavigate } from 'react-router-dom'; // For navigation
 import ErrorMessage from '../components/ErrorMessage';
+import Settings from './Settings'; // Import the Settings component
 
 const LoginPage: React.FC = () => {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null); // State for error message
+  const [showSettings, setShowSettings] = useState(false); // State to show/hide settings
   const navigate = useNavigate();
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 's') {
+        setShowSettings((prev) => !prev);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, []);
 
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -39,6 +54,7 @@ const LoginPage: React.FC = () => {
         </div>
         <button type="submit">Login</button>
       </form>
+      {showSettings && <Settings />} {/* Conditionally render the Settings component */}
     </div>
   );
 };
