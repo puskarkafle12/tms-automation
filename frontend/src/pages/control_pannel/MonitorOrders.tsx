@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import ErrorMessage from '../../components/ErrorMessage';
 
 const MonitorOrders: React.FC = () => {
-  const apiUrl = process.env.REACT_APP_API_URL;
+  const apiUrl = localStorage.getItem('apiUrl') || '';
 
   const [errorMessage, setErrorMessage] = useState<string>('');
 

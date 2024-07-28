@@ -23,7 +23,7 @@ const CheckOrders: React.FC = () => {
 
   const fetchLoggedInClients = useCallback(async () => {
     try {
-      const response = await fetch(`${process.env.REACT_APP_API_URL}/logged_in_clients/`);
+      const response = await fetch(`${localStorage.getItem('apiUrl') || ''}/logged_in_clients/`);
       if (!response.ok) {
         throw new Error('Failed to fetch logged-in clients');
       }
@@ -41,7 +41,7 @@ const CheckOrders: React.FC = () => {
       if (clientIds.length === 0) return;
 
       const queryParams = clientIds.map((id: string) => `client_ids=${id}`).join('&');
-      const response = await fetch(`${process.env.REACT_APP_API_URL}/logs/?${queryParams}`);
+      const response = await fetch(`${localStorage.getItem('apiUrl') || ''}/logs/?${queryParams}`);
       if (!response.ok) {
         throw new Error('Failed to fetch logs');
       }
@@ -105,7 +105,7 @@ const CheckOrders: React.FC = () => {
   const clearLogs = async () => {
     try {
       const clientIds = JSON.parse(localStorage.getItem('client_ids') || '[]');
-      const response = await fetch(`${process.env.REACT_APP_API_URL}/logs/?client_ids=${clientIds.join(',')}`, {
+      const response = await fetch(`${localStorage.getItem('apiUrl') || ''}/logs/?client_ids=${clientIds.join(',')}`, {
         method: 'DELETE',
       });
       if (!response.ok) {
