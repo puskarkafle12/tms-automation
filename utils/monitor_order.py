@@ -36,7 +36,7 @@ async def monitor_order_task_func(db: Session):
                 for client_id in client_ids:
                     if client_id not in tms_users_instances:
                         try:
-                            tms_users_instances = load_tms_users_instances(client_ids, tms_users_instances)
+                            tms_users_instances = await load_tms_users_instances(client_ids, tms_users_instances)
                         except Exception:
                             pass
 
@@ -48,14 +48,14 @@ async def monitor_order_task_func(db: Session):
                     count_dict[key] += 1  # Increment the count for this specific client_id and script_name
 
                     if order.client_id in tms_users_instances:
-                        security_details = tms_users_instances[order.client_id].get_security_id(order.script_name)
-                        current_price = tms_users_instances[order.client_id].get_stock_details(security_details['id']).get('ltp')
-
+                        security_details = await tms_users_instances[order.client_id].get_security_id(order.script_name)
+                        current_price = await tms_users_instances[order.client_id].get_stock_details(security_details['id'])
+                        current_price = current_price.get('ltp')
                         await store_or_update_logs(db, order.client_id, order.script_name, count_dict[key], current_price, False)
 
                         if truncate_to_one_decimal_place(current_price * 0.98) <= truncate_to_one_decimal_place(order.price) <= truncate_to_one_decimal_place(current_price * 1.02):
                             order.price = truncate_to_one_decimal_place(order.price)
-                            order_response = tms_users_instances[order.client_id].order(order.price, order.qty, security=security_details, order_type=order.order_type)
+                            order_response = await tms_users_instances[order.client_id].order(order.price, order.qty, security=security_details, order_type=order.order_type)
 
                             if order_response.get('status') == 200:
                                 order.status = "order_placed"
@@ -73,7 +73,7 @@ async def monitor_order_task_func(db: Session):
             except Exception as e:
                 # Log the error with client_id and script_name if available
                 for order in pending_orders:
-                    await store_or_update_logs(db, order.client_id, order.script_name, count_dict[(order.client_id, order.script_name)], 0, False, f"An error occurred: {e}")
+                    await store_or_update_logs(db, order.client_id, order.script_name,count_dict.get((order.client_id, order.script_name),''), 0, False, f"An error occurred: {e}")
 
             await asyncio.sleep(5)
         else:

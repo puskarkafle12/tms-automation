@@ -104,10 +104,9 @@ def save_tokens(client_id, tokens,expires,broker_no):
         user = db.query(LoggedInUsers).filter_by(client_id=client_id).first()
         if user:
             user.tokens = tokens
-            user.expires=expires
             user.status="logged_in"
         else:
-            user = LoggedInUsers(client_id=client_id, tokens=tokens,expires=expires,broker_no=broker_no,status="logged_in")
+            user = LoggedInUsers(client_id=client_id, tokens=tokens,broker_no=broker_no,status="logged_in")
             db.add(user)
         db.commit()
         return True
@@ -122,7 +121,7 @@ def get_tokens(client_id):
         db=get_db()
         user = db.query(LoggedInUsers).filter_by(client_id=client_id).first()
         if user:
-            return user.tokens , user.expires ,user.broker_no
+            return user.tokens,user.broker_no
         else:
             return None
     except SQLAlchemyError as e:
