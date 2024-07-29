@@ -128,7 +128,7 @@ class TmsUser:
                 save_tokens(self.client_id, self.login_response, self.expires, self.broker_no)
                 self.headers = self.get_header(self.login_response['request_owner'], self.tokens)
                 self.client_details = await self.get_client_details(self.tokens, self.headers, self.login_response['client_dealer_id'])
-                self.save_login_info()
+                await self.save_login_info()
                 return {
                     "status": "success",
                     "message": "token refreshed and stored in the database"
