@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 # Create an instance of Tms
 
-def load_tms_users_instances(client_ids,tms_instances:Dict):
+async def load_tms_users_instances(client_ids,tms_instances:Dict):
     db = get_db()
     tms_users = db.query(LoggedInUsers).filter(LoggedInUsers.client_id.in_(client_ids)).all()
     for tms_user in tms_users:
@@ -24,7 +24,7 @@ def load_tms_users_instances(client_ids,tms_instances:Dict):
                 tokens=tms_user.tokens
             )
             try:
-                tms_user_instance.try_token_login()
+                await tms_user_instance.try_token_login()
             except:
                 try:
                     tms_instances.pop(tms_user.client_id)
