@@ -21,23 +21,25 @@ const StockTable: React.FC = () => {
   const [stockData, setStockData] = useState<StockData[]>([]);
 
   const apiUrl = localStorage.getItem('apiUrl') || '';
-  const clientIds = JSON.parse(localStorage.getItem('clientIDs') || '')
+  const clientIds: string[] = JSON.parse(localStorage.getItem('client_ids') || '[]');
 
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const response = await axios.get(apiUrl+'/get_script_details?client_id='+clientIds[0]);
-        const data = response.data.payload.data.map((stock: StockData) => ({
-          ...stock,
-          color: stock.percentChange > 0 ? 'lightgreen' : stock.percentChange < 0 ? 'red' : 'lightyellow'
-        }));
-        setStockData(data);
+        if (clientIds.length > 0) {
+          const response = await axios.get(`${apiUrl}/get_script_details?client_id=${clientIds[0]}`);
+          const data = response.data.payload.data.map((stock: StockData) => ({
+            ...stock,
+            color: stock.percentChange > 0 ? 'lightgreen' : stock.percentChange < 0 ? 'red' : 'lightyellow'
+          }));
+          setStockData(data);
+        }
       } catch (error) {
         console.error('Error fetching stock data:', error);
       }
     };
     fetchData();
-  }, []);
+  }, []); // Empty dependency array to ensure it runs only once
 
   return (
     <div className="stock-table-container">
