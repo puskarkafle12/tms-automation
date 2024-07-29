@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import ScheduleOrder from './ScheduleOrder';
 import OrderStatus from './OrderLogs';
 import CheckOrders from './CheckOrders';
@@ -9,17 +9,30 @@ import StockTable from './StockTable';
 
 const Home: React.FC = () => {
   const [activeComponent, setActiveComponent] = useState<string | null>(null);
-  const [apiUrl, setApiUrl] = useState<string>(localStorage.getItem('apiUrl') || localStorage.getItem('apiUrl') || '' || '');
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
   const handleButtonClick = (componentName: string) => {
     setActiveComponent(activeComponent === componentName ? null : componentName);
   };
 
-  const toggleSettings = () => {
-    setIsSettingsOpen(prevState => !prevState);
-  };
+  const fetchLoggedInClients = useCallback(async () => {
+    try {
+      const response = await fetch(`${localStorage.getItem('apiUrl') || ''}/logged_in_clients/`);
+      if (!response.ok) {
+        throw new Error('Failed to fetch logged-in clients');
+      }
+      const data = await response.json();
+      const clientIds = data.logged_in_client_ids;
+      localStorage.setItem('client_ids', JSON.stringify(clientIds));
+    } catch (error) {
+      console.error('Error fetching logged-in clients:', error);
+    }
+    console.log("logged in client fetched ")
+  }, []);
+  useEffect(() => {
+    fetchLoggedInClients();
+  }, [fetchLoggedInClients]);
 
+  
   return (
     <div className="container">
       <h1>Dashboard</h1>

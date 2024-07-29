@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import './CheckOrders.css';
 import MonitorOrders from './MonitorOrders';
+import useHotkeys from '@reecelucas/react-use-hotkeys';
 
 interface OrderLog {
   id: number;
@@ -74,18 +75,9 @@ const CheckOrders: React.FC = () => {
     };
   }, [fetchLogs, refreshInterval]);
 
-  useEffect(() => {
-    const handleShortcut = (event: KeyboardEvent) => {
-      if (event.key === 'f') {
-        setShowInput(prevShowInput => !prevShowInput);
-      }
-    };
-
-    window.addEventListener('keydown', handleShortcut);
-    return () => {
-      window.removeEventListener('keydown', handleShortcut);
-    };
-  }, []);
+  useHotkeys('s', () => {
+    setShowInput(prevShowInput => !prevShowInput);
+  });
 
   const handleInputChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const value = parseInt(event.target.value, 10);

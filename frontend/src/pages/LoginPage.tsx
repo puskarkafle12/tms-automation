@@ -1,30 +1,22 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { authService } from '../services/authService';
 import './LoginPage.css'; // Assuming your CSS file is named LoginPage.css
 import { useNavigate } from 'react-router-dom'; // For navigation
 import ErrorMessage from '../components/ErrorMessage';
 import Settings from './Settings'; // Import the Settings component
+import useHotkeys from '@reecelucas/react-use-hotkeys';
 
 const LoginPage: React.FC = () => {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [apiUrl, setApiUrl] = useState(localStorage.getItem('apiUrl') || '');
   const [error, setError] = useState<string | null>(null); // State for error message
   const [showSettings, setShowSettings] = useState(false); // State to show/hide settings
   const navigate = useNavigate();
 
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 's') {
-        setShowSettings((prev) => !prev);
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-
-    return () => {
-      window.removeEventListener('keydown', handleKeyDown);
-    };
-  }, []);
-
+  useHotkeys('shift+s', () => {
+    setShowSettings(prev => !prev);
+  });
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     try {
@@ -39,6 +31,7 @@ const LoginPage: React.FC = () => {
     }
   };
 
+
   return (
     <div className="login-page">
       <h1>Login</h1>
@@ -46,11 +39,21 @@ const LoginPage: React.FC = () => {
       <form onSubmit={handleSubmit}>
         <div>
           <label htmlFor="username">Username:</label>
-          <input type="text" id="username" value={username} onChange={(e) => setUsername(e.target.value)} />
+          <input
+            type="text"
+            id="username"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+          />
         </div>
         <div>
           <label htmlFor="password">Password:</label>
-          <input type="password" id="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+          <input
+            type="password"
+            id="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
         </div>
         <button type="submit">Login</button>
       </form>
