@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import './CheckOrders.css';
 import MonitorOrders from './MonitorOrders';
 import useHotkeys from '@reecelucas/react-use-hotkeys';
+import moment from 'moment-timezone';
 
 interface OrderLog {
   id: number;
@@ -20,7 +21,7 @@ const CheckOrders: React.FC = () => {
   const [showInput, setShowInput] = useState<boolean>(false);
   const [clientID, setClientID] = useState('');
   const [scriptName, setScriptName] = useState('');
-  const [newRefreshInterval, setNewRefreshInterval] = useState<number>(5); // State to hold new interval input
+  const [newRefreshInterval, setNewRefreshInterval] = useState<number>(5);
   const [filteredLogs, setFilteredLogs] = useState<OrderLog[]>([]);
 
   const fetchLoggedInClients = useCallback(async () => {
@@ -51,7 +52,7 @@ const CheckOrders: React.FC = () => {
       const newLogs = data.order_logs;
       setLogs(newLogs);
       localStorage.setItem('logs', JSON.stringify(newLogs));
-      setFilteredLogs(newLogs); // Initially set filteredLogs to all logs
+      setFilteredLogs(newLogs);
     } catch (error) {
       console.error('Error fetching logs:', error);
     }
@@ -68,11 +69,11 @@ const CheckOrders: React.FC = () => {
       if (interval) {
         setRefreshInterval(interval * 1000);
         localStorage.setItem('refresh_interval', interval.toString());
-        return interval
+        return interval;
       }
     } catch (error) {
       console.error('Error fetching monitor interval:', error);
-      return 'error'
+      return 'error';
     }
   }, []);
 
@@ -103,7 +104,7 @@ const CheckOrders: React.FC = () => {
   const handleInputChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const value = parseInt(event.target.value, 10);
     if (!isNaN(value) && value >= 3) {
-      setNewRefreshInterval(value); // Update the new refresh interval value
+      setNewRefreshInterval(value);
     }
   };
 
@@ -114,11 +115,11 @@ const CheckOrders: React.FC = () => {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ monitor_interval: newRefreshInterval }), // Use the new interval here
+        body: JSON.stringify({ monitor_interval: newRefreshInterval }),
       });
 
       if (response.ok) {
-        setRefreshInterval(newRefreshInterval * 1000); // Set the refresh interval after the API call
+        setRefreshInterval(newRefreshInterval * 1000);
         localStorage.setItem('refresh_interval', newRefreshInterval.toString());
         const data = await response.json();
         console.log('Monitor interval updated successfully:', data);
@@ -128,7 +129,7 @@ const CheckOrders: React.FC = () => {
     } catch (error) {
       console.error('Error updating monitor interval:', error);
     } finally {
-      setShowInput(false); // Close the dialog
+      setShowInput(false);
     }
   };
 
@@ -158,19 +159,30 @@ const CheckOrders: React.FC = () => {
       return clientIDMatch && scriptNameMatch;
     });
 
-    setFilteredLogs(filtered); // Update filteredLogs with the matched logs
+    setFilteredLogs(filtered);
   };
 
   useEffect(() => {
-    handleSearch(); // Run the search whenever clientID or scriptName changes
+    handleSearch();
   }, [clientID, scriptName, logs]);
 
+  const convertToKathmanduTime = (timestamp: string): string => {
+    if (!timestamp) return 'Invalid timestamp';
+
+    try {
+      const date = moment.utc(timestamp).tz('Asia/Kathmandu');
+      return date.format('hh:mm:ss A'); // Format time in 12-hour format
+    } catch (error) {
+      console.error('Error converting timestamp:', error);
+      return 'Invalid timestamp';
+    }
+  };
   return (
     <div className="check-orders-container">
       <h2>Check Orders Logs</h2>
       <MonitorOrders />
       <button onClick={clearLogs}>Clear Logs</button>
-      <p>Refresh interval:{refreshInterval/1000}</p>
+      <p>Refresh interval: {refreshInterval / 1000}</p>
       {showInput && (
         <div className="overlay">
           <div className="popup">
@@ -201,7 +213,7 @@ const CheckOrders: React.FC = () => {
                 onChange={handleInputChange}
               />
             </div>
-            <button onClick={handleDialogClose}>Update Interval</button> {/* Button to confirm update */}
+            <button onClick={handleDialogClose}>Update Interval</button>
           </div>
         </div>
       )}
@@ -214,13 +226,13 @@ const CheckOrders: React.FC = () => {
               <p>Scanning Count: {log.scanning_count}</p>
               <p>Current Price: {log.current_price}</p>
               <p>Order Placed: {log.order_placed ? 'Yes' : 'No'}</p>
-              <p>Timestamp: {new Date(log.timestamp).toLocaleString('en-GB', { timeZone: 'Asia/Kathmandu' })}</p>
+              <p>Last Fetched: {convertToKathmanduTime(log.timestamp)}</p>
               <p>Logs: {log.logs ? log.logs : 'No logs available'}</p>
               <hr />
             </div>
           ))
         ) : (
-          <p>No logs found.</p> // Display message if no logs match the search
+          <p>No logs found.</p>
         )}
       </div>
     </div>

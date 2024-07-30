@@ -6,10 +6,10 @@ import Login from './Login';
 import './Dashboard.css';
 import DPHoldings from './DpHolding';
 import StockTable from './StockTable';
+import { act } from 'react-dom/test-utils';
 
 const Home: React.FC = () => {
-  const [activeComponent, setActiveComponent] = useState<string | null>(null);
-
+  const [activeComponent, setActiveComponent] =  useState<string>('OrderStatus');
   const handleButtonClick = (componentName: string) => {
     // Set the active component to the clicked component, or do nothing if it's already active
     if (activeComponent !== componentName) {
