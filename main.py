@@ -21,8 +21,7 @@ from utils.monitor_order import monitor_order_task_func
 from utils.tms import TmsUser
 import uvicorn
 import jwt
-from fastapi import FastAPI, WebSocket
-
+from fastapi import FastAPI, Request, HTTPException
 from sqlalchemy.orm import Session
 from datetime import date, time, timedelta, datetime
 
@@ -159,6 +158,20 @@ async def delete_scheduled_order(
     return {"message": "Order deleted successfully"}
 
 
+@app.post("/update_monitor_interval")
+async def update_monitor_interval(request: Request):
+    data = await request.json()
+    monitor_interval = data.get("monitor_interval")
+    if monitor_interval is not None:
+        tms_config.monitor_interval = monitor_interval
+        return {"message": "Monitor interval updated successfully", "new_interval": tms_config.monitor_interval}
+    else:
+        return {"error": "monitor_interval not provided"}, 400
+        
+@app.get("/get_monitor_interval")
+async def get_monitor_interval():
+    return {"monitor_interval": tms_config.monitor_interval}
+    
 @app.get("/order_status_logs/")
 async def get_order_status_logs(
     client_id: str = Query(None),

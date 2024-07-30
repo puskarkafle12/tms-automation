@@ -75,7 +75,7 @@ async def monitor_order_task_func(db: Session):
                 for order in pending_orders:
                     await store_or_update_logs(db, order.client_id, order.script_name,count_dict.get((order.client_id, order.script_name),''), 0, False, f"An error occurred: {e}")
 
-            await asyncio.sleep(5)
+            await asyncio.sleep(config.monitor_interval)
         else:
             logs = "Session not active, Check orders loop stopped."
             config.is_running = False
