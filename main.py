@@ -175,7 +175,7 @@ async def get_order_status_logs(
         query = query.filter(OrderStatusLog.script_name == script_name)
 
     # Handle date filtering
-    if ordered_date:
+    if ordered_date and ordered_date!='null':
         try:
             parsed_date = datetime.strptime(ordered_date, "%Y-%m-%d").date()
             query = query.filter(
