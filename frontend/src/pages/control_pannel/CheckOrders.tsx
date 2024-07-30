@@ -20,6 +20,7 @@ const CheckOrders: React.FC = () => {
   const [showInput, setShowInput] = useState<boolean>(false);
   const [clientID, setClientID] = useState('');
   const [scriptName, setScriptName] = useState('');
+  const [newRefreshInterval, setNewRefreshInterval] = useState<number>(5); // State to hold new interval input
   const [filteredLogs, setFilteredLogs] = useState<OrderLog[]>([]);
 
   const fetchLoggedInClients = useCallback(async () => {
@@ -56,14 +57,32 @@ const CheckOrders: React.FC = () => {
     }
   }, []);
 
+  const fetchMonitorInterval = useCallback(async () => {
+    try {
+      const response = await fetch(`${localStorage.getItem('apiUrl') || ''}/get_monitor_interval`);
+      if (!response.ok) {
+        throw new Error('Failed to fetch monitor interval');
+      }
+      const data = await response.json();
+      const interval = data.monitor_interval;
+      if (interval) {
+        setRefreshInterval(interval * 1000);
+        localStorage.setItem('refresh_interval', interval.toString());
+      }
+    } catch (error) {
+      console.error('Error fetching monitor interval:', error);
+    }
+  }, []);
+
   useEffect(() => {
     const initialize = async () => {
       await fetchLoggedInClients();
       await fetchLogs();
+      await fetchMonitorInterval();
     };
 
     initialize();
-  }, [fetchLoggedInClients, fetchLogs]);
+  }, [fetchLoggedInClients, fetchLogs, fetchMonitorInterval]);
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -82,17 +101,34 @@ const CheckOrders: React.FC = () => {
   const handleInputChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const value = parseInt(event.target.value, 10);
     if (!isNaN(value) && value >= 3) {
-      setRefreshInterval(value * 1000);
-      localStorage.setItem('refresh_interval', value.toString());
+      setNewRefreshInterval(value); // Update the new refresh interval value
     }
   };
 
-  useEffect(() => {
-    const savedInterval = localStorage.getItem('refresh_interval');
-    if (savedInterval) {
-      setRefreshInterval(Math.max(parseInt(savedInterval, 10), 3) * 1000);
+  const handleDialogClose = async () => {
+    try {
+      const response = await fetch(`${localStorage.getItem('apiUrl') || ''}/update_monitor_interval`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ monitor_interval: newRefreshInterval }), // Use the new interval here
+      });
+
+      if (response.ok) {
+        setRefreshInterval(newRefreshInterval * 1000); // Set the refresh interval after the API call
+        localStorage.setItem('refresh_interval', newRefreshInterval.toString());
+        const data = await response.json();
+        console.log('Monitor interval updated successfully:', data);
+      } else {
+        throw new Error('Failed to update monitor interval');
+      }
+    } catch (error) {
+      console.error('Error updating monitor interval:', error);
+    } finally {
+      setShowInput(false); // Close the dialog
     }
-  }, []);
+  };
 
   const clearLogs = async () => {
     try {
@@ -132,6 +168,7 @@ const CheckOrders: React.FC = () => {
       <h2>Check Orders Logs</h2>
       <MonitorOrders />
       <button onClick={clearLogs}>Clear Logs</button>
+      <p>Refresh interval:{newRefreshInterval}</p>
       {showInput && (
         <div className="overlay">
           <div className="popup">
@@ -158,11 +195,11 @@ const CheckOrders: React.FC = () => {
               <label>Set Refresh Interval (seconds): </label>
               <input
                 type="number"
-                value={refreshInterval / 1000}
+                value={newRefreshInterval}
                 onChange={handleInputChange}
-                min="3"
               />
             </div>
+            <button onClick={handleDialogClose}>Update Interval</button> {/* Button to confirm update */}
           </div>
         </div>
       )}
