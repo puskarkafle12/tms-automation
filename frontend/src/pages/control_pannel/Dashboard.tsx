@@ -11,7 +11,10 @@ const Home: React.FC = () => {
   const [activeComponent, setActiveComponent] = useState<string | null>(null);
 
   const handleButtonClick = (componentName: string) => {
-    setActiveComponent(activeComponent === componentName ? null : componentName);
+    // Set the active component to the clicked component, or do nothing if it's already active
+    if (activeComponent !== componentName) {
+      setActiveComponent(componentName);
+    }
   };
 
   const fetchLoggedInClients = useCallback(async () => {
@@ -26,13 +29,13 @@ const Home: React.FC = () => {
     } catch (error) {
       console.error('Error fetching logged-in clients:', error);
     }
-    console.log("logged in client fetched ")
+    console.log("Logged in clients fetched");
   }, []);
+
   useEffect(() => {
     fetchLoggedInClients();
   }, [fetchLoggedInClients]);
 
-  
   return (
     <div className="container">
       <h1>Dashboard</h1>
@@ -45,13 +48,12 @@ const Home: React.FC = () => {
         <button onClick={() => handleButtonClick('StockTable')}>Stock Table</button>
       </div>
 
-      {activeComponent === 'Login' && <Login  />}
-      {activeComponent === 'ScheduleOrder' && <ScheduleOrder  />}
-      {activeComponent === 'OrderStatus' && <OrderStatus  />}
-      {activeComponent === 'CheckOrders' && <CheckOrders  />}
-      {activeComponent === 'DPHoldings' && <DPHoldings  />}
-      {activeComponent === 'StockTable' && <StockTable  />}
-
+      {activeComponent === 'Login' && <Login />}
+      {activeComponent === 'ScheduleOrder' && <ScheduleOrder />}
+      {activeComponent === 'OrderStatus' && <OrderStatus />}
+      {activeComponent === 'CheckOrders' && <CheckOrders />}
+      {activeComponent === 'DPHoldings' && <DPHoldings />}
+      {activeComponent === 'StockTable' && <StockTable />}
     </div>
   );
 };
