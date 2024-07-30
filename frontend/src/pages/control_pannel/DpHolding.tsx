@@ -4,11 +4,10 @@ import CommonTable from '../../components/Table/Table';
 import axios from 'axios';
 
 interface DPHolding {
-  // Define the structure of your DPHolding data based on your API response
   clientID: string;
   valueAsOfPreviousClosePrice: number;
   valueAsOfLTP: number;
-  // Add other properties as necessary
+  percentChange?: number; // Add percentChange property
   color?: string; // Optional color property for row coloring
 }
 
@@ -44,17 +43,21 @@ const DPHoldings: React.FC = () => {
       if (response.ok) {
         const data = await response.json();
 
-        // Map the data to include the color property
-        const coloredData = data.map((holding: DPHolding) => ({
-          ...holding,
-          color: holding.valueAsOfLTP > holding.valueAsOfPreviousClosePrice
-            ? 'lightgreen'
-            : holding.valueAsOfLTP < holding.valueAsOfPreviousClosePrice
+        // Map the data to include the percentChange and color properties
+        const processedData = data.map((holding: DPHolding) => {
+          const percentChange = ((holding.valueAsOfLTP - holding.valueAsOfPreviousClosePrice) / holding.valueAsOfPreviousClosePrice * 100).toFixed(1);
+          return {
+            ...holding,
+            percentChange:percentChange,
+            color: holding.valueAsOfLTP > holding.valueAsOfPreviousClosePrice
+              ? 'lightgreen'
+              : holding.valueAsOfLTP < holding.valueAsOfPreviousClosePrice
               ? 'red'
               : 'lightyellow' // For no change
-        }));
+          };
+        });
 
-        setDPHoldings(coloredData);
+        setDPHoldings(processedData);
       } else {
         alert("Failed to fetch DP holdings");
         console.error('Failed to fetch DP holdings');
@@ -101,7 +104,8 @@ const DPHoldings: React.FC = () => {
       {!isLoading && dpHoldings.length > 0 && (
         <>
           <CommonTable
-            data={dpHoldings} columns={["scrip", "currentBalance", "previousClosePrice", "valueAsOfPreviousClosePrice", "ltp", "valueAsOfLTP", "cdsFreeBalance", "cdsTotalBalance", "symbolName"]} // Pass the colored data to the CommonTable
+            data={dpHoldings}
+            columns={["scrip","previousCloseprice", "ltp","valueAsOfPreviousClosePrice", "valueAsOfLTP","percentChange","symbolName","currentBalance"]}
           />
           <table className="common-table" >
             <tfoot>

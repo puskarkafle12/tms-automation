@@ -9,7 +9,8 @@ async def store_or_update_logs(db: Session, client_id: str, script_name: str, sc
     log_entry = db.query(OrderLog).filter_by(client_id=client_id, script_name=script_name).first()
 
     if log_entry:
-        log_entry.scanning_count = scanning_count
+        if log_entry.scanning_count<scanning_count:
+            log_entry.scanning_count = scanning_count
         log_entry.current_price = current_price
         log_entry.order_placed = order_placed
         log_entry.timestamp = datetime.now(timezone.utc)
@@ -30,3 +31,4 @@ async def store_or_update_logs(db: Session, client_id: str, script_name: str, sc
         )
         db.add(log_entry)
     db.commit()
+    return log_entry
