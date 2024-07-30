@@ -68,9 +68,11 @@ const CheckOrders: React.FC = () => {
       if (interval) {
         setRefreshInterval(interval * 1000);
         localStorage.setItem('refresh_interval', interval.toString());
+        return interval
       }
     } catch (error) {
       console.error('Error fetching monitor interval:', error);
+      return 'error'
     }
   }, []);
 
@@ -168,7 +170,7 @@ const CheckOrders: React.FC = () => {
       <h2>Check Orders Logs</h2>
       <MonitorOrders />
       <button onClick={clearLogs}>Clear Logs</button>
-      <p>Refresh interval:{newRefreshInterval}</p>
+      <p>Refresh interval:{refreshInterval/1000}</p>
       {showInput && (
         <div className="overlay">
           <div className="popup">
