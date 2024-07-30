@@ -3,11 +3,13 @@ import './OrderLogs.css';
 import CommonTable from '../../components/Table/Table';
 import DialogBox from '../../components/dialog_box/DialogBox';
 import Message from '../../components/Message/Message';
-
+import 'react-datepicker/dist/react-datepicker.css';
+import { format } from 'date-fns';
+import DatePicker from 'react-datepicker';
 const GetOrderStatus: React.FC = () => {
+  const [orderedDate, setOrderedDate] = useState<string | null>(null);
   const [clientID, setClientID] = useState('');
   const [scriptName, setScriptName] = useState('');
-  const [orderedDate, setOrderedDate] = useState('');
   const [orderLogs, setOrderLogs] = useState<any[]>([]);
   const [scheduledOrders, setScheduledOrders] = useState<any[]>([]);
   const [orderBook, setOrderBook] = useState<any[]>([]);
@@ -18,7 +20,7 @@ const GetOrderStatus: React.FC = () => {
   const [messageVisible, setMessageVisible] = useState(false);
   const [dialogMessage, setDialogMessage] = useState('');
   const [message, setMessage] = useState('');
-  const [dialogAction, setDialogAction] = useState<() => void>(() => {});
+  const [dialogAction, setDialogAction] = useState<() => void>(() => { });
   const apiUrl = localStorage.getItem('apiUrl') || '';
 
   const fetchLoggedInClientIDs = async () => {
@@ -36,19 +38,27 @@ const GetOrderStatus: React.FC = () => {
         setMessageVisible(true); // Show the error dialog
         setMessage('Failed to fetch logged-in client IDs'); // Set the error message
       }
-    } catch (error:any) {
+    } catch (error: any) {
       console.error('Error fetching logged-in client IDs:', error);
       setLoggedInClientIDs([]); // Set loggedInClientIDs to an empty array when API fails
       setMessageVisible(true); // Show the error dialog
       setMessage(`Error fetching logged-in client IDs: ${error.message}`); // Set the error message
     }
   };
-  
+
 
   useEffect(() => {
     fetchLoggedInClientIDs();
   }, []);
 
+  const handleDateChange = (date: Date | null) => {
+    if (date) {
+      const formattedDate = format(date, 'yyyy-MM-dd'); // Format the date to YYYY-MM-DD
+      setOrderedDate(formattedDate); // Store the formatted date string
+    } else {
+      setOrderedDate(''); // Clear the formatted date string if null
+    }
+  };
   const fetchOrderBook = async (clientID: string) => {
     try {
       const response = await fetch(`${apiUrl}/get_order_book?client_id=${clientID}`);
@@ -127,7 +137,7 @@ const GetOrderStatus: React.FC = () => {
       console.error('Error canceling order:', error);
     }
   };
-  
+
 
   const handleAction = async (row: any, actionType: string) => {
     if (actionType === 'Delete') {
@@ -183,7 +193,12 @@ const GetOrderStatus: React.FC = () => {
         <br />
         <label>
           Ordered Date:
-          <input type="text" value={orderedDate} onChange={(e) => setOrderedDate(e.target.value)} />
+          <DatePicker
+            selected={orderedDate ? new Date(orderedDate) : null} // Convert string back to Date for DatePicker
+            onChange={handleDateChange}
+            dateFormat="yyyy-MM-dd"
+            placeholderText="Select a date"
+          />
         </label>
         <br />
         <button type="submit">Submit</button>
@@ -245,7 +260,7 @@ const GetOrderStatus: React.FC = () => {
           onCancel={() => setDialogVisible(false)}
         />
       )}
-        {messageVisible && (
+      {messageVisible && (
         <Message
           message={message}
           onClose={() => setMessageVisible(false)} // Close the message when the close button is clicked

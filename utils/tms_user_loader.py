@@ -20,7 +20,6 @@ async def load_tms_users_instances(client_ids,tms_instances:Dict):
             tms_user_instance = TmsUser(
                 broker_no=tms_user.broker_no,
                 username=tms_user.client_id,
-                expires=tms_user.expires,
                 tokens=tms_user.tokens
             )
             try:

@@ -24,6 +24,18 @@ services:
       DB_HOST: db
       DB_NAME: stock
 
+  ngrok:
+    image: ngrok/ngrok:latest
+    ports:
+      - "4040:4040" # Dashboard
+    environment:
+      NGROK_AUTHTOKEN: REDACTED_CREDENTIAL # replace with your actual Ngrok authentication token
+    command: ngrok http web:8000
+    depends_on:
+      - web
+    networks:
+      - mynetwork
+
 networks:
   mynetwork:
     driver: bridge

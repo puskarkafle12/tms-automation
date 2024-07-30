@@ -43,15 +43,15 @@ const DPHoldings: React.FC = () => {
       });
       if (response.ok) {
         const data = await response.json();
-        
+
         // Map the data to include the color property
         const coloredData = data.map((holding: DPHolding) => ({
           ...holding,
           color: holding.valueAsOfLTP > holding.valueAsOfPreviousClosePrice
             ? 'lightgreen'
             : holding.valueAsOfLTP < holding.valueAsOfPreviousClosePrice
-            ? 'red'
-            : 'lightyellow' // For no change
+              ? 'red'
+              : 'lightyellow' // For no change
         }));
 
         setDPHoldings(coloredData);
@@ -101,9 +101,9 @@ const DPHoldings: React.FC = () => {
       {!isLoading && dpHoldings.length > 0 && (
         <>
           <CommonTable
-            data={dpHoldings} // Pass the colored data to the CommonTable
+            data={dpHoldings} columns={["scrip", "currentBalance", "previousClosePrice", "valueAsOfPreviousClosePrice", "ltp", "valueAsOfLTP", "cdsFreeBalance", "cdsTotalBalance", "symbolName"]} // Pass the colored data to the CommonTable
           />
-          <table className="common-table">
+          <table className="common-table" >
             <tfoot>
               <tr>
                 <td>Total</td>
