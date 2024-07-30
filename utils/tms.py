@@ -36,12 +36,11 @@ class TmsUser:
 16. `stock_grabber`: Manages stock orders, checking price changes, and placing orders based on certain conditions.
 17. get_order_book
 """
-    def __init__(self, broker_no, username=None, password=None, tokens=None, expires=None, stock_symbol=None, request_per_sec=2):
+    def __init__(self, broker_no, username=None, password=None, tokens=None, stock_symbol=None, request_per_sec=2):
         self.final_order_quantity = 100
         self.client_id = username
         self.password = password
         self.tokens = tokens
-        self.expires = expires
         self.driver = None
         self.session = aiohttp.ClientSession()
         self.security = None
@@ -80,7 +79,7 @@ class TmsUser:
             except Exception as e:
                 print(f"Exception during __del__: {e}")
     async def try_token_login(self):
-        if self.tokens and self.expires:
+        if self.tokens:
             try:
                 self.login_response = self.tokens
                 request_owner = self.tokens['request_owner']
@@ -124,8 +123,7 @@ class TmsUser:
             try:
                 self.login_response = await self.login()
                 self.tokens = self.login_response['tokens']
-                self.expires = 999999999999
-                save_tokens(self.client_id, self.login_response, self.expires, self.broker_no)
+                save_tokens(self.client_id, self.login_response, self.broker_no)
                 self.headers = self.get_header(self.login_response['request_owner'], self.tokens)
                 self.client_details = await self.get_client_details(self.tokens, self.headers, self.login_response['client_dealer_id'])
                 await self.save_login_info()
