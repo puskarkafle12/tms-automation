@@ -46,9 +46,12 @@ const DPHoldings: React.FC = () => {
         // Map the data to include the percentChange and color properties
         const processedData = data.map((holding: DPHolding) => {
           const percentChange = ((holding.valueAsOfLTP - holding.valueAsOfPreviousClosePrice) / holding.valueAsOfPreviousClosePrice * 100).toFixed(1);
+          const gainedProfit = holding.valueAsOfLTP - holding.valueAsOfPreviousClosePrice;
+
           return {
             ...holding,
             percentChange:percentChange,
+            gainedProfit: gainedProfit,
             color: holding.valueAsOfLTP > holding.valueAsOfPreviousClosePrice
               ? 'lightgreen'
               : holding.valueAsOfLTP < holding.valueAsOfPreviousClosePrice
@@ -105,7 +108,7 @@ const DPHoldings: React.FC = () => {
         <>
           <CommonTable
             data={dpHoldings}
-            columns={["scrip","previousCloseprice", "ltp","valueAsOfPreviousClosePrice", "valueAsOfLTP","percentChange","symbolName","currentBalance"]}
+            columns={["scrip","previousCloseprice", "ltp","valueAsOfPreviousClosePrice", "valueAsOfLTP","gainedProfit","percentChange","symbolName","currentBalance"]}
           />
           <table className="common-table" >
             <tfoot>

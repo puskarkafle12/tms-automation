@@ -46,7 +46,7 @@ const StockTable: React.FC = () => {
       <h1>Live Market:</h1>
       <CommonTable
         data={stockData}
-        columns={['symbol', 'volume', 'ltp', 'percentChange', 'high', 'low', 'open', 'lastTradedVolume', 'lastTradedTime', 'change', 'previousClose']}
+        columns={['symbol', 'volume', 'ltp', 'percentChange', 'high', 'low', 'open', 'lastTradedVolume', 'lastTradedTime', 'previousClose']}
       />
     </div>
   );
