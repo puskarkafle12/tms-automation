@@ -12,3 +12,4 @@ node_modules
 alembic/*
 # Do not ignore the .env file inside the alembic folder
 !alembic/.env
+!alembic/script.py.mako

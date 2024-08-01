@@ -9,6 +9,7 @@ tmsenv/
 alembic/versions/*
 # But do not ignore the versions directory itself
 !alembic/versions/
+!alembic/script.py.mako
 # Include an empty .dockerkeep file to keep the directory
 !alembic/versions/.dockerkeep
 
