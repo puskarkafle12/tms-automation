@@ -12,24 +12,28 @@ interface DPHolding {
 }
 
 const DPHoldings: React.FC = () => {
+  const [loggedInClientIDs, setLoggedInClientIDs] = useState<string[]>([]);
   const [clientID, setClientID] = useState('');
   const [dpHoldings, setDPHoldings] = useState<DPHolding[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const apiUrl = localStorage.getItem('apiUrl') || '';
 
   useEffect(() => {
-    const fetchLoggedInClients = async () => {
+    const fetchLoggedInClientIDs = async () => {
       try {
-        const response = await fetch(`${apiUrl}/logged_in_clients/`);
-        const data = await response.json();
-        if (data.logged_in_client_ids.length > 0) {
-          setClientID(data.logged_in_client_ids[0]);
+        const response = await fetch(apiUrl + '/logged_in_clients/');
+        if (response.ok) {
+          const data = await response.json();
+          setLoggedInClientIDs(data.logged_in_client_ids);
+          setClientID(data.logged_in_client_ids[0]); // Set default client ID to the first one
+        } else {
+          console.error('Failed to fetch logged-in client IDs');
         }
       } catch (error) {
-        console.error('Error fetching logged in clients:', error);
+        console.error('Error fetching logged-in client IDs:', error);
       }
     };
-    fetchLoggedInClients();
+    fetchLoggedInClientIDs();
   }, [apiUrl]);
 
   const handleSubmit = async () => {
@@ -50,13 +54,13 @@ const DPHoldings: React.FC = () => {
 
           return {
             ...holding,
-            percentChange:percentChange,
+            percentChange: percentChange,
             gainedProfit: gainedProfit,
             color: holding.valueAsOfLTP > holding.valueAsOfPreviousClosePrice
               ? 'lightgreen'
               : holding.valueAsOfLTP < holding.valueAsOfPreviousClosePrice
-              ? 'red'
-              : 'lightyellow' // For no change
+                ? 'red'
+                : 'lightyellow' // For no change
           };
         });
 
@@ -77,7 +81,10 @@ const DPHoldings: React.FC = () => {
       acc.valueAsOfPreviousClosePrice += row.valueAsOfPreviousClosePrice || 0;
       acc.valueAsOfLTP += row.valueAsOfLTP || 0;
       return acc;
-    }, { valueAsOfPreviousClosePrice: 0, valueAsOfLTP: 0 });
+    }, { valueAsOfPreviousClosePrice: 0, valueAsOfLTP: 0, profit: 0 });
+
+    totals.profit = totals.valueAsOfLTP - totals.valueAsOfPreviousClosePrice;
+
     return totals;
   };
 
@@ -89,12 +96,11 @@ const DPHoldings: React.FC = () => {
       <form onSubmit={(e) => { e.preventDefault(); handleSubmit(); }}>
         <label>
           Client ID:
-          <input
-            list="clientIds"
-            type="text"
-            value={clientID}
-            onChange={(e) => setClientID(e.target.value)}
-          />
+          <select value={clientID} onChange={(e) => setClientID(e.target.value)}>
+              {loggedInClientIDs.map((id, index) => (
+                <option key={index} value={id}>{id}</option>
+              ))}
+            </select>
           <datalist id="clientIds">
             {/* Update this to dynamically fetch client IDs from API */}
           </datalist>
@@ -108,14 +114,18 @@ const DPHoldings: React.FC = () => {
         <>
           <CommonTable
             data={dpHoldings}
-            columns={["scrip","previousCloseprice", "ltp","valueAsOfPreviousClosePrice", "valueAsOfLTP","gainedProfit","percentChange","symbolName","currentBalance"]}
+            columns={["scrip", "previousCloseprice", "ltp", "valueAsOfPreviousClosePrice", "valueAsOfLTP", "gainedProfit", "percentChange", "symbolName", "currentBalance"]}
           />
           <table className="common-table" >
             <tfoot>
-              <tr>
+            <tr style={{ background: totals.profit < 0 ? '#ffcccb' : '#d4edda' ,}}>
                 <td>Total</td>
                 <td>{totals.valueAsOfPreviousClosePrice}</td>
                 <td>{totals.valueAsOfLTP}</td>
+                <td>{totals.valueAsOfLTP}</td>
+                <td>
+                  {totals.profit}
+                </td>
               </tr>
             </tfoot>
           </table>
