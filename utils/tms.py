@@ -221,14 +221,17 @@ class TmsUser:
                 return {}
 
     async def login_request(self, logindata):
+        encoded_bytes = base64.b64encode(logindata['password'].encode("utf-8"))
+        encoded_password = encoded_bytes.decode("utf-8")
         json_data = {
             'userName': logindata['username'],
-            'password': logindata['password'],
+            'password': encoded_password,
             'jwt': '',
             'otp': '',
             'captchaIdentifier': logindata['captcha_id'],
             'userCaptcha': logindata['captcha'],
         }
+
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/authApi/authenticate',
