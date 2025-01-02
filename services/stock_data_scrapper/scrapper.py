@@ -12,7 +12,7 @@ def convert_to_numeric(value):
     try:
         return float(value.replace('%', '').replace(',', ''))
     except ValueError:
-        return value  # If conversion is not possible, return the original value
+        return value  
 def extract_numeric_value(s):
     match = re.search(r'([-+]?\d*\.\d+|\d+)', str(s))
     if match:
