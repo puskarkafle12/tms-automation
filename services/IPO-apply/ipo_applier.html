@@ -69,9 +69,9 @@
 var details = {};
 details['kitta'] = 10;
 let messages = [];
-var users = [{ "clientId": 186, "username": "374749", "password": "Puskar123@@@@@", "crnNumber": "2946088TCL", "pin": "5356", "bankName": "siddhartha bank" },
-{ "clientId": 178, "username": "205808", "password": "kH48mwSQbE%QQY", "crnNumber": "00884971", "pin": "5356" },
-{ "clientId": 163, "username": "00358242", "password": "qqCPfLH^2^J@", "crnNumber": "O8-O89527708", "pin": "5356" },
+var users = [{ "clientId": 186, "username": "374749", "password": "i$eiaa8x&#JdAL@", "crnNumber": "2946088TCL", "pin": "5356", "bankName": "siddhartha bank" },
+{ "clientId": 178, "username": "205808", "password": "Oqx9*29ZS5!@eE", "crnNumber": "00884971", "pin": "5356" },
+{ "clientId": 163, "username": "00358242", "password": "qqCPfLH^2^J@@", "crnNumber": "O8-O89527708", "pin": "5356" },
 { "clientId": 137, "username": "251157", "password": "Dnudd!9Px*vEZW", "crnNumber": "CZP00377935", "pin": "5356" }
 ];
 user = { "clientId": 186, "username": "374749", "password": "Puskar123@@@@@", "crnNumber": "2946088TCL", "pin": "5356", "bankName": "siddhartha bank" }
@@ -276,7 +276,6 @@ async function get_applicable_list(headers) {
 
         if (item.action === 'reapply' && item.shareGroupName === 'Ordinary Shares') {
             // messages.push(user.username + item.companyName + " amount blocked failed now re-applying " + item.shareGroupName + "\n");
-            rejected_count++;
             const issue_id = String(item.companyShareId);
             const issue_name = item.scrip;
             const company_name = item.companyName;
@@ -312,18 +311,21 @@ async function get_applicable_list(headers) {
 
     return issue_names_and_ids;
 }
-async function re_apply() {
+async function re_apply(user) {
+    const bank_id = await get_bank_id(headers);
+    details.bankId=bank_id
     const json_data = {
         appliedKitta: details.kitta,
         companyShareId: details.companyId,
-        customerId: details.id,
+        customerId: details[0].id,
         boid: details.dematNo.slice(-8),
         crnNumber: user.crnNumber,
         bankId: details.bankId,
-        accountNumber: details.accountNumber,
+        accountNumber: details[0].accountNumber,
         demat: details.dematNo,
-        accountBranchId: details.accountBranchId,
+        accountBranchId: details[0].accountBranchId,
         transactionPIN: user.pin,
+        accountTypeId:details[0].accountTypeId
     };
 
     const response1 = await fetch('https://webbackend.cdsc.com.np/api/meroShare/applicantForm/reapply/' + details.companyId, {
@@ -332,7 +334,7 @@ async function re_apply() {
     });
 
     if (response1.status !== 200) {
-        throw new Error('Bad request: ' + response1.status);
+        throw new Error('Bad request: in reapply get form id' + response1.status);
     }
 
     const form_id = (await response1.json()).applicantFormId;
@@ -343,8 +345,8 @@ async function re_apply() {
         body: JSON.stringify(json_data),
     });
 
-    if (response2.status !== 200) {
-        throw new Error('Bad request: ' + response2.status);
+    if (response2.status !== 201) {
+            throw new Error('Bad request: ' + response2.status);
     }
 
     const data = await response2.json();
@@ -411,7 +413,7 @@ async function apply_share(user, headers) {
         }
 
         if ('reapply' in applicable_share_list[0]) {
-            const response = await re_apply();
+            const response = await re_apply(user);
             messages.push(user['username'] + " re-apply " + response['message'] + "\n");
             return "reapply called";
         } else {
@@ -497,8 +499,6 @@ async function check_status(limit) {
 }
 async function bulk_apply() {
     // Assuming users is already defined or loaded in the JavaScript environment
-    let rejected_count = 0;
-    let success_count = 0;
     let output_message;
     const limit = 6;
     for (const user of users) {
@@ -546,8 +546,6 @@ async function bulk_apply() {
 
     return {
         messages: nested_messages,
-        rejected_count: rejected_count,
-        success_count: success_count
     };
 }
 
