@@ -1,79 +1,21 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Message Data</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            margin: 0;
-            padding: 20px;
-        }
-        
-        .container {
-            max-width: 800px;
-            margin: 0 auto;
-            padding: 20px;
-            border: 1px solid #ccc;
-            border-radius: 5px;
-        }
-        h1 {
-            text-align: center;
-        }
-        .user {
-            padding: 40px;
-            border: 1px solid #ccc;
-            border-radius: 5px;
-            margin-bottom: 70px;
-        }
-        .user:nth-child(even) {
-            background-color: rgba(128, 128, 128, 0.5); /* Grey with 50% opacity */
-        }
-        .user:nth-child(odd) {
-            background-color: rgba(0, 0, 0, 0.1);
-        }
-        .message {
-            padding: 10px;
-            border: 1px solid #ccc;
-            border-radius: 5px;
-            margin-bottom: 10px;
-        }
-        .yellow {
-            background-color: yellow;
-        }
-        .red {
-            background-color: red;
-            color: white;
-        }
-        .green {
-            background-color: green;
-            color: white;
-        }
-        .white {
-            background-color: white;
-        }
-      
-        .alternate {
-            /* Alternate background color for containers */
-            background-color: white;
-        }
-    </style>
+    <script src="https://cdn.tailwindcss.com"></script>
 </head>
-<body>
-    <div class="container">
-        <h1>Message Data</h1>
-        <div class="user">
-            <div class="message" id="message-container"></div>
-        </div>
+<body class="bg-gray-100 flex justify-center items-center min-h-screen">
+    <div class="container mx-auto p-6 bg-white shadow-lg rounded-lg">
+        <h1 class="text-2xl font-bold text-center text-gray-800 mb-4">Message Data</h1>
+        <div id="message-container" class="space-y-4"></div>
     </div>
 <script>
 var details = {};
 details['kitta'] = 10;
 let messages = [];
-var users = [{ "clientId": 186, "username": "374749", "password": "i$eiaa8x&#JdAL@", "crnNumber": "2946088TCL", "pin": "5356", "bankName": "siddhartha bank" },
-{ "clientId": 178, "username": "205808", "password": "Oqx9*29ZS5!@eE", "crnNumber": "00884971", "pin": "5356" },
-{ "clientId": 163, "username": "00358242", "password": "qqCPfLH^2^J@@", "crnNumber": "O8-O89527708", "pin": "5356" },
-{ "clientId": 137, "username": "251157", "password": "Dnudd!9Px*vEZW", "crnNumber": "CZP00377935", "pin": "5356" }
-];
+var users =JSON.parse(localStorage.getItem("users")) || [];
 user = { "clientId": 186, "username": "374749", "password": "Puskar123@@@@@", "crnNumber": "2946088TCL", "pin": "5356", "bankName": "siddhartha bank" }
 
 var headers = {
@@ -552,58 +494,51 @@ async function bulk_apply() {
     
     </script>
     <script>
-      
-        
         async function main() {
             try {
                 var results = await bulk_apply();
                 results = results.messages;
                 var messageContainer = document.getElementById("message-container");
-                var alternateColor = false; // Initialize alternateColor variable
-                var messageIndex = 0; // Initialize message index
-                var usersPerGroup = 4; // Define the number of users per group
-        
+                var alternateColor = false; 
+                var messageIndex = 0; 
+                var usersPerGroup = 4;
+
                 results.forEach(function (result) {
-                    // Check if the current message should have an alternate color
                     var useAlternateColor = alternateColor;
-        
                     if (messageIndex % usersPerGroup === 0) {
-                        alternateColor = !alternateColor; // Toggle the alternateColor for each group
+                        alternateColor = !alternateColor;
                     }
-        
+
                     var userContainer = document.createElement("div");
-                    userContainer.className = useAlternateColor ? "user alternate" : "user";
-        
+                    userContainer.className = `p-4 rounded-lg shadow ${useAlternateColor ? 'bg-gray-200' : 'bg-gray-100'}`;
+
                     result.forEach(function (messageText) {
                         var messageDiv = document.createElement("div");
-                        messageDiv.className = "message";
-        
+                        messageDiv.className = "p-3 rounded text-white font-semibold mb-2";
+
                         if (messageText.includes('BLOCKED_APPROVE')) {
-                            messageDiv.className += " yellow";
+                            messageDiv.classList.add("bg-yellow-500");
                         } else if (messageText.includes('Not Alloted') || messageText.includes('BLOCK_FAILED')) {
-                            messageDiv.className += " red";
+                            messageDiv.classList.add("bg-red-500");
                         } else if (messageText.includes('Alloted')) {
-                            messageDiv.className += " green";
+                            messageDiv.classList.add("bg-green-500");
                         } else {
-                            messageDiv.className += " white";
+                            messageDiv.classList.add("bg-gray-300", "text-gray-800");
                         }
-        
+
                         messageDiv.innerText = messageText;
                         userContainer.appendChild(messageDiv);
                     });
-        
+
                     messageContainer.appendChild(userContainer);
-                    messageIndex++; // Increment the message index
+                    messageIndex++;
                 });
             } catch (error) {
-                // Handle any errors that occur during the asynchronous operation
                 console.error(error);
             }
         }
-        
-        main(); // Start the asynchronous operation
-        // Results array from JavaScript
-       
+
+        main();
     </script>
 </body>
 </html>

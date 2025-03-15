@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Modern User Form</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+
+<body class="bg-gray-900 text-white flex justify-center items-center min-h-screen">
+    <div class="w-full max-w-2xl p-6 bg-gray-800 shadow-lg rounded-lg m-5">
+        <h2 class="text-2xl font-bold mb-4 text-center">User Registration</h2>
+
+        <form id="userForm" class="space-y-4">
+            <input type="hidden" id="editIndex">
+            <div>
+                <label class="block text-sm font-medium"> Client Id </label>
+                <input type="text" id="clientId"
+                    class="w-full p-2 rounded bg-gray-700 border border-gray-600 text-white" required>
+            </div>
+            <div>
+                <label class="block text-sm font-medium">Username</label>
+                <input type="text" id="username"
+                    class="w-full p-2 rounded bg-gray-700 border border-gray-600 text-white" required>
+            </div>
+
+            <div>
+                <label class="block text-sm font-medium">Password</label>
+                <input type="password" id="password"
+                    class="w-full p-2 rounded bg-gray-700 border border-gray-600 text-white" required>
+            </div>
+
+            <div>
+                <label class="block text-sm font-medium">CRN Number</label>
+                <input type="text" id="crnNumber"
+                    class="w-full p-2 rounded bg-gray-700 border border-gray-600 text-white" required>
+            </div>
+
+            <div>
+                <label class="block text-sm font-medium">PIN</label>
+                <input type="text" id="pin" class="w-full p-2 rounded bg-gray-700 border border-gray-600 text-white"
+                    required>
+            </div>
+
+            <div>
+                <label class="block text-sm font-medium">Bank Name</label>
+                <input type="text" id="bankName"
+                    class="w-full p-2 rounded bg-gray-700 border border-gray-600 text-white">
+            </div>
+
+            <button type="submit" class="w-full bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 rounded">Save
+                User</button>
+            <button type="button" class="w-full bg-green-500 hover:bg-green-600 text-white font-bold py-2 rounded"
+                onclick="window.location.href='ipo_applier.html'">
+                Bulk IPO Apply
+            </button>
+
+            <h3 class="text-xl font-semibold mt-6">Stored Users</h3>
+            <ul id="userList" class="mt-3 space-y-2"></ul>
+    </div>
+
+    <script>
+
+
+        document.addEventListener("DOMContentLoaded", () => {
+            let users = JSON.parse(localStorage.getItem("users")) || [];
+            displayUsers();
+
+            document.getElementById("userForm").addEventListener("submit", async (e) => {
+                e.preventDefault();
+
+                const editIndex = document.getElementById("editIndex").value;
+                const clientId = document.getElementById("clientId").value;
+                const username = document.getElementById("username").value.trim();
+                const password = document.getElementById("password").value;
+                const crnNumber = document.getElementById("crnNumber").value;
+                const pin = document.getElementById("pin").value;
+                const bankName = document.getElementById("bankName").value || "N/A";
+
+                if (!isUsernameUnique(username, editIndex)) {
+                    alert("Username must be unique!");
+                    return;
+                }
+
+
+                if (editIndex) {
+                    users[editIndex] = { clientId, username, password: password, crnNumber, pin, bankName };
+                } else {
+                    const newUser = { clientId, username, password: password, crnNumber, pin, bankName };
+                    users.push(newUser);
+                }
+
+                localStorage.setItem("users", JSON.stringify(users));
+                displayUsers();
+                document.getElementById("userForm").reset();
+                document.getElementById("editIndex").value = "";
+                document.getElementById("clientId").value = "";
+            });
+        });
+
+        function isUsernameUnique(username, editIndex) {
+            let users = JSON.parse(localStorage.getItem("users")) || [];
+            return !users.some((user, index) => user.username.toLowerCase() === username.toLowerCase() && index != editIndex);
+        }
+
+        function displayUsers() {
+            const userList = document.getElementById("userList");
+            userList.innerHTML = "";
+            let users = JSON.parse(localStorage.getItem("users")) || [];
+
+            users.forEach((user, index) => {
+                const userItem = document.createElement("li");
+                userItem.classList = "p-3 bg-gray-700 rounded flex justify-between items-center";
+                userItem.innerHTML = `
+                    <div>
+                        <p class="font-medium">${user.username} (${user.bankName})</p>
+                        <p class="text-sm text-gray-400">CRN: ${user.crnNumber} | PIN: ${user.pin}</p>
+                    </div>
+                    <div>
+                        <button onclick="editUser(${index})" class="bg-yellow-500 px-2 py-1 text-white rounded">Edit</button>
+                        <button onclick="deleteUser(${index})" class="bg-red-500 px-2 py-1 text-white rounded ml-2">Delete</button>
+                    </div>
+                `;
+                userList.appendChild(userItem);
+            });
+        }
+
+        function deleteUser(index) {
+            let users = JSON.parse(localStorage.getItem("users")) || [];
+            users.splice(index, 1);
+            localStorage.setItem("users", JSON.stringify(users));
+            displayUsers();
+        }
+
+        function editUser(index) {
+            let users = JSON.parse(localStorage.getItem("users")) || [];
+            const user = users[index];
+
+            document.getElementById("editIndex").value = index;
+            document.getElementById("clientId").value = user.clientId;
+            document.getElementById("username").value = user.username;
+            document.getElementById("password").value = user.password;
+            document.getElementById("crnNumber").value = user.crnNumber;
+            document.getElementById("pin").value = user.pin;
+            document.getElementById("bankName").value = user.bankName;
+        }
+    </script>
+</body>
+
+</html>
