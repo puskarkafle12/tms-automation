@@ -221,11 +221,9 @@ class TmsUser:
                 return {}
 
     async def login_request(self, logindata):
-        encoded_bytes = base64.b64encode(logindata['password'].encode("utf-8"))
-        encoded_password = encoded_bytes.decode("utf-8")
         json_data = {
             'userName': logindata['username'],
-            'password': encoded_password,
+            'password': logindata['password'],
             'jwt': '',
             'otp': '',
             'captchaIdentifier': logindata['captcha_id'],
@@ -240,7 +238,8 @@ class TmsUser:
             ) as response:
                 simple_cookie = SimpleCookie(response.cookies)
                 tokens_dict = {key: morsel.value for key, morsel in simple_cookie.items()}
-                return  await response.json(),tokens_dict
+                response = await response.json(),tokens_dict
+                return response 
 
     async def fetch_securities_details(self):
         url = f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/rtApi/ws/top25securities'
