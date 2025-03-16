@@ -333,25 +333,29 @@ async def stop_check_orders_endpoint():
     check_orders_task.cancel()
     return {"message": "Check orders loop stopped."}
 
-
 @app.delete("/logs/")
-async def clear_logs(client_ids: List[str] = Query(...), db: Session = Depends(get_db)):
+async def clear_logs(client_ids:str = Query(...), db: Session = Depends(get_db)):
+    if not client_ids:
+        raise HTTPException(status_code=400, detail="Client IDs cannot be empty.")
+    client_ids=client_ids.split(',')
     try:
-        # Deleting logs for the specified client IDs
-        deleted_count = db.query(OrderLog).filter(
-            OrderLog.client_id.in_(client_ids)).delete(synchronize_session=False)
+        # Check if logs exist before deleting
+        existing_logs = db.query(OrderLog).filter(OrderLog.client_id.in_(client_ids)).count()
+        if existing_logs == 0:
+            raise HTTPException(status_code=404, detail="No logs found for the specified client IDs.")
+
+        # Proceed with deletion
+        deleted_count = db.query(OrderLog).filter(OrderLog.client_id.in_(client_ids)).delete(synchronize_session=False)
         db.commit()
 
-        if deleted_count == 0:
-            raise HTTPException(
-                status_code=404, detail="No logs found for the specified client IDs.")
-
-        return {"message": f"Logs cleared successfully for {deleted_count} specified client IDs"}
+        return {"message": f"Logs cleared successfully for {deleted_count} client IDs."}
+    
     except Exception as e:
         db.rollback()  # Rollback in case of error
-        raise HTTPException(
-            status_code=500, detail="Failed to clear logs: " + str(e))
-
+        raise HTTPException(status_code=500, detail=f"Failed to clear logs: {str(e)}")
+    
+    finally:
+        db.close()
 
 @app.get("/logs/")
 async def get_order_logs(client_ids: List[str] = Query(...), db: Session = Depends(get_db)):
