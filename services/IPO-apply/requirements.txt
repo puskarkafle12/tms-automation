@@ -1,7 +1,0 @@
-fuzzywuzzy==0.18.0
-python-Levenshtein==0.12.2
-requests==2.26.0
-Flask==2.3.3
-uvicorn>=0.15.0,<0.16.0
-fastapi==0.102.0
-python-multipart==0.0.6

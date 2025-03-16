@@ -64,7 +64,6 @@ def get_stock_details():
                 row_data['link'] = row.find('a').get('href')
                 table_data.append(row_data)
 
-        # Use ThreadPoolExecutor to fetch stock details concurrently
         with ThreadPoolExecutor(max_workers=10) as executor:
             futures = [executor.submit(fetch_stock_details, row_data)
                        for row_data in table_data]
@@ -72,7 +71,6 @@ def get_stock_details():
             for future in futures:
                 stock_details.append(future.result())
 
-        # Convert the list of dictionaries to a Pandas DataFrame
         numeric_columns = ['LTP', '% Change', 'Open', 'High', 'Low', 'Qty.', 'Shares Outstanding', 'Market Price', '180 Day Average',
                        '120 Day Average', '1 Year Yield',
                        'EPS', 'P/E Ratio', 'Book Value', 'PBV', '% Bonus', 'Right Share',
@@ -84,6 +82,5 @@ def get_stock_details():
 
         return df
 
-# Call the function to fetch stock details
 stock_df=get_stock_details()
 stock_df.to_csv('data/'+"share_data_"+datetime.today().strftime("%Y-%m-%d")+'.csv', index=False)
