@@ -41,7 +41,16 @@ class TmsUser:
             'sec-gpc': '1',
             'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
         }
-
+    def __del__(self):
+        if self.session:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(self.close())
+                else:
+                    asyncio.run(self.close())
+            except Exception as e:
+                print(f"Exception during __del__: {e}")
     async def close(self):
         if self.session:
             await self.session.close()
