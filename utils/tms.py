@@ -1,12 +1,10 @@
 import asyncio
 import base64
+from datetime import time
 from http.cookies import SimpleCookie
 import json
-import time
 from typing import Dict
 import aiohttp
-import requests
-
 from database import get_db
 from exceptions.login_exceptions import LoginFailedException
 from models.logged_in_user import LoggedInUsers
@@ -15,27 +13,6 @@ from utils.tms_captcha_solver.imgto_txt import solve_captcha
 from utils.base_functions import calculate_high_price, get_tokens, log_time, logout_user, save_tokens
 
 class TmsUser:
-    """
-    Here's a concise summary of each function in the `TmsUser` class:
-
-1. `__init__`: Initializes a TmsUser instance with provided credentials and configuration.
-2. `try_token_login`: Attempts login using stored tokens, falls back to cached login if tokens are invalid.
-3. `try_cached_login`: Attempts to login using cached tokens; if unsuccessful, retries with new credentials.
-4. `get_captcha_id`: Fetches the captcha ID required for login.
-5. `get_captcha_image`: Retrieves the captcha image using the captcha ID.
-6. `get_stock_details_async`: Asynchronously fetches stock details, retrying up to three times if necessary.
-7. `get_stock_details`: Synchronously fetches stock details, retrying up to three times if necessary.
-8. `get_header`: Constructs and returns headers for requests using provided tokens.
-9. `get_request_owner`: Retrieves the request owner ID from the server.
-10. `get_security_id`: Fetches security details for a given stock symbol.
-11. `login_request`: Sends a login request with provided credentials and captcha solution.
-12. `get_client_details`: Retrieves client details using cookies, headers, and client dealer ID.
-13. `login`: Attempts to login by solving captcha and sending credentials; retries with new captcha if necessary.
-14. `order`: Places an order with given price and quantity, including extensive client and security details.
-15. `price_scanner`: Continuously scans stock prices, calculates high price, and fetches stock details asynchronously.
-16. `stock_grabber`: Manages stock orders, checking price changes, and placing orders based on certain conditions.
-17. get_order_book
-"""
     def __init__(self, broker_no, username=None, password=None, tokens=None, stock_symbol=None, request_per_sec=2):
         self.final_order_quantity = 100
         self.client_id = username
@@ -64,20 +41,17 @@ class TmsUser:
             'sec-gpc': '1',
             'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
         }
+
     async def close(self):
         if self.session:
             await self.session.close()
 
-    def __del__(self):
-        if self.session:
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    loop.create_task(self.close())
-                else:
-                    asyncio.run(self.close())
-            except Exception as e:
-                print(f"Exception during __del__: {e}")
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        await self.close()
+
     async def try_token_login(self):
         if self.tokens:
             try:
@@ -87,7 +61,7 @@ class TmsUser:
                 self.headers = self.get_header(request_owner, self.tokens)
                 self.client_details = await self.get_client_details(self.tokens, self.headers, self.login_response['client_dealer_id'])
             except Exception as e:
-                db = get_db()
+                db = get_db()  # Assumes get_db is async-compatible
                 user = db.query(User).filter(User.client_id == self.client_id).first()
                 if not user:
                     print()
@@ -111,7 +85,7 @@ class TmsUser:
 
     async def try_cached_login(self):
         try:
-            self.login_response,self.broker_no = get_tokens(self.client_id)
+            self.login_response, self.broker_no = get_tokens(self.client_id)  # Assumes get_tokens is async-compatible
             self.tokens = self.login_response['tokens']
             self.headers = self.get_header(self.login_response['request_owner'], self.tokens)
             self.client_details = await self.get_client_details(self.tokens, self.headers, self.login_response['client_dealer_id'])
@@ -123,7 +97,7 @@ class TmsUser:
             try:
                 self.login_response = await self.login()
                 self.tokens = self.login_response['tokens']
-                save_tokens(self.client_id, self.login_response, self.broker_no)
+                save_tokens(self.client_id, self.login_response, self.broker_no)  # Assumes save_tokens is async-compatible
                 self.headers = self.get_header(self.login_response['request_owner'], self.tokens)
                 self.client_details = await self.get_client_details(self.tokens, self.headers, self.login_response['client_dealer_id'])
                 await self.save_login_info()
@@ -146,18 +120,17 @@ class TmsUser:
         for attempt in range(3):  # Retry up to 3 times
             try:
                 url = f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/rtApi/ws/stockQuote/{id}'
-                async with session.get(url, headers=headers, cookies=token, timeout=5) as responsee:
-                    responsee.raise_for_status()
-                    response = await responsee.json()
-                    return response['payload']['data'][0]
+                async with session.get(url, headers=headers, cookies=token, timeout=5) as response:
+                    response.raise_for_status()
+                    response_data = await response.json()
+                    return response_data['payload']['data'][0]
             except aiohttp.ClientError as e:
                 print(f"Attempt {attempt + 1} failed: {e}")
                 await asyncio.sleep(2 ** attempt)  # Exponential backoff
             except KeyError as e:
                 print(f"KeyError: {e}")
-                if response.get('message') == 'ACCESS_TOKEN_EXPIRED':
-                    return response
-
+                if response_data.get('message') == 'ACCESS_TOKEN_EXPIRED':
+                    return response_data
         print("Max retries reached, unable to fetch data.")
         return None
 
@@ -176,6 +149,8 @@ class TmsUser:
                 print(f"KeyError: {e}")
                 if data.get('message') == 'ACCESS_TOKEN_EXPIRED':
                     return data
+        return None
+
     def get_header(self, request_owner, token):
         header = {
             'authority': f'tms{self.broker_no}.nepsetms.com.np',
@@ -214,7 +189,7 @@ class TmsUser:
             ) as response:
                 stocks = await response.json()
                 if response.status == 401:
-                    logout_user(self.client_id, "access token expired")
+                    logout_user(self.client_id, "access token expired")  # Assumes logout_user is async-compatible
                 for stock in stocks:
                     if stock['symbol'] == symbol:
                         return stock
@@ -229,7 +204,6 @@ class TmsUser:
             'captchaIdentifier': logindata['captcha_id'],
             'userCaptcha': logindata['captcha'],
         }
-
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/authApi/authenticate',
@@ -238,8 +212,8 @@ class TmsUser:
             ) as response:
                 simple_cookie = SimpleCookie(response.cookies)
                 tokens_dict = {key: morsel.value for key, morsel in simple_cookie.items()}
-                response = await response.json(),tokens_dict
-                return response 
+                response_data = await response.json()
+                return response_data, tokens_dict
 
     async def fetch_securities_details(self):
         url = f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/rtApi/ws/top25securities'
@@ -264,7 +238,7 @@ class TmsUser:
 
     async def save_login_info(self):
         try:
-            db = get_db()
+            db = get_db()  # Assumes get_db is async-compatible
             user = db.query(User).filter(User.client_id == self.client_id, User.broker_no == self.broker_no).first()
             if user:
                 user.auto_login = True
@@ -275,19 +249,17 @@ class TmsUser:
                 new_user = User(client_id=self.client_id, password=self.password, broker_no=self.broker_no, auto_login=True)
                 db.add(new_user)
                 db.commit()
-        except:
-            print("cannot save the login info to db")
+        except Exception as e:
+            print(f"Cannot save the login info to db: {e}")
 
     async def login(self):
         async def get_captcha_data():
             captcha_id = await self.get_captcha_id(self.headers)
             binary_captcha_image = await self.get_captcha_image(self.headers, captcha_id)
-            captcha = solve_captcha(binary_captcha_image)
+            captcha = await solve_captcha(binary_captcha_image)  # Assumes solve_captcha is async-compatible
             return captcha_id, captcha
 
         login_data = {}
-        
-        # Initial captcha retrieval and login attempt
         login_data["captcha_id"], login_data["captcha"] = await get_captcha_data()
         login_data["username"] = self.client_id
         login_data["password"] = self.password
@@ -300,7 +272,7 @@ class TmsUser:
                 response_json, tokens_dict = await self.login_request(login_data)
 
                 if 'Credentials Not Found' in response_json.get('message', ''):
-                    print('Login failed: invalid username or password', self.client_id)
+                    print(f'Login failed: invalid username or password {self.client_id}')
                     break
                 
                 if response_json.get('status') == '202':
@@ -315,7 +287,6 @@ class TmsUser:
         return self._create_response(response_json, tokens_dict)
 
     def _create_response(self, response_json, tokens_dict):
-        """Helper method to create a response dictionary."""
         return {
             "client_dealer_id": response_json['data']['clientDealerMember']['client']['id'],
             "login_response": response_json['data'],
@@ -326,7 +297,6 @@ class TmsUser:
 
     async def get_order_book(self):
         url = f"https://tms{self.broker_no}.nepsetms.com.np/tmsapi/orderTradeApi/orderbook-v2/client/{self.client_details['id']}?&activeStatus=OPEN&activeStatus=PARTIALLY_TRADED&activeStatus=MODIFIED&activeStatus=PENDING"
-        
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=self.headers, cookies=self.tokens) as response:
                 if response.status == 200:
@@ -337,14 +307,11 @@ class TmsUser:
     @staticmethod
     def encode_base64(input_string: str) -> str:
         input_bytes = input_string.encode('utf-8')
-        # Encode the bytes in Base64
         base64_encoded_bytes = base64.b64encode(input_bytes)
-        # Convert the Base64 encoded bytes to a UTF-8 string
         return base64_encoded_bytes.decode('utf-8')
 
     async def get_user_stock_details(self):
         url = f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/dp-holding/client/freebalance/{self.client_details["id"]}/CLI'
-        
         async with aiohttp.ClientSession() as session:
             async with session.get(url, cookies=self.tokens, headers=self.headers) as response:
                 if response.status == 200:
@@ -354,7 +321,6 @@ class TmsUser:
 
     async def get_order_history(self):
         url = f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/orderTradeApi/orderbook-v2/client/{self.client_details["id"]}?&activeStatus=COMPLETED&activeStatus=CANCELLED&activeStatus=REJECTED&activeStatus=TMS_REJECTED&activeStatus=PARTIALLY_CANCELLED&activeStatus=MODIFIED_CANCELLED'
-        
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=self.headers, cookies=self.tokens) as response:
                 if response.status == 200:
@@ -368,9 +334,7 @@ class TmsUser:
             'orderPlacedBy': self.client_details['clientDealerType']['id'],
             'exchangeOrderId': exchange_order_id,
         }
-
         url = f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/orderApi/order/cancel/'
-        
         async with aiohttp.ClientSession() as session:
             async with session.post(url, cookies=self.tokens, headers=self.headers, json=json_data) as response:
                 if response.status == 200:
@@ -378,15 +342,14 @@ class TmsUser:
                 else:
                     response.raise_for_status()
 
-    async def order(self, orderPrice, orderQuantity,order_type, security=None):
+    async def order(self, orderPrice, orderQuantity, order_type, security=None):
         if not security:
             security = self.security
         orderPrice = str(orderPrice)
-        # Determine buy or sell based on order_type
         if order_type.lower() == 'buy':
-            buyOrSell = 1  # 1 for buy
+            buyOrSell = 1
         elif order_type.lower() == 'sell':
-            buyOrSell = 2  # 2 for sell
+            buyOrSell = 2
         else:
             raise ValueError("Invalid order_type. Please use 'buy' or 'sell'.")
         json_data = {
@@ -428,7 +391,6 @@ class TmsUser:
                 },
                 'client': {
                     'activeStatus': self.client_details['activeStatus'],
-                    # client id
                     'id': self.client_details['id'],
                     'accountType': self.client_details['accountType'],
                     'allowedToTrade': self.client_details['allowedToTrade'],
@@ -494,7 +456,7 @@ class TmsUser:
                 },
                 'accountType': 1,
                 'cpMemberId': 0,
-                'buyOrSell': buyOrSell,  # Adjusted for buy or sell
+                'buyOrSell': buyOrSell,
             },
             'orderPlacedBy': 2,
             'exchangeOrderId': None,
@@ -509,11 +471,11 @@ class TmsUser:
                 if response.status == 200:
                     return {
                         "status": response.status,
-                        "message": await response.text()  # Use await to read the response text
+                        "message": await response.text()
                     }
                 else:
                     try:
-                        content = await response.json()  # Await JSON response
+                        content = await response.json()
                         return {
                             "status": response.status,
                             "message": content
@@ -521,35 +483,22 @@ class TmsUser:
                     except Exception as e:
                         return {
                             "status": 500,
-                            "message": "exception occurred while loading json: " + str(e) + " " + await response.text()
+                            "message": f"exception occurred while loading json: {str(e)} {await response.text()}"
                         }
-    async def price_scanner(self,id,previous_ltp):
-        """_Returns the stock details along with twoPercentHigh calculated field in dict return by server 
 
-        Args:
-            id (_type_): _description_
-            previous_ltp (_type_): _description_
-            session (_type_): _description_
-            headers (_type_): _description_
-            token (_type_): _description_
-            request_per_sec (_type_): _description_
-
-        Returns:
-            DICT: response received from get_stock_details function and add twoPercentHigh key to dict 
-        """
+    async def price_scanner(self, id, previous_ltp):
         fetch_count = 0
         total_fetch_count = 0
-        start_time = time.time()
+        start_time = asyncio.get_event_loop().time()
         reset_time = 4  # Reset the fetch rate counter every 4 seconds
         fetch_rate = 0
 
         while True:
-            time.sleep(1/self.request_per_sec)
-            elapsed_time = time.time() - start_time
-            fetch_rate = fetch_count / elapsed_time
+            time.sleep(1 / self.request_per_sec)
+            elapsed_time = asyncio.get_event_loop().time() - start_time
+            fetch_rate = fetch_count / elapsed_time if elapsed_time > 0 else 0
             if elapsed_time >= reset_time:
-                # Reset the fetch rate counter every 4 seconds
-                start_time = time.time()
+                start_time = asyncio.get_event_loop().time()
                 fetch_count = 0
 
             try:
@@ -572,52 +521,51 @@ class TmsUser:
             print(response['security']['symbol'])
             print('Fetch per second:', fetch_rate)
             print('Fetched count:', str(total_fetch_count))
-            print('LTP:', ltp,'\n')
+            print('LTP:', ltp, '\n')
 
-            # if percentage_change > 9:
-            #     print('Price already changed; you missed the chance. Try next day.')
-            #     return {'message': 'exit'}
             if previous_ltp < ltp:
                 response['fetchDetails'] = {
                     "fetchRate": fetch_rate,
                     "totalFetchCount": total_fetch_count,
                     "ltp": ltp,
-                    "script":response['security']['symbol']
+                    "script": response['security']['symbol']
                 }
-                
-                two_percent_high = calculate_high_price(ltp,percentage_change)
+                two_percent_high = calculate_high_price(ltp, percentage_change)  # Assumes calculate_high_price is async-compatible
                 print('The high price after calculation is', two_percent_high)
                 response['twoPercentHigh'] = two_percent_high
                 return response
-    def stock_grabber(self, order_quantity,order_limit=0):
-        stock_details={}
-        total_orders=[]
-        self.security=self.get_security_id(self.stock_symbol)
-        previous_ltp=previous_ltp=self.get_stock_details(self.security.get('id')).get('ltp')
-        while stock_details.get('message') !='exit' and order_limit<4:
-            stock_details = asyncio.run(self.price_scanner(self.security['id'], previous_ltp))
-            if stock_details.get('message') == 'exit':
-                return {"message":"exit"}
-            elif stock_details.get('message') == 'ACCESS_TOKEN_EXPIRED':
-                # Handle token expiration or refresh here
-                return {"message":"ACCESS_TOKEN_EXPIRED"}
-            if stock_details['changePercentage']>7.4:
-                order_response = self.order(stock_details['twoPercentHigh'], self.final_order_quantity)
-            else:
-                order_response = self.order(stock_details['twoPercentHigh'], order_quantity)
-            if order_response.get('status') == 200:
-                log_time(stock_details['lastTradedTime'],self.headers,order_response)
-                order_limit+=1
-                total_orders.append(order_response)
-            else :
-                order_response['message']='ordered failed due to '+str(order_response['message'])
-                log_time(stock_details['lastTradedTime'],self.headers,order_response)
-            # this can make slow change this code 
-            previous_ltp=stock_details.get('ltp')
-        if len(total_orders)>0:
-            return {
-                "message":"sucessfully ordered shares",
-                "totalOrders":total_orders
-            }
-            
+
+    async def stock_grabber(self, order_quantity, order_limit=0):
+        stock_details = {}
+        total_orders = []
+        self.security = await self.get_security_id(self.stock_symbol)
+        previous_ltp = (await self.get_stock_details(self.security.get('id'))).get('ltp')
         
+        while stock_details.get('message') != 'exit' and order_limit < 4:
+            stock_details = await self.price_scanner(self.security['id'], previous_ltp)
+            if stock_details.get('message') == 'exit':
+                return {"message": "exit"}
+            elif stock_details.get('message') == 'ACCESS_TOKEN_EXPIRED':
+                return {"message": "ACCESS_TOKEN_EXPIRED"}
+            
+            if stock_details['changePercentage'] > 7.4:
+                order_response = await self.order(stock_details['twoPercentHigh'], self.final_order_quantity, 'buy')
+            else:
+                order_response = await self.order(stock_details['twoPercentHigh'], order_quantity, 'buy')
+            
+            if order_response.get('status') == 200:
+                log_time(stock_details['lastTradedTime'], self.headers, order_response)  # Assumes log_time is async-compatible
+                order_limit += 1
+                total_orders.append(order_response)
+            else:
+                order_response['message'] = f'order failed due to {str(order_response["message"])}'
+                log_time(stock_details['lastTradedTime'], self.headers, order_response)
+            
+            previous_ltp = stock_details.get('ltp')
+        
+        if len(total_orders) > 0:
+            return {
+                "message": "successfully ordered shares",
+                "totalOrders": total_orders
+            }
+        return {"message": "no orders placed"}
