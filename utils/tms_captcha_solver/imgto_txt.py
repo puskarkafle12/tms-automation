@@ -1,22 +1,21 @@
-
 from PIL import Image
 import io
 import easyocr
 import numpy as np
+import asyncio
 
-def get_text_from_image(byte_image):
-    image = Image.open(io.BytesIO(byte_image))
+reader = easyocr.Reader(['en'])  # Initialize once at module level (important for performance!)
 
-    image_np = np.array(image)
+async def get_text_from_image(byte_image):
+    def process_image():
+        image = Image.open(io.BytesIO(byte_image))
+        image_np = np.array(image)
+        text = reader.readtext(image_np)[0][1]
+        return text
 
-    # Initialize the OCR reader
-    reader = easyocr.Reader(['en'])
-
-    # Perform OCR on the image to extract text
-    text = reader.readtext(image_np)[0][1]
-    # Extract the recognized text
+    text = await asyncio.to_thread(process_image)
     return text
 
-def solve_captcha (binary_byte_image):
-    # decoded_image=decode_binary_data_to_utf(binary_byte_image)
-    return get_text_from_image(binary_byte_image)
+async def solve_captcha(binary_byte_image):
+    return await get_text_from_image(binary_byte_image)
+
