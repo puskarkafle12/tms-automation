@@ -3,7 +3,7 @@ import base64
 from datetime import time
 from http.cookies import SimpleCookie
 import json
-from typing import Dict
+from typing import Dict, Optional
 import aiohttp
 from database import get_db
 from exceptions.login_exceptions import LoginFailedException
@@ -14,7 +14,7 @@ from utils.base_functions import calculate_high_price, get_tokens, log_time, log
 
 class TmsUser:
     def __init__(self, broker_no, username=None, password=None, tokens=None, stock_symbol=None, request_per_sec=2):
-        self.final_order_quantity = 100
+        self.final_order_quantity = 20
         self.client_id = username
         self.password = password
         self.tokens = tokens
@@ -22,9 +22,16 @@ class TmsUser:
         self.session = aiohttp.ClientSession()
         self.security = None
         self.stock_symbol = stock_symbol
-        self.request_per_sec = request_per_sec
+        self.request_per_sec = max(request_per_sec, 3.0)  # Start at minimum 3.0
+        self.max_request_per_sec = 5.0  # Maximum fetch rate
+        self.min_request_per_sec = 3.0  
+        self.total_requests = 0  #
         self.broker_no = broker_no
         self.client_details = None
+        self.success_count = 0  # Track successful requests
+        self.stable_rate = None  # Fixed rate once determined
+        self.stable_cycles = 0  # Count cycles with high success rate
+        self.trial_requests = 0  # Count requests during trial period
         self.headers = {
             'authority': f'tms{broker_no}.nepsetms.com.np',
             'accept': 'application/json, text/plain, */*',
@@ -124,41 +131,6 @@ class TmsUser:
     async def get_captcha_image(self, headers, captcha_id):
         async with self.session.get(f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/authApi/captcha/image/{captcha_id}', headers=headers) as response:
             return await response.read()
-
-    async def get_stock_details_async(self, session, headers, token, id):
-        for attempt in range(3):  # Retry up to 3 times
-            try:
-                url = f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/rtApi/ws/stockQuote/{id}'
-                async with session.get(url, headers=headers, cookies=token, timeout=5) as response:
-                    response.raise_for_status()
-                    response_data = await response.json()
-                    return response_data['payload']['data'][0]
-            except aiohttp.ClientError as e:
-                print(f"Attempt {attempt + 1} failed: {e}")
-                await asyncio.sleep(2 ** attempt)  # Exponential backoff
-            except KeyError as e:
-                print(f"KeyError: {e}")
-                if response_data.get('message') == 'ACCESS_TOKEN_EXPIRED':
-                    return response_data
-        print("Max retries reached, unable to fetch data.")
-        return None
-
-    async def get_stock_details(self, id):
-        for attempt in range(3):  # Retry up to 3 times
-            try:
-                url = f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/rtApi/ws/stockQuote/{id}'
-                async with self.session.get(url, headers=self.headers, cookies=self.tokens, timeout=5) as response:
-                    response.raise_for_status()
-                    data = await response.json()
-                    return data['payload']['data'][0]
-            except aiohttp.ClientError as e:
-                print(f"Attempt {attempt + 1} failed: {e}")
-                await asyncio.sleep(2 ** attempt)  # Exponential backoff
-            except KeyError as e:
-                print(f"KeyError: {e}")
-                if data.get('message') == 'ACCESS_TOKEN_EXPIRED':
-                    return data
-        return None
 
     def get_header(self, request_owner, token):
         header = {
@@ -495,15 +467,33 @@ class TmsUser:
                             "message": f"exception occurred while loading json: {str(e)} {await response.text()}"
                         }
 
-    async def price_scanner(self, id, previous_ltp):
+    async def get_stock_details_async(self, session: aiohttp.ClientSession, headers: Dict, token: Dict, id: str) -> Optional[Dict]:
+        url = f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/rtApi/ws/stockQuote/{id}'
+        try:
+            async with session.get(url, headers=headers, cookies=token, timeout=10) as response:
+                if response.status == 200:
+                    response_data = await response.json()
+                    return response_data['payload']['data'][0]
+                print(f"HTTP error: {response.status}, url={url}")
+                return None
+        except Exception as e:
+            print(f"Error fetching stock details: {e}, url={url}")
+            return None
+
+    async def price_scanner(self, id: str, previous_ltp: float) -> Dict:
         fetch_count = 0
         total_fetch_count = 0
         start_time = asyncio.get_event_loop().time()
-        reset_time = 4  # Reset the fetch rate counter every 4 seconds
+        reset_time = 4  # Reset fetch rate counter every 4 seconds
         fetch_rate = 0
+        consecutive_failures = 0
+        max_consecutive_failures = 5  # Exit after 5 consecutive failures
+        base_delay = 1.0  # Initial backoff delay (seconds)
+        max_delay = 10.0  # Maximum backoff delay
 
+        self.session = self.session
         while True:
-            time.sleep(1 / self.request_per_sec)
+            await asyncio.sleep(1 / self.request_per_sec)  # Non-blocking sleep
             elapsed_time = asyncio.get_event_loop().time() - start_time
             fetch_rate = fetch_count / elapsed_time if elapsed_time > 0 else 0
             if elapsed_time >= reset_time:
@@ -511,46 +501,99 @@ class TmsUser:
                 fetch_count = 0
 
             try:
-                async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(keepalive_timeout=30)) as session:
-                    response = await self.get_stock_details_async(session, self.headers, self.tokens, id)
+                response = await self.get_stock_details_async(self.session, self.headers, self.tokens, id)
+                self.total_requests += 1
+                self.trial_requests += 1
 
-                if response.get('status'):
-                    if response['status'] == '401':
-                        if response['message'] == 'ACCESS_TOKEN_EXPIRED':
-                            return response
-                        continue
+                if response is None:
+                    consecutive_failures += 1
+                    if consecutive_failures >= max_consecutive_failures:
+                        print("Max consecutive failures reached, exiting price_scanner")
+                        return {"message": "exit", "error": "Too many failed requests"}
+                    if self.stable_rate is None:  # Adjust only during trial
+                        self.request_per_sec = max(self.min_request_per_sec, self.request_per_sec - 1.0)
+                        print(f"Fetch rate decreased to {self.request_per_sec} due to failure")
+                    delay = min(0.2, max_delay)
+                    print(f"Request failed, backing off for {delay} seconds")
+                    await asyncio.sleep(delay)
+                    continue
+
+                if response.get('status') == '401' and response.get('message') == 'ACCESS_TOKEN_EXPIRED':
+                    print("Access token expired")
+                    return response
+
+                # Success: reset failure counter
+                self.success_count += 1
+                consecutive_failures = 0
                 fetch_count += 1
                 total_fetch_count += 1
+
+                ltp = float(response['ltp'])
+                percentage_change = float(response['changePercentage'])
+                print(f"Symbol: {response['security']['symbol']}")
+                print(f"Fetch per second: {fetch_rate}")
+                print(f"Fetched count: {total_fetch_count}")
+                print(f"LTP: {ltp}")
+
+                # Adjust fetch rate every 10 requests during trial period
+                if self.stable_rate is None and self.total_requests >= 10:
+                    success_rate = self.success_count / self.total_requests
+                    if success_rate >= 0.8:  # High success rate
+                        self.request_per_sec = min(self.max_request_per_sec, self.request_per_sec + 0.2)
+                        print(f"Fetch rate increased to {self.request_per_sec} due to high success rate")
+                        self.stable_cycles += 1
+                    else:  # Low success rate
+                        self.request_per_sec = max(self.min_request_per_sec, self.request_per_sec - 0.2)
+                        print(f"Fetch rate decreased to {self.request_per_sec} due to low success rate")
+                        self.stable_cycles = 0
+                    self.success_count = 0
+                    self.total_requests = 0
+
+                    # Check for stability: 3 consecutive cycles with high success
+                    if self.stable_cycles >= 20:
+                        self.stable_rate = self.request_per_sec
+                        print(f"Stable fetch rate fixed at {self.stable_rate}")
+
+                # Fix rate after 50 requests if not already fixed
+                if self.stable_rate is None and self.trial_requests >= 50:
+                    self.stable_rate = max(self.min_request_per_sec, self.request_per_sec)
+                    print(f"Trial period ended, fixing fetch rate at {self.stable_rate}")
+
+                if previous_ltp < ltp:
+                    response['fetchDetails'] = {
+                        "fetchRate": fetch_rate,
+                        "totalFetchCount": total_fetch_count,
+                        "ltp": ltp,
+                        "script": response['security']['symbol']
+                    }
+                    two_percent_high = await asyncio.to_thread(calculate_high_price, ltp, percentage_change)
+                    print(f"The high price after calculation is {two_percent_high}")
+                    response['twoPercentHigh'] = two_percent_high
+                    return response
+
             except Exception as e:
-                print(f"Error fetching stock details: {e}")
-                continue
+                print(f"Error in price_scanner: {e}")
+                consecutive_failures += 1
+                if consecutive_failures >= max_consecutive_failures:
+                    print("Max consecutive failures reached, exiting price_scanner")
+                    return {"message": "exit", "error": "Too many failed requests"}
+                if self.stable_rate is None:  # Adjust only during trial
+                    self.request_per_sec = max(self.min_request_per_sec, self.request_per_sec - 0.2)
+                    print(f"Fetch rate decreased to {self.request_per_sec} due to error")
+                delay = min(base_delay * (2 ** consecutive_failures), max_delay)
+                print(f"Request failed, backing off for {delay} seconds")
+                await asyncio.sleep(delay)
 
-            ltp = float(response['ltp'])
-            percentage_change = float(response['changePercentage'])
-            print(response['security']['symbol'])
-            print('Fetch per second:', fetch_rate)
-            print('Fetched count:', str(total_fetch_count))
-            print('LTP:', ltp, '\n')
-
-            if previous_ltp < ltp:
-                response['fetchDetails'] = {
-                    "fetchRate": fetch_rate,
-                    "totalFetchCount": total_fetch_count,
-                    "ltp": ltp,
-                    "script": response['security']['symbol']
-                }
-                two_percent_high = calculate_high_price(ltp, percentage_change)  # Assumes calculate_high_price is async-compatible
-                print('The high price after calculation is', two_percent_high)
-                response['twoPercentHigh'] = two_percent_high
-                return response
-
-    async def stock_grabber(self, order_quantity, order_limit=0):
+    async def stock_grabber(self, order_quantity, max_order_limit=4):
         stock_details = {}
         total_orders = []
+        order_limit=0
         self.security = await self.get_security_id(self.stock_symbol)
-        previous_ltp = (await self.get_stock_details(self.security.get('id'))).get('ltp')
-        
-        while stock_details.get('message') != 'exit' and order_limit < 4:
+        # previous_ltp = (await self.get_stock_details_async(self.security.get('id'))).get('ltp')
+        previous_ltp = await self.get_stock_details_async(self.session, self.headers, self.tokens,self.security.get('id'))
+        previous_ltp=previous_ltp.get('ltp')
+
+        while stock_details.get('message') != 'exit' and order_limit < max_order_limit:
             stock_details = await self.price_scanner(self.security['id'], previous_ltp)
             if stock_details.get('message') == 'exit':
                 return {"message": "exit"}

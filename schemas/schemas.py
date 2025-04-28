@@ -1,7 +1,7 @@
 # schemas.py
 
 from pydantic import BaseModel
-from typing import Dict
+from typing import Dict, Optional
 class OrderCreateRequest(BaseModel):
     client_id: str
     security_details: Dict={}
@@ -22,3 +22,9 @@ class LoginRequest(BaseModel):
 class UserLogin(BaseModel):
     username: str
     password: str
+class StockGrabberRequest(BaseModel):
+    client_id: str
+    stock_symbol: str
+    order_quantity: int
+    max_order_limit: Optional[int] = 0
+    request_per_sec: Optional[float] = 2.0

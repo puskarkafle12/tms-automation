@@ -15,7 +15,7 @@ from models.order_log import OrderLog
 from models.scheduled_order import ScheduledOrder
 from models.order_status_log import OrderStatusLog
 from models.user import User
-from schemas.schemas import LoginRequest, OrderCreateRequest, UserLogin
+from schemas.schemas import LoginRequest, OrderCreateRequest, StockGrabberRequest, UserLogin
 from utils.base_functions import is_within_time_range, truncate_to_one_decimal_place
 from utils.monitor_order import monitor_order_task_func
 from utils.tms import TmsUser
@@ -418,6 +418,46 @@ async def frontend_login(user_login: UserLogin, db: Session = Depends(get_db)):
 #     return {"message": "Order loop stopped"}
 
 
+@app.post("/stock_grabber/")
+async def stock_grabber(
+    request: StockGrabberRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Execute the stock_grabber functionality for a given client and stock symbol.
+    """
+    # Fetch user from database
+    user =db.query(User).filter(User.client_id == request.client_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Initialize TmsUser instance
+    tms_user = TmsUser(
+        broker_no=user.broker_no,
+        username=user.client_id,
+        password=user.password,
+        stock_symbol=request.stock_symbol,
+        request_per_sec=request.request_per_sec
+    )
+
+    try:
+        # Attempt to log in
+        await tms_user.try_cached_login()
+
+        # Execute stock_grabber
+        response = await tms_user.stock_grabber(
+            order_quantity=request.order_quantity,
+            max_order_limit=request.max_order_limit
+        )
+
+        return response
+
+    except Exception as e:
+        if "ACCESS_TOKEN_EXPIRED" in str(e):
+            raise HTTPException(status_code=401, detail="Access token expired")
+        raise HTTPException(status_code=500, detail=f"Error executing stock grabber: {str(e)}")
+    finally:
+        await tms_user.close()
 @app.get("/{path:path}")
 async def catch_all(path: str):
     raise HTTPException(status_code=404, detail="Route not found")
