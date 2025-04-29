@@ -1,4 +1,6 @@
 import logging
+import uuid
+import aiohttp
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import sys
@@ -29,6 +31,55 @@ from utils.tms_user_loader import load_tms_users_instances
 import config.tms_config as tms_config
 app = FastAPI(debug=True)
 SECRET_KEY = "your_secret_key_here"
+
+# Store running tasks and updates
+running_tasks: Dict[str, asyncio.Task] = {}
+stock_grabber_updates: Dict[str, List[Dict]] = {}
+
+@app.post("/stock_grabber/")
+async def stock_grabber(request: StockGrabberRequest, db: Session = Depends(get_db)):
+    session_id = str(uuid.uuid4())
+    stock_grabber_updates[session_id] = []
+    user = db.query(User).filter(User.client_id == request.client_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Instantiate TmsUser with user credentials
+    tms_user = TmsUser(
+        broker_no=user.broker_no,
+        username=user.client_id,
+        password=user.password,
+        stock_symbol=request.stock_symbol,
+        request_per_sec=request.request_per_sec
+    )
+    await tms_user.try_cached_login()
+    async with aiohttp.ClientSession() as session:
+        tms_user.session = session
+        task = asyncio.create_task(
+            tms_user.stock_grabber(
+                order_quantity=request.order_quantity,
+                session_id=session_id,
+            )
+        )
+        running_tasks[session_id] = task
+        task.add_done_callback(lambda t: stock_grabber_updates[session_id].append({"status": "completed", "message": "Task completed"}))
+    return {"session_id": session_id, "message": "Stock grabber started"}
+
+@app.post("/stop_stock_grabber/{session_id}")
+async def stop_stock_grabber(session_id: str):
+    task = running_tasks.get(session_id)
+    if task:
+        task.cancel()
+        del running_tasks[session_id]
+        stock_grabber_updates[session_id].append({"status": "stopped", "message": "Stock grabber stopped"})
+        return {"message": f"Stock grabber {session_id} stopped"}
+    raise HTTPException(status_code=404, detail="Stock grabber not found")
+
+@app.get("/get_stock_grabber_updates/{session_id}")
+async def get_stock_grabber_updates(session_id: str):
+    updates = stock_grabber_updates.get(session_id, [])
+    stock_grabber_updates[session_id] = []
+    return {"updates": updates}
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
