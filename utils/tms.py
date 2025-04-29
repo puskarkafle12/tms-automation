@@ -470,11 +470,11 @@ class TmsUser:
                             "message": f"exception occurred while loading json: {str(e)} {await response.text()}"
                         }
 
-    async def get_stock_details_async(self, headers: Dict, token: Dict, id: str) -> Optional[Dict]:
+    async def get_stock_details_async(self, id: str) -> Optional[Dict]:
         url = f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/rtApi/ws/stockQuote/{id}'
         try:
             async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(keepalive_timeout=30)) as session:
-                async with session.get(url, headers=headers, cookies=token, timeout=10) as response:
+                async with session.get(url, headers=self.headers, cookies=self.tokens, timeout=10) as response:
                     if response.status == 200:
                         response_data = await response.json()
                         return response_data['payload']['data'][0]
@@ -506,7 +506,7 @@ class TmsUser:
                         start_time = asyncio.get_event_loop().time()
                         fetch_count = 0
 
-                    response = await self.get_stock_details_async(self.headers, self.tokens, id)
+                    response = await self.get_stock_details_async(id)
                     self.total_requests += 1
                     self.trial_requests += 1
 
@@ -611,7 +611,7 @@ class TmsUser:
         if max_order_limit == 0:
             max_order_limit = 4
         self.security = await self.get_security_id(self.stock_symbol)
-        previous_ltp_response = await self.get_stock_details_async(self.headers, self.tokens, self.security.get('id'))
+        previous_ltp_response = await self.get_stock_details_async(self.security.get('id'))
         previous_ltp = previous_ltp_response.get('ltp') if previous_ltp_response else 0.0
 
         while stock_details.get('message') != 'exit' and order_limit < max_order_limit:

@@ -49,7 +49,7 @@ async def monitor_order_task_func(db: Session):
 
                     if order.client_id in tms_users_instances:
                         security_details = await tms_users_instances[order.client_id].get_security_id(order.script_name)
-                        current_price = await tms_users_instances[order.client_id].get_stock_details(security_details['id'])
+                        current_price = await tms_users_instances[order.client_id].get_stock_details_async(security_details['id'])
                         current_price = current_price.get('ltp')
                         log_entry=await store_or_update_logs(db, order.client_id, order.script_name, count_dict[key], current_price, False)
                         if log_entry.scanning_count>count_dict[key]:
