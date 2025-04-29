@@ -6,12 +6,25 @@ import Login from './Login';
 import './Dashboard.css';
 import DPHoldings from './DpHolding';
 import StockTable from './StockTable';
-import { act } from 'react-dom/test-utils';
+import StockGrabber from './StockGrabber';
 
-const Home: React.FC = () => {
-  const [activeComponent, setActiveComponent] =  useState<string>('OrderStatus');
+interface StockGrabberInstance {
+  id: string;
+  client_id: string;
+  stock_symbol: string;
+}
+
+interface DashboardProps {
+  activeComponent?: string;
+}
+
+const DashBoardPage: React.FC<DashboardProps> = ({ activeComponent: initialComponent }) => {
+  const [activeComponent, setActiveComponent] = useState<string>(initialComponent || 'OrderStatus');
+  const [stockGrabbers, setStockGrabbers] = useState<StockGrabberInstance[]>([]);
+  const [newClientId, setNewClientId] = useState<string>('PK479690');
+  const [newStockSymbol, setNewStockSymbol] = useState<string>('CREST');
+
   const handleButtonClick = (componentName: string) => {
-    // Set the active component to the clicked component, or do nothing if it's already active
     if (activeComponent !== componentName) {
       setActiveComponent(componentName);
     }
@@ -29,12 +42,25 @@ const Home: React.FC = () => {
     } catch (error) {
       console.error('Error fetching logged-in clients:', error);
     }
-    console.log("Logged in clients fetched");
+    console.log('Logged in clients fetched');
   }, []);
 
   useEffect(() => {
     fetchLoggedInClients();
   }, [fetchLoggedInClients]);
+
+  const addStockGrabber = () => {
+    const id = `${newClientId}-${newStockSymbol}-${Date.now()}`;
+    setStockGrabbers((prev) => [
+      ...prev,
+      { id, client_id: newClientId, stock_symbol: newStockSymbol }
+    ]);
+    setActiveComponent('StockGrabber');
+  };
+
+  const removeStockGrabber = (id: string) => {
+    setStockGrabbers((prev) => prev.filter((sg) => sg.id !== id));
+  };
 
   return (
     <div className="container">
@@ -46,7 +72,47 @@ const Home: React.FC = () => {
         <button onClick={() => handleButtonClick('CheckOrders')}>Check Order Logs</button>
         <button onClick={() => handleButtonClick('DPHoldings')}>DP Holdings</button>
         <button onClick={() => handleButtonClick('StockTable')}>Stock Table</button>
+        <button onClick={() => handleButtonClick('StockGrabber')}>Stock Grabber</button>
       </div>
+
+      {activeComponent === 'StockGrabber' && (
+        <div className="mb-4">
+          <h2 className="text-xl font-semibold mb-2">Add Stock Grabber</h2>
+          <div className="flex space-x-4 mb-4">
+            <input
+              type="text"
+              placeholder="Client ID"
+              value={newClientId}
+              onChange={(e) => setNewClientId(e.target.value)}
+              className="border border-gray-300 rounded-md p-2"
+            />
+            <input
+              type="text"
+              placeholder="Stock Symbol"
+              value={newStockSymbol}
+              onChange={(e) => setNewStockSymbol(e.target.value)}
+              className="border border-gray-300 rounded-md p-2"
+            />
+            <button
+              onClick={addStockGrabber}
+              className="bg-green-600 text-white py-2 px-4 rounded-md hover:bg-green-700"
+            >
+              Add
+            </button>
+          </div>
+          <div className="space-y-4">
+            {stockGrabbers.map((sg) => (
+              <StockGrabber
+                key={sg.id}
+                instanceId={sg.id}
+                client_id={sg.client_id}
+                stock_symbol={sg.stock_symbol}
+                onRemove={() => removeStockGrabber(sg.id)}
+              />
+            ))}
+          </div>
+        </div>
+      )}
 
       {activeComponent === 'Login' && <Login />}
       {activeComponent === 'ScheduleOrder' && <ScheduleOrder />}
@@ -58,4 +124,4 @@ const Home: React.FC = () => {
   );
 };
 
-export default Home;
+export default DashBoardPage;
