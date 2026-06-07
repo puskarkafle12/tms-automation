@@ -10,7 +10,7 @@ sys.path.insert(0, str(ROOT))
 
 from database import Base, engine, SessionLocal
 from models.frontend_user import FrontendUser
-from models import frontend_user, logged_in_user, order_log, order_status_log, scheduled_order, user  # noqa: F401
+from models import frontend_user, logged_in_user, order_log, order_status_log, scheduled_order, tms_password_backup, user  # noqa: F401
 
 
 def main() -> None:
