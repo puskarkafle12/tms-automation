@@ -7,7 +7,7 @@ from time import sleep
 import math
 import os
 
-from database import  get_db
+from database import get_db_session
 from models.logged_in_user import LoggedInUsers
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -27,15 +27,17 @@ def get_function_time(func):
 def truncate_to_one_decimal_place(number):
     return round(number, 1)
 def logout_user(client_id: str,message):
-    db=get_db()
-    user = db.query(LoggedInUsers).filter(LoggedInUsers.client_id == client_id).first()
-    if user:
-        user.status = "logged_out"
-        user.message = message
-        db.commit()
-        return True
-    else:
+    db = get_db_session()
+    try:
+        user = db.query(LoggedInUsers).filter(LoggedInUsers.client_id == client_id).first()
+        if user:
+            user.status = "logged_out"
+            user.message = message
+            db.commit()
+            return True
         return False
+    finally:
+        db.close()
 
 def calculate_high_price(ltp, change_in_percentage):
     if change_in_percentage > 7.843:
@@ -99,8 +101,8 @@ def is_within_time_range(start_time, end_time, current_time):
     return (start_time.hour, start_time.minute, start_time.second) <= (current_time.hour, current_time.minute, current_time.second) <= (end_time.hour, end_time.minute, end_time.second)
 
 def save_tokens(client_id, tokens,broker_no):
+    db = get_db_session()
     try:
-        db=get_db()
         user = db.query(LoggedInUsers).filter_by(client_id=client_id).first()
         if user:
             user.tokens = tokens
@@ -114,19 +116,22 @@ def save_tokens(client_id, tokens,broker_no):
         print(f"Failed to save tokens: {e}")
         db.rollback()
         return False
+    finally:
+        db.close()
 
 # Function to get tokens for a user
 def get_tokens(client_id):
+    db = get_db_session()
     try:
-        db=get_db()
         user = db.query(LoggedInUsers).filter_by(client_id=client_id).first()
         if user:
             return user.tokens,user.broker_no
-        else:
-            return None
+        return None
     except SQLAlchemyError as e:
         print(f"Failed to get tokens: {e}")
         return None
+    finally:
+        db.close()
 # def get_token(username):
 #     with open('tokens.json', 'r') as file:
 #         data = json.load(file)

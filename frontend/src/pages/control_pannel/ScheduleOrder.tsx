@@ -18,26 +18,12 @@ const ScheduleOrder: React.FC = () => {
   const dropdownRef = useRef<HTMLDataListElement>(null);
 
   useEffect(() => {
-    // Fetch logged-in client IDs from the API
-    const fetchLoggedInClientIDs = async () => {
-      try {
-        const response = await fetch(apiUrl + '/logged_in_clients/');
-        if (response.ok) {
-          const data = await response.json();
-          setLoggedInClientIDs(data.logged_in_client_ids);
-          setClientID(data.logged_in_client_ids[0]); // Set default client ID to the first one
-        } else {
-          console.error('Failed to fetch logged-in client IDs');
-        }
-      } catch (error) {
-        console.error('Error fetching logged-in client IDs:', error);
+    const fetchStockDetails = async (clientId: string) => {
+      if (!clientId) {
+        return;
       }
-    };
-
-    // Fetch stock details from the API
-    const fetchStockDetails = async () => {
       try {
-        const response = await fetch(apiUrl+'/get_script_details?client_id=PK479690');
+        const response = await fetch(`${apiUrl}/get_script_details?client_id=${encodeURIComponent(clientId)}`);
         if (response.ok) {
           const data = await response.json();
           setStockDetails(data.payload.data);
@@ -49,8 +35,24 @@ const ScheduleOrder: React.FC = () => {
       }
     };
 
-    fetchLoggedInClientIDs();
-    fetchStockDetails();
+    const loadInitialData = async () => {
+      try {
+        const response = await fetch(apiUrl + '/logged_in_clients/');
+        if (response.ok) {
+          const data = await response.json();
+          setLoggedInClientIDs(data.logged_in_client_ids);
+          const defaultClientId = data.logged_in_client_ids[0] || '';
+          setClientID(defaultClientId);
+          await fetchStockDetails(defaultClientId);
+        } else {
+          console.error('Failed to fetch logged-in client IDs');
+        }
+      } catch (error) {
+        console.error('Error fetching logged-in client IDs:', error);
+      }
+    };
+
+    loadInitialData();
   }, []); // Empty dependency array ensures this runs only once when the component mounts
 
   const handleScriptNameChange = (e: React.ChangeEvent<HTMLInputElement>) => {

@@ -3,6 +3,7 @@ import { authService } from '../services/authService';
 import './LoginPage.css'; // Assuming your CSS file is named LoginPage.css
 import { useNavigate } from 'react-router-dom'; // For navigation
 import ErrorMessage from '../components/ErrorMessage';
+import { extractApiErrorMessage } from '../utils/apiError';
 import Settings from './Settings'; // Import the Settings component
 import useHotkeys from '@reecelucas/react-use-hotkeys';
 
@@ -27,7 +28,7 @@ const LoginPage: React.FC = () => {
       // Handle successful login (e.g., redirect to protected content)
     } catch (error) {
       console.error('Login error (in component):', error);
-      setError(`Login error: ${error}`); // Set error message in state
+      setError(extractApiErrorMessage(error));
     }
   };
 

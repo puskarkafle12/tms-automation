@@ -21,7 +21,7 @@ interface DashboardProps {
 const DashBoardPage: React.FC<DashboardProps> = ({ activeComponent: initialComponent }) => {
   const [activeComponent, setActiveComponent] = useState<string>(initialComponent || 'OrderStatus');
   const [stockGrabbers, setStockGrabbers] = useState<StockGrabberInstance[]>([]);
-  const [newClientId, setNewClientId] = useState<string>('PK479690');
+  const [newClientId, setNewClientId] = useState<string>('');
   const [newStockSymbol, setNewStockSymbol] = useState<string>('CREST');
 
   const handleButtonClick = (componentName: string) => {

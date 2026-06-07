@@ -2,7 +2,7 @@ import sys
 from typing import Dict
 
 from fastapi import Depends
-from database import get_db
+from database import get_db_session
 from models.logged_in_user import LoggedInUsers
 from utils.base_functions import load_users
 from utils.tms import TmsUser
@@ -13,8 +13,11 @@ from sqlalchemy.orm import Session
 # Create an instance of Tms
 
 async def load_tms_users_instances(client_ids,tms_instances:Dict):
-    db = get_db()
-    tms_users = db.query(LoggedInUsers).filter(LoggedInUsers.client_id.in_(client_ids)).all()
+    db = get_db_session()
+    try:
+        tms_users = db.query(LoggedInUsers).filter(LoggedInUsers.client_id.in_(client_ids)).all()
+    finally:
+        db.close()
     for tms_user in tms_users:
         if tms_user.client_id not in tms_instances.keys():
             tms_user_instance = TmsUser(

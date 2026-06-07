@@ -74,7 +74,9 @@ def create_user():
         VALUES (%s, %s)
         ON CONFLICT (username) DO NOTHING;
         '''
-        cursor.execute(insert_user_query, ("puskar", "puskar"))
+        seed_user = os.getenv("FRONTEND_SEED_USER", "admin")
+        seed_password = os.getenv("FRONTEND_SEED_PASSWORD", "changeme")
+        cursor.execute(insert_user_query, (seed_user, seed_password))
         connection.commit()
         print("User inserted successfully.")
 

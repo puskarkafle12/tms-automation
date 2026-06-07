@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import axios from 'axios';
-import CommonTable from '../../components/Table/Table';
+import CommonTable from '../../components/table/Table';
 
 interface StockData {
   symbol: string;

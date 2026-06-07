@@ -113,7 +113,7 @@ async def read_root():
 
 @app.post("/login/")
 async def login(login_request: LoginRequest, db: Session = Depends(get_db)):
-    enc_password = TmsUser.encode_base64(login_request.password)
+    enc_password = TmsUser.to_tms_password_payload(login_request.password)
     tms_instance = TmsUser(
         username=login_request.username,
         password=enc_password,
@@ -124,7 +124,7 @@ async def login(login_request: LoginRequest, db: Session = Depends(get_db)):
     try:
         login_status = await tms_instance.try_cached_login()  # Await the async call
     except LoginFailedException as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=401, detail=e.message)
 
     if login_status.get("status") == "success":
         return {"message": login_status}, 200

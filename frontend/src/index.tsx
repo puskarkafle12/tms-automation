@@ -4,6 +4,10 @@ import './index.css';
 import App from './App';
 import reportWebVitals from './reportWebVitals';
 
+if (!localStorage.getItem('apiUrl')) {
+  localStorage.setItem('apiUrl', 'http://localhost:8000');
+}
+
 const root = ReactDOM.createRoot(
   document.getElementById('root') as HTMLElement
 );

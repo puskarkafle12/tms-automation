@@ -2,6 +2,9 @@ import React, { useState } from 'react';
 import './Login.css';
 import axios from 'axios';
 import ErrorMessage from '../../components/ErrorMessage';
+import { extractApiErrorMessage } from '../../utils/apiError';
+
+const getApiUrl = () => localStorage.getItem('apiUrl') || 'http://localhost:8000';
 
 const Login: React.FC = () => {
   const [brokerNo, setBrokerNo] = useState('');
@@ -13,38 +16,37 @@ const Login: React.FC = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setMessage(''); // Clear any previous success message
-    setErrorMessage(''); // Clear any previous error message
-    let color = 'red';
+    setMessage('');
+    setErrorMessage('');
     try {
-         const apiUrl = localStorage.getItem('apiUrl') ;
-
-      const response = await axios.post(apiUrl+'/login/', {
+      const response = await axios.post(`${getApiUrl()}/login/`, {
         username: clientId,
-        password: password,
+        password,
         broker_no: brokerNo,
-        stock_symbol: '', // Add if necessary
-        request_per_sec: 5 // Adjust as needed
+        stock_symbol: '',
+        request_per_sec: 5,
       });
-      if (response.status === 200) {
-        setColor('lightgreen')
-        setErrorMessage(`Login successful: ${JSON.stringify(response.data[0].message.message)}`);
-      } else {
-        setErrorMessage('Login failed');
-      }
-    } catch (error) {
-      if (axios.isAxiosError(error)) {
-        setErrorMessage(`Error: ${error.response?.data.detail}`);
-      } else {
-        setErrorMessage('An unexpected error occurred');
 
+      const payload = response.data?.message || {};
+      const loginMessage = payload.message || 'TMS login successful';
+      const expiryNote = payload.password_expiry ? ` Expiry: ${payload.password_expiry}.` : '';
+      const fullMessage = `${loginMessage}${expiryNote}`;
+      if (payload.new_password_plain) {
+        setPassword(payload.new_password_plain);
       }
+      setColor('lightgreen');
+      setMessage(fullMessage);
+      setErrorMessage(fullMessage);
+    } catch (error) {
+      setColor('lightred');
+      setErrorMessage(extractApiErrorMessage(error));
     }
   };
-  
+
   return (
     <div className="login-container">
-      <h2>Login</h2>
+      <h2>TMS Login</h2>
+      <p>Enter your plain TMS password. The backend converts it to the encoded format before calling TMS.</p>
       <form onSubmit={handleSubmit} className="login-form">
         <div className="form-group">
           <label htmlFor="brokerNo">Broker Number</label>
@@ -67,7 +69,7 @@ const Login: React.FC = () => {
           />
         </div>
         <div className="form-group">
-          <label htmlFor="password">Encrypted Password</label>
+          <label htmlFor="password">Password</label>
           <input
             type="password"
             id="password"
