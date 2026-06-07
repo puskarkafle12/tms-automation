@@ -100,7 +100,12 @@ const CommonTable: React.FC<CommonTableProps> = ({ data, onAction, columns, empt
             {sortedData.map((row, rowIndex) => (
               <tr key={rowIndex} style={{ backgroundColor: row.color }}>
                 {columnsToRender.map((column, colIndex) => (
-                  <td key={colIndex}>{formatValue(row[column])}</td>
+                  <td
+                    key={colIndex}
+                    className={column === 'status' && row.liveStatus ? 'table-status-live' : undefined}
+                  >
+                    {formatValue(row[column])}
+                  </td>
                 ))}
                 {onAction && renderActions(row)}
               </tr>

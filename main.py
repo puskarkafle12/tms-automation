@@ -584,14 +584,41 @@ async def get_order_status_logs(
 
     order_logs = query.all()
 
-    # Perform a separate query to retrieve ScheduledOrder data
-    scheduled_orders = db.query(ScheduledOrder).filter(
-        ScheduledOrder.client_id == client_id).all()
+    scheduled_query = db.query(ScheduledOrder)
+    if client_id:
+        scheduled_query = scheduled_query.filter(ScheduledOrder.client_id == client_id)
+    if script_name:
+        scheduled_query = scheduled_query.filter(ScheduledOrder.script_name == script_name)
+    scheduled_orders = scheduled_query.all()
 
-    # Combine the results
+    scan_logs: Dict[tuple, OrderLog] = {}
+    scan_log_query = db.query(OrderLog)
+    if client_id:
+        scan_log_query = scan_log_query.filter(OrderLog.client_id == client_id)
+    for scan_log in scan_log_query.all():
+        scan_logs[(scan_log.client_id, scan_log.script_name)] = scan_log
+
+    scheduled_payload = []
+    for order in scheduled_orders:
+        scan_log = scan_logs.get((order.client_id, order.script_name))
+        scheduled_payload.append({
+            "order_id": order.order_id,
+            "client_id": order.client_id,
+            "script_name": order.script_name,
+            "price": order.price,
+            "qty": order.qty,
+            "status": order.status,
+            "order_type": order.order_type,
+            "scanning_count": scan_log.scanning_count if scan_log else 0,
+            "current_price": scan_log.current_price if scan_log else None,
+            "last_scan_at": scan_log.timestamp.isoformat() if scan_log and scan_log.timestamp else None,
+        })
+
     combined_results = {
         "order_logs": [log.__dict__ for log in order_logs],
-        "scheduled_orders": [order.__dict__ for order in scheduled_orders]
+        "scheduled_orders": scheduled_payload,
+        "monitoring_active": tms_config.is_running,
+        "monitor_interval": tms_config.monitor_interval,
     }
 
     return combined_results
@@ -695,6 +722,14 @@ async def check_orders_endpoint(db: Session = Depends(get_db)):
     if tms_config.is_running:
         return JSONResponse(status_code=400, content={"message": "Check orders loop is already running."})
 
+    pending_orders = db.query(ScheduledOrder).filter_by(status="pending").all()
+    for order in pending_orders:
+        db.query(OrderLog).filter(
+            OrderLog.client_id == order.client_id,
+            OrderLog.script_name == order.script_name,
+        ).delete(synchronize_session=False)
+    db.commit()
+
     global check_orders_task
     check_orders_task = asyncio.create_task(
         monitor_order_task_func(db))  # Keep as is, no changes needed
@@ -715,8 +750,14 @@ async def stop_check_orders_endpoint():
 
 @app.get("/monitoring-status/")
 async def monitoring_status():
+    from datetime import datetime
+
+    now = datetime.now().time()
+    market_open = is_within_time_range(tms_config.start_time, tms_config.end_time, now)
     return {
         "scheduled_orders_active": tms_config.is_running,
+        "market_open": market_open,
+        "monitor_interval": tms_config.monitor_interval,
         "active_grabber_count": len(running_grabbers),
     }
 

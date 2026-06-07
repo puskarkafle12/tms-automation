@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import './OrderLogs.css';
 import CommonTable from '../../components/table/Table';
 import DialogBox from '../../components/dialog_box/DialogBox';
@@ -6,8 +6,36 @@ import ErrorMessage from '../../components/ErrorMessage';
 import 'react-datepicker/dist/react-datepicker.css';
 import { format } from 'date-fns';
 import DatePicker from 'react-datepicker';
+import { monitoringStore } from '../../hooks/monitoringStore';
+import { fetchJson } from '../../utils/api';
 
 type OrderTab = 'logs' | 'scheduled' | 'book' | 'history';
+
+interface ScheduledOrderRow {
+  order_id: number;
+  client_id: string;
+  script_name: string;
+  price: number;
+  qty: number;
+  status: string;
+  order_type: string;
+  scanning_count?: number;
+  current_price?: number | null;
+  actionRequired?: boolean;
+}
+
+const formatLiveScanStatus = (order: ScheduledOrderRow, monitoringActive: boolean): string => {
+  const base = order.status || 'pending';
+  if (!monitoringActive) {
+    return `${base} (off)`;
+  }
+  const count = order.scanning_count ?? 0;
+  const ltp = order.current_price;
+  if (ltp != null && Number(ltp) > 0) {
+    return `${base} (${count} · ${Number(ltp).toFixed(1)})`;
+  }
+  return `${base} (${count})`;
+};
 
 const TABS: { id: OrderTab; label: string; icon: string }[] = [
   { id: 'logs', label: 'Order Logs', icon: '📋' },
@@ -16,16 +44,20 @@ const TABS: { id: OrderTab; label: string; icon: string }[] = [
   { id: 'history', label: 'History', icon: '🕐' },
 ];
 
+const todayDate = () => format(new Date(), 'yyyy-MM-dd');
+
 const GetOrderStatus: React.FC = () => {
-  const [orderedDate, setOrderedDate] = useState<string | null>(null);
+  const [orderedDate, setOrderedDate] = useState<string>(todayDate);
   const [clientID, setClientID] = useState('');
   const [scriptName, setScriptName] = useState('');
   const [orderLogs, setOrderLogs] = useState<any[]>([]);
-  const [scheduledOrders, setScheduledOrders] = useState<any[]>([]);
+  const [scheduledOrders, setScheduledOrders] = useState<ScheduledOrderRow[]>([]);
+  const [monitorIntervalMs, setMonitorIntervalMs] = useState(5000);
+  const [monitoringActive, setMonitoringActive] = useState(false);
   const [orderBook, setOrderBook] = useState<any[]>([]);
   const [orderHistory, setOrderHistory] = useState<any[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
-  const [hasSearched, setHasSearched] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [hasLoaded, setHasLoaded] = useState(false);
   const [loggedInClientIDs, setLoggedInClientIDs] = useState<string[]>([]);
   const [activeTab, setActiveTab] = useState<OrderTab>('logs');
   const [dialogVisible, setDialogVisible] = useState(false);
@@ -58,71 +90,154 @@ const GetOrderStatus: React.FC = () => {
     fetchLoggedInClientIDs();
   }, [fetchLoggedInClientIDs]);
 
+  useEffect(() => {
+    const loadInterval = async () => {
+      const result = await fetchJson<{ monitor_interval: number }>('/get_monitor_interval');
+      if (result.ok && result.data.monitor_interval > 0) {
+        setMonitorIntervalMs(result.data.monitor_interval * 1000);
+      }
+    };
+    void loadInterval();
+  }, []);
+
   const handleDateChange = (date: Date | null) => {
-    if (date) {
-      setOrderedDate(format(date, 'yyyy-MM-dd'));
-    } else {
-      setOrderedDate(null);
-    }
+    setOrderedDate(date ? format(date, 'yyyy-MM-dd') : todayDate());
   };
 
-  const fetchOrderBook = async (selectedClientId: string) => {
+  const fetchOrderBook = useCallback(async (selectedClientId: string) => {
+    if (!selectedClientId) {
+      setOrderBook([]);
+      return;
+    }
     const response = await fetch(`${apiUrl}/get_order_book?client_id=${selectedClientId}`);
     if (response.ok) {
       setOrderBook(await response.json());
     } else {
       setOrderBook([]);
     }
-  };
+  }, [apiUrl]);
 
-  const fetchOrderStatusLogs = async (selectedClientId: string) => {
-    const response = await fetch(
-      `${apiUrl}/order_status_logs/?client_id=${selectedClientId}&script_name=${scriptName}&ordered_date=${orderedDate || ''}`,
-      { headers: { Accept: 'application/json' } },
-    );
-    if (response.ok) {
-      const data = await response.json();
-      setOrderLogs(data.order_logs || []);
-      setScheduledOrders(
-        (data.scheduled_orders || []).map((order: any) => ({ ...order, actionRequired: true })),
-      );
-    } else {
-      setOrderLogs([]);
-      setScheduledOrders([]);
-      throw new Error('Failed to fetch order logs');
+  const fetchOrderStatusLogs = useCallback(
+    async (options?: { silent?: boolean }) => {
+      const params = new URLSearchParams();
+      if (scriptName.trim()) {
+        params.set('script_name', scriptName.trim());
+      }
+      if (orderedDate) {
+        params.set('ordered_date', orderedDate);
+      }
+      const response = await fetch(`${apiUrl}/order_status_logs/?${params.toString()}`, {
+        headers: { Accept: 'application/json' },
+        cache: 'no-store',
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setOrderLogs(data.order_logs || []);
+        setScheduledOrders(
+          (data.scheduled_orders || []).map((order: ScheduledOrderRow) => ({
+            ...order,
+            actionRequired: true,
+          })),
+        );
+        if (typeof data.monitoring_active === 'boolean') {
+          setMonitoringActive(data.monitoring_active);
+          monitoringStore.setScheduledActive(data.monitoring_active);
+        }
+        if (typeof data.monitor_interval === 'number' && data.monitor_interval > 0) {
+          setMonitorIntervalMs(data.monitor_interval * 1000);
+        }
+      } else {
+        setOrderLogs([]);
+        setScheduledOrders([]);
+        if (!options?.silent) {
+          throw new Error('Failed to fetch order logs');
+        }
+      }
+    },
+    [apiUrl, orderedDate, scriptName],
+  );
+
+  const fetchOrderHistory = useCallback(async (selectedClientId: string) => {
+    if (!selectedClientId) {
+      setOrderHistory([]);
+      return;
     }
-  };
-
-  const fetchOrderHistory = async (selectedClientId: string) => {
     const response = await fetch(`${apiUrl}/order_history?client_id=${selectedClientId}`);
     if (response.ok) {
       setOrderHistory(await response.json());
     } else {
       setOrderHistory([]);
     }
-  };
+  }, [apiUrl]);
+
+  const loadClientTmsData = useCallback(
+    async (selectedClientId: string) => {
+      await Promise.all([fetchOrderBook(selectedClientId), fetchOrderHistory(selectedClientId)]);
+    },
+    [fetchOrderBook, fetchOrderHistory],
+  );
+
+  const loadLogsAndScheduled = useCallback(
+    async (options?: { silent?: boolean }) => {
+      if (!options?.silent) {
+        setIsLoading(true);
+      }
+      setErrorMessage('');
+
+      try {
+        await fetchOrderStatusLogs({ silent: true });
+        setHasLoaded(true);
+      } catch {
+        if (!options?.silent) {
+          setErrorMessage('Failed to load order data.');
+        }
+      } finally {
+        if (!options?.silent) {
+          setIsLoading(false);
+        }
+      }
+    },
+    [fetchOrderStatusLogs],
+  );
+
+  useEffect(() => {
+    void loadLogsAndScheduled();
+  }, [loadLogsAndScheduled]);
+
+  useEffect(() => {
+    const bookClient = clientID || loggedInClientIDs[0] || '';
+    if (!bookClient) {
+      return;
+    }
+    void loadClientTmsData(bookClient);
+  }, [clientID, loadClientTmsData, loggedInClientIDs]);
+
+  useEffect(() => {
+    if (!hasLoaded) {
+      return undefined;
+    }
+
+    const pollMs = monitoringActive ? 2000 : monitorIntervalMs;
+    const interval = window.setInterval(() => {
+      void fetchOrderStatusLogs({ silent: true });
+    }, pollMs);
+
+    return () => window.clearInterval(interval);
+  }, [fetchOrderStatusLogs, hasLoaded, monitorIntervalMs, monitoringActive]);
 
   const handleSubmit = async (e?: React.FormEvent) => {
     e?.preventDefault();
-    setErrorMessage('');
     setSuccessMessage('');
-
-    if (!clientID) {
-      setErrorMessage('Please select a logged-in client ID or log in from TMS Login tab.');
-      return;
-    }
-
     setIsLoading(true);
-    setHasSearched(true);
     try {
-      await Promise.all([
-        fetchOrderStatusLogs(clientID),
-        fetchOrderBook(clientID),
-        fetchOrderHistory(clientID),
-      ]);
-      setSuccessMessage(`Data loaded for ${clientID}`);
+      await loadLogsAndScheduled({ silent: true });
+      const bookClient = clientID || loggedInClientIDs[0] || '';
+      if (bookClient) {
+        await loadClientTmsData(bookClient);
+      }
+      setSuccessMessage('Data refreshed');
     } catch {
-      setErrorMessage('Failed to load order data. Check that the client is logged in to TMS.');
+      setErrorMessage('Failed to refresh order data.');
     } finally {
       setIsLoading(false);
     }
@@ -176,22 +291,32 @@ const GetOrderStatus: React.FC = () => {
     }
   };
 
+  const scheduledRows = useMemo(
+    () =>
+      scheduledOrders.map((order) => ({
+        ...order,
+        status: formatLiveScanStatus(order, monitoringActive),
+        liveStatus: monitoringActive,
+      })),
+    [monitoringActive, scheduledOrders],
+  );
+
   const tabData: Record<OrderTab, { count: number; columns: string[]; rows: any[]; empty: string }> = {
     logs: {
       count: orderLogs.length,
       columns: ['client_id', 'script_name', 'qty', 'price', 'order_type', 'status', 'timestamp'],
       rows: orderLogs,
-      empty: hasSearched
-        ? 'No order logs found for the selected filters.'
-        : 'Run a search to load order logs.',
+      empty: hasLoaded
+        ? 'No order logs found for today.'
+        : 'Loading order logs...',
     },
     scheduled: {
       count: scheduledOrders.length,
       columns: ['client_id', 'script_name', 'order_type', 'price', 'status', 'qty'],
-      rows: scheduledOrders,
-      empty: hasSearched
+      rows: scheduledRows,
+      empty: hasLoaded
         ? 'No scheduled orders found.'
-        : 'Run a search to load scheduled orders.',
+        : 'Loading scheduled orders...',
     },
     book: {
       count: orderBook.length,
@@ -207,7 +332,7 @@ const GetOrderStatus: React.FC = () => {
         'remainingOrderQuantity',
       ],
       rows: orderBook,
-      empty: hasSearched ? 'No open orders in the order book.' : 'Run a search to load the order book.',
+      empty: hasLoaded ? 'No open orders in the order book.' : 'Loading order book...',
     },
     history: {
       count: orderHistory.length,
@@ -223,7 +348,7 @@ const GetOrderStatus: React.FC = () => {
         'remainingOrderQuantity',
       ],
       rows: orderHistory,
-      empty: hasSearched ? 'No order history found.' : 'Run a search to load order history.',
+      empty: hasLoaded ? 'No order history found.' : 'Loading order history...',
     },
   };
 
@@ -234,8 +359,10 @@ const GetOrderStatus: React.FC = () => {
       <div className="order-logs-filters panel">
         <div className="order-logs-filters-header">
           <div>
-            <h2 className="panel-title">Search Orders</h2>
-            <p className="panel-subtitle">Filter by client, script, and date to load order data from TMS.</p>
+            <h2 className="panel-title">Order Logs</h2>
+            <p className="panel-subtitle">
+              Today&apos;s logs and all scheduled orders load automatically. Use filters to narrow results.
+            </p>
           </div>
           {loggedInClientIDs.length > 0 && (
             <span className="badge badge-success">{loggedInClientIDs.length} client(s) online</span>
@@ -248,7 +375,7 @@ const GetOrderStatus: React.FC = () => {
         <form onSubmit={handleSubmit} className="order-logs-form">
           <div className="order-logs-form-grid">
             <div className="form-group">
-              <label htmlFor="clientId">Client ID</label>
+              <label htmlFor="clientId">Client ID (book / history)</label>
               <select
                 id="clientId"
                 className="select"
@@ -287,7 +414,7 @@ const GetOrderStatus: React.FC = () => {
               <label htmlFor="orderedDate">Ordered Date</label>
               <DatePicker
                 id="orderedDate"
-                selected={orderedDate ? new Date(orderedDate) : null}
+                selected={new Date(orderedDate)}
                 onChange={handleDateChange}
                 dateFormat="yyyy-MM-dd"
                 placeholderText="Select a date"
@@ -300,7 +427,7 @@ const GetOrderStatus: React.FC = () => {
             <div className="form-group order-logs-submit-group">
               <label>&nbsp;</label>
               <button type="submit" className="btn btn-primary order-logs-submit" disabled={isLoading}>
-                {isLoading ? 'Loading...' : 'Search Orders'}
+                {isLoading ? 'Loading...' : 'Refresh'}
               </button>
             </div>
           </div>

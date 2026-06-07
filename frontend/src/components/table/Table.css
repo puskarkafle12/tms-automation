@@ -99,3 +99,9 @@
 .table-action-danger:hover {
   background: #fecaca;
 }
+
+.table-status-live {
+  font-variant-numeric: tabular-nums;
+  color: var(--color-primary, #2563eb);
+  font-weight: 500;
+}
