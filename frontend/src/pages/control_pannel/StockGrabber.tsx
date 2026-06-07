@@ -80,6 +80,7 @@ interface StockGrabberProps {
   resumeStableRate?: number | null;
   initialOrderQuantity?: number;
   initialRequestPerSec?: number;
+  symbolAlreadyRunning?: boolean;
   onRemove: () => void;
   onRunningChange?: (running: boolean) => void;
   onRegisterControls?: (id: string, controls: GrabberControls) => void;
@@ -112,6 +113,7 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
   resumeStableRate = null,
   initialOrderQuantity,
   initialRequestPerSec,
+  symbolAlreadyRunning = false,
   onRemove,
   onRunningChange,
   onRegisterControls,
@@ -131,6 +133,7 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [showEvents, setShowEvents] = useState(false);
   const [ltpFlash, setLtpFlash] = useState<'up' | 'down' | null>(null);
   const [priceHistory, setPriceHistory] = useState<number[]>([]);
   const [activity, setActivity] = useState<ActivityItem[]>([]);
@@ -207,7 +210,7 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
       }
       return { ...prev, ltp: newLtp };
     });
-    setPriceHistory((prev) => [...prev, newLtp].slice(-30));
+    setPriceHistory((prev) => [...prev, newLtp].slice(-20));
   }, []);
 
   const processUpdate = useCallback((update: StockGrabberResponse) => {
@@ -480,6 +483,10 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
       setError('Client ID and stock symbol are required.');
       return;
     }
+    if (!force && symbolAlreadyRunning) {
+      setError(`${formData.stock_symbol} is already being monitored for ${formData.client_id}`);
+      return;
+    }
 
     isStartingRef.current = true;
     if (!force) {
@@ -617,46 +624,50 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
     }));
   };
 
+  const changePositive = (liveStats.changePct ?? 0) >= 0;
+  const visibleEvents = showEvents ? activity.slice(0, 3) : activity.slice(0, 1);
+
   const buildSparkline = () => {
     if (priceHistory.length < 2) return null;
-    const width = 280;
-    const height = 48;
+    const width = 72;
+    const height = 32;
     const min = Math.min(...priceHistory);
     const max = Math.max(...priceHistory);
     const range = max - min || 1;
-
     const points = priceHistory.map((price, i) => {
       const x = (i / (priceHistory.length - 1)) * width;
-      const y = height - ((price - min) / range) * (height - 8) - 4;
+      const y = height - ((price - min) / range) * (height - 6) - 3;
       return `${x},${y}`;
     });
-
-    const areaPoints = `0,${height} ${points.join(' ')} ${width},${height}`;
-
+    const trendUp = priceHistory[priceHistory.length - 1] >= priceHistory[0];
     return (
-      <svg className="sg-sparkline" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none">
-        <defs>
-          <linearGradient id={`sgGrad-${instanceId}`} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="#2563eb" stopOpacity="0.4" />
-            <stop offset="100%" stopColor="#2563eb" stopOpacity="0" />
-          </linearGradient>
-        </defs>
-        <polygon className="sg-sparkline-area" points={areaPoints} fill={`url(#sgGrad-${instanceId})`} />
-        <polyline className="sg-sparkline-line" points={points.join(' ')} />
+      <svg className="sg-sparkline" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-hidden="true">
+        <polyline
+          className={`sg-sparkline-line ${trendUp ? 'up' : 'down'}`}
+          points={points.join(' ')}
+        />
       </svg>
     );
   };
 
-  const changePositive = (liveStats.changePct ?? 0) >= 0;
-
   return (
-    <div className={`sg-monitor ${isRunning ? 'running' : ''}`}>
+    <div className={`sg-monitor ${isRunning ? 'running' : ''} ${connectionStatus}`}>
       <div className="sg-monitor-header">
-        <div className="sg-monitor-title">
-          <span className="sg-monitor-symbol">{formData.stock_symbol}</span>
+        <div className="sg-symbol-chip">{formData.stock_symbol}</div>
+        <div className="sg-monitor-meta">
           <span className="sg-monitor-client">{formData.client_id}</span>
-        </div>
-        <div className="sg-monitor-status">
+          <button
+            type="button"
+            className={`sg-icon-btn ${showSettings ? 'active' : ''}`}
+            onClick={() => {
+              setShowSettings((v) => !v);
+              if (!showSettings) setShowEvents(false);
+            }}
+            title="Settings"
+            aria-label="Settings"
+          >
+            ⚙
+          </button>
           <span className={`sg-live-badge ${isRunning ? 'live' : 'idle'}`}>
             {isRunning && <span className="sg-live-dot" />}
             {isRunning ? 'Live' : 'Idle'}
@@ -665,41 +676,40 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
       </div>
 
       <div className="sg-monitor-body">
-        <div className="sg-price-hero">
-          <div className="sg-ltp-block">
-            <span className="sg-ltp-label">Last Traded Price</span>
+        <div className="sg-price-block">
+          <div className="sg-price-main">
+            <span className="sg-ltp-label">LTP</span>
             <span className={`sg-ltp-value ${ltpFlash ? `flash-${ltpFlash}` : ''}`}>
               {liveStats.ltp !== null ? `Rs. ${liveStats.ltp}` : '—'}
             </span>
             {liveStats.changePct !== null && (
               <span className={`sg-change-badge ${changePositive ? 'positive' : 'negative'}`}>
-                {changePositive ? '+' : ''}{liveStats.changePct}%
+                {changePositive ? '▲' : '▼'} {changePositive ? '+' : ''}{liveStats.changePct}%
               </span>
             )}
           </div>
+          {priceHistory.length >= 2 && (
+            <div className="sg-sparkline-wrap">{buildSparkline()}</div>
+          )}
         </div>
 
-        {priceHistory.length >= 2 && (
-          <div className="sg-sparkline-wrap">{buildSparkline()}</div>
-        )}
-
         <div className="sg-metrics-grid">
+          <div className={`sg-metric ${isRunning ? 'active' : ''}`}>
+            <span className="sg-metric-label">Scans</span>
+            <span className="sg-metric-value">{liveStats.totalFetches.toLocaleString()}</span>
+          </div>
+          <div className={`sg-metric ${liveStats.ordersPlaced > 0 ? 'highlight' : ''}`}>
+            <span className="sg-metric-label">Orders</span>
+            <span className="sg-metric-value">{liveStats.ordersPlaced}</span>
+          </div>
           <div className="sg-metric">
-            <span className="sg-metric-label">Fetch Rate</span>
+            <span className="sg-metric-label">Fetch</span>
             <span className="sg-metric-value">
               {liveStats.fetchRate !== null ? `${liveStats.fetchRate.toFixed(1)}/s` : '—'}
             </span>
           </div>
           <div className="sg-metric">
-            <span className="sg-metric-label">Total Scans</span>
-            <span className="sg-metric-value">{liveStats.totalFetches.toLocaleString()}</span>
-          </div>
-          <div className="sg-metric">
-            <span className="sg-metric-label">Orders Placed</span>
-            <span className="sg-metric-value">{liveStats.ordersPlaced}</span>
-          </div>
-          <div className="sg-metric">
-            <span className="sg-metric-label">Stable Rate</span>
+            <span className="sg-metric-label">Stable</span>
             <span className="sg-metric-value">
               {liveStats.stableRate !== null ? `${liveStats.stableRate}/s` : '—'}
             </span>
@@ -708,25 +718,34 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
 
         {liveStats.targetPrice !== null && (
           <div className="sg-target-bar">
-            <span className="sg-target-label">Target Price</span>
-            <span className="sg-target-value">Rs. {liveStats.targetPrice}</span>
+            <span>🎯 Target</span>
+            <strong>Rs. {liveStats.targetPrice}</strong>
           </div>
         )}
 
-        <div className={`sg-connection ${connectionStatus}`} key={connectionStatus}>
-          <span className="sg-connection-dot" aria-hidden="true" />
-          <span className="sg-connection-text">{CONNECTION_LABELS[connectionStatus]}</span>
+        <div className={`sg-status-strip ${connectionStatus}`}>
+          <span className="sg-status-dot" />
+          <span>{CONNECTION_LABELS[connectionStatus]}</span>
         </div>
 
         {activity.length > 0 && (
-          <div className="sg-activity">
-            <div className="sg-activity-title">Recent Events</div>
-            <ul className="sg-activity-list">
-              {activity.map((item) => (
-                <li key={item.id} className={`sg-activity-item ${item.type} sg-activity-enter`}>
-                  <span className="sg-activity-icon">{item.icon}</span>
-                  <span className="sg-activity-text">{item.text}</span>
-                  <span className="sg-activity-time">{item.time}</span>
+          <div className="sg-events">
+            <button
+              type="button"
+              className="sg-events-toggle"
+              onClick={() => setShowEvents((v) => !v)}
+              aria-expanded={showEvents}
+            >
+              <span>Recent</span>
+              <span className="sg-events-count">{activity.length}</span>
+              <span className="sg-events-chevron">{showEvents ? '▴' : '▾'}</span>
+            </button>
+            <ul className={`sg-events-list ${showEvents ? 'expanded' : ''}`}>
+              {visibleEvents.map((item) => (
+                <li key={item.id} className={`sg-event ${item.type}`}>
+                  <span className="sg-event-icon">{item.icon}</span>
+                  <span className="sg-event-text">{item.text}</span>
+                  <span className="sg-event-time">{item.time}</span>
                 </li>
               ))}
             </ul>
@@ -734,16 +753,8 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
         )}
       </div>
 
-      <div className="sg-settings">
-        <button
-          type="button"
-          className="sg-settings-toggle"
-          onClick={() => setShowSettings((v) => !v)}
-        >
-          <span>⚙ Monitor Settings</span>
-          <span>{showSettings ? '▴' : '▾'}</span>
-        </button>
-        {showSettings && (
+      {showSettings && (
+        <div className="sg-settings-panel">
           <div className="sg-settings-grid">
             <div className="form-group">
               <label htmlFor={`qty-${instanceId}`}>Order Qty</label>
@@ -773,7 +784,7 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
               />
             </div>
             <div className="form-group">
-              <label htmlFor={`broker-${instanceId}`}>Broker No</label>
+              <label htmlFor={`broker-${instanceId}`}>Broker</label>
               <input
                 id={`broker-${instanceId}`}
                 type="text"
@@ -785,8 +796,8 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
               />
             </div>
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
       {error && (
         <div className="sg-error">
@@ -797,26 +808,28 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
       <div className="sg-actions">
         <button
           type="button"
-          className="btn btn-success"
+          className={`btn btn-success sg-btn-start ${isRunning ? 'active' : ''}`}
           onClick={() => startStockGrabber()}
-          disabled={isRunning}
+          disabled={isRunning || symbolAlreadyRunning}
+          title={symbolAlreadyRunning ? `${stock_symbol} is already being monitored` : 'Start monitoring'}
         >
-          {isRunning ? 'Monitoring...' : 'Start Monitor'}
+          {isRunning ? '● Scanning' : symbolAlreadyRunning ? 'In Use' : '▶ Start'}
         </button>
         <button
           type="button"
           className="btn btn-secondary"
           onClick={stopStockGrabber}
           disabled={!isRunning}
+          title="Stop monitoring"
         >
-          Stop
+          ■ Stop
         </button>
         <button
           type="button"
           className="btn btn-secondary sg-remove-btn"
           onClick={onRemove}
           disabled={isRunning}
-          title={isRunning ? 'Stop monitor before removing' : 'Remove'}
+          title={isRunning ? 'Stop first' : 'Remove'}
         >
           ✕
         </button>

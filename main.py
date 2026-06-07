@@ -93,6 +93,15 @@ async def stock_grabber(request: StockGrabberRequest, db: Session = Depends(get_
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
+    symbol = (request.stock_symbol or "").strip().upper()
+    for tms_user in running_grabbers.values():
+        existing_symbol = (tms_user.stock_symbol or "").strip().upper()
+        if tms_user.client_id == request.client_id and existing_symbol == symbol:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{symbol} is already being monitored for {request.client_id}",
+            )
+
     max_order_limit = int(request.max_order_limit) if request.max_order_limit and int(request.max_order_limit) > 0 else 4
 
     tms_user = TmsUser(

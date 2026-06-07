@@ -7,7 +7,10 @@ import { GrabberControls } from '../../types/monitoring';
 import { fetchJson, getApiUrl } from '../../utils/api';
 import {
   ActiveGrabberFromApi,
+  dedupeGrabbers,
+  findGrabberByKey,
   loadGrabbers,
+  makeGrabberKey,
   mergeWithActiveGrabbers,
   saveGrabbers,
   sortGrabbersRunningFirst,
@@ -22,6 +25,7 @@ const StockGrabberPage: React.FC = () => {
   const [loggedInClientIDs, setLoggedInClientIDs] = useState<string[]>([]);
   const [newClientId, setNewClientId] = useState('');
   const [newStockSymbol, setNewStockSymbol] = useState('CREST');
+  const [addError, setAddError] = useState<string | null>(null);
   const grabberControlsRef = useRef<Map<string, GrabberControls>>(new Map());
   const cardRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
@@ -46,7 +50,7 @@ const StockGrabberPage: React.FC = () => {
       return;
     }
     const active = result.data.grabbers || [];
-    setGrabbers((prev) => mergeWithActiveGrabbers(prev, active));
+    setGrabbers((prev) => dedupeGrabbers(mergeWithActiveGrabbers(prev, active)));
   }, []);
 
   useEffect(() => {
@@ -97,14 +101,25 @@ const StockGrabberPage: React.FC = () => {
   }, []);
 
   const addGrabber = () => {
-    if (!newClientId.trim() || !newStockSymbol.trim()) {
+    const clientId = newClientId.trim();
+    const stockSymbol = newStockSymbol.trim().toUpperCase();
+    if (!clientId || !stockSymbol) {
       return;
     }
-    const id = `${newClientId}-${newStockSymbol}-${Date.now()}`;
-    setGrabbers((prev) => [
+
+    const existing = findGrabberByKey(grabbers, clientId, stockSymbol);
+    if (existing) {
+      setAddError(`${stockSymbol} is already in the monitor list for ${clientId}`);
+      scrollToGrabber(existing.id);
+      return;
+    }
+
+    setAddError(null);
+    const id = `${clientId}-${stockSymbol}-${Date.now()}`;
+    setGrabbers((prev) => dedupeGrabbers([
       ...prev,
-      { id, client_id: newClientId.trim(), stock_symbol: newStockSymbol.trim().toUpperCase() },
-    ]);
+      { id, client_id: clientId, stock_symbol: stockSymbol },
+    ]));
   };
 
   const removeGrabber = (id: string) => {
@@ -118,6 +133,17 @@ const StockGrabberPage: React.FC = () => {
   };
 
   const sortedGrabbers = useMemo(() => sortGrabbersRunningFirst(grabbers), [grabbers]);
+
+  const runningGrabberKeys = useMemo(
+    () => new Set(
+      grabbers
+        .filter((g) => g.isRunning)
+        .map((g) => makeGrabberKey(g.client_id, g.stock_symbol)),
+    ),
+    [grabbers],
+  );
+
+  const liveCount = grabbers.filter((g) => g.isRunning).length;
 
   return (
     <div className="stock-grabber-page">
@@ -180,12 +206,29 @@ const StockGrabberPage: React.FC = () => {
             type="button"
             className="btn btn-success"
             onClick={addGrabber}
-            disabled={!newClientId.trim() || !newStockSymbol.trim()}
+            disabled={
+              !newClientId.trim()
+              || !newStockSymbol.trim()
+              || Boolean(findGrabberByKey(grabbers, newClientId.trim(), newStockSymbol.trim()))
+            }
           >
             + Add Grabber
           </button>
         </div>
+        {addError && <p className="stock-grabber-hint">{addError}</p>}
       </div>
+
+      {sortedGrabbers.length > 0 && (
+        <div className="stock-grabber-summary">
+          <span className="stock-grabber-summary-total">
+            {sortedGrabbers.length} monitor{sortedGrabbers.length !== 1 ? 's' : ''}
+          </span>
+          <span className={`stock-grabber-summary-live ${liveCount > 0 ? 'active' : ''}`}>
+            {liveCount > 0 ? `● ${liveCount} live` : 'None running'}
+          </span>
+          <span className="stock-grabber-summary-hint">Click Recent on a card to expand events</span>
+        </div>
+      )}
 
       <div className="stock-grabber-list">
         {sortedGrabbers.length === 0 ? (
@@ -210,6 +253,10 @@ const StockGrabberPage: React.FC = () => {
                 instanceId={grabber.id}
                 client_id={grabber.client_id}
                 stock_symbol={grabber.stock_symbol}
+                symbolAlreadyRunning={
+                  runningGrabberKeys.has(makeGrabberKey(grabber.client_id, grabber.stock_symbol))
+                  && !grabber.isRunning
+                }
                 resumeSessionId={grabber.sessionId}
                 autoAttach={Boolean(grabber.isRunning && grabber.sessionId)}
                 resumeScanCount={grabber.scanCount}
