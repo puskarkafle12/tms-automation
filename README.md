@@ -17,15 +17,17 @@ docker compose up --build
 | App + API | http://localhost:3000 |
 | API docs | http://localhost:3000/docs |
 
-The Docker image builds the React frontend, starts Nginx, runs FastAPI, starts bundled PostgreSQL, creates tables, seeds the app login, and starts Cloudflare Tunnel inside one container. Docker publishes Nginx on host port `3000`.
-
-By default Docker starts a temporary Cloudflare Quick Tunnel. Get the public URL with:
+The Docker image builds the React frontend, starts Nginx, runs FastAPI, starts bundled PostgreSQL, creates tables, seeds the app login, and starts **ngrok** with a permanent public URL. Docker publishes Nginx on host port `3000`.
 
 ```bash
-docker logs tms-automation | grep -Eo 'https://[-a-z0-9]+\.trycloudflare\.com' | tail -1
+docker compose up -d --build
+./scripts/show-public-url.sh
 ```
 
-For the same public URL every time, create a Cloudflare named tunnel and set `CLOUDFLARED_TOKEN` before starting Docker.
+| URL | Address |
+|-----|---------|
+| Local | http://localhost:3000 |
+| Public (fixed) | `https://untrained-pleading-unmarked.ngrok-free.dev` |
 
 **Default app login:** `admin` / `admin`  
 Change `FRONTEND_SEED_USER` and `FRONTEND_SEED_PASSWORD` in `docker-compose.yml` before first run if you want different credentials.

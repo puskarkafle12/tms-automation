@@ -35,21 +35,16 @@ The container:
 - creates the database/user if missing
 - runs `scripts/init_local_db.py`
 - starts FastAPI privately on port `8000` inside the container
-- starts Cloudflare Tunnel inside the same container
+- starts **ngrok** with a permanent public URL (authtoken is baked into the image)
 
 Docker maps host port `3000` to Nginx inside the container, so other machines on the same LAN can open `http://YOUR_COMPUTER_LAN_IP:3000`.
 
-By default, Docker starts a temporary Cloudflare Quick Tunnel. Get the public URL with:
-
 ```bash
-docker logs tms-automation | grep -Eo 'https://[-a-z0-9]+\.trycloudflare\.com' | tail -1
+docker compose up -d --build
+./scripts/show-public-url.sh
 ```
 
-For the same public URL every time, create a Cloudflare named tunnel in Cloudflare Zero Trust, set `CLOUDFLARED_TOKEN`, and run Docker again:
-
-```bash
-CLOUDFLARED_TOKEN="your-token" docker compose up -d --build
-```
+ngrok assigns a **permanent free dev domain** to your account (e.g. `https://abc123.ngrok-free.dev`) that does not change on restart.
 
 Default app login:
 
