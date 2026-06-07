@@ -1,25 +1,70 @@
 .stock-details {
-    padding: 10px;
-    background-color: #f9f9f9;
-    margin-bottom: 20px;
-  }
-  
-  .stock-details h3 {
-    font-size: 1.2em;
-    margin-bottom: 10px;
-  }
-  
-  .stock-details ul {
-    list-style-type: none;
-    padding: 0;
-  }
-  
-  .stock-details ul li {
-    margin-bottom: 8px;
-  }
-  
-  .data-name {
-    font-weight: bold;
-    color: #333;
-  }
-  
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.stock-details-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.stock-details-title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.stock-details-change {
+  font-size: 0.875rem;
+  font-weight: 700;
+  padding: 0.25rem 0.625rem;
+  border-radius: 999px;
+}
+
+.stock-details-change.positive {
+  background: var(--color-success-soft);
+  color: var(--color-success);
+}
+
+.stock-details-change.negative {
+  background: var(--color-danger-soft);
+  color: var(--color-danger);
+}
+
+.stock-details-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+}
+
+.stock-details-item {
+  padding: 0.75rem;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+
+.stock-details-label {
+  display: block;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted);
+  margin-bottom: 0.25rem;
+}
+
+.stock-details-value {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.stock-details-empty {
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+  margin: 0;
+}

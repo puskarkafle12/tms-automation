@@ -1,42 +1,355 @@
-.login-container {
-    background: #f9f9f9;
-    padding: 20px;
-    border-radius: 8px;
-    box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
-    max-width: 400px;
-    margin: 20px auto;
+.tms-login-page {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  max-width: 1200px;
+}
+
+.tms-login-hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1.25rem 1.5rem;
+  background: linear-gradient(135deg, #f8fafc 0%, #eef2ff 100%);
+  border-color: #c7d2fe;
+}
+
+.tms-login-hero-content {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.tms-login-hero-icon {
+  width: 48px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.5rem;
+  background: #fff;
+  border: 1px solid #c7d2fe;
+  border-radius: 12px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+}
+
+.tms-login-hero-title {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+.tms-login-hero-subtitle {
+  margin: 0.25rem 0 0;
+  font-size: 0.875rem;
+  color: var(--color-text-muted);
+}
+
+.tms-refresh-btn {
+  flex-shrink: 0;
+}
+
+.tms-login-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 1rem;
+}
+
+.tms-stat-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 1.125rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+.tms-stat-card-active {
+  border-color: #86efac;
+  background: linear-gradient(180deg, #f0fdf4 0%, #ecfdf5 100%);
+}
+
+.tms-stat-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted);
+}
+
+.tms-stat-value {
+  font-size: 1.75rem;
+  font-weight: 700;
+  color: var(--color-text);
+  line-height: 1.1;
+}
+
+.tms-section-title {
+  font-size: 1rem;
+  font-weight: 600;
+  margin: 0 0 0.5rem;
+}
+
+.tms-logged-in-panel {
+  padding: 1.25rem 1.5rem;
+}
+
+.tms-logged-in-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.tms-logged-in-chip {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0.625rem 1rem;
+  background: #fff;
+  border: 1px solid #bbf7d0;
+  border-radius: 999px;
+  font-size: 0.8125rem;
+  box-shadow: 0 1px 2px rgba(16, 185, 129, 0.08);
+}
+
+.tms-online-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #22c55e;
+  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.2);
+}
+
+.tms-session-time {
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+}
+
+.tms-login-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(280px, 1fr);
+  gap: 1.25rem;
+  align-items: start;
+}
+
+.tms-accounts-table-wrap,
+.tms-form-panel {
+  padding: 1.25rem 1.5rem;
+}
+
+.tms-panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.tms-panel-header .tms-section-title {
+  margin-bottom: 0.25rem;
+}
+
+.tms-side-column {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.tms-quick-login-panel {
+  border-color: #bfdbfe;
+  background: linear-gradient(180deg, #fff 0%, #f8fbff 100%);
+}
+
+.tms-accounts-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 0.875rem;
+}
+
+.tms-accounts-table th,
+.tms-accounts-table td {
+  padding: 0.8rem 1rem;
+  border-bottom: 1px solid var(--color-border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.tms-accounts-table th {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted);
+  background: var(--color-bg);
+}
+
+.tms-accounts-table tbody tr:hover {
+  background: #f8fafc;
+}
+
+.tms-client-id {
+  font-weight: 600;
+}
+
+.tms-status-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.tms-status {
+  display: inline-flex;
+  align-self: flex-start;
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.tms-status-logged_in {
+  background: var(--color-success-soft);
+  color: var(--color-success);
+}
+
+.tms-status-logged_out {
+  background: var(--color-bg);
+  color: var(--color-text-muted);
+}
+
+.tms-session-error {
+  font-size: 0.75rem;
+  color: var(--color-danger);
+  line-height: 1.4;
+  max-width: 220px;
+}
+
+.tms-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.btn-sm {
+  padding: 0.4rem 0.75rem;
+  font-size: 0.8125rem;
+}
+
+.tms-delete-btn:hover {
+  color: var(--color-danger);
+  border-color: #fecaca;
+  background: var(--color-danger-soft);
+}
+
+.tms-form-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+}
+
+.tms-form-header .tms-section-title {
+  margin: 0;
+}
+
+.tms-login-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+}
+
+.tms-login-grid .form-group {
+  margin-bottom: 0;
+}
+
+.tms-login-form .form-group {
+  margin-top: 1rem;
+}
+
+.tms-password-row {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.tms-password-row .input {
+  flex: 1;
+}
+
+.tms-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.tms-login-btn {
+  width: 100%;
+  margin-top: 1rem;
+  padding: 0.75rem;
+}
+
+.tms-muted {
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+  margin: 0;
+}
+
+.tms-loading-state,
+.tms-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  padding: 2rem 1rem;
+  text-align: center;
+}
+
+.tms-spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid #e2e8f0;
+  border-top-color: var(--color-primary);
+  border-radius: 50%;
+  animation: tms-spin 0.8s linear infinite;
+}
+
+@keyframes tms-spin {
+  to {
+    transform: rotate(360deg);
   }
-  
-  .login-form {
-    display: flex;
+}
+
+@media (max-width: 960px) {
+  .tms-login-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 768px) {
+  .tms-login-hero {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .tms-panel-header {
     flex-direction: column;
   }
-  
-  .form-group {
-    margin-bottom: 15px;
+
+  .tms-login-grid {
+    grid-template-columns: 1fr;
   }
-  
-  .form-group label {
-    margin-bottom: 5px;
-    font-weight: bold;
+
+  .tms-actions {
+    flex-direction: column;
   }
-  
-  .form-group input {
-    padding: 10px;
-    border: 1px solid #ccc;
-    border-radius: 4px;
-  }
-  
-  .login-button {
-    padding: 10px;
-    background-color: #007bff;
-    color: white;
-    border: none;
-    border-radius: 4px;
-    cursor: pointer;
-  }
-  
-  .login-button:hover {
-    background-color: #0056b3;
-  }
-  
+}

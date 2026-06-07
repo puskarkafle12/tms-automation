@@ -1,0 +1,146 @@
+.schedule-order-page {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  max-width: 1200px;
+}
+
+.schedule-order-hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1.25rem 1.5rem;
+  background: linear-gradient(135deg, #f8fafc 0%, #eff6ff 100%);
+  border-color: #bfdbfe;
+}
+
+.schedule-order-hero-content {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.schedule-order-hero-icon {
+  width: 48px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.5rem;
+  background: #fff;
+  border: 1px solid #bfdbfe;
+  border-radius: 12px;
+}
+
+.schedule-order-hero-title {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 700;
+}
+
+.schedule-order-hero-subtitle {
+  margin: 0.25rem 0 0;
+  font-size: 0.875rem;
+  color: var(--color-text-muted);
+}
+
+.schedule-order-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(280px, 1fr);
+  gap: 1.25rem;
+  align-items: start;
+}
+
+.schedule-order-form-panel {
+  padding: 1.5rem;
+}
+
+.schedule-order-form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+}
+
+.schedule-order-form-grid .form-group,
+.schedule-order-form .form-group {
+  margin-bottom: 0;
+}
+
+.schedule-order-form .form-group {
+  margin-top: 1rem;
+}
+
+.schedule-order-type-toggle {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.schedule-order-type-btn {
+  padding: 0.625rem 1rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+}
+
+.schedule-order-type-btn.active-buy {
+  border-color: #86efac;
+  background: #f0fdf4;
+  color: #166534;
+}
+
+.schedule-order-type-btn.active-sell {
+  border-color: #fca5a5;
+  background: #fef2f2;
+  color: #991b1b;
+}
+
+.schedule-order-submit {
+  width: 100%;
+  margin-top: 1.25rem;
+  padding: 0.75rem;
+}
+
+.schedule-order-hint {
+  font-size: 0.75rem;
+  color: var(--color-danger);
+  margin-top: 0.25rem;
+}
+
+.schedule-order-script-group {
+  position: relative;
+  z-index: 2;
+}
+
+.schedule-order-side-panel {
+  padding: 1.25rem;
+  min-height: 200px;
+}
+
+.schedule-order-empty-side {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 2rem 1rem;
+  text-align: center;
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+}
+
+@media (max-width: 900px) {
+  .schedule-order-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .schedule-order-form-grid {
+    grid-template-columns: 1fr;
+  }
+}

@@ -1,28 +1,18 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
+import './ErrorPage.css';
 
 const NotFoundPage = () => {
   return (
-    <div className="not-found">
-      <h1>404: Page Not Found</h1>
-      <p>
-        The page you requested could not be found. It may have been removed, or
-        you may have typed the address incorrectly.
-      </p>
-      <Link to="/">Go Back Home</Link>
+    <div className="error-page">
+      <div className="error-page-card panel">
+        <h1>404</h1>
+        <h2>Page Not Found</h2>
+        <p>The page you requested could not be found.</p>
+        <Link to="/" className="btn btn-primary">Back to Login</Link>
+      </div>
     </div>
   );
 };
 
 export default NotFoundPage;
-
-// // Optional styles (add to your CSS file)
-// .not-found {
-//   text-align: center;
-//   padding: 50px;
-// }
-
-// .not-found h1 {
-//   font-size: 2em;
-//   margin-bottom: 20px;
-// }
