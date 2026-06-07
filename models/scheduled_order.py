@@ -1,5 +1,5 @@
 from sqlalchemy import Column, Float, Integer, String, JSON, DateTime, func, event
-from database import Base, get_db
+from database import Base, get_db_session
 from models.order_status_log import OrderStatusLog
 from schemas.schemas import OrderCreateRequest
 
@@ -30,7 +30,10 @@ class ScheduledOrder(Base):
 
 @event.listens_for(ScheduledOrder, 'after_delete')
 def after_delete_order(mapper, connection, target):
-    with get_db() as db:
+    db = get_db_session()
+    try:
         log_entry = OrderStatusLog(order_id=target.order_id, client_id=target.client_id, security_details=target.security_details, script_name=target.script_name, qty=target.qty, status=target.status,price=target.price,order_type=target.order_type)
         db.add(log_entry)
         db.commit()
+    finally:
+        db.close()

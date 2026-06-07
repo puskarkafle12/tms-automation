@@ -10,10 +10,15 @@ engine = create_engine(DATABASE_URL, echo=True,    pool_size=50,
 # Set up session factory with tracking setting
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()  # Added for model declaration
+def get_db_session():
+    """Return a DB session for use outside FastAPI dependency injection."""
+    return SessionLocal()
+
+
 def get_db():
     db = SessionLocal()
     try:
-        return db  # Return the session directly
+        yield db
     finally:
         db.close()
 

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import './DpHolding.css';
-import CommonTable from '../../components/Table/Table';
+import CommonTable from '../../components/table/Table';
 import axios from 'axios';
 
 interface DPHolding {

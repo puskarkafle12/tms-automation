@@ -1,41 +1,16 @@
-version: '3.8'
-
 services:
-  db:
-    image: postgres:latest
-    environment:
-      POSTGRES_PASSWORD: postgres
+  postgres:
+    image: postgres:16-alpine
+    container_name: tms-postgres
+    restart: unless-stopped
     ports:
       - "5432:5432"
-    networks:
-      - mynetwork
-
-  web:
-    build: .
-    ports:
-      - "8000:8000"
-    depends_on:
-      - db
-    networks:
-      - mynetwork
     environment:
-      DB_USER: postgres
-      DB_PASSWORD: postgres
-      DB_HOST: db
-      DB_NAME: stock
+      POSTGRES_USER: pk
+      POSTGRES_PASSWORD: pk
+      POSTGRES_DB: stock
+    volumes:
+      - tms_postgres_data:/var/lib/postgresql/data
 
-  ngrok:
-    image: ngrok/ngrok:latest
-    ports:
-      - "4040:4040" # Dashboard
-    environment:
-      NGROK_AUTHTOKEN: 2joXsvN4glIHO7DeEe7XZ9LSWyA_3T7Sxk2Gg7ndcG1gFetQY # replace with your actual Ngrok authentication token
-    command: ngrok http web:8000
-    depends_on:
-      - web
-    networks:
-      - mynetwork
-
-networks:
-  mynetwork:
-    driver: bridge
+volumes:
+  tms_postgres_data:

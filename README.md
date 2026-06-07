@@ -1,36 +1,32 @@
-# Project Name
+# TMS Automation
 
-## Installation
+Automated trading tools for NEPSE TMS: stock grabber, order scheduling, order monitoring, and a React dashboard.
 
-To run this project, follow these steps:
+## Quick Start
 
-1. Clone the repository to your local machine:
-    ```bash
-    git clone https://github.com/your_username/your_repository.git
-    cd your_repository
-    ```
+**Full setup from scratch:** see **[SETUP_GUIDE.md](./SETUP_GUIDE.md)**
 
-2. Install the required dependencies:
-    ```bash
-    pip install -r requirements.txt
-    ```
+### Minimum steps
 
+```bash
+# 1. Database
+docker compose up -d
 
-## Usage
+# 2. Backend
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+# create .env — see SETUP_GUIDE.md
+python scripts/init_local_db.py
+uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
-3. create .env file 
-DB_USER=pk
-DB_PASSWORD=
-DB_HOST=localhost
-DB_NAME=stock
+# 3. Frontend (new terminal)
+cd frontend && npm install && npm start
+```
 
-4. alembic is used as orm so go to alembic .ini and env file configure to make sure its working 
-in alembic env add these 
-    from models import frontend_user, logged_in_user, order_status_log, scheduled_order, user
-    target_metadata = logged_in_user.Base.metadata
-    target_metadata = scheduled_order.Base.metadata
-    target_metadata = order_status_log.Base.metadata
-    target_metadata = user.Base.metadata
-    target_metadata = frontend_user.Base.metadata
-in alembic.ini configuration
-    sqlalchemy.url = postgresql://pk:@localhost/stock
+| Service | URL |
+|---------|-----|
+| Frontend | http://localhost:3000 |
+| Backend | http://localhost:8000 |
+
+**App login:** use the credentials printed by `scripts/init_local_db.py`  
+**TMS login:** Dashboard → Login tab (use your own broker credentials)

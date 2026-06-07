@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import './OrderLogs.css';
-import CommonTable from '../../components/Table/Table';
+import CommonTable from '../../components/table/Table';
 import DialogBox from '../../components/dialog_box/DialogBox';
-import Message from '../../components/Message/Message';
+import Message from '../../components/message/Message';
 import 'react-datepicker/dist/react-datepicker.css';
 import { format } from 'date-fns';
 import DatePicker from 'react-datepicker';

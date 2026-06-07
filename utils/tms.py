@@ -1,11 +1,11 @@
 import asyncio
 import base64
-from datetime import time
+from datetime import date, datetime, time
 from http.cookies import SimpleCookie
 import json
 from typing import Dict, List, Optional
 import aiohttp
-from database import get_db
+from database import get_db_session
 from exceptions.login_exceptions import LoginFailedException
 from models.logged_in_user import LoggedInUsers
 from models.user import User
@@ -80,52 +80,82 @@ class TmsUser:
                 self.headers = self.get_header(request_owner, self.tokens)
                 self.client_details = await self.get_client_details(self.tokens, self.headers, self.login_response['client_dealer_id'])
             except Exception as e:
-                db = get_db()  # Assumes get_db is async-compatible
-                user = db.query(User).filter(User.client_id == self.client_id).first()
-                if not user:
-                    print()
-                if user.auto_login:
-                    self.password = user.password
-                    self.broker_no = user.broker_no
-                    try:
-                        await self.try_cached_login()
-                    except Exception as e:
+                db = get_db_session()
+                try:
+                    user = db.query(User).filter(User.client_id == self.client_id).first()
+                    if not user:
+                        print()
+                    if user.auto_login:
+                        self.password = user.password
+                        self.broker_no = user.broker_no
+                        try:
+                            await self.try_cached_login()
+                        except Exception as e:
+                            logged_in_user = db.query(LoggedInUsers).filter(LoggedInUsers.client_id == self.client_id).first()
+                            logged_in_user.status = "logged_out"
+                            logged_in_user.message = "exception while login error message ::" + str(e)
+                            db.commit()
+                            raise LoginFailedException("login failed " + str(e))
+                    else:
                         logged_in_user = db.query(LoggedInUsers).filter(LoggedInUsers.client_id == self.client_id).first()
                         logged_in_user.status = "logged_out"
-                        logged_in_user.message = "exception while login error message ::" + str(e)
+                        logged_in_user.message = "auto login disabled user token expire re-login again::" + str(e)
                         db.commit()
                         raise LoginFailedException("login failed " + str(e))
-                else:
-                    logged_in_user = db.query(LoggedInUsers).filter(LoggedInUsers.client_id == self.client_id).first()
-                    logged_in_user.status = "logged_out"
-                    logged_in_user.message = "auto login disabled user token expire re-login again::" + str(e)
-                    db.commit()
-                    raise LoginFailedException("login failed " + str(e))
+                finally:
+                    db.close()
 
     async def try_cached_login(self):
         try:
             self.login_response, self.broker_no = get_tokens(self.client_id)  # Assumes get_tokens is async-compatible
+            if not self.login_response:
+                raise LoginFailedException("No cached TMS session found")
             self.tokens = self.login_response['tokens']
             self.headers = self.get_header(self.login_response['request_owner'], self.tokens)
-            self.client_details = await self.get_client_details(self.tokens, self.headers, self.login_response['client_dealer_id'])
+            rotation_result = await self.rotate_password_if_expired()
+            self.client_details = await self.get_client_details(
+                self.tokens, self.headers, self.login_response['client_dealer_id']
+            )
+            if rotation_result.get("rotated"):
+                save_tokens(self.client_id, self.login_response, self.broker_no)
+                await self.save_login_info()
             return {
                 "status": "success",
-                "message": "token successfully loaded from the cache file"
+                "message": rotation_result["message"]
+                if rotation_result.get("rotated")
+                else "token successfully loaded from the cache file",
+                "password_expiry": self.login_response.get("password_expiry"),
+                "password_rotated": rotation_result.get("rotated", False),
+                "new_password_plain": rotation_result.get("new_password_plain"),
             }
         except Exception as e:
             try:
                 self.login_response = await self.login()
                 self.tokens = self.login_response['tokens']
-                save_tokens(self.client_id, self.login_response, self.broker_no)  # Assumes save_tokens is async-compatible
                 self.headers = self.get_header(self.login_response['request_owner'], self.tokens)
-                self.client_details = await self.get_client_details(self.tokens, self.headers, self.login_response['client_dealer_id'])
+                rotation_result = await self.rotate_password_if_expired()
+                save_tokens(self.client_id, self.login_response, self.broker_no)
+                self.client_details = await self.get_client_details(
+                    self.tokens, self.headers, self.login_response['client_dealer_id']
+                )
                 await self.save_login_info()
+                if rotation_result.get("rotated"):
+                    message = rotation_result["message"]
+                else:
+                    message = "token refreshed and stored in the database"
                 return {
                     "status": "success",
-                    "message": "token refreshed and stored in the database"
+                    "message": message,
+                    "password_expiry": self.login_response.get("password_expiry"),
+                    "password_rotated": rotation_result.get("rotated", False),
+                    "new_password_plain": rotation_result.get("new_password_plain"),
                 }
+            except LoginFailedException:
+                raise
             except Exception as e:
-                raise LoginFailedException("cannot login " + str(e))
+                if isinstance(e, LoginFailedException):
+                    raise
+                raise LoginFailedException(f"Unexpected TMS login error: {e}")
 
     async def get_captcha_id(self, headers):
         async with self.session.get(f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/authApi/captcha/id', headers=headers) as response:
@@ -199,6 +229,202 @@ class TmsUser:
                 response_data = await response.json()
                 return response_data, tokens_dict
 
+    @staticmethod
+    def is_login_success(status: Optional[str]) -> bool:
+        return str(status) in ("202", "210")
+
+    @staticmethod
+    def is_password_expired(password_expiry: Optional[str], today: Optional[date] = None) -> bool:
+        if not password_expiry:
+            return False
+        try:
+            expiry_date = datetime.fromisoformat(str(password_expiry)[:10]).date()
+        except ValueError:
+            return False
+        return expiry_date <= (today or date.today())
+
+    @staticmethod
+    def decode_password_payload(encoded_password: str) -> str:
+        return base64.b64decode(encoded_password.encode("utf-8")).decode("utf-8")
+
+    TMS_PASSWORD_MIN_LEN = 7
+    TMS_PASSWORD_MAX_LEN = 14
+
+    @staticmethod
+    def satisfies_tms_password_rules(password: str) -> bool:
+        if not (TmsUser.TMS_PASSWORD_MIN_LEN <= len(password) <= TmsUser.TMS_PASSWORD_MAX_LEN):
+            return False
+        if not any(char.isupper() for char in password):
+            return False
+        if not any(char.isdigit() for char in password):
+            return False
+        if not any(not char.isalnum() for char in password):
+            return False
+        return True
+
+    @staticmethod
+    def split_password_core_and_at_pad(plain_password: str) -> tuple[str, int]:
+        core = plain_password.rstrip("@")
+        pad_count = len(plain_password) - len(core)
+        return core, pad_count
+
+    @staticmethod
+    def with_at_pad(core: str, pad_count: int) -> str:
+        return core + ("@" * pad_count)
+
+    @staticmethod
+    def valid_at_pad_counts(core: str) -> List[int]:
+        max_pad = max(0, TmsUser.TMS_PASSWORD_MAX_LEN - len(core))
+        counts: List[int] = []
+        for pad_count in range(0, max_pad + 1):
+            candidate = TmsUser.with_at_pad(core, pad_count)
+            if TmsUser.satisfies_tms_password_rules(candidate):
+                counts.append(pad_count)
+        return counts
+
+    @staticmethod
+    def describe_at_pad_password(core: str, pad_count: int) -> str:
+        if pad_count == 0:
+            return f"{core} (core only)"
+        return f"{core} (+{pad_count} @)"
+
+    @staticmethod
+    def rotation_password_candidates(plain_password: str) -> List[tuple[str, str]]:
+        """Build unused-password candidates; TMS rejects passwords already in history."""
+        core, current_pad = TmsUser.split_password_core_and_at_pad(plain_password)
+        results: List[tuple[str, str]] = []
+        seen = {plain_password}
+
+        def add(label: str, candidate: str) -> None:
+            if candidate in seen or not TmsUser.satisfies_tms_password_rules(candidate):
+                return
+            seen.add(candidate)
+            results.append((label, candidate))
+
+        valid_counts = TmsUser.valid_at_pad_counts(core)
+        alternate_counts = [count for count in valid_counts if count != current_pad]
+        ordered_pads: List[int] = []
+        if valid_counts:
+            max_pad = max(valid_counts)
+            if current_pad >= max_pad and current_pad - 1 in alternate_counts:
+                ordered_pads.append(current_pad - 1)
+            elif current_pad + 1 in alternate_counts:
+                ordered_pads.append(current_pad + 1)
+            for count in sorted(alternate_counts, key=lambda value: (abs(value - current_pad), -value)):
+                if count not in ordered_pads:
+                    ordered_pads.append(count)
+
+        for pad_count in ordered_pads:
+            add(
+                TmsUser.describe_at_pad_password(core, pad_count),
+                TmsUser.with_at_pad(core, pad_count),
+            )
+
+        max_pad = max(0, TmsUser.TMS_PASSWORD_MAX_LEN - len(core))
+        special_chars = "!#$%&*"
+        for pad_count in range(0, max_pad + 1):
+            base = TmsUser.with_at_pad(core, pad_count)
+            remaining = TmsUser.TMS_PASSWORD_MAX_LEN - len(base)
+            for special in special_chars:
+                if remaining >= 1:
+                    add(f"{core} (+{pad_count} @ +{special})", base + special)
+                if remaining >= 2:
+                    add(f"{core} (+{pad_count} @ +{special * 2})", base + (special * 2))
+            for digit in "0123456789":
+                if remaining >= 1:
+                    add(f"{core} (+{pad_count} @ +{digit})", base + digit)
+                if remaining >= 2:
+                    for special in special_chars:
+                        add(
+                            f"{core} (+{pad_count} @ +{digit}{special})",
+                            base + digit + special,
+                        )
+
+        if not results:
+            raise LoginFailedException(
+                "Cannot build a new password for rotation within TMS 7-14 char rules."
+            )
+        return results
+
+    async def rotate_password_if_expired(self, *, auto_rotate: bool = True) -> Dict:
+        password_expiry = (self.login_response or {}).get("password_expiry")
+        if not self.is_password_expired(password_expiry):
+            return {"rotated": False, "message": "password is not expired"}
+
+        if not auto_rotate:
+            raise LoginFailedException(
+                f"TMS password expired on {password_expiry}. Enable auto rotation to continue."
+            )
+
+        old_password = self.password
+        plain_password = self.decode_password_payload(old_password)
+        core, current_pad = self.split_password_core_and_at_pad(plain_password)
+        candidates = self.rotation_password_candidates(plain_password)
+        last_error: Optional[Exception] = None
+        current_label = self.describe_at_pad_password(core, current_pad)
+
+        for new_label, new_plain in candidates:
+            new_password = self.encode_base64(new_plain)
+            try:
+                await self.change_password(old_password, new_password)
+                self.password = new_password
+                return {
+                    "rotated": True,
+                    "password_changed": True,
+                    "new_password_plain": new_plain,
+                    "message": (
+                        f"TMS password expired on {password_expiry}. "
+                        f"Changed from {current_label} to {new_label}. "
+                        f"Use this new password for future logins: {new_plain}"
+                    ),
+                }
+            except Exception as exc:
+                last_error = exc
+                continue
+
+        self.password = old_password
+        tried = ", ".join(label for label, _ in candidates[:12])
+        if len(candidates) > 12:
+            tried += f", ... (+{len(candidates) - 12} more)"
+        raise LoginFailedException(
+            f"Password rotation failed after trying {len(candidates)} new password(s) [{tried}]: {last_error}"
+        )
+
+    async def change_password(self, current_password: str, new_password: str) -> Dict:
+        if not self.tokens or not self.headers:
+            raise LoginFailedException("Cannot change password without an authenticated TMS session")
+
+        payload = {
+            "currentPassword": current_password,
+            "newPassword": new_password,
+        }
+        headers = {
+            **self.headers,
+            "content-type": "application/json",
+            "membercode": str(self.broker_no),
+            "origin": f"https://tms{self.broker_no}.nepsetms.com.np",
+            "referer": f"https://tms{self.broker_no}.nepsetms.com.np/tms/changepassword",
+        }
+        url = f"https://tms{self.broker_no}.nepsetms.com.np/tmsapi/authApi/authenticate/updatepassword"
+        async with self.session.post(
+            url, headers=headers, cookies=self.tokens, json=payload, timeout=30
+        ) as response:
+            response_text = await response.text()
+            try:
+                response_json = json.loads(response_text) if response_text else {}
+            except json.JSONDecodeError:
+                response_json = {"message": response_text[:300]}
+            if 200 <= response.status < 300:
+                tms_status = str(response_json.get("status", ""))
+                if tms_status and tms_status not in ("200", "202", "210"):
+                    raise LoginFailedException(
+                        self.auth_failure_message(response_json, "updatepassword failed")
+                    )
+                return {"status": response.status, "message": "password changed", "response": response_json}
+            raise LoginFailedException(
+                f"updatepassword returned HTTP {response.status}: {response_json.get('message', response_text[:200])}"
+            )
+
     async def fetch_securities_details(self):
         url = f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/rtApi/ws/top25securities'
         async with aiohttp.ClientSession() as session:
@@ -221,8 +447,8 @@ class TmsUser:
                 return await response.json()
 
     async def save_login_info(self):
+        db = get_db_session()
         try:
-            db = get_db()  # Assumes get_db is async-compatible
             user = db.query(User).filter(User.client_id == self.client_id, User.broker_no == self.broker_no).first()
             if user:
                 user.auto_login = True
@@ -235,6 +461,9 @@ class TmsUser:
                 db.commit()
         except Exception as e:
             print(f"Cannot save the login info to db: {e}")
+            db.rollback()
+        finally:
+            db.close()
 
     async def login(self):
         async def get_captcha_data():
@@ -250,25 +479,66 @@ class TmsUser:
 
         response_json, tokens_dict = await self.login_request(login_data)
 
-        if response_json['status'] == '108':
-            for _ in range(5):  # Max retries
+        if response_json.get('status') == '108':
+            for _ in range(5):
                 login_data["captcha_id"], login_data["captcha"] = await get_captcha_data()
                 response_json, tokens_dict = await self.login_request(login_data)
 
-                if 'Credentials Not Found' in response_json.get('message', ''):
-                    print(f'Login failed: invalid username or password {self.client_id}')
-                    break
-                
-                if response_json.get('status') == '202':
+                if 'Credentials Not Found' in str(response_json.get('message', '')):
+                    raise LoginFailedException(
+                        self.auth_failure_message(response_json, "Credentials Not Found")
+                    )
+
+                if self.is_login_success(response_json.get('status')):
                     return self._create_response(response_json, tokens_dict)
 
-            print("Maximum number of retries reached. Captcha cannot be solved")
-            raise LoginFailedException()
-        
-        if response_json['status'] != '202':
-            raise LoginFailedException()
+            raise LoginFailedException(
+                self.auth_failure_message(
+                    response_json,
+                    "CAPTCHA_VALIDATION_FAILED after 5 attempts",
+                )
+            )
+
+        if not self.is_login_success(response_json.get('status')):
+            raise LoginFailedException(self.auth_failure_message(response_json))
 
         return self._create_response(response_json, tokens_dict)
+
+    @staticmethod
+    def auth_failure_message(response_json: Optional[Dict], default_message: str = "Login failed.") -> str:
+        if not isinstance(response_json, dict):
+            return default_message
+
+        message = response_json.get("message") or response_json.get("error") or response_json.get("detail")
+        if isinstance(message, list):
+            message = " ".join(str(item) for item in message if item)
+        elif isinstance(message, dict):
+            message = message.get("message") or message.get("detail") or json.dumps(message)
+        elif message is not None:
+            message = str(message)
+
+        status = response_json.get("status")
+        http_status = response_json.get("_http_status")
+
+        if not message:
+            data = response_json.get("data")
+            if isinstance(data, dict):
+                nested = data.get("message") or data.get("error") or data.get("detail")
+                if nested:
+                    message = str(nested)
+
+        if not message:
+            message = default_message
+        else:
+            message = " ".join(str(message).split())
+
+        parts = []
+        if status:
+            parts.append(f"status={status}")
+        if http_status:
+            parts.append(f"http={http_status}")
+        parts.append(message)
+        return " | ".join(parts)
 
     def _create_response(self, response_json, tokens_dict):
         return {
@@ -293,6 +563,21 @@ class TmsUser:
         input_bytes = input_string.encode('utf-8')
         base64_encoded_bytes = base64.b64encode(input_bytes)
         return base64_encoded_bytes.decode('utf-8')
+
+    @staticmethod
+    def to_tms_password_payload(password: str) -> str:
+        """Accept plain TMS password or an already base64-encoded payload."""
+        value = (password or "").strip()
+        if not value:
+            return value
+        if len(value) % 4 == 0 and any(char in value for char in "=+/"):
+            try:
+                decoded = base64.b64decode(value.encode("utf-8"), validate=True).decode("utf-8")
+                if decoded and all(char.isprintable() for char in decoded):
+                    return value
+            except Exception:
+                pass
+        return TmsUser.encode_base64(value)
 
     async def get_user_stock_details(self):
         url = f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/dp-holding/client/freebalance/{self.client_details["id"]}/CLI'
