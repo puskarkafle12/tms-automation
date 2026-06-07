@@ -50,6 +50,41 @@ running_tasks: Dict[str, asyncio.Task] = {}
 running_grabbers: Dict[str, TmsUser] = {}
 stock_grabber_updates: Dict[str, List[Dict]] = {}
 
+async def _run_stock_grabber_task(
+    tms_user: TmsUser,
+    session_id: str,
+    order_quantity: int,
+    max_order_limit: int,
+) -> None:
+    try:
+        while True:
+            try:
+                result = await tms_user.stock_grabber(
+                    order_quantity=order_quantity,
+                    session_id=session_id,
+                    max_order_limit=max_order_limit,
+                )
+                placed = len(result.get("totalOrders") or [])
+                if placed > 0 or result.get("message") == "ACCESS_TOKEN_EXPIRED":
+                    break
+                tms_user.updates.append({
+                    "status": "scanning",
+                    "message": "Scan interrupted — resuming price watch…",
+                })
+                await asyncio.sleep(2)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                stock_grabber_updates[session_id].append(
+                    {"status": "warn", "message": f"Grabber error ({exc}) — resuming scan…"}
+                )
+                await asyncio.sleep(2)
+    except asyncio.CancelledError:
+        raise
+    finally:
+        await tms_user.close()
+
+
 @app.post("/stock_grabber/")
 async def stock_grabber(request: StockGrabberRequest, db: Session = Depends(get_db)):
     session_id = str(uuid.uuid4())
@@ -58,31 +93,43 @@ async def stock_grabber(request: StockGrabberRequest, db: Session = Depends(get_
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Instantiate TmsUser with user credentials
+    max_order_limit = int(request.max_order_limit) if request.max_order_limit and int(request.max_order_limit) > 0 else 4
+
     tms_user = TmsUser(
         broker_no=user.broker_no,
         username=user.client_id,
         password=user.password,
         stock_symbol=request.stock_symbol,
-        request_per_sec=request.request_per_sec
+        request_per_sec=request.request_per_sec,
+        resume_scan_count=int(request.resume_scan_count or 0),
+        resume_previous_ltp=float(request.resume_previous_ltp or 0.0),
+        resume_stable_rate=request.resume_stable_rate,
     )
     await tms_user.try_cached_login()
-    async with aiohttp.ClientSession() as session:
-        tms_user.session = session
-        task = asyncio.create_task(
-            tms_user.stock_grabber(
-                order_quantity=request.order_quantity,
-                session_id=session_id,
-            )
+
+    task = asyncio.create_task(
+        _run_stock_grabber_task(
+            tms_user,
+            session_id,
+            request.order_quantity,
+            max_order_limit,
         )
-        running_tasks[session_id] = task
-        running_grabbers[session_id] = tms_user
+    )
+    running_tasks[session_id] = task
+    running_grabbers[session_id] = tms_user
 
-        def _on_grabber_done(_task: asyncio.Task) -> None:
-            stock_grabber_updates[session_id].append({"status": "completed", "message": "Task completed"})
-            running_grabbers.pop(session_id, None)
+    def _on_grabber_done(done_task: asyncio.Task) -> None:
+        running_tasks.pop(session_id, None)
+        running_grabbers.pop(session_id, None)
+        if done_task.cancelled():
+            return
+        exc = done_task.exception()
+        if exc:
+            stock_grabber_updates[session_id].append(
+                {"status": "failed", "message": f"Stock grabber crashed: {exc}"}
+            )
 
-        task.add_done_callback(_on_grabber_done)
+    task.add_done_callback(_on_grabber_done)
     return {"session_id": session_id, "message": "Stock grabber started"}
 
 @app.post("/stop_stock_grabber/{session_id}")
@@ -107,7 +154,30 @@ async def get_stock_grabber_updates(session_id: str):
         updates.extend(tms_user.updates)
         tms_user.updates = []
 
-    return {"updates": updates}
+    task = running_tasks.get(session_id)
+    scanner_active = task is not None and not task.done()
+
+    return {"updates": updates, "scanner_active": scanner_active}
+
+
+@app.get("/active_stock_grabbers/")
+@app.get("/active_stock_grabbers")
+async def active_stock_grabbers():
+    grabbers = []
+    for session_id, tms_user in running_grabbers.items():
+        task = running_tasks.get(session_id)
+        grabbers.append({
+            "session_id": session_id,
+            "client_id": tms_user.client_id,
+            "stock_symbol": tms_user.stock_symbol,
+            "scan_count": getattr(tms_user, "scan_count", 0),
+            "scanner_active": task is not None and not task.done(),
+            "request_per_sec": tms_user.request_per_sec,
+            "stable_rate": tms_user.stable_rate,
+        })
+    return {"grabbers": grabbers}
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -731,46 +801,6 @@ async def frontend_login(user_login: UserLogin, db: Session = Depends(get_db)):
 #     return {"message": "Order loop stopped"}
 
 
-@app.post("/stock_grabber/")
-async def stock_grabber(
-    request: StockGrabberRequest,
-    db: Session = Depends(get_db)
-):
-    """
-    Execute the stock_grabber functionality for a given client and stock symbol.
-    """
-    # Fetch user from database
-    user =db.query(User).filter(User.client_id == request.client_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    # Initialize TmsUser instance
-    tms_user = TmsUser(
-        broker_no=user.broker_no,
-        username=user.client_id,
-        password=user.password,
-        stock_symbol=request.stock_symbol,
-        request_per_sec=request.request_per_sec
-    )
-
-    try:
-        # Attempt to log in
-        await tms_user.try_cached_login()
-
-        # Execute stock_grabber
-        response = await tms_user.stock_grabber(
-            order_quantity=request.order_quantity,
-            max_order_limit=request.max_order_limit
-        )
-
-        return response
-
-    except Exception as e:
-        if "ACCESS_TOKEN_EXPIRED" in str(e):
-            raise HTTPException(status_code=401, detail="Access token expired")
-        raise HTTPException(status_code=500, detail=f"Error executing stock grabber: {str(e)}")
-    finally:
-        await tms_user.close()
 @app.get("/{path:path}")
 async def catch_all(path: str):
     raise HTTPException(status_code=404, detail="Route not found")

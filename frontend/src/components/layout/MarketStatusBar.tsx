@@ -42,9 +42,11 @@ const MarketStatusBar: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    loadStatus();
-    const poll = setInterval(loadStatus, 30000);
-    return () => clearInterval(poll);
+    void loadStatus();
+    const poll = window.setInterval(() => {
+      void loadStatus();
+    }, 30000);
+    return () => window.clearInterval(poll);
   }, [loadStatus]);
 
   const isMarketLive = status?.market_live ?? false;
