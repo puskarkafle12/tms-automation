@@ -297,8 +297,19 @@ class TmsUser:
 
     @staticmethod
     def with_rotation_number(plain_password: str, rotation_number: int) -> str:
-        prefix, _ = TmsUser.password_rotation_parts(plain_password)
-        return prefix + str(rotation_number)
+        """Replace the tail of the password so length stays the same.
+
+        Examples:
+            Abcdef@9  -> Abcdef10   (last 2 chars "@9" become "10")
+            Abc@ef99  -> Abc@e100   (last 3 chars "f99" become "100")
+        """
+        new_suffix = str(rotation_number)
+        replace_len = len(new_suffix)
+        if replace_len > len(plain_password):
+            raise LoginFailedException(
+                "Cannot rotate password: new suffix is longer than the current password."
+            )
+        return plain_password[:-replace_len] + new_suffix
 
     @staticmethod
     def describe_numbered_password(rotation_number: int) -> str:
