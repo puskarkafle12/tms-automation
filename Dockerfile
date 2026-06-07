@@ -26,6 +26,7 @@ RUN apt-get update \
         libglib2.0-0 \
         libgl1 \
         libpq-dev \
+        nginx \
         python3 \
         python3-dev \
         python3-venv \
@@ -41,8 +42,11 @@ RUN pip install --no-cache-dir --upgrade pip \
 COPY . /app
 COPY --from=frontend-build /frontend/build /app/frontend/build
 COPY docker-entrypoint-all-in-one.sh /app/docker-entrypoint-all-in-one.sh
+COPY nginx-tms-automation.conf /etc/nginx/conf.d/tms-automation.conf
 RUN chmod +x /app/docker-entrypoint-all-in-one.sh
+RUN rm -f /etc/nginx/sites-enabled/default \
+    && nginx -t
 
-EXPOSE 8000
+EXPOSE 80
 
 ENTRYPOINT ["/app/docker-entrypoint-all-in-one.sh"]

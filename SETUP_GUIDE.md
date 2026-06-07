@@ -1,20 +1,20 @@
 # TMS Automation — Setup Guide (From Scratch)
 
-This guide walks you through running the full project locally. The recommended path is Docker, which packages PostgreSQL, FastAPI, the React build, and database initialization into one container.
+This guide walks you through running the full project locally. The recommended path is Docker, which packages Nginx, PostgreSQL, FastAPI, the React build, and database initialization into one container.
 
 ---
 
 ## What This Project Does
 
-- **App** (`http://localhost:8000`) — React dashboard served by FastAPI
-- **Backend API** (`http://localhost:8000/docs`) — FastAPI API that talks to NEPSE TMS and the database
+- **App** (`http://localhost:3000`) — React dashboard served through Nginx
+- **Backend API** (`http://localhost:3000/docs`) — FastAPI API that talks to NEPSE TMS and the database
 - **Bundled PostgreSQL** — stores app users, TMS sessions/tokens, orders, and logs inside the Docker container volume
 
 You need **two separate logins**:
 
 | Login | Where | Purpose |
 |-------|-------|---------|
-| App login | `http://localhost:8000` | Opens the dashboard |
+| App login | `http://localhost:3000` | Opens the dashboard |
 | TMS login | Dashboard → **Login** tab | Connects your broker TMS account |
 
 ---
@@ -25,15 +25,18 @@ You need **two separate logins**:
 docker compose up --build
 ```
 
-Open [http://localhost:8000](http://localhost:8000).
+Open [http://localhost:3000](http://localhost:3000).
 
 The container:
 
 - builds the React frontend
+- starts Nginx on port `80` inside the container
 - starts PostgreSQL inside the same container
 - creates the database/user if missing
 - runs `scripts/init_local_db.py`
-- starts FastAPI on port `8000`
+- starts FastAPI privately on port `8000` inside the container
+
+Docker maps host port `3000` to Nginx inside the container, so other machines on the same LAN can open `http://YOUR_COMPUTER_LAN_IP:3000`.
 
 Default app login:
 
