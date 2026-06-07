@@ -22,6 +22,35 @@ export interface ActiveGrabberFromApi {
 
 const STORAGE_KEY = 'stock_grabber_instances';
 
+export const makeGrabberKey = (clientId: string, stockSymbol: string): string =>
+  `${clientId.trim().toUpperCase()}::${stockSymbol.trim().toUpperCase()}`;
+
+const grabberScore = (grabber: StockGrabberInstance): number =>
+  (grabber.isRunning ? 4 : 0)
+  + (grabber.sessionId ? 2 : 0)
+  + (grabber.scanCount ? 1 : 0);
+
+export const dedupeGrabbers = (grabbers: StockGrabberInstance[]): StockGrabberInstance[] => {
+  const byKey = new Map<string, StockGrabberInstance>();
+  grabbers.forEach((grabber) => {
+    const key = makeGrabberKey(grabber.client_id, grabber.stock_symbol);
+    const existing = byKey.get(key);
+    if (!existing || grabberScore(grabber) > grabberScore(existing)) {
+      byKey.set(key, grabber);
+    }
+  });
+  return Array.from(byKey.values());
+};
+
+export const findGrabberByKey = (
+  grabbers: StockGrabberInstance[],
+  clientId: string,
+  stockSymbol: string,
+): StockGrabberInstance | undefined =>
+  grabbers.find(
+    (g) => makeGrabberKey(g.client_id, g.stock_symbol) === makeGrabberKey(clientId, stockSymbol),
+  );
+
 export const loadGrabbers = (): StockGrabberInstance[] => {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -29,7 +58,7 @@ export const loadGrabbers = (): StockGrabberInstance[] => {
       return [];
     }
     const parsed = JSON.parse(raw) as StockGrabberInstance[];
-    return Array.isArray(parsed) ? parsed : [];
+    return Array.isArray(parsed) ? dedupeGrabbers(parsed) : [];
   } catch {
     return [];
   }
@@ -99,7 +128,7 @@ export const mergeWithActiveGrabbers = (
     }
   });
 
-  return merged;
+  return dedupeGrabbers(merged);
 };
 
 export const sortGrabbersRunningFirst = (grabbers: StockGrabberInstance[]) =>
