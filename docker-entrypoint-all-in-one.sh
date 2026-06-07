@@ -35,7 +35,7 @@ wait_for_ngrok_url() {
   local url=""
   for _ in $(seq 1 60); do
     url="$(curl -fsS http://127.0.0.1:4040/api/tunnels 2>/dev/null \
-      | python3 -c "import json,sys; data=json.load(sys.stdin); tunnels=data.get('tunnels') or []; print(next((t['public_url'] for t in tunnels if t.get('public_url','').startswith('https')), ''))" \
+      | python3 -c "import json,sys; data=json.load(sys.stdin); tunnels=data.get('tunnels') or []; print(next((t['public_url'] for t in tunnels if t.get('public_url','').startswith('https')), ''))" 2>/dev/null \
       || true)"
     if [ -n "$url" ]; then
       print_public_url_banner "$url" "Permanent ngrok URL for your account."
