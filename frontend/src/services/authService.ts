@@ -6,9 +6,11 @@ const getApiUrl = () => localStorage.getItem('apiUrl') || window.location.origin
 export const authService = {
   login: async (username: string, password: string) => {
     try {
+      const cleanUsername = username.trim();
+      const cleanPassword = password.trim();
       const response = await axios.post(`${getApiUrl()}/frontend-login`, {
-        username,
-        password,
+        username: cleanUsername,
+        password: cleanPassword,
       }, {
         headers: {
           'Content-Type': 'application/json',

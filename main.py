@@ -795,8 +795,10 @@ async def get_order_logs(client_ids: List[str] = Query(...), db: Session = Depen
 
 @app.post("/frontend-login")
 async def frontend_login(user_login: UserLogin, db: Session = Depends(get_db)):
+    username = user_login.username.strip()
+    password = user_login.password.strip()
     user = FrontendUser.authenticate(
-        user_login.username, user_login.password, db)
+        username, password, db)
     if not user:
         raise HTTPException(
             status_code=401, detail="Invalid username or password")
@@ -804,8 +806,8 @@ async def frontend_login(user_login: UserLogin, db: Session = Depends(get_db)):
     # Generate JWT token
     timestamp = datetime.utcnow().timestamp()
     payload = {
-        "username": user_login.username,
-        "password": user_login.password,
+        "username": username,
+        "password": password,
         "timestamp": timestamp
     }
     access_token = jwt.encode(payload, SECRET_KEY, algorithm="HS256")
