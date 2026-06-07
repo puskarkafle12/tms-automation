@@ -13,6 +13,11 @@ services:
       DB_NAME: stock
       FRONTEND_SEED_USER: admin
       FRONTEND_SEED_PASSWORD: admin
+      # For a permanent same Cloudflare URL, set CLOUDFLARED_TOKEN to a
+      # named tunnel token from Cloudflare Zero Trust.
+      CLOUDFLARED_TOKEN: ${CLOUDFLARED_TOKEN:-}
+      # Without a token, Docker starts a temporary trycloudflare.com URL.
+      CLOUDFLARED_QUICK_TUNNEL: ${CLOUDFLARED_QUICK_TUNNEL:-true}
     volumes:
       - tms_postgres_data:/var/lib/postgresql/data
 
