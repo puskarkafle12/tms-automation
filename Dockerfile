@@ -17,7 +17,8 @@ ENV PYTHONUNBUFFERED=1 \
     DB_HOST=127.0.0.1 \
     DB_NAME=stock \
     FRONTEND_SEED_USER=admin \
-    FRONTEND_SEED_PASSWORD=admin
+    FRONTEND_SEED_PASSWORD=admin \
+    CLOUDFLARED_QUICK_TUNNEL=true
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -33,6 +34,18 @@ RUN apt-get update \
     && python3 -m venv "$VIRTUAL_ENV" \
     && mkdir -p /root/.EasyOCR/model /root/.EasyOCR/user_network \
     && rm -rf /var/lib/apt/lists/*
+
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) cloudflared_arch=amd64 ;; \
+      arm64) cloudflared_arch=arm64 ;; \
+      *) echo "Unsupported architecture for cloudflared: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${cloudflared_arch}" \
+      -o /usr/local/bin/cloudflared; \
+    chmod +x /usr/local/bin/cloudflared; \
+    cloudflared --version
 
 WORKDIR /app
 COPY requirements.txt ./
