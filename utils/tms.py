@@ -8,6 +8,7 @@ import aiohttp
 from database import get_db_session
 from exceptions.login_exceptions import LoginFailedException
 from models.logged_in_user import LoggedInUsers
+from models.tms_password_backup import TmsPasswordBackup
 from models.user import User
 from utils.tms_captcha_solver.imgto_txt import solve_captcha
 from utils.base_functions import calculate_high_price, get_tokens, log_time, logout_user, save_tokens
@@ -279,35 +280,35 @@ class TmsUser:
         return True
 
     @staticmethod
-    def split_password_core_and_at_pad(plain_password: str) -> tuple[str, int]:
-        core = plain_password.rstrip("@")
-        pad_count = len(plain_password) - len(core)
-        return core, pad_count
+    def password_rotation_number(plain_password: str) -> int:
+        _, rotation_number = TmsUser.password_rotation_parts(plain_password)
+        return rotation_number
 
     @staticmethod
-    def with_at_pad(core: str, pad_count: int) -> str:
-        return core + ("@" * pad_count)
+    def password_rotation_parts(plain_password: str) -> tuple[str, int]:
+        trailing_digits = ""
+        for char in reversed(plain_password):
+            if not char.isdigit():
+                break
+            trailing_digits = char + trailing_digits
+        if trailing_digits:
+            return plain_password[: -len(trailing_digits)], int(trailing_digits)
+        return plain_password[:-1], 0
 
     @staticmethod
-    def valid_at_pad_counts(core: str) -> List[int]:
-        max_pad = max(0, TmsUser.TMS_PASSWORD_MAX_LEN - len(core))
-        counts: List[int] = []
-        for pad_count in range(0, max_pad + 1):
-            candidate = TmsUser.with_at_pad(core, pad_count)
-            if TmsUser.satisfies_tms_password_rules(candidate):
-                counts.append(pad_count)
-        return counts
+    def with_rotation_number(plain_password: str, rotation_number: int) -> str:
+        prefix, _ = TmsUser.password_rotation_parts(plain_password)
+        return prefix + str(rotation_number)
 
     @staticmethod
-    def describe_at_pad_password(core: str, pad_count: int) -> str:
-        if pad_count == 0:
-            return f"{core} (core only)"
-        return f"{core} (+{pad_count} @)"
+    def describe_numbered_password(rotation_number: int) -> str:
+        if rotation_number < 10:
+            return f"rotation {rotation_number} (last digit)"
+        return f"rotation {rotation_number} (last {len(str(rotation_number))} digits)"
 
     @staticmethod
     def rotation_password_candidates(plain_password: str) -> List[tuple[str, str]]:
         """Build unused-password candidates; TMS rejects passwords already in history."""
-        core, current_pad = TmsUser.split_password_core_and_at_pad(plain_password)
         results: List[tuple[str, str]] = []
         seen = {plain_password}
 
@@ -317,48 +318,16 @@ class TmsUser:
             seen.add(candidate)
             results.append((label, candidate))
 
-        valid_counts = TmsUser.valid_at_pad_counts(core)
-        alternate_counts = [count for count in valid_counts if count != current_pad]
-        ordered_pads: List[int] = []
-        if valid_counts:
-            max_pad = max(valid_counts)
-            if current_pad >= max_pad and current_pad - 1 in alternate_counts:
-                ordered_pads.append(current_pad - 1)
-            elif current_pad + 1 in alternate_counts:
-                ordered_pads.append(current_pad + 1)
-            for count in sorted(alternate_counts, key=lambda value: (abs(value - current_pad), -value)):
-                if count not in ordered_pads:
-                    ordered_pads.append(count)
-
-        for pad_count in ordered_pads:
+        current_number = TmsUser.password_rotation_number(plain_password)
+        for rotation_number in range(current_number + 1, 1000):
             add(
-                TmsUser.describe_at_pad_password(core, pad_count),
-                TmsUser.with_at_pad(core, pad_count),
+                TmsUser.describe_numbered_password(rotation_number),
+                TmsUser.with_rotation_number(plain_password, rotation_number),
             )
-
-        max_pad = max(0, TmsUser.TMS_PASSWORD_MAX_LEN - len(core))
-        special_chars = "!#$%&*"
-        for pad_count in range(0, max_pad + 1):
-            base = TmsUser.with_at_pad(core, pad_count)
-            remaining = TmsUser.TMS_PASSWORD_MAX_LEN - len(base)
-            for special in special_chars:
-                if remaining >= 1:
-                    add(f"{core} (+{pad_count} @ +{special})", base + special)
-                if remaining >= 2:
-                    add(f"{core} (+{pad_count} @ +{special * 2})", base + (special * 2))
-            for digit in "0123456789":
-                if remaining >= 1:
-                    add(f"{core} (+{pad_count} @ +{digit})", base + digit)
-                if remaining >= 2:
-                    for special in special_chars:
-                        add(
-                            f"{core} (+{pad_count} @ +{digit}{special})",
-                            base + digit + special,
-                        )
 
         if not results:
             raise LoginFailedException(
-                "Cannot build a new password for rotation within TMS 7-14 char rules."
+                "Cannot build a new numbered password for rotation within TMS 7-14 char rules."
             )
         return results
 
@@ -374,16 +343,19 @@ class TmsUser:
 
         old_password = self.password
         plain_password = self.decode_password_payload(old_password)
-        core, current_pad = self.split_password_core_and_at_pad(plain_password)
         candidates = self.rotation_password_candidates(plain_password)
         last_error: Optional[Exception] = None
-        current_label = self.describe_at_pad_password(core, current_pad)
+        current_label = self.describe_numbered_password(
+            self.password_rotation_number(plain_password)
+        )
 
         for new_label, new_plain in candidates:
             new_password = self.encode_base64(new_plain)
             try:
                 await self.change_password(old_password, new_password)
                 self.password = new_password
+                await self.save_login_info()
+                await self.save_password_backup(new_password, new_label)
                 return {
                     "rotated": True,
                     "password_changed": True,
@@ -477,6 +449,23 @@ class TmsUser:
                 db.commit()
         except Exception as e:
             print(f"Cannot save the login info to db: {e}")
+            db.rollback()
+        finally:
+            db.close()
+
+    async def save_password_backup(self, encoded_password: str, rotation_label: str) -> None:
+        db = get_db_session()
+        try:
+            backup = TmsPasswordBackup(
+                client_id=self.client_id,
+                broker_no=self.broker_no,
+                password=encoded_password,
+                rotation_label=rotation_label,
+            )
+            db.add(backup)
+            db.commit()
+        except Exception as e:
+            print(f"Cannot save password backup to db: {e}")
             db.rollback()
         finally:
             db.close()
