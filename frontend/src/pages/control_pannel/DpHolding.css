@@ -201,6 +201,180 @@
   font-weight: 700;
 }
 
+.dp-holdings-table .positive {
+  color: var(--color-success);
+  font-weight: 700;
+}
+
+.dp-holdings-table .negative {
+  color: var(--color-danger);
+  font-weight: 700;
+}
+
+.dp-holdings-symbol-name {
+  display: block;
+  max-width: 220px;
+  margin-top: 0.125rem;
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  white-space: normal;
+}
+
+.dp-sell-btn {
+  background: var(--color-danger-soft) !important;
+  color: var(--color-danger) !important;
+}
+
+.dp-sell-btn:hover {
+  background: #fecaca !important;
+}
+
+.dp-sell-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: rgb(15 23 42 / 0.48);
+}
+
+.dp-sell-modal {
+  width: min(920px, 100%);
+  max-height: min(86vh, 780px);
+  overflow-y: auto;
+  padding: 1.25rem;
+}
+
+.dp-sell-modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.dp-sell-modal-header h3 {
+  margin: 0;
+  font-size: 1.125rem;
+}
+
+.dp-sell-modal-header p {
+  margin: 0.25rem 0 0;
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+}
+
+.dp-sell-close {
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
+  cursor: pointer;
+  font-size: 1.25rem;
+  line-height: 1;
+}
+
+.dp-sell-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.dp-sell-summary div {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+  padding: 0.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+}
+
+.dp-sell-summary span {
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.dp-sell-summary strong {
+  color: var(--color-text);
+  font-size: 1rem;
+}
+
+.dp-depth-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.dp-depth-table {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.dp-depth-table h4 {
+  margin: 0;
+  padding: 0.75rem 1rem;
+  background: var(--color-bg);
+  border-bottom: 1px solid var(--color-border);
+  font-size: 0.875rem;
+}
+
+.dp-depth-table table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8125rem;
+}
+
+.dp-depth-table th,
+.dp-depth-table td {
+  padding: 0.625rem 0.75rem;
+  border-bottom: 1px solid var(--color-border);
+  text-align: right;
+}
+
+.dp-depth-table th:first-child,
+.dp-depth-table td:first-child {
+  text-align: left;
+}
+
+.dp-depth-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.dp-depth-table p {
+  margin: 0;
+  padding: 1rem;
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+}
+
+.dp-sell-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr)) auto;
+  gap: 1rem;
+  align-items: end;
+}
+
+.dp-sell-form .form-group {
+  margin-bottom: 0;
+}
+
+.dp-sell-submit {
+  min-height: 42px;
+  white-space: nowrap;
+}
+
 @media (max-width: 768px) {
   .dp-holdings-hero,
   .dp-holdings-filters-header {
@@ -209,6 +383,11 @@
   }
 
   .dp-holdings-form {
+    grid-template-columns: 1fr;
+  }
+
+  .dp-depth-grid,
+  .dp-sell-form {
     grid-template-columns: 1fr;
   }
 }
