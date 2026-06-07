@@ -5,7 +5,7 @@ import ErrorMessage from '../../components/ErrorMessage';
 import ScriptNameAutocomplete, { ScriptOption } from '../../components/ScriptNameAutocomplete';
 import ScheduleMonitorBar from '../../components/ScheduleMonitorBar';
 
-const getApiUrl = () => localStorage.getItem('apiUrl') || 'http://localhost:8000';
+const getApiUrl = () => localStorage.getItem('apiUrl') || window.location.origin;
 
 const ScheduleOrder: React.FC = () => {
   const [clientID, setClientID] = useState('');

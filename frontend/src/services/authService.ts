@@ -1,7 +1,7 @@
 import axios from 'axios';
 import { extractApiErrorMessage } from '../utils/apiError';
 
-const getApiUrl = () => localStorage.getItem('apiUrl') || 'http://localhost:8000';
+const getApiUrl = () => localStorage.getItem('apiUrl') || window.location.origin;
 
 export const authService = {
   login: async (username: string, password: string) => {

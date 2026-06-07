@@ -4,7 +4,7 @@ import ErrorMessage from '../../components/ErrorMessage';
 import { GrabberControls } from '../../types/monitoring';
 import { monitoringStore } from '../../hooks/monitoringStore';
 
-const getApiUrl = () => localStorage.getItem('apiUrl') || 'http://localhost:8000';
+const getApiUrl = () => localStorage.getItem('apiUrl') || window.location.origin;
 
 interface StockGrabberRequest {
   client_id: string;

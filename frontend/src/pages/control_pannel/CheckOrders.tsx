@@ -16,7 +16,7 @@ interface OrderLog {
   logs: string | null;
 }
 
-const getApiUrl = () => localStorage.getItem('apiUrl') || 'http://localhost:8000';
+const getApiUrl = () => localStorage.getItem('apiUrl') || window.location.origin;
 
 const CheckOrders: React.FC = () => {
   const [logs, setLogs] = useState<OrderLog[]>([]);

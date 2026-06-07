@@ -15,7 +15,7 @@ from models import frontend_user, logged_in_user, order_log, order_status_log, s
 
 def main() -> None:
     seed_user = os.getenv("FRONTEND_SEED_USER", "admin")
-    seed_password = os.getenv("FRONTEND_SEED_PASSWORD", "changeme")
+    seed_password = os.getenv("FRONTEND_SEED_PASSWORD", "admin")
 
     Base.metadata.create_all(bind=engine)
     db = SessionLocal()
@@ -27,7 +27,12 @@ def main() -> None:
             print(f"Seeded frontend user: {seed_user}")
             print("Use FRONTEND_SEED_USER and FRONTEND_SEED_PASSWORD in .env to customize.")
         else:
-            print(f"Frontend user already exists: {seed_user}")
+            if existing.password != seed_password:
+                existing.password = seed_password
+                db.commit()
+                print(f"Updated frontend user password: {seed_user}")
+            else:
+                print(f"Frontend user already exists: {seed_user}")
         print("Database tables are ready.")
     finally:
         db.close()

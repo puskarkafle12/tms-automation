@@ -5,7 +5,7 @@ interface MonitorOrdersProps {
   onStatusChange?: (message: string, variant: 'success' | 'error') => void;
 }
 
-const getApiUrl = () => localStorage.getItem('apiUrl') || 'http://localhost:8000';
+const getApiUrl = () => localStorage.getItem('apiUrl') || window.location.origin;
 
 const MonitorOrders: React.FC<MonitorOrdersProps> = ({ onStatusChange }) => {
   const [errorMessage, setErrorMessage] = useState('');

@@ -132,9 +132,13 @@
 
 .tms-login-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1.6fr) minmax(280px, 1fr);
+  grid-template-columns: 1fr;
   gap: 1.25rem;
   align-items: start;
+}
+
+.tms-login-layout.has-sidebar {
+  grid-template-columns: minmax(0, 1.6fr) minmax(280px, 1fr);
 }
 
 .tms-accounts-table-wrap,
@@ -158,11 +162,6 @@
   display: flex;
   flex-direction: column;
   gap: 1.25rem;
-}
-
-.tms-quick-login-panel {
-  border-color: #bfdbfe;
-  background: linear-gradient(180deg, #fff 0%, #f8fbff 100%);
 }
 
 .tms-accounts-table {

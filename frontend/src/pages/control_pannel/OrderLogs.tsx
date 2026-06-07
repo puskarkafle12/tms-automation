@@ -33,7 +33,7 @@ const GetOrderStatus: React.FC = () => {
   const [dialogAction, setDialogAction] = useState<() => void>(() => {});
   const [errorMessage, setErrorMessage] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
-  const apiUrl = localStorage.getItem('apiUrl') || 'http://localhost:8000';
+  const apiUrl = localStorage.getItem('apiUrl') || window.location.origin;
 
   const fetchLoggedInClientIDs = useCallback(async () => {
     try {

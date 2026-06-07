@@ -1,23 +1,52 @@
 # TMS Automation — Setup Guide (From Scratch)
 
-This guide walks you through installing and running the full project locally: PostgreSQL, FastAPI backend, and React frontend.
+This guide walks you through running the full project locally. The recommended path is Docker, which packages PostgreSQL, FastAPI, the React build, and database initialization into one container.
 
 ---
 
 ## What This Project Does
 
-- **Frontend** (`http://localhost:3000`) — dashboard UI for TMS trading tools
-- **Backend** (`http://localhost:8000`) — FastAPI API that talks to NEPSE TMS and the database
-- **PostgreSQL** — stores app users, TMS sessions/tokens, orders, and logs
+- **App** (`http://localhost:8000`) — React dashboard served by FastAPI
+- **Backend API** (`http://localhost:8000/docs`) — FastAPI API that talks to NEPSE TMS and the database
+- **Bundled PostgreSQL** — stores app users, TMS sessions/tokens, orders, and logs inside the Docker container volume
 
 You need **two separate logins**:
 
 | Login | Where | Purpose |
 |-------|-------|---------|
-| App login | `http://localhost:3000` | Opens the dashboard |
+| App login | `http://localhost:8000` | Opens the dashboard |
 | TMS login | Dashboard → **Login** tab | Connects your broker TMS account |
 
 ---
+
+## Recommended: Run Everything in One Docker Container
+
+```bash
+docker compose up --build
+```
+
+Open [http://localhost:8000](http://localhost:8000).
+
+The container:
+
+- builds the React frontend
+- starts PostgreSQL inside the same container
+- creates the database/user if missing
+- runs `scripts/init_local_db.py`
+- starts FastAPI on port `8000`
+
+Default app login:
+
+```text
+username: admin
+password: admin
+```
+
+To change the seeded login, edit `FRONTEND_SEED_USER` and `FRONTEND_SEED_PASSWORD` in `docker-compose.yml` before the first run. PostgreSQL data is stored in the `tms_postgres_data` Docker volume.
+
+---
+
+## Manual Local Development
 
 ## Prerequisites
 
@@ -49,7 +78,12 @@ cd tms-automation
 The project uses PostgreSQL for all data storage.
 
 ```bash
-docker compose up -d
+docker run --name tms-postgres \
+  -e POSTGRES_USER=pk \
+  -e POSTGRES_PASSWORD=pk \
+  -e POSTGRES_DB=stock \
+  -p 5432:5432 \
+  -d postgres:16-alpine
 ```
 
 This starts a container named `tms-postgres` with:
@@ -68,7 +102,7 @@ Verify it is running:
 docker ps
 ```
 
-You should see `tms-postgres` in the list.
+You should see `tms-postgres` in the list. If you use the recommended all-in-one Docker setup above, skip the rest of the manual setup.
 
 ---
 
@@ -83,7 +117,7 @@ DB_PASSWORD=pk
 DB_HOST=localhost
 DB_NAME=stock
 FRONTEND_SEED_USER=admin
-FRONTEND_SEED_PASSWORD=changeme
+FRONTEND_SEED_PASSWORD=admin
 EOF
 ```
 
@@ -165,7 +199,7 @@ npm start
 
 The app opens at [http://localhost:3000](http://localhost:3000).
 
-The frontend defaults the API URL to `http://localhost:8000` (set in `frontend/src/index.tsx`). You can change it later in **Settings** if needed.
+The frontend defaults the API URL to the same origin it was opened from. In manual development from `http://localhost:3000`, set **Settings → Backend API URL** to `http://localhost:8000` if needed.
 
 ---
 

@@ -8,7 +8,6 @@ import {
   deleteTmsAccount,
   listTmsAccounts,
   loginTmsAccount,
-  loginTmsWithCredentials,
   updateTmsAccount,
 } from '../../api/tmsAccounts.api';
 
@@ -29,10 +28,8 @@ const Login: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [formMode, setFormMode] = useState<FormMode>(null);
   const [form, setForm] = useState(emptyForm);
-  const [quickForm, setQuickForm] = useState(emptyForm);
   const [editingClientId, setEditingClientId] = useState<string | null>(null);
   const [showPassword, setShowPassword] = useState(false);
-  const [showQuickPassword, setShowQuickPassword] = useState(false);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
@@ -170,30 +167,6 @@ const Login: React.FC = () => {
     }
   };
 
-  const handleQuickLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
-    resetMessages();
-    if (!quickForm.client_id.trim() || !quickForm.broker_no.trim() || !quickForm.password.trim()) {
-      setErrorMessage('Client ID, broker number, and password are required.');
-      return;
-    }
-    setActionLoading('quick-login');
-    try {
-      const response = await loginTmsWithCredentials({
-        username: quickForm.client_id.trim(),
-        password: quickForm.password,
-        broker_no: quickForm.broker_no.trim(),
-      });
-      setSuccessMessage(formatLoginResponse(response));
-      setQuickForm((current) => ({ ...current, password: '' }));
-      await loadAccounts();
-    } catch (error) {
-      setErrorMessage(extractApiErrorMessage(error));
-    } finally {
-      setActionLoading(null);
-    }
-  };
-
   const loggedInAccounts = accounts.filter((a) => a.session_status === 'logged_in');
 
   return (
@@ -240,7 +213,7 @@ const Login: React.FC = () => {
         {loading ? (
           <p className="tms-muted">Loading sessions...</p>
         ) : loggedInAccounts.length === 0 ? (
-          <p className="tms-muted">No clients are logged in right now. Use Quick Login or Login on an account below.</p>
+          <p className="tms-muted">No clients are logged in right now. Add an account below and press Login.</p>
         ) : (
           <div className="tms-logged-in-list">
             {loggedInAccounts.map((account) => (
@@ -259,7 +232,7 @@ const Login: React.FC = () => {
         )}
       </div>
 
-      <div className="tms-login-layout">
+      <div className={`tms-login-layout${formMode ? ' has-sidebar' : ''}`}>
         <div className="tms-accounts-table-wrap panel">
           <div className="tms-panel-header">
             <div>
@@ -344,8 +317,8 @@ const Login: React.FC = () => {
           )}
         </div>
 
-        <div className="tms-side-column">
-          {formMode && (
+        {formMode && (
+          <div className="tms-side-column">
             <div className="tms-form-panel panel">
               <div className="tms-form-header">
                 <h3 className="tms-section-title">
@@ -423,66 +396,8 @@ const Login: React.FC = () => {
                 </button>
               </form>
             </div>
-          )}
-
-          <div className="tms-form-panel panel tms-quick-login-panel">
-            <h3 className="tms-section-title">Quick Login</h3>
-            <p className="panel-subtitle">
-              Log in without saving first. Successful logins are stored as accounts automatically.
-            </p>
-            <form onSubmit={handleQuickLogin} className="tms-login-form">
-              <div className="form-group">
-                <label htmlFor="quickClientId">Client ID</label>
-                <input
-                  type="text"
-                  id="quickClientId"
-                  className="input"
-                  value={quickForm.client_id}
-                  onChange={(e) => setQuickForm({ ...quickForm, client_id: e.target.value })}
-                  placeholder="Your TMS client ID"
-                />
-              </div>
-              <div className="form-group">
-                <label htmlFor="quickBrokerNo">Broker Number</label>
-                <input
-                  type="text"
-                  id="quickBrokerNo"
-                  className="input"
-                  value={quickForm.broker_no}
-                  onChange={(e) => setQuickForm({ ...quickForm, broker_no: e.target.value })}
-                  placeholder="e.g. 35"
-                />
-              </div>
-              <div className="form-group">
-                <label htmlFor="quickPassword">Password</label>
-                <div className="tms-password-row">
-                  <input
-                    type={showQuickPassword ? 'text' : 'password'}
-                    id="quickPassword"
-                    className="input"
-                    value={quickForm.password}
-                    onChange={(e) => setQuickForm({ ...quickForm, password: e.target.value })}
-                    placeholder="Plain TMS password"
-                  />
-                  <button
-                    type="button"
-                    className="btn btn-secondary btn-sm"
-                    onClick={() => setShowQuickPassword((v) => !v)}
-                  >
-                    {showQuickPassword ? 'Hide' : 'Show'}
-                  </button>
-                </div>
-              </div>
-              <button
-                type="submit"
-                className="btn btn-success tms-login-btn"
-                disabled={actionLoading === 'quick-login'}
-              >
-                {actionLoading === 'quick-login' ? 'Connecting...' : 'Connect to TMS'}
-              </button>
-            </form>
           </div>
-        </div>
+        )}
       </div>
     </div>
   );

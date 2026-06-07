@@ -22,7 +22,7 @@ const Settings: React.FC = () => {
           className="input"
           value={apiUrl}
           onChange={(e) => setApiUrl(e.target.value)}
-          placeholder="http://localhost:8000"
+          placeholder={window.location.origin}
         />
       </div>
       <button type="button" className="btn btn-primary" onClick={handleSave}>

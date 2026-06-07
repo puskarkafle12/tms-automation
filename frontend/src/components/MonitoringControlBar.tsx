@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import './MonitoringControlBar.css';
 import ErrorMessage from './ErrorMessage';
 
-const getApiUrl = () => localStorage.getItem('apiUrl') || 'http://localhost:8000';
+const getApiUrl = () => localStorage.getItem('apiUrl') || window.location.origin;
 
 interface MonitoringControlBarProps {
   title: string;

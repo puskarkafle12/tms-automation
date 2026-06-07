@@ -4,7 +4,7 @@ import ErrorMessage from './ErrorMessage';
 import { monitoringStore } from '../hooks/monitoringStore';
 import { useMonitoringStore } from '../hooks/useMonitoringStore';
 
-const getApiUrl = () => localStorage.getItem('apiUrl') || 'http://localhost:8000';
+const getApiUrl = () => localStorage.getItem('apiUrl') || window.location.origin;
 
 export interface GrabberControls {
   start: () => void;

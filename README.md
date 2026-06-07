@@ -6,27 +6,19 @@ Automated trading tools for NEPSE TMS: stock grabber, order scheduling, order mo
 
 **Full setup from scratch:** see **[SETUP_GUIDE.md](./SETUP_GUIDE.md)**
 
-### Minimum steps
+### Docker quick start
 
 ```bash
-# 1. Database
-docker compose up -d
-
-# 2. Backend
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-# create .env — see SETUP_GUIDE.md
-python scripts/init_local_db.py
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
-
-# 3. Frontend (new terminal)
-cd frontend && npm install && npm start
+docker compose up --build
 ```
 
 | Service | URL |
 |---------|-----|
-| Frontend | http://localhost:3000 |
-| Backend | http://localhost:8000 |
+| App + API | http://localhost:8000 |
+| API docs | http://localhost:8000/docs |
 
-**App login:** use the credentials printed by `scripts/init_local_db.py`  
+The Docker image builds the React frontend, runs FastAPI, starts bundled PostgreSQL, creates tables, and seeds the app login inside one container.
+
+**Default app login:** `admin` / `admin`  
+Change `FRONTEND_SEED_USER` and `FRONTEND_SEED_PASSWORD` in `docker-compose.yml` before first run if you want different credentials.
 **TMS login:** Dashboard → Login tab (use your own broker credentials)
