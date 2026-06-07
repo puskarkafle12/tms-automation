@@ -669,6 +669,38 @@ async def get_dp_holdings(client_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/stock_quote")
+async def get_stock_quote(client_id: str, symbol: str, db: Session = Depends(get_db)):
+    try:
+        user = db.query(User).filter(User.client_id == client_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        tms_user_instance = TmsUser(
+            broker_no=user.broker_no,
+            username=user.client_id,
+            password=user.password,
+        )
+        await tms_user_instance.try_cached_login()
+
+        security = await tms_user_instance.get_security_id(symbol)
+        if not security or not security.get("id"):
+            raise HTTPException(status_code=404, detail=f"Security not found for {symbol}")
+
+        quote = await tms_user_instance.get_stock_details_async(str(security["id"]))
+        if not quote:
+            return {"security": security, "quote": None}
+
+        return {"security": security, "quote": quote}
+
+    except LoginFailedException as e:
+        raise HTTPException(status_code=401, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/get_order_book")
 async def get_order_book(client_id: str, db: Session = Depends(get_db)):
     try:
