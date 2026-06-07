@@ -9,10 +9,18 @@ interface TableRow {
 interface CommonTableProps {
   data: TableRow[];
   onAction?: (row: TableRow, actionType: string) => void;
-  columns?: string[]; // Optional prop for specifying columns to display
+  columns?: string[];
+  emptyMessage?: string;
 }
 
-const CommonTable: React.FC<CommonTableProps> = ({ data, onAction, columns }) => {
+const formatColumnLabel = (column: string) =>
+  column
+    .replace(/([A-Z])/g, ' $1')
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (char) => char.toUpperCase())
+    .trim();
+
+const CommonTable: React.FC<CommonTableProps> = ({ data, onAction, columns, emptyMessage }) => {
   const [sortConfig, setSortConfig] = useState<{ key: string; direction: 'asc' | 'desc' } | null>(null);
 
   // Sort data based on the sort configuration
@@ -43,12 +51,16 @@ const CommonTable: React.FC<CommonTableProps> = ({ data, onAction, columns }) =>
     <>
       {onAction && row.hasOwnProperty('exchangeOrderId') && (
         <td>
-          <button onClick={() => onAction(row, 'Cancel')}>Cancel</button>
+          <button type="button" className="table-action-btn table-action-danger" onClick={() => onAction(row, 'Cancel')}>
+            Cancel
+          </button>
         </td>
       )}
       {onAction && row.hasOwnProperty('order_id') && (
         <td>
-          <button onClick={() => onAction(row, 'Delete')}>Delete</button>
+          <button type="button" className="table-action-btn table-action-danger" onClick={() => onAction(row, 'Delete')}>
+            Delete
+          </button>
         </td>
       )}
     </>
@@ -63,18 +75,21 @@ const CommonTable: React.FC<CommonTableProps> = ({ data, onAction, columns }) =>
   };
 
   return (
-    <div>
+    <div className="common-table-wrap">
       {data.length === 0 ? (
-        <p>No data available</p>
+        <div className="common-table-empty">
+          <span className="common-table-empty-icon">📭</span>
+          <p>{emptyMessage || 'No data available'}</p>
+        </div>
       ) : (
         <table className="common-table">
           <thead>
             <tr>
               {columnsToRender.map((column, index) => (
                 <th key={index} onClick={() => handleSort(column)}>
-                  {column}
+                  {formatColumnLabel(column)}
                   {sortConfig && sortConfig.key === column ? (
-                    sortConfig.direction === 'asc' ? ' 🔼' : ' 🔽'
+                    <span className="common-table-sort">{sortConfig.direction === 'asc' ? ' ↑' : ' ↓'}</span>
                   ) : null}
                 </th>
               ))}

@@ -4,7 +4,7 @@ import aiohttp
 from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 import sys
-from typing import Dict, List, Type
+from typing import Dict, List, Optional, Type
 from fastapi import FastAPI, HTTPException, Depends, Query, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 import websockets
@@ -17,7 +17,14 @@ from models.order_log import OrderLog
 from models.scheduled_order import ScheduledOrder
 from models.order_status_log import OrderStatusLog
 from models.user import User
-from schemas.schemas import LoginRequest, OrderCreateRequest, StockGrabberRequest, UserLogin
+from schemas.schemas import (
+    LoginRequest,
+    OrderCreateRequest,
+    StockGrabberRequest,
+    TmsAccountCreate,
+    TmsAccountUpdate,
+    UserLogin,
+)
 from utils.base_functions import is_within_time_range, truncate_to_one_decimal_place
 from utils.monitor_order import monitor_order_task_func
 from utils.tms import TmsUser
@@ -28,12 +35,19 @@ from sqlalchemy.orm import Session
 from datetime import date, time, timedelta, datetime
 
 from utils.tms_user_loader import load_tms_users_instances
+from utils.market_status import (
+    format_nepal_datetime,
+    get_market_hours_status,
+    get_nepal_now,
+    parse_session_check_response,
+)
 import config.tms_config as tms_config
 app = FastAPI(debug=True)
 SECRET_KEY = "your_secret_key_here"
 
 # Store running tasks and updates
 running_tasks: Dict[str, asyncio.Task] = {}
+running_grabbers: Dict[str, TmsUser] = {}
 stock_grabber_updates: Dict[str, List[Dict]] = {}
 
 @app.post("/stock_grabber/")
@@ -62,7 +76,13 @@ async def stock_grabber(request: StockGrabberRequest, db: Session = Depends(get_
             )
         )
         running_tasks[session_id] = task
-        task.add_done_callback(lambda t: stock_grabber_updates[session_id].append({"status": "completed", "message": "Task completed"}))
+        running_grabbers[session_id] = tms_user
+
+        def _on_grabber_done(_task: asyncio.Task) -> None:
+            stock_grabber_updates[session_id].append({"status": "completed", "message": "Task completed"})
+            running_grabbers.pop(session_id, None)
+
+        task.add_done_callback(_on_grabber_done)
     return {"session_id": session_id, "message": "Stock grabber started"}
 
 @app.post("/stop_stock_grabber/{session_id}")
@@ -71,14 +91,22 @@ async def stop_stock_grabber(session_id: str):
     if task:
         task.cancel()
         del running_tasks[session_id]
+        running_grabbers.pop(session_id, None)
         stock_grabber_updates[session_id].append({"status": "stopped", "message": "Stock grabber stopped"})
         return {"message": f"Stock grabber {session_id} stopped"}
     raise HTTPException(status_code=404, detail="Stock grabber not found")
 
+
 @app.get("/get_stock_grabber_updates/{session_id}")
 async def get_stock_grabber_updates(session_id: str):
-    updates = stock_grabber_updates.get(session_id, [])
+    updates = list(stock_grabber_updates.get(session_id, []))
     stock_grabber_updates[session_id] = []
+
+    tms_user = running_grabbers.get(session_id)
+    if tms_user and tms_user.updates:
+        updates.extend(tms_user.updates)
+        tms_user.updates = []
+
     return {"updates": updates}
 app.add_middleware(
     CORSMiddleware,
@@ -111,6 +139,199 @@ async def read_root():
     return {"message": "Hello, FastAPI"}
 
 
+@app.get("/market-status/")
+async def get_market_status(db: Session = Depends(get_db)):
+    now = get_nepal_now()
+    hours = get_market_hours_status(now)
+    nepal = format_nepal_datetime(now)
+
+    tms_session_active = False
+    tms_session_message = "DNA logged off"
+    market_live_from_api = None
+    client_id = None
+    broker_no = None
+    session_data = None
+
+    logged_in = (
+        db.query(LoggedInUsers)
+        .filter(LoggedInUsers.status == "logged_in")
+        .order_by(LoggedInUsers.last_updated.desc())
+        .first()
+    )
+
+    if logged_in and logged_in.tokens:
+        client_id = logged_in.client_id
+        broker_no = logged_in.broker_no
+        try:
+            tms_user = TmsUser(
+                username=logged_in.client_id,
+                password="",
+                broker_no=logged_in.broker_no,
+            )
+            await tms_user.try_cached_login()
+            session_payload = await tms_user.check_exchange_session()
+            parsed = parse_session_check_response(session_payload)
+            tms_session_active = parsed["session_active"]
+            tms_session_message = parsed["session_message"]
+            market_live_from_api = parsed["market_live_from_api"]
+            session_data = parsed["session_data"]
+        except LoginFailedException as exc:
+            tms_session_message = exc.message
+        except Exception as exc:
+            tms_session_message = f"Unable to check TMS session: {exc}"
+
+    market_live = tms_session_active
+
+    if not hours["is_trading_day"]:
+        market_phase = "closed_weekend"
+    elif hours["is_pre_open"]:
+        market_phase = "pre_open"
+    elif hours["is_continuous"]:
+        market_phase = "open"
+    else:
+        market_phase = "closed"
+
+    return {
+        "nepal_time": nepal["iso"],
+        "nepal_time_formatted": nepal["time"],
+        "nepal_date_formatted": nepal["date"],
+        "timezone": nepal["timezone"],
+        "is_trading_day": hours["is_trading_day"],
+        "is_pre_open": hours["is_pre_open"],
+        "is_continuous_session": hours["is_continuous"],
+        "market_hours_open": hours["market_hours_open"],
+        "market_phase": market_phase,
+        "tms_session_active": tms_session_active,
+        "tms_session_message": tms_session_message,
+        "market_live": market_live,
+        "market_live_from_api": market_live_from_api,
+        "client_id": client_id,
+        "broker_no": broker_no,
+        "session_data": session_data,
+    }
+
+
+def _serialize_tms_account(user: User, session: Optional[LoggedInUsers]) -> dict:
+    return {
+        "client_id": user.client_id,
+        "broker_no": user.broker_no,
+        "auto_login": bool(user.auto_login),
+        "session_status": session.status if session else "logged_out",
+        "session_message": session.message if session else None,
+        "last_updated": session.last_updated.isoformat() if session and session.last_updated else None,
+    }
+
+
+@app.get("/tms-accounts/")
+async def list_tms_accounts(db: Session = Depends(get_db)):
+    users = db.query(User).order_by(User.client_id).all()
+    sessions = {
+        session.client_id: session
+        for session in db.query(LoggedInUsers).all()
+    }
+    account_ids = {user.client_id for user in users}
+    accounts = [_serialize_tms_account(user, sessions.get(user.client_id)) for user in users]
+
+    for client_id, session in sessions.items():
+        if client_id not in account_ids:
+            accounts.append({
+                "client_id": session.client_id,
+                "broker_no": session.broker_no or "",
+                "auto_login": True,
+                "session_status": session.status,
+                "session_message": session.message,
+                "last_updated": session.last_updated.isoformat() if session.last_updated else None,
+            })
+
+    accounts.sort(key=lambda account: account["client_id"])
+    logged_in = [a for a in accounts if a["session_status"] == "logged_in"]
+    return {"accounts": accounts, "logged_in_count": len(logged_in)}
+
+
+@app.post("/tms-accounts/")
+async def create_tms_account(payload: TmsAccountCreate, db: Session = Depends(get_db)):
+    client_id = payload.client_id.strip()
+    if not client_id:
+        raise HTTPException(status_code=400, detail="client_id is required")
+    if db.query(User).filter(User.client_id == client_id).first():
+        raise HTTPException(status_code=409, detail=f"TMS account {client_id} already exists")
+
+    encoded_password = TmsUser.to_tms_password_payload(payload.password)
+    user = User(
+        client_id=client_id,
+        broker_no=payload.broker_no.strip(),
+        password=encoded_password,
+        auto_login=payload.auto_login,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return {"message": "TMS account created", "account": _serialize_tms_account(user, None)}
+
+
+@app.put("/tms-accounts/{client_id}")
+async def update_tms_account(
+    client_id: str,
+    payload: TmsAccountUpdate,
+    db: Session = Depends(get_db),
+):
+    user = db.query(User).filter(User.client_id == client_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="TMS account not found")
+
+    if payload.broker_no is not None:
+        user.broker_no = payload.broker_no.strip()
+    if payload.auto_login is not None:
+        user.auto_login = payload.auto_login
+    if payload.password:
+        user.password = TmsUser.to_tms_password_payload(payload.password)
+
+    db.commit()
+    db.refresh(user)
+    session = db.query(LoggedInUsers).filter(LoggedInUsers.client_id == client_id).first()
+    return {"message": "TMS account updated", "account": _serialize_tms_account(user, session)}
+
+
+@app.delete("/tms-accounts/{client_id}")
+async def delete_tms_account(client_id: str, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.client_id == client_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="TMS account not found")
+
+    db.query(LoggedInUsers).filter(LoggedInUsers.client_id == client_id).delete()
+    db.delete(user)
+    db.commit()
+    return {"message": f"TMS account {client_id} deleted"}
+
+
+@app.post("/tms-accounts/{client_id}/login")
+async def login_tms_account(client_id: str, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.client_id == client_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="TMS account not found")
+
+    tms_instance = TmsUser(
+        username=user.client_id,
+        password=user.password,
+        stock_symbol="",
+        broker_no=user.broker_no,
+        request_per_sec=5,
+    )
+    try:
+        login_status = await tms_instance.try_cached_login()
+    except LoginFailedException as e:
+        raise HTTPException(status_code=401, detail=e.message)
+
+    if login_status.get("status") != "success":
+        raise HTTPException(status_code=401, detail="Login failed")
+
+    session = db.query(LoggedInUsers).filter(LoggedInUsers.client_id == client_id).first()
+    return {
+        "message": login_status,
+        "account": _serialize_tms_account(user, session),
+    }
+
+
 @app.post("/login/")
 async def login(login_request: LoginRequest, db: Session = Depends(get_db)):
     enc_password = TmsUser.to_tms_password_payload(login_request.password)
@@ -128,8 +349,13 @@ async def login(login_request: LoginRequest, db: Session = Depends(get_db)):
 
     if login_status.get("status") == "success":
         return {"message": login_status}, 200
-    else:
-        raise HTTPException(status_code=401, detail="Login failed")
+
+    failure_detail = (
+        login_status.get("message")
+        or login_status.get("detail")
+        or "Login failed"
+    )
+    raise HTTPException(status_code=401, detail=failure_detail)
 
 
 @app.delete("/cancel_order/")
@@ -177,7 +403,17 @@ async def get_logged_in_clients(db: Session = Depends(get_db)):
         logged_in_users = db.query(LoggedInUsers).filter(
             LoggedInUsers.status == "logged_in").all()
         client_ids = [user.client_id for user in logged_in_users]
-        return {"logged_in_client_ids": client_ids}
+        sessions = [
+            {
+                "client_id": user.client_id,
+                "broker_no": user.broker_no or "",
+                "status": user.status,
+                "message": user.message,
+                "last_updated": user.last_updated.isoformat() if user.last_updated else None,
+            }
+            for user in logged_in_users
+        ]
+        return {"logged_in_client_ids": client_ids, "sessions": sessions}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -383,6 +619,32 @@ async def stop_check_orders_endpoint():
     tms_config.is_running = False
     check_orders_task.cancel()
     return {"message": "Check orders loop stopped."}
+
+
+@app.get("/monitoring-status/")
+async def monitoring_status():
+    return {
+        "scheduled_orders_active": tms_config.is_running,
+        "active_grabber_count": len(running_grabbers),
+    }
+
+
+@app.post("/stop_all_stock_grabbers/")
+async def stop_all_stock_grabbers():
+    stopped = []
+    for session_id in list(running_tasks.keys()):
+        task = running_tasks.get(session_id)
+        if task:
+            task.cancel()
+            stopped.append(session_id)
+            del running_tasks[session_id]
+            running_grabbers.pop(session_id, None)
+            if session_id in stock_grabber_updates:
+                stock_grabber_updates[session_id].append(
+                    {"status": "stopped", "message": "Stock grabber stopped"}
+                )
+    return {"message": f"Stopped {len(stopped)} stock grabber(s)", "stopped": stopped}
+
 
 @app.delete("/logs/")
 async def clear_logs(client_ids:str = Query(...), db: Session = Depends(get_db)):

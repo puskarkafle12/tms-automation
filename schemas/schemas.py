@@ -28,3 +28,16 @@ class StockGrabberRequest(BaseModel):
     order_quantity: int
     max_order_limit: Optional[int] = 0
     request_per_sec: Optional[float] = 2.0
+
+
+class TmsAccountCreate(BaseModel):
+    client_id: str
+    broker_no: str
+    password: str
+    auto_login: bool = True
+
+
+class TmsAccountUpdate(BaseModel):
+    broker_no: Optional[str] = None
+    password: Optional[str] = None
+    auto_login: Optional[bool] = None

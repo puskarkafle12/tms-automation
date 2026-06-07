@@ -1,56 +1,89 @@
 import React, { useState } from 'react';
 import ErrorMessage from '../../components/ErrorMessage';
 
-const MonitorOrders: React.FC = () => {
-  const apiUrl = localStorage.getItem('apiUrl') || '';
+interface MonitorOrdersProps {
+  onStatusChange?: (message: string, variant: 'success' | 'error') => void;
+}
 
-  const [errorMessage, setErrorMessage] = useState<string>('');
+const getApiUrl = () => localStorage.getItem('apiUrl') || 'http://localhost:8000';
+
+const MonitorOrders: React.FC<MonitorOrdersProps> = ({ onStatusChange }) => {
+  const [errorMessage, setErrorMessage] = useState('');
+  const [successMessage, setSuccessMessage] = useState('');
+  const [isStarting, setIsStarting] = useState(false);
+  const [isStopping, setIsStopping] = useState(false);
+
+  const handleResponse = async (response: Response, action: string) => {
+    const data = await response.json().catch(() => ({}));
+    const message = data.message || data.detail || `${action} completed.`;
+
+    if (response.ok) {
+      setSuccessMessage(message);
+      setErrorMessage('');
+      onStatusChange?.(message, 'success');
+    } else {
+      setErrorMessage(message);
+      setSuccessMessage('');
+      onStatusChange?.(message, 'error');
+    }
+  };
 
   const handleStartClick = async () => {
+    setIsStarting(true);
+    setErrorMessage('');
+    setSuccessMessage('');
     try {
-      const response = await fetch(apiUrl+'/check_orders/', {
-        headers: {
-          'accept': 'application/json'
-        }
+      const response = await fetch(`${getApiUrl()}/check_orders/`, {
+        headers: { accept: 'application/json' },
       });
-      setErrorMessage('');
-      if (response.ok) {
-        const data = await response.json();
-        setErrorMessage(data.message);
-      } else {
-        const data = await response.json();
-        setErrorMessage(data.message);
-      }
-    } catch (error) {
-      setErrorMessage('Error fetching data');
+      await handleResponse(response, 'Monitoring started');
+    } catch {
+      const message = 'Failed to start monitoring.';
+      setErrorMessage(message);
+      onStatusChange?.(message, 'error');
+    } finally {
+      setIsStarting(false);
     }
   };
 
   const handleStopClick = async () => {
+    setIsStopping(true);
+    setErrorMessage('');
+    setSuccessMessage('');
     try {
-      const response = await fetch(apiUrl+'/stop_check_orders/', {
-        headers: {
-          'accept': 'application/json'
-        }
+      const response = await fetch(`${getApiUrl()}/stop_check_orders/`, {
+        headers: { accept: 'application/json' },
       });
-      setErrorMessage('')
-      if (response.ok) {
-        const data = await response.json();
-        setErrorMessage(data.message);
-      } else {
-        const data = await response.json();
-        setErrorMessage(data.message);
-      }
-    } catch (error) {
-      setErrorMessage('Error stopping monitoring');
+      await handleResponse(response, 'Monitoring stopped');
+    } catch {
+      const message = 'Failed to stop monitoring.';
+      setErrorMessage(message);
+      onStatusChange?.(message, 'error');
+    } finally {
+      setIsStopping(false);
     }
   };
 
   return (
-    <div>
-      <button onClick={handleStartClick} >Start Monitoring stocks</button>
-      <button onClick={handleStopClick}>Stop Monitoring stocks</button>
-      {errorMessage && <ErrorMessage message={errorMessage} />} {/* Use the ErrorMessage component */}
+    <div className="check-orders-monitor">
+      <button
+        type="button"
+        className="btn btn-success"
+        onClick={handleStartClick}
+        disabled={isStarting || isStopping}
+      >
+        {isStarting ? 'Starting...' : 'Start Monitoring'}
+      </button>
+      <button
+        type="button"
+        className="btn btn-secondary"
+        onClick={handleStopClick}
+        disabled={isStarting || isStopping}
+      >
+        {isStopping ? 'Stopping...' : 'Stop Monitoring'}
+      </button>
+      {successMessage && <ErrorMessage message={successMessage} variant="success" />}
+      {errorMessage && <ErrorMessage message={errorMessage} variant="error" persistent />}
     </div>
   );
 };

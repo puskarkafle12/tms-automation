@@ -549,6 +549,12 @@ class TmsUser:
             "tokens": tokens_dict,
         }
 
+    async def check_exchange_session(self) -> Dict:
+        url = f"https://tms{self.broker_no}.nepsetms.com.np/tmsapi/dnaApi/exchange/sessionCheck"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, cookies=self.tokens, headers=self.headers) as response:
+                return await response.json()
+
     async def get_order_book(self):
         url = f"https://tms{self.broker_no}.nepsetms.com.np/tmsapi/orderTradeApi/orderbook-v2/client/{self.client_details['id']}?&activeStatus=OPEN&activeStatus=PARTIALLY_TRADED&activeStatus=MODIFIED&activeStatus=PENDING"
         async with aiohttp.ClientSession() as session:

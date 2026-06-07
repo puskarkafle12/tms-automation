@@ -1,0 +1,170 @@
+.monitoring-nav-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  flex-shrink: 0;
+}
+
+.monitoring-nav-chip {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.5rem 0.35rem 0.625rem;
+  border-radius: 10px;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.monitoring-nav-chip.scheduled.active {
+  border-color: #93c5fd;
+  background: linear-gradient(135deg, #eff6ff 0%, #f8fafc 100%);
+  box-shadow: 0 1px 3px rgba(37, 99, 235, 0.08);
+}
+
+.monitoring-nav-chip.grabber.active {
+  border-color: #86efac;
+  background: linear-gradient(135deg, #f0fdf4 0%, #f8fafc 100%);
+  box-shadow: 0 1px 3px rgba(22, 163, 74, 0.08);
+}
+
+.monitoring-nav-chip.grabber.ready {
+  border-color: #fde047;
+  background: linear-gradient(135deg, #fefce8 0%, #f8fafc 100%);
+}
+
+.monitoring-nav-chip-icon {
+  font-size: 0.9375rem;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.monitoring-nav-chip-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.0625rem;
+  min-width: 0;
+}
+
+.monitoring-nav-chip-label {
+  font-size: 0.625rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-muted);
+  line-height: 1;
+}
+
+.monitoring-nav-chip-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: var(--color-text);
+  white-space: nowrap;
+  line-height: 1.2;
+}
+
+.monitoring-nav-chip-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #94a3b8;
+  flex-shrink: 0;
+}
+
+.monitoring-nav-chip.active .monitoring-nav-chip-dot {
+  background: #22c55e;
+  animation: monitoring-nav-pulse 1.5s ease-in-out infinite;
+}
+
+.monitoring-nav-chip.ready .monitoring-nav-chip-dot {
+  background: #eab308;
+}
+
+.monitoring-nav-chip-actions {
+  display: flex;
+  gap: 0.25rem;
+  margin-left: 0.125rem;
+}
+
+.monitoring-nav-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  font-size: 0.6875rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, transform 0.1s;
+}
+
+.monitoring-nav-btn:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
+.monitoring-nav-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.monitoring-nav-btn.play {
+  background: #fff;
+  color: #166534;
+  border-color: #bbf7d0;
+}
+
+.monitoring-nav-btn.play:hover:not(:disabled) {
+  background: #f0fdf4;
+  border-color: #86efac;
+}
+
+.monitoring-nav-btn.stop {
+  background: #fff;
+  color: #991b1b;
+  border-color: #fecaca;
+}
+
+.monitoring-nav-btn.stop:hover:not(:disabled) {
+  background: #fef2f2;
+  border-color: #fca5a5;
+}
+
+.monitoring-nav-divider {
+  width: 1px;
+  height: 28px;
+  background: var(--color-border);
+  flex-shrink: 0;
+}
+
+@keyframes monitoring-nav-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.8); }
+}
+
+@media (max-width: 1100px) {
+  .monitoring-nav-chip-body {
+    display: none;
+  }
+
+  .monitoring-nav-chip {
+    padding: 0.35rem 0.4rem;
+  }
+}
+
+@media (max-width: 900px) {
+  .monitoring-nav-controls {
+    width: 100%;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .monitoring-nav-chip-body {
+    display: flex;
+  }
+}

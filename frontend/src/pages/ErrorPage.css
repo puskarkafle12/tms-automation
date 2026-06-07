@@ -1,0 +1,33 @@
+.error-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+  background: var(--color-bg);
+}
+
+.error-page-card {
+  text-align: center;
+  max-width: 400px;
+  padding: 2.5rem;
+}
+
+.error-page-card h1 {
+  font-size: 3rem;
+  color: var(--color-primary);
+  margin-bottom: 0.5rem;
+}
+
+.error-page-card h2 {
+  font-size: 1.25rem;
+  margin-bottom: 0.75rem;
+}
+
+.error-page-card p {
+  margin-bottom: 1.5rem;
+}
+
+.error-page-card a {
+  text-decoration: none;
+}

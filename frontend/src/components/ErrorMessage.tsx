@@ -1,30 +1,43 @@
 import React, { useState, useEffect } from 'react';
 import './ErrorMessage.css';
 
-const ErrorMessage: React.FC<{ message: string, color?: string }> = ({ message, color = 'lightred' }) => {
+type MessageVariant = 'error' | 'success' | 'info';
+
+interface ErrorMessageProps {
+  message: string;
+  variant?: MessageVariant;
+  /** Keep visible until the user dismisses it */
+  persistent?: boolean;
+  /** @deprecated use variant instead */
+  color?: string;
+}
+
+const ErrorMessage: React.FC<ErrorMessageProps> = ({ message, variant, persistent, color }) => {
   const [isVisible, setIsVisible] = useState(true);
 
   useEffect(() => {
-    const timer = setTimeout(() => {
-      setIsVisible(false);
-    }, 5000); // Hide after 5 seconds
-
+    setIsVisible(true);
+    if (persistent) {
+      return undefined;
+    }
+    const timer = setTimeout(() => setIsVisible(false), 8000);
     return () => clearTimeout(timer);
-  }, []);
+  }, [message, persistent]);
 
-  const errorMessageStyle = {
-    backgroundColor: color, // Set the background color dynamically
-  };
+  const resolvedVariant: MessageVariant = variant
+    || (color === 'lightgreen' ? 'success' : 'error');
+
+  if (!isVisible) {
+    return null;
+  }
 
   return (
-    <>
-      {isVisible && (
-        <div className="error-message show" style={errorMessageStyle}>
-          <div>{message}</div>
-          <button onClick={() => setIsVisible(false)}>Close</button>
-        </div>
-      )}
-    </>
+    <div className={`toast toast-${resolvedVariant}`} role="alert">
+      <div className="toast-body">{message}</div>
+      <button type="button" className="toast-close" onClick={() => setIsVisible(false)} aria-label="Dismiss">
+        ×
+      </button>
+    </div>
   );
 };
 

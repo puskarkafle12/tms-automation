@@ -1,51 +1,63 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import './ScheduleOrder.css';
 import StockDetails from './StockDetails';
+import ErrorMessage from '../../components/ErrorMessage';
+import ScriptNameAutocomplete, { ScriptOption } from '../../components/ScriptNameAutocomplete';
+import ScheduleMonitorBar from '../../components/ScheduleMonitorBar';
 
-const apiUrl = localStorage.getItem('apiUrl') || '';
+const getApiUrl = () => localStorage.getItem('apiUrl') || 'http://localhost:8000';
 
 const ScheduleOrder: React.FC = () => {
   const [clientID, setClientID] = useState('');
   const [scriptName, setScriptName] = useState('');
-  const [filteredScriptNames, setFilteredScriptNames] = useState<string[]>([]);
   const [price, setPrice] = useState('');
   const [qty, setQty] = useState('');
-  const [status, setStatus] = useState('');
+  const [status, setStatus] = useState<'idle' | 'success' | 'error'>('idle');
+  const [statusMessage, setStatusMessage] = useState('');
   const [loggedInClientIDs, setLoggedInClientIDs] = useState<string[]>([]);
-  const [orderType, setOrderType] = useState('buy'); // Default order type is 'buy'
+  const [orderType, setOrderType] = useState<'buy' | 'sell'>('buy');
   const [stockDetails, setStockDetails] = useState<any[]>([]);
   const [selectedStock, setSelectedStock] = useState<any | null>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-  const dropdownRef = useRef<HTMLDataListElement>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const scriptOptions = useMemo<ScriptOption[]>(
+    () =>
+      stockDetails.map((stock) => ({
+        symbol: stock.symbol,
+        ltp: stock.ltp,
+        percentChange: stock.percentChange,
+      })),
+    [stockDetails],
+  );
+
+  const fetchStockDetails = useCallback(async (clientId: string) => {
+    if (!clientId) {
+      return;
+    }
+    try {
+      const response = await fetch(`${getApiUrl()}/get_script_details?client_id=${encodeURIComponent(clientId)}`);
+      if (response.ok) {
+        const data = await response.json();
+        setStockDetails(data.payload.data);
+      } else {
+        setStockDetails([]);
+      }
+    } catch (error) {
+      console.error('Error fetching stock details:', error);
+      setStockDetails([]);
+    }
+  }, []);
 
   useEffect(() => {
-    const fetchStockDetails = async (clientId: string) => {
-      if (!clientId) {
-        return;
-      }
-      try {
-        const response = await fetch(`${apiUrl}/get_script_details?client_id=${encodeURIComponent(clientId)}`);
-        if (response.ok) {
-          const data = await response.json();
-          setStockDetails(data.payload.data);
-        } else {
-          console.error('Failed to fetch stock details');
-        }
-      } catch (error) {
-        console.error('Error fetching stock details:', error);
-      }
-    };
-
     const loadInitialData = async () => {
       try {
-        const response = await fetch(apiUrl + '/logged_in_clients/');
+        const response = await fetch(`${getApiUrl()}/logged_in_clients/`);
         if (response.ok) {
           const data = await response.json();
           setLoggedInClientIDs(data.logged_in_client_ids);
           const defaultClientId = data.logged_in_client_ids[0] || '';
           setClientID(defaultClientId);
           await fetchStockDetails(defaultClientId);
-        } else {
-          console.error('Failed to fetch logged-in client IDs');
         }
       } catch (error) {
         console.error('Error fetching logged-in client IDs:', error);
@@ -53,131 +65,207 @@ const ScheduleOrder: React.FC = () => {
     };
 
     loadInitialData();
-  }, []); // Empty dependency array ensures this runs only once when the component mounts
+  }, [fetchStockDetails]);
 
-  const handleScriptNameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const name = e.target.value;
+  const handleClientChange = async (clientId: string) => {
+    setClientID(clientId);
+    setScriptName('');
+    setSelectedStock(null);
+    await fetchStockDetails(clientId);
+  };
+
+  const handleScriptNameChange = (name: string) => {
     setScriptName(name);
-    const filteredNames = stockDetails
-      .map(stock => stock.symbol)
-      .filter(symbol => symbol.toLowerCase().includes(name.toLowerCase()));
-    setFilteredScriptNames(filteredNames);
-    const stockDetail = stockDetails.find(stock => stock.symbol === name);
+    const stockDetail = stockDetails.find((stock) => stock.symbol === name);
     setSelectedStock(stockDetail || null);
   };
 
-  const handleScriptNameSelect = (symbol: string) => {
-    setScriptName(symbol);
-    setFilteredScriptNames([]);
-    const stockDetail = stockDetails.find(stock => stock.symbol === symbol);
+  const handleScriptNameSelect = (option: ScriptOption) => {
+    setScriptName(option.symbol);
+    const stockDetail = stockDetails.find((stock) => stock.symbol === option.symbol);
     setSelectedStock(stockDetail || null);
   };
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
+    setStatus('idle');
+    setStatusMessage('');
+    setIsSubmitting(true);
+
     try {
-      const response = await fetch(apiUrl + '/add_order/', {
+      const response = await fetch(`${getApiUrl()}/add_order/`, {
         method: 'POST',
         headers: {
-          'Accept': 'application/json',
-          'Content-Type': 'application/json'
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
         },
         body: JSON.stringify({
           client_id: clientID,
           script_name: scriptName,
-          price: parseInt(price),
-          qty: parseInt(qty),
-          order_type: orderType // Include order type in the request body
-        })
+          price: parseInt(price, 10),
+          qty: parseInt(qty, 10),
+          order_type: orderType,
+        }),
       });
+
       if (response.ok) {
         setStatus('success');
+        setStatusMessage(`Order scheduled for ${scriptName} (${orderType.toUpperCase()}).`);
+        setPrice('');
+        setQty('');
       } else {
+        const data = await response.json().catch(() => ({}));
         setStatus('error');
+        setStatusMessage(data.detail || data.message || 'Failed to add order.');
       }
     } catch (error) {
       setStatus('error');
+      setStatusMessage('Failed to add order. Check your API connection.');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
-  useEffect(() => {
-    const handleEnterPress = (event: KeyboardEvent) => {
-      if (event.key === 'Enter' && dropdownRef.current && document.activeElement !== dropdownRef.current) {
-        if (filteredScriptNames.length > 0 && inputRef.current) {
-          inputRef.current.value = filteredScriptNames[0];
-          handleScriptNameSelect(filteredScriptNames[0]);
-        }
-        event.preventDefault(); // Prevent form submission
-      }
-    };
-
-    document.addEventListener('keydown', handleEnterPress);
-
-    return () => {
-      document.removeEventListener('keydown', handleEnterPress);
-    };
-  }, [filteredScriptNames]);
-
   return (
-    <div style={{ display: 'flex' }}>
-      <div style={{ flex: '5' }}>
-        <h2>Add Order</h2>
-        <form onSubmit={handleSubmit}>
-          <label>
-            Client ID:
-            <select value={clientID} onChange={(e) => setClientID(e.target.value)}>
-              {loggedInClientIDs.map((id, index) => (
-                <option key={index} value={id}>{id}</option>
-              ))}
-            </select>
-            {loggedInClientIDs.length === 0 && (
-              <span style={{ color: 'red', marginLeft: '10px' }}>No logged in user found</span>
-            )}
-          </label>
-          <br />
-          <label>
-            Script Name:
-            <input
-              type="text"
-              value={scriptName}
-              onChange={handleScriptNameChange}
-              list="scriptNameSuggestions"
-              ref={inputRef}
-            />
-            <datalist id="scriptNameSuggestions" ref={dropdownRef}>
-              {filteredScriptNames.map((symbol, index) => (
-                <option key={index} value={symbol} onClick={() => handleScriptNameSelect(symbol)}>
-                  {symbol}
-                </option>
-              ))}
-            </datalist>
-          </label>
-          <br />
-          <label>
-            Price:
-            <input type="text" value={price} onChange={(e) => setPrice(e.target.value)} />
-          </label>
-          <br />
-          <label>
-            Quantity:
-            <input type="text" value={qty} onChange={(e) => setQty(e.target.value)} />
-          </label>
-          <br />
-          <label>
-            Order Type:
-            <select value={orderType} onChange={(e) => setOrderType(e.target.value)}>
-              <option value="buy">Buy</option>
-              <option value="sell">Sell</option>
-            </select>
-          </label>
-          <br />
-          <button type="submit">Submit</button>
-        </form>
-        {status === 'success' && <p style={{ color: 'green' }}>Order added successfully</p>}
-        {status === 'error' && <p style={{ color: 'red' }}>Failed to add order</p>}
+    <div className="schedule-order-page">
+      <ScheduleMonitorBar key="schedule-monitor" />
+
+      <div className="schedule-order-hero panel">
+        <div className="schedule-order-hero-content">
+          <div className="schedule-order-hero-icon" aria-hidden="true">📅</div>
+          <div>
+            <h2 className="schedule-order-hero-title">Schedule Order</h2>
+            <p className="schedule-order-hero-subtitle">
+              Queue buy or sell orders, then start monitoring to execute when price is hit.
+            </p>
+          </div>
+        </div>
+        {loggedInClientIDs.length > 0 && (
+          <span className="badge badge-success">{loggedInClientIDs.length} client(s) online</span>
+        )}
       </div>
-      <div style={{ flex: '4', paddingLeft: '20px' }}>
-        {selectedStock && <StockDetails stock={selectedStock} />}
+
+      {status === 'success' && <ErrorMessage message={statusMessage} variant="success" />}
+      {status === 'error' && <ErrorMessage message={statusMessage} variant="error" persistent />}
+
+      <div className="schedule-order-layout">
+        <div className="schedule-order-form-panel panel">
+          <h3 className="panel-title">Add Order</h3>
+          <p className="panel-subtitle">Select a client, symbol, price, and quantity.</p>
+
+          <form onSubmit={handleSubmit} className="schedule-order-form">
+            <div className="schedule-order-form-grid">
+              <div className="form-group">
+                <label htmlFor="scheduleClientId">Client ID</label>
+                <select
+                  id="scheduleClientId"
+                  className="select"
+                  value={clientID}
+                  onChange={(e) => handleClientChange(e.target.value)}
+                  disabled={loggedInClientIDs.length === 0}
+                  required
+                >
+                  {loggedInClientIDs.length === 0 ? (
+                    <option value="">No logged-in clients</option>
+                  ) : (
+                    loggedInClientIDs.map((id) => (
+                      <option key={id} value={id}>{id}</option>
+                    ))
+                  )}
+                </select>
+                {loggedInClientIDs.length === 0 && (
+                  <span className="schedule-order-hint">Log in via TMS Login tab first.</span>
+                )}
+              </div>
+
+              <div className="form-group schedule-order-script-group">
+                <label htmlFor="scheduleScriptName">Script Name</label>
+                <ScriptNameAutocomplete
+                  id="scheduleScriptName"
+                  value={scriptName}
+                  options={scriptOptions}
+                  placeholder="Type to search — e.g. CREST"
+                  disabled={stockDetails.length === 0}
+                  required
+                  onChange={handleScriptNameChange}
+                  onSelect={handleScriptNameSelect}
+                />
+                {stockDetails.length === 0 && clientID && (
+                  <span className="schedule-order-hint">Loading scripts for {clientID}...</span>
+                )}
+              </div>
+            </div>
+
+            <div className="schedule-order-form-grid">
+              <div className="form-group">
+                <label htmlFor="schedulePrice">Price</label>
+                <input
+                  id="schedulePrice"
+                  type="number"
+                  className="input"
+                  value={price}
+                  onChange={(e) => setPrice(e.target.value)}
+                  placeholder="Order price"
+                  min="0"
+                  required
+                />
+              </div>
+
+              <div className="form-group">
+                <label htmlFor="scheduleQty">Quantity</label>
+                <input
+                  id="scheduleQty"
+                  type="number"
+                  className="input"
+                  value={qty}
+                  onChange={(e) => setQty(e.target.value)}
+                  placeholder="Number of shares"
+                  min="1"
+                  required
+                />
+              </div>
+            </div>
+
+            <div className="form-group">
+              <label>Order Type</label>
+              <div className="schedule-order-type-toggle">
+                <button
+                  type="button"
+                  className={`schedule-order-type-btn ${orderType === 'buy' ? 'active-buy' : ''}`}
+                  onClick={() => setOrderType('buy')}
+                >
+                  Buy
+                </button>
+                <button
+                  type="button"
+                  className={`schedule-order-type-btn ${orderType === 'sell' ? 'active-sell' : ''}`}
+                  onClick={() => setOrderType('sell')}
+                >
+                  Sell
+                </button>
+              </div>
+            </div>
+
+            <button
+              type="submit"
+              className="btn btn-primary schedule-order-submit"
+              disabled={isSubmitting || loggedInClientIDs.length === 0}
+            >
+              {isSubmitting ? 'Submitting...' : 'Schedule Order'}
+            </button>
+          </form>
+        </div>
+
+        <div className="schedule-order-side-panel panel">
+          {selectedStock ? (
+            <StockDetails stock={selectedStock} />
+          ) : (
+            <div className="schedule-order-empty-side">
+              <span style={{ fontSize: '2rem' }} aria-hidden="true">📈</span>
+              <p>Select a script name to view live stock details.</p>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

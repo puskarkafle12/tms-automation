@@ -1,29 +1,34 @@
 import React, { useState } from 'react';
-import './Settings.css'; // Assuming your CSS file is named Settings.css
+import './Settings.css';
 
 const Settings: React.FC = () => {
   const [apiUrl, setApiUrl] = useState(localStorage.getItem('apiUrl') || '');
   const [message, setMessage] = useState('');
 
-  const handleApiUrlChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    setApiUrl(event.target.value);
-  };
-
   const handleSave = () => {
     localStorage.setItem('apiUrl', apiUrl);
-    setMessage('API URL successfully updated');
-    setTimeout(() => setMessage(''), 3000); // Clear the message after 3 seconds
+    setMessage('API URL saved successfully');
+    setTimeout(() => setMessage(''), 3000);
   };
 
   return (
     <div className="settings">
-      <h2>Settings</h2>
-      <div>
-        <label htmlFor="apiUrl">API URL:</label>
-        <input type="text" id="apiUrl" value={apiUrl} onChange={handleApiUrlChange} />
+      <h3 className="settings-title">API Configuration</h3>
+      <div className="form-group">
+        <label htmlFor="apiUrl">Backend API URL</label>
+        <input
+          type="text"
+          id="apiUrl"
+          className="input"
+          value={apiUrl}
+          onChange={(e) => setApiUrl(e.target.value)}
+          placeholder="http://localhost:8000"
+        />
       </div>
-      <button onClick={handleSave}>Save</button>
-      {message && <div className="success-message">{message}</div>}
+      <button type="button" className="btn btn-primary" onClick={handleSave}>
+        Save
+      </button>
+      {message && <p className="settings-success">{message}</p>}
     </div>
   );
 };

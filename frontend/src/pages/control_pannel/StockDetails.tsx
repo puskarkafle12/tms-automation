@@ -17,31 +17,46 @@ interface StockDetailsProps {
   } | null;
 }
 
+const formatDate = (dateArray: number[]) => {
+  const [year, month, day, hour, minute, second] = dateArray;
+  return `${day}-${month}-${year} ${hour}:${minute}:${second}`;
+};
+
 const StockDetails: React.FC<StockDetailsProps> = ({ stock }) => {
   if (!stock) {
-    return <p className="error-message">No stock details available</p>;
+    return <p className="stock-details-empty">No stock details available.</p>;
   }
 
-  const formatDate = (dateArray: number[]) => {
-    const [year, month, day, hour, minute, second] = dateArray;
-    return `${day}-${month}-${year} ${hour}:${minute}:${second}`;
-  };
+  const isPositive = stock.percentChange >= 0;
+
+  const fields = [
+    { label: 'LTP', value: stock.ltp },
+    { label: 'Open', value: stock.open },
+    { label: 'High', value: stock.high },
+    { label: 'Low', value: stock.low },
+    { label: 'Volume', value: stock.volume },
+    { label: 'Prev. Close', value: stock.previousClose },
+    { label: 'Change', value: stock.change },
+    { label: 'Last Traded Vol.', value: stock.lastTradedVolume },
+    { label: 'Last Traded', value: formatDate(stock.lastTradedTime) },
+  ];
 
   return (
     <div className="stock-details">
-      <h3>Stock Details for {stock.symbol}</h3>
-      <ul>
-        <li><span className="data-name">Volume:</span> {stock.volume}</li>
-        <li><span className="data-name">Last Traded Price (LTP):</span> {stock.ltp}</li>
-        <li><span className="data-name">Percent Change:</span> {stock.percentChange}%</li>
-        <li><span className="data-name">High:</span> {stock.high}</li>
-        <li><span className="data-name">Low:</span> {stock.low}</li>
-        <li><span className="data-name">Open:</span> {stock.open}</li>
-        <li><span className="data-name">Last Traded Volume:</span> {stock.lastTradedVolume}</li>
-        <li><span className="data-name">Last Traded Time:</span> {formatDate(stock.lastTradedTime)}</li>
-        <li><span className="data-name">Change:</span> {stock.change}</li>
-        <li><span className="data-name">Previous Close:</span> {stock.previousClose}</li>
-      </ul>
+      <div className="stock-details-header">
+        <h3 className="stock-details-title">{stock.symbol}</h3>
+        <span className={`stock-details-change ${isPositive ? 'positive' : 'negative'}`}>
+          {isPositive ? '+' : ''}{stock.percentChange}%
+        </span>
+      </div>
+      <div className="stock-details-grid">
+        {fields.map((field) => (
+          <div key={field.label} className="stock-details-item">
+            <span className="stock-details-label">{field.label}</span>
+            <span className="stock-details-value">{field.value}</span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 };

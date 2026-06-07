@@ -1,28 +1,205 @@
-.order-table {
+.order-logs-page {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  max-width: 1200px;
+}
+
+.order-logs-filters {
+  padding: 1.5rem;
+}
+
+.order-logs-filters-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+}
+
+.order-logs-form-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1rem;
+  align-items: end;
+}
+
+.order-logs-form .form-group {
+  margin-bottom: 0;
+}
+
+.order-logs-hint {
+  font-size: 0.75rem;
+  color: var(--color-danger);
+  margin-top: 0.25rem;
+}
+
+.order-logs-datepicker-wrap {
+  display: block;
   width: 100%;
-  border-collapse: collapse;
-  margin: 20px;
 }
 
-.order-table th, .order-table td {
-  border: 1px solid #ddd;
-  padding: 8px;
-  max-width: 10px; 
-  white-space: nowrap; /* Prevent text wrapping */
-  overflow: scroll; /* Hide overflow text */
-  /* text-overflow: ellipsis; Show ellipsis for overflow text */
+.order-logs-datepicker {
+  width: 100% !important;
+  box-sizing: border-box;
 }
 
-.order-table th {
-  background-color: #f2f2f2;
+.order-logs-submit-group {
+  display: flex;
+  flex-direction: column;
 }
 
-.order-table tbody {
-  overflow-y: auto; /* Enable vertical scrolling for tbody */
-  max-height: 200px; /* Set the maximum height for vertical scrolling */
+.order-logs-submit {
+  width: 100%;
+  padding: 0.625rem 1rem;
 }
-.order-status-container {
-  width: 95%;
-  margin: 20px;
-  padding: 20px;
+
+.order-logs-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.75rem;
+}
+
+.order-logs-stat-card {
+  display: flex;
+  align-items: center;
+  gap: 0.875rem;
+  padding: 1rem 1.125rem;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
+}
+
+.order-logs-stat-card:hover {
+  border-color: var(--color-border-strong);
+  background: #f8fafc;
+}
+
+.order-logs-stat-card.active {
+  border-color: var(--color-primary);
+  background: var(--color-primary-soft);
+  box-shadow: 0 0 0 1px var(--color-primary);
+}
+
+.order-logs-stat-icon {
+  font-size: 1.25rem;
+  line-height: 1;
+}
+
+.order-logs-stat-label {
+  display: block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted);
+  margin-bottom: 0.125rem;
+}
+
+.order-logs-stat-value {
+  display: block;
+  font-size: 1.375rem;
+  font-weight: 700;
+  color: var(--color-text);
+  line-height: 1.2;
+}
+
+.order-logs-content {
+  padding: 1.25rem;
+  min-height: 280px;
+}
+
+.order-logs-content-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1.25rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.order-logs-section-title {
+  font-size: 1rem;
+  font-weight: 600;
+  margin: 0;
+}
+
+.order-logs-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 3rem 1.5rem;
+  gap: 1rem;
+}
+
+.order-logs-loading p {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+}
+
+.order-logs-spinner {
+  width: 36px;
+  height: 36px;
+  border: 3px solid var(--color-border);
+  border-top-color: var(--color-primary);
+  border-radius: 50%;
+  animation: order-logs-spin 0.8s linear infinite;
+}
+
+@keyframes order-logs-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* react-datepicker overrides */
+.react-datepicker-wrapper {
+  width: 100%;
+}
+
+.react-datepicker__input-container input {
+  width: 100%;
+}
+
+.react-datepicker {
+  font-family: var(--font-sans);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+}
+
+.react-datepicker__header {
+  background: var(--color-bg);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.react-datepicker__day--selected,
+.react-datepicker__day--keyboard-selected {
+  background: var(--color-primary);
+}
+
+@media (max-width: 1024px) {
+  .order-logs-form-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .order-logs-stats {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 600px) {
+  .order-logs-form-grid,
+  .order-logs-stats {
+    grid-template-columns: 1fr;
+  }
+
+  .order-logs-filters-header {
+    flex-direction: column;
+  }
 }

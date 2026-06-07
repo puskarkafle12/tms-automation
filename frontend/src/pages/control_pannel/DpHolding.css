@@ -1,7 +1,214 @@
-.light-green {
-    background-color: #d4edda; /* Light green color */
+.dp-holdings-page {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  max-width: 1200px;
+}
+
+.dp-holdings-hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1.25rem 1.5rem;
+  background: linear-gradient(135deg, #f8fafc 0%, #fdf4ff 100%);
+  border-color: #e9d5ff;
+}
+
+.dp-holdings-hero-content {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.dp-holdings-hero-icon {
+  width: 48px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.5rem;
+  background: #fff;
+  border: 1px solid #e9d5ff;
+  border-radius: 12px;
+}
+
+.dp-holdings-hero-title {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 700;
+}
+
+.dp-holdings-hero-subtitle {
+  margin: 0.25rem 0 0;
+  font-size: 0.875rem;
+  color: var(--color-text-muted);
+}
+
+.dp-holdings-filters {
+  padding: 1.5rem;
+}
+
+.dp-holdings-filters-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+}
+
+.dp-holdings-form {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 1rem;
+  align-items: end;
+}
+
+.dp-holdings-form .form-group {
+  margin-bottom: 0;
+}
+
+.dp-holdings-hint {
+  font-size: 0.75rem;
+  color: var(--color-danger);
+  margin-top: 0.25rem;
+}
+
+.dp-holdings-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 1rem;
+}
+
+.dp-holdings-stat-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 1rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.dp-holdings-stat-card.profit {
+  border-color: #86efac;
+  background: linear-gradient(180deg, #f0fdf4 0%, #ecfdf5 100%);
+}
+
+.dp-holdings-stat-card.loss {
+  border-color: #fca5a5;
+  background: linear-gradient(180deg, #fef2f2 0%, #fff1f2 100%);
+}
+
+.dp-holdings-stat-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted);
+}
+
+.dp-holdings-stat-value {
+  font-size: 1.375rem;
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+.dp-holdings-stat-value.positive {
+  color: var(--color-success);
+}
+
+.dp-holdings-stat-value.negative {
+  color: var(--color-danger);
+}
+
+.dp-holdings-content {
+  padding: 1.25rem;
+  min-height: 200px;
+}
+
+.dp-holdings-content-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.dp-holdings-loading,
+.dp-holdings-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  padding: 3rem 1rem;
+  text-align: center;
+  color: var(--color-text-muted);
+}
+
+.dp-holdings-spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid #e2e8f0;
+  border-top-color: var(--color-primary);
+  border-radius: 50%;
+  animation: dp-spin 0.8s linear infinite;
+}
+
+@keyframes dp-spin {
+  to {
+    transform: rotate(360deg);
   }
-  
-  .red {
-    background-color: #f8d7da; /* Light red color */
+}
+
+.dp-holdings-totals {
+  margin-top: 1rem;
+  padding: 1rem 1.25rem;
+  border-radius: var(--radius-md);
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 1rem;
+}
+
+.dp-holdings-totals.profit {
+  background: var(--color-success-soft);
+  border: 1px solid #a7f3d0;
+}
+
+.dp-holdings-totals.loss {
+  background: var(--color-danger-soft);
+  border: 1px solid #fecaca;
+}
+
+.dp-holdings-total-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+}
+
+.dp-holdings-total-label {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted);
+}
+
+.dp-holdings-total-value {
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+@media (max-width: 768px) {
+  .dp-holdings-hero,
+  .dp-holdings-filters-header {
+    flex-direction: column;
+    align-items: stretch;
   }
+
+  .dp-holdings-form {
+    grid-template-columns: 1fr;
+  }
+}

@@ -1,22 +1,21 @@
 import React from 'react';
-import { Routes, Route } from 'react-router-dom';
+import { Routes, Route, Navigate } from 'react-router-dom';
 import LoginPage from '../pages/LoginPage';
-import HomePage from '../pages/HomePage'; // Assuming you have a HomePage component
+import HomePage from '../pages/HomePage';
 import DashboardRoutes from './control_pannel/ControlPannelRoutes';
 import NotFoundPage from '../pages/ErrorPage';
+import { DASHBOARD_PATHS } from './control_pannel/dashboardPaths';
 
-// Wrap your routes with BrowserRouter
 const AppRoutes = () => {
   return (
       <Routes>
-
-        <Route path="/home" element={<LoginPage />} />
-        <Route path="/home" element={<HomePage />} /> {/* Assuming HomePage is for authenticated users */}
-        <Route path="/Dashboard/*" element={<DashboardRoutes />} />
+        <Route path="/home" element={<HomePage />} />
+        <Route path="/dashboard" element={<Navigate to={DASHBOARD_PATHS.orderLogs} replace />} />
+        <Route path="/Dashboard" element={<Navigate to={DASHBOARD_PATHS.orderLogs} replace />} />
         <Route path="/dashboard/*" element={<DashboardRoutes />} />
+        <Route path="/Dashboard/*" element={<DashboardRoutes />} />
         <Route path="/" element={<LoginPage />} />
         <Route path="*" element={<NotFoundPage />} />
-        
       </Routes>
   );
 };
