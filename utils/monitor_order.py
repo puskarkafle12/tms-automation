@@ -69,7 +69,7 @@ async def monitor_order_task_func(db: Session):
                             db.commit()
                     else:
                         logs = f"Client ID {order.client_id} is not logged in."
-                        await store_or_update_logs(db, order.client_id, order.script_name, count_dict[key], current_price, False, logs)
+                        await store_or_update_logs(db, order.client_id, order.script_name, count_dict[key], 0, False, logs)
 
             except Exception as e:
                 # Log the error with client_id and script_name if available

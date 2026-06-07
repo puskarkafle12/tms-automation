@@ -30,19 +30,21 @@ const ScheduleMonitorBar: React.FC = () => {
         </span>
         <button
           type="button"
-          className="page-monitor-btn play"
+          className={`page-monitor-btn play ${!scheduledActive ? 'is-enabled' : ''}`}
           onClick={startScheduled}
           disabled={scheduledActive || scheduledLoading !== null}
-          title="Start monitoring"
+          title={scheduledActive ? 'Monitoring is running' : 'Start monitoring'}
+          aria-pressed={scheduledActive}
         >
           {scheduledLoading === 'start' ? '…' : '▶'}
         </button>
         <button
           type="button"
-          className="page-monitor-btn stop"
+          className={`page-monitor-btn stop ${scheduledActive ? 'is-enabled' : ''}`}
           onClick={stopScheduled}
-          disabled={scheduledLoading !== null}
-          title="Stop monitoring"
+          disabled={!scheduledActive || scheduledLoading !== null}
+          title={!scheduledActive ? 'Monitoring is stopped' : 'Stop monitoring'}
+          aria-pressed={!scheduledActive}
         >
           {scheduledLoading === 'stop' ? '…' : '⏹'}
         </button>

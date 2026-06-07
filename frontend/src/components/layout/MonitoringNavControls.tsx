@@ -32,21 +32,23 @@ const MonitoringNavControls: React.FC = () => {
         <div className="monitoring-nav-chip-actions">
           <button
             type="button"
-            className="monitoring-nav-btn play"
+            className={`monitoring-nav-btn play ${!scheduledActive ? 'is-enabled' : ''}`}
             onClick={startScheduled}
             disabled={scheduledActive || scheduledLoading !== null}
-            title="Start scheduled order monitoring"
+            title={scheduledActive ? 'Monitoring is running' : 'Start scheduled order monitoring'}
             aria-label="Start scheduled order monitoring"
+            aria-pressed={scheduledActive}
           >
             {scheduledLoading === 'start' ? '…' : '▶'}
           </button>
           <button
             type="button"
-            className="monitoring-nav-btn stop"
+            className={`monitoring-nav-btn stop ${scheduledActive ? 'is-enabled' : ''}`}
             onClick={stopScheduled}
-            disabled={scheduledLoading !== null}
-            title="Stop scheduled order monitoring"
+            disabled={!scheduledActive || scheduledLoading !== null}
+            title={!scheduledActive ? 'Monitoring is stopped' : 'Stop scheduled order monitoring'}
             aria-label="Stop scheduled order monitoring"
+            aria-pressed={!scheduledActive}
           >
             {scheduledLoading === 'stop' ? '…' : '⏹'}
           </button>
@@ -85,10 +87,10 @@ const MonitoringNavControls: React.FC = () => {
           </button>
           <button
             type="button"
-            className="monitoring-nav-btn stop"
+            className={`monitoring-nav-btn stop ${grabberIsActive ? 'is-enabled' : ''}`}
             onClick={stopGrabbers}
-            disabled={grabberLoading !== null}
-            title="Stop all stock grabbers"
+            disabled={!grabberIsActive || grabberLoading !== null}
+            title={!grabberIsActive ? 'No grabbers running' : 'Stop all stock grabbers'}
             aria-label="Stop all stock grabbers"
           >
             {grabberLoading === 'stop' ? '…' : '⏹'}
