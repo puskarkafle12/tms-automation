@@ -2,7 +2,7 @@ import { useCallback, useState } from 'react';
 import { monitoringStore } from './monitoringStore';
 import { useMonitoringStore } from './useMonitoringStore';
 
-const getApiUrl = () => localStorage.getItem('apiUrl') || 'http://localhost:8000';
+const getApiUrl = () => localStorage.getItem('apiUrl') || window.location.origin;
 
 export const useMonitoringActions = () => {
   const { scheduledActive, grabberActiveCount, grabberTotal, grabberCanStart } = useMonitoringStore();

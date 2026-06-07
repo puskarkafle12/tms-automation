@@ -17,7 +17,7 @@ interface DPHolding {
   currentBalance?: number;
 }
 
-const getApiUrl = () => localStorage.getItem('apiUrl') || 'http://localhost:8000';
+const getApiUrl = () => localStorage.getItem('apiUrl') || window.location.origin;
 
 const formatCurrency = (value: number) =>
   value.toLocaleString('en-NP', { maximumFractionDigits: 2 });

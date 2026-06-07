@@ -4,8 +4,9 @@ import './index.css';
 import App from './App';
 import reportWebVitals from './reportWebVitals';
 
-if (!localStorage.getItem('apiUrl')) {
-  localStorage.setItem('apiUrl', 'http://localhost:8000');
+const savedApiUrl = localStorage.getItem('apiUrl');
+if (!savedApiUrl || /^http:\/\/(localhost|127\.0\.0\.1):(200|8000)\/?$/.test(savedApiUrl)) {
+  localStorage.setItem('apiUrl', window.location.origin);
 }
 
 const root = ReactDOM.createRoot(

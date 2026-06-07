@@ -1,12 +1,14 @@
 import logging
 import uuid
 import aiohttp
+from pathlib import Path
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 import asyncio
 import sys
 from typing import Dict, List, Optional, Type
 from fastapi import FastAPI, HTTPException, Depends, Query, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 import websockets
 from database import get_db
 from sqlalchemy import cast, DateTime
@@ -44,6 +46,7 @@ from utils.market_status import (
 import config.tms_config as tms_config
 app = FastAPI(debug=True)
 SECRET_KEY = "your_secret_key_here"
+FRONTEND_BUILD_DIR = Path(__file__).resolve().parent / "frontend" / "build"
 
 # Store running tasks and updates
 running_tasks: Dict[str, asyncio.Task] = {}
@@ -194,6 +197,13 @@ app.add_middleware(
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],
 )
+
+if (FRONTEND_BUILD_DIR / "static").exists():
+    app.mount(
+        "/static",
+        StaticFiles(directory=str(FRONTEND_BUILD_DIR / "static")),
+        name="static",
+    )
 # Load user credentials
 # to disable the warnings in the logs
 logging.disable(logging.WARNING)
@@ -215,6 +225,9 @@ logging.disable(logging.WARNING)
 # Define your routes
 @app.get("/")
 async def read_root():
+    index_path = FRONTEND_BUILD_DIR / "index.html"
+    if index_path.exists():
+        return FileResponse(index_path)
     return {"message": "Hello, FastAPI"}
 
 
@@ -812,6 +825,19 @@ async def frontend_login(user_login: UserLogin, db: Session = Depends(get_db)):
 
 @app.get("/{path:path}")
 async def catch_all(path: str):
+    requested_path = (FRONTEND_BUILD_DIR / path).resolve()
+    build_root = FRONTEND_BUILD_DIR.resolve()
+    if (
+        FRONTEND_BUILD_DIR.exists()
+        and requested_path.is_file()
+        and (requested_path == build_root or build_root in requested_path.parents)
+    ):
+        return FileResponse(requested_path)
+
+    index_path = FRONTEND_BUILD_DIR / "index.html"
+    if index_path.exists() and "." not in Path(path).name:
+        return FileResponse(index_path)
+
     raise HTTPException(status_code=404, detail="Route not found")
 
 # Run the FastAPI application

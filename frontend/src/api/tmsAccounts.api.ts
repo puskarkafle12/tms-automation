@@ -37,7 +37,7 @@ export interface LoggedInSession {
   last_updated: string | null;
 }
 
-const DEFAULT_API_URL = 'http://localhost:8000';
+const DEFAULT_API_URL = window.location.origin;
 
 export const getApiUrl = () => {
   const stored = localStorage.getItem('apiUrl')?.trim();

@@ -1,41 +1,13 @@
-# Ignore Python bytecode
+.git
+.venv
+__pycache__/
 *.pyc
-*.pyo
-__pycache__
+.pytest_cache/
+.mypy_cache/
+.DS_Store
 
-# Ignore the virtual environment directory
-tmsenv/
-# Ignore all files inside the alembic/versions directory
-alembic/versions/*
-# But do not ignore the versions directory itself
-!alembic/versions/
-!alembic/script.py.mako
-# Include an empty .dockerkeep file to keep the directory
-!alembic/versions/.dockerkeep
+frontend/node_modules/
+frontend/build/
 
-# Ignore other common unwanted files and directories
-*.swp
-*.swo
-*.DS_Store
-*.idea
-*.vscode
-*.mypy_cache/
-*.pytest_cache/
-*.coverage
-.coverage.*
-*.log
-*.tmp
-*.bak
-*.old
-*.orig
-
-# Ignore build artifacts
-build/
-dist/
-*.egg-info/
-.eggs/
-
-# Ignore Dockerfile and docker-compose.yml if they are only used for local development
-# Uncomment the following lines if needed
-# Dockerfile
-# docker-compose.yml
+data/*.csv
+*.zip

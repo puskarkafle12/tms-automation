@@ -3,7 +3,7 @@ export const getApiUrl = (): string => {
   if (stored) {
     return stored.replace(/\/$/, '');
   }
-  return 'http://localhost:8000';
+  return window.location.origin;
 };
 
 const buildUrl = (path: string): string => {

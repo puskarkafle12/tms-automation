@@ -1,14 +1,18 @@
 services:
-  postgres:
-    image: postgres:16-alpine
-    container_name: tms-postgres
+  tms-automation:
+    build: .
+    image: tms-automation:all-in-one
+    container_name: tms-automation
     restart: unless-stopped
     ports:
-      - "5432:5432"
+      - "3000:8000"
     environment:
-      POSTGRES_USER: pk
-      POSTGRES_PASSWORD: pk
-      POSTGRES_DB: stock
+      DB_USER: pk
+      DB_PASSWORD: pk
+      DB_HOST: 127.0.0.1
+      DB_NAME: stock
+      FRONTEND_SEED_USER: admin
+      FRONTEND_SEED_PASSWORD: admin
     volumes:
       - tms_postgres_data:/var/lib/postgresql/data
 
