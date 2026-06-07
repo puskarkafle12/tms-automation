@@ -5,7 +5,7 @@ services:
     container_name: tms-automation
     restart: unless-stopped
     ports:
-      - "3000:8000"
+      - "3000:80"
     environment:
       DB_USER: pk
       DB_PASSWORD: pk

@@ -7,7 +7,7 @@ set -euo pipefail
 : "${DB_HOST:=127.0.0.1}"
 : "${DB_NAME:=stock}"
 : "${FRONTEND_SEED_USER:=admin}"
-: "${FRONTEND_SEED_PASSWORD:=changeme}"
+: "${FRONTEND_SEED_PASSWORD:=admin}"
 
 export DB_USER DB_PASSWORD DB_HOST DB_NAME FRONTEND_SEED_USER FRONTEND_SEED_PASSWORD
 
@@ -23,6 +23,7 @@ echo "Starting bundled PostgreSQL..."
 gosu postgres pg_ctl -D "$PGDATA" -o "-c listen_addresses='127.0.0.1'" -w start
 
 cleanup() {
+  nginx -s quit >/dev/null 2>&1 || true
   gosu postgres pg_ctl -D "$PGDATA" -m fast -w stop
 }
 trap cleanup EXIT
@@ -52,5 +53,8 @@ SQL
 echo "Creating application tables and default frontend login..."
 python scripts/init_local_db.py
 
-echo "Starting TMS Automation on http://0.0.0.0:8000"
-exec uvicorn main:app --host 0.0.0.0 --port 8000
+echo "Starting Nginx reverse proxy on http://0.0.0.0:80"
+nginx
+
+echo "Starting TMS Automation backend on http://127.0.0.1:8000"
+exec uvicorn main:app --host 127.0.0.1 --port 8000
