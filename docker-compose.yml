@@ -6,6 +6,9 @@ services:
     restart: unless-stopped
     ports:
       - "3000:80"
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     environment:
       DB_USER: pk
       DB_PASSWORD: pk
