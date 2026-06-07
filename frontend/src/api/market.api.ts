@@ -1,6 +1,5 @@
 import axios from 'axios';
-
-const getApiUrl = () => localStorage.getItem('apiUrl') || 'http://localhost:8000';
+import { getApiUrl } from '../utils/api';
 
 export interface MarketStatus {
   nepal_time: string;
@@ -21,6 +20,12 @@ export interface MarketStatus {
 }
 
 export const fetchMarketStatus = async (): Promise<MarketStatus> => {
-  const response = await axios.get<MarketStatus>(`${getApiUrl()}/market-status/`);
-  return response.data;
+  try {
+    const response = await axios.get<MarketStatus>(`${getApiUrl()}/market-status/`, {
+      timeout: 8000,
+    });
+    return response.data;
+  } catch {
+    throw new Error('Market status unavailable');
+  }
 };

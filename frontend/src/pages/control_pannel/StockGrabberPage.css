@@ -106,9 +106,17 @@
 }
 
 .stock-grabber-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  display: flex;
+  flex-direction: column;
   gap: 1.25rem;
+}
+
+.stock-grabber-card {
+  scroll-margin-top: 5rem;
+}
+
+.stock-grabber-card.running {
+  order: -1;
 }
 
 .stock-grabber-empty {

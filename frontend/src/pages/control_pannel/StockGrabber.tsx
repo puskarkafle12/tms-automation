@@ -12,6 +12,9 @@ interface StockGrabberRequest {
   order_quantity: number;
   request_per_sec: number;
   broker_no: string;
+  resume_scan_count?: number;
+  resume_previous_ltp?: number;
+  resume_stable_rate?: number;
 }
 
 interface StockGrabberResponse {
@@ -58,14 +61,31 @@ interface LiveStats {
   stableRate: number | null;
 }
 
+interface GrabberPersistState {
+  sessionId: string | null;
+  isRunning: boolean;
+  order_quantity: number;
+  request_per_sec: number;
+  scanCount: number;
+  stableRate: number | null;
+}
+
 interface StockGrabberProps {
   instanceId: string;
   client_id: string;
   stock_symbol: string;
+  resumeSessionId?: string | null;
+  autoAttach?: boolean;
+  resumeScanCount?: number;
+  resumeStableRate?: number | null;
+  initialOrderQuantity?: number;
+  initialRequestPerSec?: number;
   onRemove: () => void;
   onRunningChange?: (running: boolean) => void;
   onRegisterControls?: (id: string, controls: GrabberControls) => void;
   onUnregisterControls?: (id: string) => void;
+  onStateChange?: (state: GrabberPersistState) => void;
+  onFocusCard?: () => void;
 }
 
 const TERMINAL_STATUSES = new Set(['stopped', 'completed', 'exit', 'success', 'failed']);
@@ -77,8 +97,8 @@ const formatTime = () =>
 
 const CONNECTION_LABELS: Record<ConnectionStatus, string> = {
   idle: 'Ready to monitor',
-  connecting: 'Starting monitor…',
-  live: 'Live — receiving price updates',
+  connecting: 'Connecting / restarting…',
+  live: 'Live — scanning for +2% high price',
   stopped: 'Monitor stopped',
 };
 
@@ -86,16 +106,24 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
   instanceId,
   client_id,
   stock_symbol,
+  resumeSessionId = null,
+  autoAttach = false,
+  resumeScanCount = 0,
+  resumeStableRate = null,
+  initialOrderQuantity,
+  initialRequestPerSec,
   onRemove,
   onRunningChange,
   onRegisterControls,
   onUnregisterControls,
+  onStateChange,
+  onFocusCard,
 }) => {
   const [formData, setFormData] = useState<StockGrabberRequest>({
     client_id,
     stock_symbol,
-    order_quantity: 10,
-    request_per_sec: 3,
+    order_quantity: initialOrderQuantity ?? 10,
+    request_per_sec: initialRequestPerSec ?? 3,
     broker_no: '35',
   });
   const [isRunning, setIsRunning] = useState(false);
@@ -110,21 +138,53 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
     ltp: null,
     changePct: null,
     fetchRate: null,
-    totalFetches: 0,
+    totalFetches: resumeScanCount,
     ordersPlaced: 0,
     targetPrice: null,
-    stableRate: null,
+    stableRate: resumeStableRate,
   });
 
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const flashTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const startRef = useRef<() => void>(() => {});
+  const startRef = useRef<(force?: boolean) => void>(() => {});
   const stopRef = useRef<() => void>(() => {});
+  const formDataRef = useRef(formData);
   const isRunningRef = useRef(false);
   const isStartingRef = useRef(false);
   const sessionIdRef = useRef<string | null>(null);
-  const stableLoggedRef = useRef(false);
+  const stableLoggedRef = useRef(Boolean(resumeStableRate));
+  const didAutoAttachRef = useRef(false);
   const lastActivityTextRef = useRef('');
+  const lastScanAtRef = useRef(0);
+  const isRestartingRef = useRef(false);
+  const restartGrabberRef = useRef<() => Promise<void>>(async () => {});
+  const liveStatsRef = useRef(liveStats);
+
+  useEffect(() => {
+    liveStatsRef.current = liveStats;
+  }, [liveStats]);
+
+  useEffect(() => {
+    formDataRef.current = formData;
+  }, [formData]);
+
+  const notifyStateChange = useCallback(() => {
+    onStateChange?.({
+      sessionId: sessionIdRef.current,
+      isRunning: isRunningRef.current,
+      order_quantity: formDataRef.current.order_quantity,
+      request_per_sec: formDataRef.current.request_per_sec,
+      scanCount: liveStatsRef.current.totalFetches,
+      stableRate: liveStatsRef.current.stableRate,
+    });
+  }, [onStateChange]);
+
+  const mergeScanCount = useCallback((sessionCount?: number, floor = 0) => {
+    if (sessionCount === undefined) {
+      return floor;
+    }
+    return Math.max(floor, sessionCount);
+  }, []);
 
   const addEvent = useCallback((type: ActivityItem['type'], icon: string, text: string) => {
     if (text === lastActivityTextRef.current) {
@@ -159,8 +219,9 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
         ...prev,
         changePct: update.change_percentage ?? prev.changePct,
         fetchRate: update.fetch_rate ?? prev.fetchRate,
-        totalFetches: update.total_fetch_count ?? prev.totalFetches,
+        totalFetches: mergeScanCount(update.total_fetch_count, prev.totalFetches),
       }));
+      lastScanAtRef.current = Date.now();
       return false;
     }
 
@@ -174,11 +235,33 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
     }
 
     if (status === 'backoff') {
-      addEvent('warn', '⏳', `Backing off ${update.delay}s`);
       return false;
     }
 
-    if (status === 'started') {
+    if (status === 'warn') {
+      addEvent('warn', '⏳', update.message || 'Retrying scan…');
+      return false;
+    }
+
+    if (status === 'info') {
+      addEvent('info', 'ℹ️', update.message || 'Update');
+      return false;
+    }
+
+    if (status === 'started' || status === 'scanning') {
+      if (status === 'started' && update.message?.startsWith('Resuming')) {
+        addEvent('info', '▶️', update.message);
+      }
+      if (status === 'scanning') {
+        if (update.ltp !== undefined) updateLtp(update.ltp);
+        if (update.total_fetch_count !== undefined) {
+          setLiveStats((prev) => ({
+            ...prev,
+            totalFetches: mergeScanCount(update.total_fetch_count, prev.totalFetches),
+          }));
+        }
+        lastScanAtRef.current = Date.now();
+      }
       return false;
     }
 
@@ -210,23 +293,32 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
       setLiveStats((prev) => ({
         ...prev,
         fetchRate: update.fetchDetails?.fetchRate ?? prev.fetchRate,
-        totalFetches: update.fetchDetails?.totalFetchCount ?? prev.totalFetches,
+        totalFetches: mergeScanCount(update.fetchDetails?.totalFetchCount, prev.totalFetches),
       }));
     }
 
     if (TERMINAL_STATUSES.has(status)) {
-      if (status !== 'stopped') {
-        addEvent(
-          status === 'success' ? 'order' : 'error',
-          status === 'success' ? '🏁' : '⏹',
-          update.message || update.error || `Monitor ${status}`,
-        );
+      if (status === 'stopped') {
+        return true;
       }
+      if (status === 'completed') {
+        const placed = Number(update.total_orders ?? 0);
+        if (placed <= 0) {
+          return false;
+        }
+        addEvent('order', '🏁', update.message || `Finished — ${placed} order(s) placed`);
+        return true;
+      }
+      if (status === 'failed' || status === 'exit') {
+        addEvent('error', '⏹', update.message || update.error || `Grabber stopped: ${status}`);
+        return true;
+      }
+      addEvent('order', '🏁', update.message || `Monitor ${status}`);
       return true;
     }
 
     return false;
-  }, [addEvent, updateLtp]);
+  }, [addEvent, mergeScanCount, updateLtp]);
 
   const stopPolling = useCallback(() => {
     if (pollingRef.current) {
@@ -240,7 +332,8 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
     setIsRunning(running);
     monitoringStore.setGrabberRunning(instanceId, running);
     onRunningChange?.(running);
-  }, [instanceId, onRunningChange]);
+    notifyStateChange();
+  }, [instanceId, notifyStateChange, onRunningChange]);
 
   const resetSession = useCallback(() => {
     setRunning(false);
@@ -250,10 +343,137 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
     sessionIdRef.current = null;
     isStartingRef.current = false;
     stableLoggedRef.current = false;
-  }, [setRunning, stopPolling]);
+    notifyStateChange();
+  }, [notifyStateChange, setRunning, stopPolling]);
 
-  const startStockGrabber = async () => {
+  const restartGrabber = useCallback(async () => {
+    if (isRestartingRef.current || isStartingRef.current) {
+      return;
+    }
+    isRestartingRef.current = true;
+    stopPolling();
+    const oldSession = sessionIdRef.current;
+    sessionIdRef.current = null;
+    setSessionId(null);
+    isRunningRef.current = false;
+    isStartingRef.current = false;
+
+    if (oldSession) {
+      try {
+        await fetch(`${getApiUrl()}/stop_stock_grabber/${oldSession}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+        });
+      } catch {
+        // Old session may already be gone — continue restart.
+      }
+    }
+
+    const priorScans = liveStatsRef.current.totalFetches;
+    addEvent(
+      'warn',
+      '🔄',
+      priorScans > 0
+        ? `Scanner stalled — auto-restarting from scan #${priorScans}…`
+        : 'Scanner stalled — auto-restarting…',
+    );
+    setConnectionStatus('connecting');
+    setRunning(true);
+    isRestartingRef.current = false;
+    onFocusCard?.();
+    await startRef.current(true);
+  }, [addEvent, onFocusCard, setRunning, stopPolling]);
+
+  const beginPolling = useCallback(() => {
+    if (pollingRef.current) {
+      clearInterval(pollingRef.current);
+    }
+
+    pollingRef.current = setInterval(async () => {
+      const activeSessionId = sessionIdRef.current;
+      if (!activeSessionId || isRestartingRef.current) {
+        return;
+      }
+
+      try {
+        const pollRes = await fetch(`${getApiUrl()}/get_stock_grabber_updates/${activeSessionId}`);
+        if (!pollRes.ok) throw new Error(`Poll failed: ${pollRes.status}`);
+
+        const pollData = await pollRes.json();
+        const updates: StockGrabberResponse[] = pollData.updates || [];
+        const scannerActive = pollData.scanner_active !== false;
+
+        for (const update of updates) {
+          const shouldStop = processUpdate(update);
+          if (shouldStop) {
+            resetSession();
+            if (update.error || update.message) {
+              setError(update.error || update.message || null);
+            }
+            return;
+          }
+        }
+
+        const staleMs = Date.now() - lastScanAtRef.current;
+        if (
+          isRunningRef.current
+          && lastScanAtRef.current > 0
+          && (!scannerActive || staleMs > 12000)
+        ) {
+          await restartGrabberRef.current();
+        }
+      } catch (err) {
+        console.error('Poll error (will retry):', err);
+      }
+    }, 800);
+  }, [processUpdate, resetSession]);
+
+  const attachToSession = useCallback(async (existingSessionId: string) => {
     if (isRunningRef.current || isStartingRef.current) {
+      return;
+    }
+
+    isStartingRef.current = true;
+    setConnectionStatus('connecting');
+    setRunning(true);
+    onFocusCard?.();
+
+    sessionIdRef.current = existingSessionId;
+    setSessionId(existingSessionId);
+
+    try {
+      const pollRes = await fetch(`${getApiUrl()}/get_stock_grabber_updates/${existingSessionId}`);
+      if (!pollRes.ok) {
+        throw new Error(`Session unavailable (${pollRes.status})`);
+      }
+
+      const pollData = await pollRes.json();
+      if (pollData.scanner_active === false) {
+        throw new Error('Scanner is no longer active');
+      }
+
+      const updates: StockGrabberResponse[] = pollData.updates || [];
+      for (const update of updates) {
+        processUpdate(update);
+      }
+
+      lastScanAtRef.current = Date.now();
+      setConnectionStatus('live');
+      isStartingRef.current = false;
+      addEvent('info', '🔌', 'Reconnected to running scanner');
+      notifyStateChange();
+      beginPolling();
+    } catch {
+      sessionIdRef.current = null;
+      setSessionId(null);
+      isStartingRef.current = false;
+      addEvent('warn', '🔄', 'Session lost — restarting scanner…');
+      await startRef.current(true);
+    }
+  }, [addEvent, beginPolling, notifyStateChange, onFocusCard, processUpdate, setRunning]);
+
+  const startStockGrabber = async (force = false) => {
+    if (!force && (isRunningRef.current || isStartingRef.current)) {
       return;
     }
     if (!formData.client_id || !formData.stock_symbol) {
@@ -262,18 +482,42 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
     }
 
     isStartingRef.current = true;
-    setError(null);
-    setActivity([]);
-    lastActivityTextRef.current = '';
-    stableLoggedRef.current = false;
+    if (!force) {
+      setError(null);
+      setActivity([]);
+      lastActivityTextRef.current = '';
+      stableLoggedRef.current = false;
+      setLiveStats({
+        ltp: null,
+        changePct: null,
+        fetchRate: null,
+        totalFetches: 0,
+        ordersPlaced: 0,
+        targetPrice: null,
+        stableRate: null,
+      });
+      setPriceHistory([]);
+    }
     setConnectionStatus('connecting');
     setRunning(true);
+
+    const payload: StockGrabberRequest = { ...formData };
+    if (force) {
+      const snapshot = liveStatsRef.current;
+      payload.resume_scan_count = snapshot.totalFetches;
+      if (snapshot.ltp !== null) {
+        payload.resume_previous_ltp = snapshot.ltp;
+      }
+      if (snapshot.stableRate !== null) {
+        payload.resume_stable_rate = snapshot.stableRate;
+      }
+    }
 
     try {
       const res = await fetch(`${getApiUrl()}/stock_grabber/`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(formData),
+        body: JSON.stringify(payload),
       });
 
       if (!res.ok) {
@@ -284,37 +528,12 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
       const data = await res.json();
       setSessionId(data.session_id);
       sessionIdRef.current = data.session_id;
+      lastScanAtRef.current = Date.now();
       setConnectionStatus('live');
       isStartingRef.current = false;
-
-      pollingRef.current = setInterval(async () => {
-        const activeSessionId = sessionIdRef.current;
-        if (!activeSessionId) {
-          return;
-        }
-
-        try {
-          const pollRes = await fetch(`${getApiUrl()}/get_stock_grabber_updates/${activeSessionId}`);
-          if (!pollRes.ok) throw new Error(`Poll failed: ${pollRes.status}`);
-
-          const pollData = await pollRes.json();
-          const updates: StockGrabberResponse[] = pollData.updates || [];
-
-          for (const update of updates) {
-            const shouldStop = processUpdate(update);
-            if (shouldStop) {
-              resetSession();
-              if (update.error || update.message) {
-                setError(update.error || update.message || null);
-              }
-              break;
-            }
-          }
-        } catch (err) {
-          setError(err instanceof Error ? err.message : 'Failed to fetch updates');
-          resetSession();
-        }
-      }, 800);
+      notifyStateChange();
+      onFocusCard?.();
+      beginPolling();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to start monitor');
       resetSession();
@@ -353,9 +572,22 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
   }, [connectionStatus]);
 
   useEffect(() => {
-    startRef.current = startStockGrabber;
+    restartGrabberRef.current = restartGrabber;
+  }, [restartGrabber]);
+
+  useEffect(() => {
+    startRef.current = (force?: boolean) => startStockGrabber(force);
     stopRef.current = stopStockGrabber;
   });
+
+  useEffect(() => {
+    if (!autoAttach || !resumeSessionId || didAutoAttachRef.current) {
+      return undefined;
+    }
+    didAutoAttachRef.current = true;
+    attachToSession(resumeSessionId);
+    return undefined;
+  }, [attachToSession, autoAttach, resumeSessionId]);
 
   useEffect(() => {
     if (!onRegisterControls) {
@@ -372,15 +604,9 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
     };
   }, [instanceId, onRegisterControls, onUnregisterControls]);
 
-  useEffect(() => {
-    return () => {
-      stopPolling();
-      if (flashTimeoutRef.current) clearTimeout(flashTimeoutRef.current);
-      const activeSessionId = sessionIdRef.current;
-      if (activeSessionId) {
-        fetch(`${getApiUrl()}/stop_stock_grabber/${activeSessionId}`, { method: 'POST' }).catch(() => {});
-      }
-    };
+  useEffect(() => () => {
+    stopPolling();
+    if (flashTimeoutRef.current) clearTimeout(flashTimeoutRef.current);
   }, [stopPolling]);
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -572,7 +798,7 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
         <button
           type="button"
           className="btn btn-success"
-          onClick={startStockGrabber}
+          onClick={() => startStockGrabber()}
           disabled={isRunning}
         >
           {isRunning ? 'Monitoring...' : 'Start Monitor'}

@@ -1,24 +1,29 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import './StockGrabberPage.css';
 import StockGrabber from './StockGrabber';
 import GrabberMonitorBar from '../../components/GrabberMonitorBar';
 import { monitoringStore } from '../../hooks/monitoringStore';
 import { GrabberControls } from '../../types/monitoring';
+import { fetchJson, getApiUrl } from '../../utils/api';
+import {
+  ActiveGrabberFromApi,
+  loadGrabbers,
+  mergeWithActiveGrabbers,
+  saveGrabbers,
+  sortGrabbersRunningFirst,
+  StockGrabberInstance,
+} from '../../utils/grabberPersistence';
 
-export interface StockGrabberInstance {
-  id: string;
-  client_id: string;
-  stock_symbol: string;
-}
-
-const getApiUrl = () => localStorage.getItem('apiUrl') || 'http://localhost:8000';
+export type { StockGrabberInstance };
 
 const StockGrabberPage: React.FC = () => {
-  const [grabbers, setGrabbers] = useState<StockGrabberInstance[]>([]);
+  const [grabbers, setGrabbers] = useState<StockGrabberInstance[]>(() => loadGrabbers());
+  const [hydrated, setHydrated] = useState(false);
   const [loggedInClientIDs, setLoggedInClientIDs] = useState<string[]>([]);
   const [newClientId, setNewClientId] = useState('');
   const [newStockSymbol, setNewStockSymbol] = useState('CREST');
   const grabberControlsRef = useRef<Map<string, GrabberControls>>(new Map());
+  const cardRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
   const fetchLoggedInClients = useCallback(async () => {
     try {
@@ -35,9 +40,31 @@ const StockGrabberPage: React.FC = () => {
     }
   }, []);
 
+  const reconcileActiveGrabbers = useCallback(async () => {
+    const result = await fetchJson<{ grabbers: ActiveGrabberFromApi[] }>('/active_stock_grabbers/');
+    if (!result.ok) {
+      return;
+    }
+    const active = result.data.grabbers || [];
+    setGrabbers((prev) => mergeWithActiveGrabbers(prev, active));
+  }, []);
+
   useEffect(() => {
     fetchLoggedInClients();
-  }, [fetchLoggedInClients]);
+    void reconcileActiveGrabbers().finally(() => setHydrated(true));
+    const interval = window.setInterval(() => {
+      void reconcileActiveGrabbers();
+    }, 10000);
+    return () => window.clearInterval(interval);
+  }, [fetchLoggedInClients, reconcileActiveGrabbers]);
+
+  useEffect(() => {
+    if (!hydrated) {
+      return undefined;
+    }
+    saveGrabbers(grabbers);
+    return undefined;
+  }, [grabbers, hydrated]);
 
   useEffect(() => {
     monitoringStore.setGrabberTotal(grabbers.length);
@@ -59,6 +86,16 @@ const StockGrabberPage: React.FC = () => {
     monitoringStore.syncActiveFromControls();
   }, []);
 
+  const handleGrabberStateChange = useCallback((id: string, patch: Partial<StockGrabberInstance>) => {
+    setGrabbers((prev) => prev.map((g) => (g.id === id ? { ...g, ...patch } : g)));
+  }, []);
+
+  const scrollToGrabber = useCallback((id: string) => {
+    requestAnimationFrame(() => {
+      cardRefs.current.get(id)?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    });
+  }, []);
+
   const addGrabber = () => {
     if (!newClientId.trim() || !newStockSymbol.trim()) {
       return;
@@ -71,10 +108,16 @@ const StockGrabberPage: React.FC = () => {
   };
 
   const removeGrabber = (id: string) => {
+    const controls = grabberControlsRef.current.get(id);
+    if (controls?.getIsRunning()) {
+      controls.stop();
+    }
     setGrabbers((prev) => prev.filter((g) => g.id !== id));
     grabberControlsRef.current.delete(id);
     monitoringStore.setGrabberRunning(id, false);
   };
+
+  const sortedGrabbers = useMemo(() => sortGrabbersRunningFirst(grabbers), [grabbers]);
 
   return (
     <div className="stock-grabber-page">
@@ -145,22 +188,41 @@ const StockGrabberPage: React.FC = () => {
       </div>
 
       <div className="stock-grabber-list">
-        {grabbers.length === 0 ? (
+        {sortedGrabbers.length === 0 ? (
           <div className="stock-grabber-empty panel">
             <span style={{ fontSize: '2.5rem', opacity: 0.4 }} aria-hidden="true">📡</span>
             <p>No grabbers yet. Add a client and symbol, then press Start in the monitor bar or top nav.</p>
           </div>
         ) : (
-          grabbers.map((grabber) => (
-            <StockGrabber
+          sortedGrabbers.map((grabber) => (
+            <div
               key={grabber.id}
-              instanceId={grabber.id}
-              client_id={grabber.client_id}
-              stock_symbol={grabber.stock_symbol}
-              onRemove={() => removeGrabber(grabber.id)}
-              onRegisterControls={registerControls}
-              onUnregisterControls={unregisterControls}
-            />
+              ref={(el) => {
+                if (el) {
+                  cardRefs.current.set(grabber.id, el);
+                } else {
+                  cardRefs.current.delete(grabber.id);
+                }
+              }}
+              className={`stock-grabber-card${grabber.isRunning ? ' running' : ''}`}
+            >
+              <StockGrabber
+                instanceId={grabber.id}
+                client_id={grabber.client_id}
+                stock_symbol={grabber.stock_symbol}
+                resumeSessionId={grabber.sessionId}
+                autoAttach={Boolean(grabber.isRunning && grabber.sessionId)}
+                resumeScanCount={grabber.scanCount}
+                resumeStableRate={grabber.stableRate}
+                initialOrderQuantity={grabber.order_quantity}
+                initialRequestPerSec={grabber.request_per_sec}
+                onRemove={() => removeGrabber(grabber.id)}
+                onRegisterControls={registerControls}
+                onUnregisterControls={unregisterControls}
+                onStateChange={(state) => handleGrabberStateChange(grabber.id, state)}
+                onFocusCard={() => scrollToGrabber(grabber.id)}
+              />
+            </div>
           ))
         )}
       </div>
