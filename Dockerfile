@@ -18,7 +18,9 @@ ENV PYTHONUNBUFFERED=1 \
     DB_NAME=stock \
     FRONTEND_SEED_USER=admin \
     FRONTEND_SEED_PASSWORD=admin \
-    CLOUDFLARED_QUICK_TUNNEL=true
+    TUNNEL_PROVIDER=ngrok \
+    NGROK_AUTHTOKEN=3EombR7pM5BtIVDJ2s3RVHeqxYY_5DFGGW87479PWxts3xSsX \
+    NGROK_DOMAIN=untrained-pleading-unmarked.ngrok-free.dev
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -38,14 +40,14 @@ RUN apt-get update \
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-      amd64) cloudflared_arch=amd64 ;; \
-      arm64) cloudflared_arch=arm64 ;; \
-      *) echo "Unsupported architecture for cloudflared: $arch" >&2; exit 1 ;; \
+      amd64) ngrok_arch=amd64 ;; \
+      arm64) ngrok_arch=arm64 ;; \
+      *) echo "Unsupported architecture for ngrok: $arch" >&2; exit 1 ;; \
     esac; \
-    curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${cloudflared_arch}" \
-      -o /usr/local/bin/cloudflared; \
-    chmod +x /usr/local/bin/cloudflared; \
-    cloudflared --version
+    curl -fsSL "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-${ngrok_arch}.tgz" \
+      | tar xz -C /usr/local/bin ngrok; \
+    chmod +x /usr/local/bin/ngrok; \
+    ngrok version
 
 WORKDIR /app
 COPY requirements.txt ./
@@ -55,8 +57,9 @@ RUN pip install --no-cache-dir --upgrade pip \
 COPY . /app
 COPY --from=frontend-build /frontend/build /app/frontend/build
 COPY docker-entrypoint-all-in-one.sh /app/docker-entrypoint-all-in-one.sh
+COPY scripts/show-public-url.sh /app/scripts/show-public-url.sh
 COPY nginx-tms-automation.conf /etc/nginx/conf.d/tms-automation.conf
-RUN chmod +x /app/docker-entrypoint-all-in-one.sh
+RUN chmod +x /app/docker-entrypoint-all-in-one.sh /app/scripts/show-public-url.sh
 RUN rm -f /etc/nginx/sites-enabled/default \
     && nginx -t
 
