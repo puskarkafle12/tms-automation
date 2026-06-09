@@ -763,8 +763,7 @@ async def check_orders_endpoint(db: Session = Depends(get_db)):
     db.commit()
 
     global check_orders_task
-    check_orders_task = asyncio.create_task(
-        monitor_order_task_func(db))  # Keep as is, no changes needed
+    check_orders_task = asyncio.create_task(monitor_order_task_func())
     return {"message": "Check orders loop started."}
 
 
