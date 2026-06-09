@@ -3,8 +3,7 @@
 import asyncio
 from datetime import datetime
 from typing import Dict, Type
-from sqlalchemy.orm import Session
-from database import get_db
+from database import SessionLocal
 
 from utils.base_functions import is_within_time_range, truncate_to_one_decimal_place
 from utils.log_sender import store_or_update_logs  # Import store_or_update_logs function
@@ -14,7 +13,7 @@ from models.scheduled_order import ScheduledOrder
 from models.logged_in_user import LoggedInUsers
 import config.tms_config as config  # Import the config module
 
-async def monitor_order_task_func(db: Session):
+async def monitor_order_task_func():
     tms_users_instances: Dict[str, Type[TmsUser]] = {}
     config.is_running = True
     # Create a dictionary to keep counts for each (client_id, script_name) pair
@@ -24,6 +23,7 @@ async def monitor_order_task_func(db: Session):
         current_time = datetime.now().time()
 
         if is_within_time_range(config.start_time, config.end_time, current_time):
+            db = SessionLocal()
             try:
                 pending_orders = db.query(ScheduledOrder).filter_by(status="pending").all()
                 client_ids = set(order.client_id for order in pending_orders)
@@ -51,9 +51,9 @@ async def monitor_order_task_func(db: Session):
                         security_details = await tms_users_instances[order.client_id].get_security_id(order.script_name)
                         current_price = await tms_users_instances[order.client_id].get_stock_details_async(security_details['id'])
                         current_price = current_price.get('ltp')
-                        log_entry=await store_or_update_logs(db, order.client_id, order.script_name, count_dict[key], current_price, False)
-                        if log_entry.scanning_count>count_dict[key]:
-                            count_dict[key]=log_entry.scanning_count
+                        log_entry = await store_or_update_logs(db, order.client_id, order.script_name, count_dict[key], current_price, False)
+                        if log_entry.scanning_count > count_dict[key]:
+                            count_dict[key] = log_entry.scanning_count
                         if truncate_to_one_decimal_place(current_price * 0.98) <= truncate_to_one_decimal_place(order.price) <= truncate_to_one_decimal_place(current_price * 1.02):
                             order.price = truncate_to_one_decimal_place(order.price)
                             order_response = await tms_users_instances[order.client_id].order(order.price, order.qty, security=security_details, order_type=order.order_type)
@@ -74,12 +74,13 @@ async def monitor_order_task_func(db: Session):
             except Exception as e:
                 # Log the error with client_id and script_name if available
                 for order in pending_orders:
-                    await store_or_update_logs(db, order.client_id, order.script_name,count_dict.get((order.client_id, order.script_name),''), 0, False, f"An error occurred: {e}")
+                    await store_or_update_logs(db, order.client_id, order.script_name, count_dict.get((order.client_id, order.script_name), ''), 0, False, f"An error occurred: {e}")
+            finally:
+                db.close()
 
             await asyncio.sleep(config.monitor_interval)
         else:
             logs = "Session not active, Check orders loop stopped."
             config.is_running = False
-            # Log the session end message for each client_id and script_name
-            for order in pending_orders:
-                await store_or_update_logs(db, order.client_id, order.script_name, count_dict[(order.client_id, order.script_name)], 0, False, logs)
+            # When outside market hours, stop the loop and allow the task to exit cleanly.
+            break
