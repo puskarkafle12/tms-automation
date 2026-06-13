@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import './MonitoringDashboard.css';
 import ErrorMessage from './ErrorMessage';
-import { monitoringStore } from '../hooks/monitoringStore';
+import { syncMonitoringStatus } from '../hooks/monitoringSync';
 import { useMonitoringStore } from '../hooks/useMonitoringStore';
 
 const getApiUrl = () => localStorage.getItem('apiUrl') || window.location.origin;
@@ -39,7 +39,7 @@ const MonitoringDashboard: React.FC<MonitoringDashboardProps> = ({
       const message = data.message || data.detail || 'Scheduled order monitoring started';
 
       if (response.ok) {
-        monitoringStore.setScheduledActive(true);
+        await syncMonitoringStatus();
         setFeedback({ message, variant: 'success' });
       } else {
         setFeedback({ message, variant: 'error' });
@@ -62,7 +62,7 @@ const MonitoringDashboard: React.FC<MonitoringDashboardProps> = ({
       const message = data.message || data.detail || 'Scheduled order monitoring stopped';
 
       if (response.ok) {
-        monitoringStore.setScheduledActive(false);
+        await syncMonitoringStatus();
         setFeedback({ message, variant: 'success' });
       } else {
         setFeedback({ message, variant: 'error' });

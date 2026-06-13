@@ -1,42 +1,43 @@
 import { fetchJson } from '../utils/api';
 import { loadGrabbers } from '../utils/grabberPersistence';
 import { monitoringStore } from './monitoringStore';
+import { MonitorPhase, RemoteGrabberStatus } from '../types/monitoringStatus';
 
 interface MonitoringStatusResponse {
   scheduled_orders_active: boolean;
+  scheduled_scanning?: boolean;
+  scheduled_phase?: MonitorPhase | string;
+  scheduled_status_message?: string;
+  scheduled_started_at?: string | null;
   active_grabber_count: number;
+  grabber_scanning_count?: number;
+  grabbers?: RemoteGrabberStatus[];
 }
 
-interface ActiveGrabberResponse {
-  grabbers: Array<{ scanner_active?: boolean }>;
-}
-
-export async function syncMonitoringStatus(): Promise<void> {
-  try {
-    monitoringStore.syncActiveFromControls();
-  } catch {
-    // Local-only sync.
-  }
-
+export async function syncMonitoringStatus(): Promise<boolean> {
   const statusResult = await fetchJson<MonitoringStatusResponse>('/monitoring-status/', undefined, 8000);
   if (!statusResult.ok) {
-    return;
+    monitoringStore.setStatusLoaded(true);
+    return false;
   }
 
-  monitoringStore.setScheduledActive(Boolean(statusResult.data.scheduled_orders_active));
-
-  const backendActive = Number(statusResult.data.active_grabber_count) || 0;
+  const data = statusResult.data;
+  const phase = (data.scheduled_phase || (data.scheduled_orders_active ? 'armed' : 'stopped')) as MonitorPhase;
+  const backendActive = Number(data.active_grabber_count) || 0;
+  const backendScanning = Number(data.grabber_scanning_count) || 0;
   const localTotal = loadGrabbers().length;
 
-  const activeResult = await fetchJson<ActiveGrabberResponse>('/active_stock_grabbers/', undefined, 8000);
-  let remoteActive = backendActive;
-  if (activeResult.ok) {
-    remoteActive = (activeResult.data.grabbers || []).filter((g) => g.scanner_active !== false).length;
-  }
+  monitoringStore.applyBackendStatus({
+    scheduledActive: Boolean(data.scheduled_orders_active),
+    scheduledScanning: Boolean(data.scheduled_scanning),
+    scheduledPhase: phase,
+    scheduledStatusMessage: data.scheduled_status_message || '',
+    scheduledStartedAt: data.scheduled_started_at || null,
+    grabberActiveCount: backendActive,
+    grabberScanningCount: backendScanning,
+    grabberTotal: localTotal,
+    remoteGrabbers: data.grabbers || [],
+  });
 
-  const controlsActive = monitoringStore.getState().grabberActiveCount;
-  const mergedActive = Math.max(remoteActive, controlsActive);
-  const total = Math.max(localTotal, mergedActive);
-
-  monitoringStore.setGrabberStats(mergedActive, total);
+  return true;
 }

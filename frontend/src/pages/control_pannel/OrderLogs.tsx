@@ -6,7 +6,7 @@ import ErrorMessage from '../../components/ErrorMessage';
 import 'react-datepicker/dist/react-datepicker.css';
 import { format } from 'date-fns';
 import DatePicker from 'react-datepicker';
-import { monitoringStore } from '../../hooks/monitoringStore';
+import { syncMonitoringStatus } from '../../hooks/monitoringSync';
 import { fetchJson } from '../../utils/api';
 
 type OrderTab = 'logs' | 'scheduled' | 'book' | 'history';
@@ -21,6 +21,7 @@ interface ScheduledOrderRow {
   order_type: string;
   scanning_count?: number;
   current_price?: number | null;
+  live_status?: string;
   actionRequired?: boolean;
 }
 
@@ -39,16 +40,11 @@ const formatNepsePrice = (value: number | null | undefined): string => {
   return num.toFixed(1);
 };
 
-const formatLiveScanStatus = (order: ScheduledOrderRow, monitoringActive: boolean): string => {
-  const baseStatus = (order.status || 'pending').split(' (')[0];
-  if (!monitoringActive) {
-    return `${baseStatus} (off)`;
+const formatLiveScanStatus = (order: ScheduledOrderRow): string => {
+  if (order.live_status) {
+    return order.live_status;
   }
-  const count = formatScanCount(order.scanning_count);
-  if (count > 0) {
-    return `${baseStatus} (${count})`;
-  }
-  return baseStatus;
+  return order.status || 'pending';
 };
 
 const TABS: { id: OrderTab; label: string; icon: string }[] = [
@@ -160,8 +156,8 @@ const GetOrderStatus: React.FC = () => {
         );
         if (typeof data.monitoring_active === 'boolean') {
           setMonitoringActive(data.monitoring_active);
-          monitoringStore.setScheduledActive(data.monitoring_active);
         }
+        void syncMonitoringStatus();
         if (typeof data.monitor_interval === 'number' && data.monitor_interval > 0) {
           setMonitorIntervalMs(data.monitor_interval * 1000);
         }
@@ -316,10 +312,9 @@ const GetOrderStatus: React.FC = () => {
         ...order,
         price: formatNepsePrice(order.price) || order.price,
         qty: formatScanCount(order.qty),
-        status: formatLiveScanStatus(order, monitoringActive),
-        liveStatus: monitoringActive,
+        status: formatLiveScanStatus(order),
       })),
-    [monitoringActive, scheduledOrders],
+    [scheduledOrders],
   );
 
   const tabData: Record<OrderTab, { count: number; columns: string[]; rows: any[]; empty: string }> = {

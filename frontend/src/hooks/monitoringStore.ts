@@ -1,29 +1,43 @@
 import { GrabberControls } from '../types/monitoring';
+import { MonitorPhase, RemoteGrabberStatus } from '../types/monitoringStatus';
 
 type Listener = () => void;
 type GrabberControlsGetter = () => Map<string, GrabberControls>;
 
 interface MonitoringStoreState {
+  statusLoaded: boolean;
   scheduledActive: boolean;
+  scheduledScanning: boolean;
+  scheduledPhase: MonitorPhase;
+  scheduledStatusMessage: string;
+  scheduledStartedAt: string | null;
   grabberActiveCount: number;
+  grabberScanningCount: number;
   grabberTotal: number;
   grabberCanStart: boolean;
+  remoteGrabbers: RemoteGrabberStatus[];
   scheduledLoading: 'start' | 'stop' | null;
   grabberLoading: 'start' | 'stop' | null;
   actionMessage: string | null;
 }
 
 const state: MonitoringStoreState = {
+  statusLoaded: true,
   scheduledActive: false,
+  scheduledScanning: false,
+  scheduledPhase: 'stopped',
+  scheduledStatusMessage: '',
+  scheduledStartedAt: null,
   grabberActiveCount: 0,
+  grabberScanningCount: 0,
   grabberTotal: 0,
   grabberCanStart: false,
+  remoteGrabbers: [],
   scheduledLoading: null,
   grabberLoading: null,
   actionMessage: null,
 };
 
-const runningGrabberIds = new Set<string>();
 let grabberControlsGetter: GrabberControlsGetter | null = null;
 
 const listeners = new Set<Listener>();
@@ -40,25 +54,59 @@ export const monitoringStore = {
       listeners.delete(listener);
     };
   },
-  setScheduledActive: (active: boolean) => {
-    if (state.scheduledActive === active) {
-      return;
-    }
-    state.scheduledActive = active;
+  applyBackendStatus: (payload: {
+    scheduledActive: boolean;
+    scheduledScanning: boolean;
+    scheduledPhase: MonitorPhase;
+    scheduledStatusMessage: string;
+    scheduledStartedAt: string | null;
+    grabberActiveCount: number;
+    grabberScanningCount: number;
+    grabberTotal: number;
+    remoteGrabbers: RemoteGrabberStatus[];
+  }) => {
+    state.statusLoaded = true;
+    state.scheduledActive = payload.scheduledActive;
+    state.scheduledScanning = payload.scheduledScanning;
+    state.scheduledPhase = payload.scheduledPhase;
+    state.scheduledStatusMessage = payload.scheduledStatusMessage;
+    state.scheduledStartedAt = payload.scheduledStartedAt;
+    state.grabberActiveCount = payload.grabberActiveCount;
+    state.grabberScanningCount = payload.grabberScanningCount;
+    state.grabberTotal = payload.grabberTotal;
+    state.grabberCanStart = payload.grabberTotal > 0;
+    state.remoteGrabbers = payload.remoteGrabbers;
     notify();
   },
-  setGrabberStats: (active: number, total: number) => {
-    const canStart = total > 0;
-    if (
-      state.grabberActiveCount === active
-      && state.grabberTotal === total
-      && state.grabberCanStart === canStart
-    ) {
+  patchScheduledStatus: (patch: {
+    active?: boolean;
+    scanning?: boolean;
+    phase?: MonitorPhase;
+    statusMessage?: string;
+    startedAt?: string | null;
+  }) => {
+    state.statusLoaded = true;
+    if (patch.active !== undefined) state.scheduledActive = patch.active;
+    if (patch.scanning !== undefined) state.scheduledScanning = patch.scanning;
+    if (patch.phase !== undefined) state.scheduledPhase = patch.phase;
+    if (patch.statusMessage !== undefined) state.scheduledStatusMessage = patch.statusMessage;
+    if (patch.startedAt !== undefined) state.scheduledStartedAt = patch.startedAt;
+    if (patch.active && !state.scheduledStartedAt) {
+      state.scheduledStartedAt = new Date().toISOString();
+    }
+    notify();
+  },
+  patchGrabberStatus: (patch: { activeCount?: number; scanningCount?: number }) => {
+    state.statusLoaded = true;
+    if (patch.activeCount !== undefined) state.grabberActiveCount = patch.activeCount;
+    if (patch.scanningCount !== undefined) state.grabberScanningCount = patch.scanningCount;
+    notify();
+  },
+  setStatusLoaded: (loaded: boolean) => {
+    if (state.statusLoaded === loaded) {
       return;
     }
-    state.grabberActiveCount = active;
-    state.grabberTotal = total;
-    state.grabberCanStart = canStart;
+    state.statusLoaded = loaded;
     notify();
   },
   setGrabberTotal: (total: number) => {
@@ -67,31 +115,6 @@ export const monitoringStore = {
       return;
     }
     state.grabberTotal = total;
-    state.grabberCanStart = canStart;
-    notify();
-  },
-  setGrabberRunning: (id: string, running: boolean) => {
-    const alreadyRunning = runningGrabberIds.has(id);
-    if (running === alreadyRunning) {
-      return;
-    }
-    if (running) {
-      runningGrabberIds.add(id);
-    } else {
-      runningGrabberIds.delete(id);
-    }
-    state.grabberActiveCount = runningGrabberIds.size;
-    notify();
-  },
-  clearGrabberRunning: () => {
-    runningGrabberIds.clear();
-    state.grabberActiveCount = 0;
-    notify();
-  },
-  setGrabberCanStart: (canStart: boolean) => {
-    if (state.grabberCanStart === canStart) {
-      return;
-    }
     state.grabberCanStart = canStart;
     notify();
   },
@@ -118,28 +141,6 @@ export const monitoringStore = {
   },
   setGrabberControlsGetter: (getter: GrabberControlsGetter | null) => {
     grabberControlsGetter = getter;
-    notify();
   },
   getGrabberControls: () => grabberControlsGetter?.() ?? new Map<string, GrabberControls>(),
-  syncActiveFromControls: () => {
-    const controls = grabberControlsGetter?.() ?? new Map<string, GrabberControls>();
-    let active = 0;
-    controls.forEach((control) => {
-      if (control.getIsRunning()) {
-        active += 1;
-      }
-    });
-    if (active !== state.grabberActiveCount) {
-      state.grabberActiveCount = active;
-      notify();
-    }
-    return active;
-  },
-  hasRunningGrabbers: () => {
-    if (state.grabberActiveCount > 0) {
-      return true;
-    }
-    const controls = grabberControlsGetter?.() ?? new Map<string, GrabberControls>();
-    return Array.from(controls.values()).some((control) => control.getIsRunning());
-  },
 };

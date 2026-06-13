@@ -2,7 +2,6 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import './StockGrabber.css';
 import ErrorMessage from '../../components/ErrorMessage';
 import { GrabberControls } from '../../types/monitoring';
-import { monitoringStore } from '../../hooks/monitoringStore';
 
 const getApiUrl = () => localStorage.getItem('apiUrl') || window.location.origin;
 
@@ -91,7 +90,7 @@ interface StockGrabberProps {
 
 const TERMINAL_STATUSES = new Set(['stopped', 'completed', 'exit', 'success', 'failed']);
 
-type ConnectionStatus = 'idle' | 'connecting' | 'live' | 'stopped';
+type ConnectionStatus = 'idle' | 'connecting' | 'live' | 'waiting' | 'stopped';
 
 const formatTime = () =>
   new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -100,6 +99,7 @@ const CONNECTION_LABELS: Record<ConnectionStatus, string> = {
   idle: 'Ready to monitor',
   connecting: 'Connecting / restarting…',
   live: 'Live — scanning for +2% high price',
+  waiting: 'Armed — waiting for market to open',
   stopped: 'Monitor stopped',
 };
 
@@ -161,6 +161,7 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
   const lastActivityTextRef = useRef('');
   const lastScanAtRef = useRef(0);
   const isRestartingRef = useRef(false);
+  const connectionStatusRef = useRef<ConnectionStatus>('idle');
   const restartGrabberRef = useRef<() => Promise<void>>(async () => {});
   const liveStatsRef = useRef(liveStats);
 
@@ -171,6 +172,10 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
   useEffect(() => {
     formDataRef.current = formData;
   }, [formData]);
+
+  useEffect(() => {
+    connectionStatusRef.current = connectionStatus;
+  }, [connectionStatus]);
 
   const notifyStateChange = useCallback(() => {
     onStateChange?.({
@@ -218,6 +223,7 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
     const status = update.status || '';
 
     if (status === 'update') {
+      setConnectionStatus('live');
       if (update.ltp !== undefined) updateLtp(update.ltp);
       setLiveStats((prev) => ({
         ...prev,
@@ -226,6 +232,12 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
         totalFetches: mergeScanCount(update.total_fetch_count, prev.totalFetches),
       }));
       lastScanAtRef.current = Date.now();
+      return false;
+    }
+
+    if (status === 'waiting') {
+      setConnectionStatus('waiting');
+      addEvent('info', '⏸', update.message || 'Waiting for market to open');
       return false;
     }
 
@@ -253,6 +265,7 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
     }
 
     if (status === 'started' || status === 'scanning') {
+      setConnectionStatus('live');
       if (status === 'started' && update.message?.startsWith('Resuming')) {
         addEvent('info', '▶️', update.message);
       }
@@ -334,10 +347,9 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
   const setRunning = useCallback((running: boolean) => {
     isRunningRef.current = running;
     setIsRunning(running);
-    monitoringStore.setGrabberRunning(instanceId, running);
     onRunningChange?.(running);
     notifyStateChange();
-  }, [instanceId, notifyStateChange, onRunningChange]);
+  }, [notifyStateChange, onRunningChange]);
 
   const resetSession = useCallback(() => {
     setRunning(false);
@@ -422,6 +434,7 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
         const staleMs = Date.now() - lastScanAtRef.current;
         if (
           isRunningRef.current
+          && connectionStatusRef.current !== 'waiting'
           && lastScanAtRef.current > 0
           && (!scannerActive || staleMs > 12000)
         ) {
@@ -610,7 +623,6 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
       getIsRunning: () => isRunningRef.current,
     });
     return () => {
-      monitoringStore.setGrabberRunning(instanceId, false);
       onUnregisterControls?.(instanceId);
     };
   }, [instanceId, onRegisterControls, onUnregisterControls]);

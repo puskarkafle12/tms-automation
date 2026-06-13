@@ -10,11 +10,7 @@ from models.order_status_log import OrderStatusLog
 from models.scheduled_order import ScheduledOrder
 from utils.base_functions import truncate_to_one_decimal_place
 from utils.log_sender import store_or_update_logs
-from utils.market_status import (
-    MARKET_HOURS_LABEL,
-    is_market_hours_open,
-    parse_session_check_response,
-)
+from utils.market_gate import resolve_market_gate
 from utils.tms import TmsUser
 from utils.tms_user_loader import load_tms_users_instances
 import config.tms_config as config
@@ -42,6 +38,17 @@ class OrderQuoteSnapshot:
     current_price: Optional[float]
     high_price: Optional[float] = None
     error_message: Optional[str] = None
+
+
+def _load_logged_in_client_ids():
+    db = SessionLocal()
+    try:
+        return [
+            user.client_id
+            for user in db.query(LoggedInUsers).filter(LoggedInUsers.status == "logged_in").all()
+        ]
+    finally:
+        db.close()
 
 
 def _load_monitor_cycle_data():
@@ -83,44 +90,6 @@ def _status_log_from_order(order: ScheduledOrder) -> OrderStatusLog:
     )
 
 
-async def _check_tms_session(tms_users_instances: Dict[str, TmsUser]) -> tuple[bool, str]:
-    if not tms_users_instances:
-        return False, "No logged-in TMS clients"
-
-    for tms_user in tms_users_instances.values():
-        try:
-            payload = await tms_user.check_exchange_session()
-            parsed = parse_session_check_response(payload)
-            return parsed["session_active"], parsed["session_message"]
-        except Exception:
-            continue
-
-    return False, "Unable to check TMS session"
-
-
-async def _resolve_execution_gate(tms_users_instances: Dict[str, TmsUser]) -> dict:
-    if not is_market_hours_open():
-        return {
-            "can_execute": False,
-            "reason": f"Market closed — waiting for trading hours ({MARKET_HOURS_LABEL})",
-            "session_active": False,
-        }
-
-    session_active, session_message = await _check_tms_session(tms_users_instances)
-    if not session_active:
-        return {
-            "can_execute": False,
-            "reason": f"Waiting for TMS session — {session_message}",
-            "session_active": False,
-        }
-
-    return {
-        "can_execute": True,
-        "reason": "",
-        "session_active": True,
-    }
-
-
 async def monitor_order_task_func():
     tms_users_instances: Dict[str, Type[TmsUser]] = {}
     count_dict = {}
@@ -148,7 +117,43 @@ async def monitor_order_task_func():
                     except Exception:
                         pass
 
-                execution_gate = await _resolve_execution_gate(tms_users_instances)
+                gate_users = tms_users_instances
+                if not gate_users:
+                    logged_in_ids = await asyncio.to_thread(_load_logged_in_client_ids)
+                    if logged_in_ids:
+                        try:
+                            gate_users = await load_tms_users_instances(set(logged_in_ids), {})
+                        except Exception:
+                            gate_users = {}
+
+                execution_gate = await resolve_market_gate(gate_users)
+                config.scheduled_phase = execution_gate["phase"]
+                config.scheduled_status_message = execution_gate["message"]
+
+                if not execution_gate["can_scan"]:
+                    db = SessionLocal()
+                    try:
+                        for order in pending_orders:
+                            key = (order.client_id, order.script_name)
+                            await store_or_update_logs(
+                                db,
+                                order.client_id,
+                                order.script_name,
+                                count_dict.get(key, 0),
+                                None,
+                                False,
+                                execution_gate["message"],
+                                commit=False,
+                            )
+                        db.commit()
+                    finally:
+                        db.close()
+
+                    try:
+                        await asyncio.sleep(config.monitor_interval)
+                    except asyncio.CancelledError:
+                        break
+                    continue
 
                 async def fetch_order_snapshot(order: PendingOrderSnapshot) -> OrderQuoteSnapshot:
                     key = (order.client_id, order.script_name)
@@ -265,7 +270,7 @@ async def monitor_order_task_func():
                                     count_dict[key],
                                     current_price,
                                     False,
-                                    execution_gate["reason"],
+                                    execution_gate["message"],
                                     commit=False,
                                 )
                                 continue
@@ -358,3 +363,6 @@ async def monitor_order_task_func():
                 break
     finally:
         config.is_running = False
+        config.scheduled_started_at = None
+        config.scheduled_phase = "stopped"
+        config.scheduled_status_message = ""

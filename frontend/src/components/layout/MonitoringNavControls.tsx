@@ -1,103 +1,91 @@
 import React from 'react';
 import './MonitoringNavControls.css';
-import { useMonitoringActions } from '../../hooks/useMonitoringActions';
+import { useMonitoring } from '../../hooks/useMonitoring';
 
 const MonitoringNavControls: React.FC = () => {
   const {
-    scheduledActive,
-    grabberActiveCount,
-    grabberTotal,
-    grabberIsActive,
-    hasGrabbers,
-    canStartGrabber,
-    canStopGrabber,
-    canStartSchedule,
-    canStopSchedule,
-    scheduledLoading,
-    grabberLoading,
-    actionMessage,
+    state,
+    schedule,
+    grabber,
     startScheduled,
     stopScheduled,
     startGrabbers,
     stopGrabbers,
-  } = useMonitoringActions();
+  } = useMonitoring();
 
   return (
     <div className="monitoring-nav-controls">
-      {actionMessage && (
+      {state.actionMessage && (
         <span className="monitoring-nav-message" role="status">
-          {actionMessage}
+          {state.actionMessage}
         </span>
       )}
 
-      <div className={`monitoring-nav-chip scheduled ${scheduledActive ? 'active' : ''}`}>
+      <div className={`monitoring-nav-chip scheduled ${state.scheduledActive ? (schedule.badgeClass === 'active' ? 'active' : 'waiting') : ''}`}>
         <span className="monitoring-nav-chip-icon" aria-hidden="true">📅</span>
         <div className="monitoring-nav-chip-body">
           <span className="monitoring-nav-chip-label">Schedule</span>
           <span className="monitoring-nav-chip-status">
             <span className="monitoring-nav-chip-dot" />
-            {scheduledActive ? 'Active' : 'Stopped'}
+            {schedule.navLabel}
           </span>
         </div>
         <div className="monitoring-nav-chip-actions">
           <button
             type="button"
-            className={`monitoring-nav-btn play ${canStartSchedule ? 'is-enabled' : ''}`}
+            className={`monitoring-nav-btn play ${schedule.canStart ? 'is-enabled' : ''}`}
             onClick={() => { void startScheduled(); }}
-            disabled={scheduledActive || scheduledLoading !== null}
-            title={scheduledActive ? 'Monitoring is running' : 'Start scheduled order monitoring'}
+            disabled={!schedule.canStart}
+            title="Start scheduled order monitoring"
             aria-label="Start scheduled order monitoring"
           >
-            {scheduledLoading === 'start' ? '…' : '▶'}
+            {state.scheduledLoading === 'start' ? '…' : '▶'}
           </button>
           <button
             type="button"
-            className={`monitoring-nav-btn stop ${scheduledActive ? 'is-enabled' : 'is-available'}`}
+            className={`monitoring-nav-btn stop ${schedule.canStop ? 'is-enabled' : ''}`}
             onClick={() => { void stopScheduled(); }}
-            disabled={scheduledLoading !== null}
+            disabled={!schedule.canStop}
             title="Stop scheduled order monitoring"
             aria-label="Stop scheduled order monitoring"
           >
-            {scheduledLoading === 'stop' ? '…' : '⏹'}
+            {state.scheduledLoading === 'stop' ? '…' : '⏹'}
           </button>
         </div>
       </div>
 
       <div className="monitoring-nav-divider" aria-hidden="true" />
 
-      <div className={`monitoring-nav-chip grabber ${grabberIsActive ? 'active' : hasGrabbers ? 'ready' : ''}`}>
+      <div className={`monitoring-nav-chip grabber ${state.grabberActiveCount > 0 ? (grabber.badgeClass === 'active' ? 'active' : 'waiting') : state.grabberTotal > 0 ? 'ready' : ''}`}>
         <span className="monitoring-nav-chip-icon" aria-hidden="true">⚡</span>
         <div className="monitoring-nav-chip-body">
           <span className="monitoring-nav-chip-label">Grabber</span>
           <span className="monitoring-nav-chip-status">
             <span className="monitoring-nav-chip-dot" />
-            {grabberIsActive
-              ? `Scanning ${grabberActiveCount}/${grabberTotal}`
-              : hasGrabbers
-                ? `Ready ${grabberTotal}`
-                : 'Idle'}
+            {grabber.navLabel}
+            {state.grabberTotal > 0 ? ` ${state.grabberActiveCount}/${state.grabberTotal}` : ''}
           </span>
         </div>
         <div className="monitoring-nav-chip-actions">
           <button
             type="button"
-            className={`monitoring-nav-btn play ${canStartGrabber ? 'is-enabled' : ''}`}
+            className={`monitoring-nav-btn play ${grabber.canStart ? 'is-enabled' : ''}`}
             onClick={() => { void startGrabbers(); }}
-            disabled={!canStartGrabber || grabberLoading !== null}
-            title={canStartGrabber ? 'Start stock grabber' : hasGrabbers ? 'All grabbers running' : 'Add a grabber first'}
+            disabled={!grabber.canStart}
+            title={state.grabberTotal > 0 ? 'Arm stock grabber' : 'Add a grabber first'}
             aria-label="Start stock grabber"
           >
-            {grabberLoading === 'start' ? '…' : '▶'}
+            {state.grabberLoading === 'start' ? '…' : '▶'}
           </button>
           <button
             type="button"
-            className={`monitoring-nav-btn stop ${grabberIsActive ? 'is-enabled' : 'is-available'}`}
+            className={`monitoring-nav-btn stop ${grabber.canStop ? 'is-enabled' : ''}`}
             onClick={() => { void stopGrabbers(); }}
-            disabled={grabberLoading !== null}
+            disabled={!grabber.canStop}
             title="Stop all stock grabbers"
             aria-label="Stop all stock grabbers"
           >
-            {grabberLoading === 'stop' ? '…' : '⏹'}
+            {state.grabberLoading === 'stop' ? '…' : '⏹'}
           </button>
         </div>
       </div>

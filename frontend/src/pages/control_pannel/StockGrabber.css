@@ -315,6 +315,11 @@
   color: #a16207;
 }
 
+.sg-status-strip.waiting {
+  background: #fef9c3;
+  color: #854d0e;
+}
+
 .sg-status-dot {
   width: 7px;
   height: 7px;
@@ -331,6 +336,10 @@
 .sg-status-strip.connecting .sg-status-dot {
   background: #eab308;
   animation: sg-pulse 1s ease-in-out infinite;
+}
+
+.sg-status-strip.waiting .sg-status-dot {
+  background: #eab308;
 }
 
 /* Events */
