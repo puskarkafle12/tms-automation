@@ -96,9 +96,11 @@ def log_time(last_traded_time, headers, response):
     # with open('tokens.json', 'w') as file:
     #     json.dump(data, file)
 
-def is_within_time_range(start_time, end_time, current_time):
-    return True
-    return (start_time.hour, start_time.minute, start_time.second) <= (current_time.hour, current_time.minute, current_time.second) <= (end_time.hour, end_time.minute, end_time.second)
+def is_within_time_range(start_time, end_time, current_time=None):
+    from utils.market_status import get_nepal_now, get_market_hours_status
+
+    _ = (start_time, end_time, current_time)
+    return get_market_hours_status(get_nepal_now())["market_hours_open"]
 
 def save_tokens(client_id, tokens,broker_no):
     db = get_db_session()

@@ -1,6 +1,6 @@
 # models/order_log.py
 
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Float, Text
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Float, Text, Index
 from datetime import datetime, timezone
 from database import Base
 
@@ -15,3 +15,7 @@ class OrderLog(Base):
     order_placed = Column(Boolean, default=False)
     timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     logs = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("ix_order_logs_client_script", "client_id", "script_name"),
+    )

@@ -80,10 +80,10 @@ const Login: React.FC = () => {
     setForm({
       client_id: account.client_id,
       broker_no: account.broker_no,
-      password: '',
+      password: account.password || '',
       auto_login: account.auto_login,
     });
-    setShowPassword(false);
+    setShowPassword(true);
   };
 
   const closeForm = () => {
@@ -361,9 +361,7 @@ const Login: React.FC = () => {
                   </div>
                 </div>
                 <div className="form-group">
-                  <label htmlFor="password">
-                    Password {formMode === 'edit' && '(leave blank to keep current)'}
-                  </label>
+                  <label htmlFor="password">Password</label>
                   <div className="tms-password-row">
                     <input
                       type={showPassword ? 'text' : 'password'}

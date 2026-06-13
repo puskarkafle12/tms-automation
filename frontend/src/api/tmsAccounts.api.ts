@@ -3,6 +3,7 @@ import axios from 'axios';
 export interface TmsAccount {
   client_id: string;
   broker_no: string;
+  password?: string;
   auto_login: boolean;
   session_status: string;
   session_message: string | null;
@@ -50,6 +51,7 @@ export const getApiUrl = () => {
 const sessionToAccount = (session: LoggedInSession): TmsAccount => ({
   client_id: session.client_id,
   broker_no: session.broker_no || '—',
+  password: '',
   auto_login: true,
   session_status: session.status,
   session_message: session.message,

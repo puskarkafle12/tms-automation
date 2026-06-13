@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useState } from 'react';
 import './MarketStatusBar.css';
 import { fetchMarketStatus, MarketStatus } from '../../api/market.api';
 
+const POLL_INTERVAL_MS = 5000;
+
 const formatNepalClock = () => {
   const now = new Date();
   const time = new Intl.DateTimeFormat('en-US', {
@@ -21,6 +23,29 @@ const formatNepalClock = () => {
   }).format(now);
 
   return { time, date };
+};
+
+const buildStatusTitle = (status: MarketStatus | null) => {
+  if (!status) {
+    return 'Market status unavailable';
+  }
+
+  const parts = [
+    status.tms_session_message,
+    `Trading hours: Sun–Fri 9:00 AM–3:00 PM NPT`,
+  ];
+
+  if (!status.is_trading_day) {
+    parts.push('Weekend / non-trading day');
+  } else if (!status.market_hours_open) {
+    parts.push('Outside market hours');
+  }
+
+  if (status.client_id) {
+    parts.push(`Checked via ${status.client_id}`);
+  }
+
+  return parts.filter(Boolean).join(' · ');
 };
 
 const MarketStatusBar: React.FC = () => {
@@ -45,11 +70,12 @@ const MarketStatusBar: React.FC = () => {
     void loadStatus();
     const poll = window.setInterval(() => {
       void loadStatus();
-    }, 120000);
+    }, POLL_INTERVAL_MS);
     return () => window.clearInterval(poll);
   }, [loadStatus]);
 
-  const isMarketLive = status?.market_live ?? false;
+  const isMarketOpen = status?.market_live ?? false;
+  const statusLabel = isMarketOpen ? 'Market Open' : 'Market Closed';
 
   const displayTime = status?.nepal_time_formatted || clock.time;
   const displayDate = status?.nepal_date_formatted || clock.date;
@@ -63,11 +89,11 @@ const MarketStatusBar: React.FC = () => {
         <span className="market-status-date">{displayDate}</span>
       </div>
       <span
-        className={`market-status-pill ${isMarketLive ? 'live' : 'closed'}`}
-        title={isMarketLive ? 'DNA logged in — market is live' : 'DNA logged off — market is closed'}
+        className={`market-status-pill ${isMarketOpen ? 'live' : 'closed'}`}
+        title={buildStatusTitle(status)}
       >
         <span className="market-status-dot" />
-        {isMarketLive ? 'Market Live' : 'Market Closed'}
+        {statusLabel}
       </span>
     </div>
   );

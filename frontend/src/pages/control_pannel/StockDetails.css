@@ -68,3 +68,51 @@
   font-size: 0.875rem;
   margin: 0;
 }
+
+.stock-details-item-action {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.stock-details-item-action.available {
+  border-color: #86efac;
+  background: #f0fdf4;
+}
+
+.stock-details-item-action.missing {
+  border-color: #fecaca;
+  background: #fef2f2;
+}
+
+.stock-details-action-value {
+  display: inline-block;
+  width: fit-content;
+  border: 1px solid #86efac;
+  border-radius: var(--radius-sm);
+  background: #fff;
+  color: #166534;
+  cursor: pointer;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  padding: 0.2rem 0.5rem;
+  text-align: left;
+}
+
+.stock-details-action-value:disabled {
+  border-color: var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  cursor: not-allowed;
+}
+
+.stock-details-hint {
+  font-size: 0.6875rem;
+  color: var(--color-text-muted);
+}
+
+.stock-details-error {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--color-danger);
+}

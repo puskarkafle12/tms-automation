@@ -1,6 +1,7 @@
 import logging
 import uuid
 import aiohttp
+import time as monotonic_time
 from pathlib import Path
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -10,7 +11,7 @@ from typing import Dict, List, Optional, Type
 from fastapi import FastAPI, HTTPException, Depends, Query, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 import websockets
-from database import get_db
+from database import ensure_performance_indexes, get_db
 from sqlalchemy import cast, DateTime, or_, and_
 from exceptions.login_exceptions import LoginFailedException
 from models.frontend_user import FrontendUser
@@ -41,10 +42,11 @@ from utils.market_status import (
     format_nepal_datetime,
     get_market_hours_status,
     get_nepal_now,
+    is_market_live,
+    outside_market_hours_message,
     parse_session_check_response,
 )
 import config.tms_config as tms_config
-import time as time_module
 
 app = FastAPI(debug=True)
 SECRET_KEY = "your_secret_key_here"
@@ -55,8 +57,59 @@ running_tasks: Dict[str, asyncio.Task] = {}
 check_orders_task: Optional[asyncio.Task] = None
 running_grabbers: Dict[str, TmsUser] = {}
 stock_grabber_updates: Dict[str, List[Dict]] = {}
-_market_status_cache: Dict[str, object] = {"payload": None, "expires_at": 0.0}
-MARKET_STATUS_CACHE_SECONDS = 120
+tms_user_cache: Dict[str, TmsUser] = {}
+tms_user_cache_touched: Dict[str, float] = {}
+tms_user_cache_ttl = 300.0
+market_status_cache: Optional[tuple[float, dict]] = None
+
+async def invalidate_cached_tms_user(client_id: str) -> None:
+    cached = tms_user_cache.pop(client_id, None)
+    tms_user_cache_touched.pop(client_id, None)
+    if cached:
+        await cached.close()
+
+async def get_cached_tms_user(user: User, *, request_per_sec: float = 5) -> TmsUser:
+    now = monotonic_time.monotonic()
+    cached = tms_user_cache.get(user.client_id)
+    touched = tms_user_cache_touched.get(user.client_id, 0)
+    if (
+        cached
+        and now - touched < tms_user_cache_ttl
+        and str(cached.broker_no) == str(user.broker_no)
+        and cached.password == user.password
+        and cached.session is not None
+        and not cached.session.closed
+    ):
+        tms_user_cache_touched[user.client_id] = now
+        return cached
+
+    if cached:
+        await invalidate_cached_tms_user(user.client_id)
+
+    tms_user = TmsUser(
+        broker_no=user.broker_no,
+        username=user.client_id,
+        password=user.password,
+        request_per_sec=request_per_sec,
+    )
+    try:
+        await tms_user.try_cached_login()
+    except Exception:
+        await tms_user.close()
+        raise
+
+    tms_user_cache[user.client_id] = tms_user
+    tms_user_cache_touched[user.client_id] = now
+    return tms_user
+
+@app.on_event("shutdown")
+async def close_cached_tms_users() -> None:
+    for client_id in list(tms_user_cache.keys()):
+        await invalidate_cached_tms_user(client_id)
+
+@app.on_event("startup")
+async def ensure_database_indexes() -> None:
+    await asyncio.to_thread(ensure_performance_indexes)
 
 async def _run_stock_grabber_task(
     tms_user: TmsUser,
@@ -199,7 +252,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "DELETE"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["*"],
 )
 
@@ -238,10 +291,10 @@ async def read_root():
 
 @app.get("/market-status/")
 async def get_market_status(db: Session = Depends(get_db)):
-    now_mono = time_module.time()
-    cached_payload = _market_status_cache.get("payload")
-    if cached_payload and now_mono < float(_market_status_cache["expires_at"]):
-        return cached_payload
+    global market_status_cache
+    cache_now = monotonic_time.monotonic()
+    if market_status_cache and cache_now - market_status_cache[0] < 4.0:
+        return market_status_cache[1]
 
     now = get_nepal_now()
     hours = get_market_hours_status(now)
@@ -261,17 +314,23 @@ async def get_market_status(db: Session = Depends(get_db)):
         .first()
     )
 
-    if logged_in and logged_in.tokens:
+    if not hours["market_hours_open"]:
+        tms_session_message = outside_market_hours_message()
+    elif logged_in and logged_in.tokens:
         client_id = logged_in.client_id
         broker_no = logged_in.broker_no
-        tms_user = TmsUser(
-            username=logged_in.client_id,
-            password="",
-            broker_no=logged_in.broker_no,
-        )
+        temp_tms_user = None
         try:
+            user = db.query(User).filter(User.client_id == logged_in.client_id).first()
+            temp_tms_user = None if user else TmsUser(
+                username=logged_in.client_id,
+                password="",
+                broker_no=logged_in.broker_no,
+            )
+            tms_user = await get_cached_tms_user(user) if user else temp_tms_user
             async with asyncio.timeout(8):
-                await tms_user.try_cached_login()
+                if not user:
+                    await tms_user.try_cached_login()
                 session_payload = await tms_user.check_exchange_session()
                 parsed = parse_session_check_response(session_payload)
                 tms_session_active = parsed["session_active"]
@@ -285,9 +344,12 @@ async def get_market_status(db: Session = Depends(get_db)):
         except Exception as exc:
             tms_session_message = f"Unable to check TMS session: {exc}"
         finally:
-            await tms_user.close()
+            if temp_tms_user:
+                await temp_tms_user.close()
+    elif hours["market_hours_open"]:
+        tms_session_message = "No TMS client logged in"
 
-    market_live = tms_session_active
+    market_live = is_market_live(hours, tms_session_active)
 
     if not hours["is_trading_day"]:
         market_phase = "closed_weekend"
@@ -316,20 +378,56 @@ async def get_market_status(db: Session = Depends(get_db)):
         "broker_no": broker_no,
         "session_data": session_data,
     }
-    _market_status_cache["payload"] = payload
-    _market_status_cache["expires_at"] = now_mono + MARKET_STATUS_CACHE_SECONDS
+    market_status_cache = (cache_now, payload)
     return payload
+
+
+def _decode_tms_account_password(password: Optional[str]) -> str:
+    if not password:
+        return ""
+    try:
+        return TmsUser.decode_password_payload(password)
+    except Exception:
+        return password
 
 
 def _serialize_tms_account(user: User, session: Optional[LoggedInUsers]) -> dict:
     return {
         "client_id": user.client_id,
         "broker_no": user.broker_no,
+        "password": _decode_tms_account_password(user.password),
         "auto_login": bool(user.auto_login),
         "session_status": session.status if session else "logged_out",
         "session_message": session.message if session else None,
         "last_updated": session.last_updated.isoformat() if session and session.last_updated else None,
     }
+
+def _order_status_log_from_order(order: ScheduledOrder) -> OrderStatusLog:
+    return OrderStatusLog(
+        order_id=order.order_id,
+        client_id=order.client_id,
+        security_details=order.security_details,
+        script_name=order.script_name,
+        qty=order.qty,
+        status=order.status,
+        price=order.price,
+        order_type=order.order_type,
+    )
+
+
+async def _get_script_high(tms_user: TmsUser, script_name: str) -> Optional[float]:
+    normalized = script_name.strip().upper()
+    security = await tms_user.get_security_id(normalized)
+    if security and security.get("id"):
+        quote = await tms_user.get_stock_details_async(str(security["id"]), max_retries=2)
+        if quote and quote.get("high") is not None:
+            return float(quote["high"])
+
+    stock_data = await tms_user.fetch_securities_details()
+    for stock in (stock_data or {}).get("payload", {}).get("data", []) or []:
+        if str(stock.get("symbol", "")).upper() == normalized and stock.get("high") is not None:
+            return float(stock["high"])
+    return None
 
 
 @app.get("/tms-accounts/")
@@ -395,6 +493,7 @@ async def update_tms_account(
         user.auto_login = payload.auto_login
     if payload.password:
         user.password = TmsUser.to_tms_password_payload(payload.password)
+        await invalidate_cached_tms_user(client_id)
 
     db.commit()
     db.refresh(user)
@@ -411,6 +510,7 @@ async def delete_tms_account(client_id: str, db: Session = Depends(get_db)):
     db.query(LoggedInUsers).filter(LoggedInUsers.client_id == client_id).delete()
     db.delete(user)
     db.commit()
+    await invalidate_cached_tms_user(client_id)
     return {"message": f"TMS account {client_id} deleted"}
 
 
@@ -420,15 +520,15 @@ async def login_tms_account(client_id: str, db: Session = Depends(get_db)):
     if not user:
         raise HTTPException(status_code=404, detail="TMS account not found")
 
-    tms_instance = TmsUser(
-        username=user.client_id,
-        password=user.password,
-        stock_symbol="",
-        broker_no=user.broker_no,
-        request_per_sec=5,
-    )
     try:
-        login_status = await tms_instance.try_cached_login()
+        await invalidate_cached_tms_user(client_id)
+        tms_instance = await get_cached_tms_user(user, request_per_sec=5)
+        login_status = {
+            "status": "success",
+            "message": "token loaded and session cached",
+            "password_expiry": getattr(tms_instance, "login_response", {}).get("password_expiry"),
+            "password_rotated": False,
+        }
     except LoginFailedException as e:
         raise HTTPException(status_code=401, detail=e.message)
 
@@ -455,9 +555,13 @@ async def login(login_request: LoginRequest, db: Session = Depends(get_db)):
     try:
         login_status = await tms_instance.try_cached_login()  # Await the async call
     except LoginFailedException as e:
+        await tms_instance.close()
         raise HTTPException(status_code=401, detail=e.message)
 
     if login_status.get("status") == "success":
+        await invalidate_cached_tms_user(login_request.username)
+        tms_user_cache[login_request.username] = tms_instance
+        tms_user_cache_touched[login_request.username] = monotonic_time.monotonic()
         return {"message": login_status}, 200
 
     failure_detail = (
@@ -476,15 +580,7 @@ async def cancel_order(client_id: str, exchange_order_id: str, db: Session = Dep
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
-        # Instantiate TmsUser with user credentials
-        tms_user_instance = TmsUser(
-            broker_no=user.broker_no,
-            username=user.client_id,
-            password=user.password,
-        )
-
-        # Try to login
-        await tms_user_instance.try_cached_login()  # Await the async call
+        tms_user_instance = await get_cached_tms_user(user)
 
         # Cancel the order
         # Await the async call
@@ -494,6 +590,7 @@ async def cancel_order(client_id: str, exchange_order_id: str, db: Session = Dep
         return response
 
     except LoginFailedException as e:
+        await invalidate_cached_tms_user(client_id)
         raise HTTPException(status_code=401, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -501,6 +598,25 @@ async def cancel_order(client_id: str, exchange_order_id: str, db: Session = Dep
 
 @app.post("/add_order/")
 async def add_order(order_data: OrderCreateRequest, db: Session = Depends(get_db)):
+    if order_data.order_type.lower() == "buy":
+        user = db.query(User).filter(User.client_id == order_data.client_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        tms_user_instance = await get_cached_tms_user(user)
+        script_high = await _get_script_high(tms_user_instance, order_data.script_name)
+        if script_high is not None:
+            order_price = truncate_to_one_decimal_place(order_data.price)
+            day_high = truncate_to_one_decimal_place(script_high)
+            if order_price > day_high:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Buy price ({order_price}) cannot exceed today's high "
+                        f"({day_high}) for {order_data.script_name}."
+                    ),
+                )
+
     order = ScheduledOrder(order_data)
     db.add(order)
     db.commit()
@@ -536,21 +652,24 @@ async def delete_scheduled_order(
     db: Session = Depends(get_db)
 ):
     if order_id:
-        deleted_count = db.query(ScheduledOrder).filter(
-            ScheduledOrder.order_id == order_id).delete()
+        orders_to_delete = db.query(ScheduledOrder).filter(
+            ScheduledOrder.order_id == order_id).all()
     elif client_id and script_name:
-        deleted_count = db.query(ScheduledOrder).filter(
+        orders_to_delete = db.query(ScheduledOrder).filter(
             ScheduledOrder.client_id == client_id,
             ScheduledOrder.script_name == script_name
-        ).delete()
+        ).all()
     else:
         raise HTTPException(
             status_code=400, detail="Invalid parameters. Specify order_id or client_id and script_name.")
 
-    db.commit()
-
-    if deleted_count == 0:
+    if len(orders_to_delete) == 0:
         raise HTTPException(status_code=404, detail="Order not found")
+
+    for order in orders_to_delete:
+        db.add(_order_status_log_from_order(order))
+        db.delete(order)
+    db.commit()
 
     return {"message": "Order deleted successfully"}
 
@@ -664,12 +783,13 @@ async def get_order_history(client_id: str, db: Session = Depends(get_db)):
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    tms_user = TmsUser(broker_no=user.broker_no,
-                       username=user.client_id, password=user.password)
-    await tms_user.try_cached_login()  # Await the async call
     try:
+        tms_user = await get_cached_tms_user(user)
         order_history = await tms_user.get_order_history()  # Await the async call
         return order_history
+    except LoginFailedException as e:
+        await invalidate_cached_tms_user(client_id)
+        raise HTTPException(status_code=401, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -680,12 +800,13 @@ async def get_dp_holdings(client_id: str, db: Session = Depends(get_db)):
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    tms_user = TmsUser(broker_no=user.broker_no,
-                       username=user.client_id, password=user.password)
-    await tms_user.try_cached_login()  # Await the async call
     try:
+        tms_user = await get_cached_tms_user(user)
         dp_holdings = await tms_user.get_user_stock_details()  # Await the async call
         return dp_holdings
+    except LoginFailedException as e:
+        await invalidate_cached_tms_user(client_id)
+        raise HTTPException(status_code=401, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -697,24 +818,24 @@ async def get_stock_quote(client_id: str, symbol: str, db: Session = Depends(get
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
-        tms_user_instance = TmsUser(
-            broker_no=user.broker_no,
-            username=user.client_id,
-            password=user.password,
-        )
-        await tms_user_instance.try_cached_login()
+        tms_user_instance = await get_cached_tms_user(user)
 
         security = await tms_user_instance.get_security_id(symbol)
         if not security or not security.get("id"):
             raise HTTPException(status_code=404, detail=f"Security not found for {symbol}")
 
-        quote = await tms_user_instance.get_stock_details_async(str(security["id"]))
+        quote = await tms_user_instance.get_stock_details_async(
+            str(security["id"]),
+            max_retries=3,
+            retry_backoff=True,
+        )
         if not quote:
             return {"security": security, "quote": None}
 
         return {"security": security, "quote": quote}
 
     except LoginFailedException as e:
+        await invalidate_cached_tms_user(client_id)
         raise HTTPException(status_code=401, detail=str(e))
     except HTTPException:
         raise
@@ -729,18 +850,13 @@ async def get_order_book(client_id: str, db: Session = Depends(get_db)):
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
-        tms_user_instance = TmsUser(
-            broker_no=user.broker_no,
-            username=user.client_id,
-            password=user.password,
-        )
-
-        await tms_user_instance.try_cached_login()  # Await the async call
+        tms_user_instance = await get_cached_tms_user(user)
 
         order_book = await tms_user_instance.get_order_book()  # Await the async call
         return order_book
 
     except LoginFailedException as e:
+        await invalidate_cached_tms_user(client_id)
         raise HTTPException(status_code=401, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -753,18 +869,13 @@ async def get_script_details(client_id: str, db: Session = Depends(get_db)):
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
-        tms_user_instance = TmsUser(
-            broker_no=user.broker_no,
-            username=user.client_id,
-            password=user.password,
-        )
-
-        await tms_user_instance.try_cached_login()  # Await the async call
+        tms_user_instance = await get_cached_tms_user(user)
 
         stock_data = await tms_user_instance.fetch_securities_details()  # Await the async call
         return stock_data
 
     except LoginFailedException as e:
+        await invalidate_cached_tms_user(client_id)
         raise HTTPException(status_code=401, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -803,13 +914,10 @@ async def stop_check_orders_endpoint():
 
 @app.get("/monitoring-status/")
 async def monitoring_status():
-    from datetime import datetime
-
-    now = datetime.now().time()
-    market_open = is_within_time_range(tms_config.start_time, tms_config.end_time, now)
+    hours = get_market_hours_status(get_nepal_now())
     return {
         "scheduled_orders_active": tms_config.is_running,
-        "market_open": market_open,
+        "market_open": hours["market_hours_open"],
         "monitor_interval": tms_config.monitor_interval,
         "active_grabber_count": len(running_grabbers),
     }

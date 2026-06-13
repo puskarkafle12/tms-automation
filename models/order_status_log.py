@@ -1,4 +1,4 @@
-from sqlalchemy import JSON, Column, Float, Integer, String, DateTime, func
+from sqlalchemy import JSON, Column, Float, Integer, String, DateTime, func, Index
 from database import Base
 
 class OrderStatusLog(Base):
@@ -14,6 +14,10 @@ class OrderStatusLog(Base):
     timestamp = Column(DateTime, default=func.now())
     price = Column(Float)
     order_type = Column(String)
+
+    __table_args__ = (
+        Index("ix_order_status_logs_timestamp_client_script", "timestamp", "client_id", "script_name"),
+    )
 
     def __repr__(self):
         return f"<Order(order_id='{self.order_id}', client_id='{self.client_id}', security_details={self.security_details}, price={self.price}, status='{self.status}', last_updated='{self.last_updated}, qty {self.qty}')>"

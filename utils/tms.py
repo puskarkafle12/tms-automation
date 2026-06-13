@@ -3,9 +3,9 @@ import base64
 from datetime import date, datetime, time
 from http.cookies import SimpleCookie
 import json
-from typing import Dict, List, Optional, Tuple, Any
+import time as monotonic_time
+from typing import Dict, List, Optional
 import aiohttp
-import time
 from database import get_db_session
 from exceptions.login_exceptions import LoginFailedException
 from models.logged_in_user import LoggedInUsers
@@ -14,10 +14,12 @@ from models.user import User
 from utils.tms_captcha_solver.imgto_txt import solve_captcha
 from utils.base_functions import calculate_high_price, get_tokens, log_time, logout_user, save_tokens
 
-_SECURITIES_CACHE: Dict[str, Tuple[float, Dict[str, Dict[str, Any]]]] = {}
-_SECURITIES_CACHE_TTL_SECONDS = 3600
-
 class TmsUser:
+    DEFAULT_TIMEOUT = aiohttp.ClientTimeout(total=12, connect=4, sock_read=8)
+    QUOTE_TIMEOUT = aiohttp.ClientTimeout(total=3, connect=1, sock_read=2)
+    _security_cache: Dict[str, tuple[float, List[Dict]]] = {}
+    _security_cache_ttl = 300.0
+
     def __init__(
         self,
         broker_no,
@@ -36,12 +38,14 @@ class TmsUser:
         self.password = password
         self.tokens = tokens
         self.driver = None
-        self.session = aiohttp.ClientSession()
+        self.session: Optional[aiohttp.ClientSession] = None
+        self._auth_refresh_lock = asyncio.Lock()
         self.security = None
         self.stock_symbol = stock_symbol
-        self.request_per_sec = max(request_per_sec, 3.0)  # Start at minimum 3.0
         self.max_request_per_sec = 5.0  # Maximum fetch rate
-        self.min_request_per_sec = 3.0  
+        self.min_request_per_sec = 3.0
+        requested_rate = float(request_per_sec or self.min_request_per_sec)
+        self.request_per_sec = min(self.max_request_per_sec, max(requested_rate, self.min_request_per_sec))
         self.total_requests = 0  #
         self.broker_no = broker_no
         self.client_details = None
@@ -52,8 +56,8 @@ class TmsUser:
         self.scan_count = int(resume_scan_count or 0)
         self.resume_previous_ltp = float(resume_previous_ltp or 0.0)
         if resume_stable_rate and float(resume_stable_rate) > 0:
-            self.stable_rate = float(resume_stable_rate)
-            self.request_per_sec = float(resume_stable_rate)
+            self.stable_rate = min(self.max_request_per_sec, max(float(resume_stable_rate), self.min_request_per_sec))
+            self.request_per_sec = self.stable_rate
         self.updates: List[Dict] = []  # Store updates for polling
 
         self.headers = {
@@ -73,18 +77,27 @@ class TmsUser:
             'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
         }
     def __del__(self):
-        if self.session:
+        if self.session and not getattr(self.session, "closed", True):
             try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    loop.create_task(self.close())
-                else:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                try:
                     asyncio.run(self.close())
+                except Exception as e:
+                    print(f"Exception during __del__: {e}")
             except Exception as e:
                 print(f"Exception during __del__: {e}")
+            else:
+                loop.create_task(self.close())
+
     async def close(self):
-        if self.session:
-            await self.session.close()
+        if self.session and not getattr(self.session, "closed", True):
+            close = getattr(self.session, "close", None)
+            if callable(close):
+                close_result = close()
+                if asyncio.iscoroutine(close_result):
+                    await close_result
+        self.session = None
 
     async def __aenter__(self):
         return self
@@ -179,10 +192,12 @@ class TmsUser:
                 raise LoginFailedException(f"Unexpected TMS login error: {e}")
 
     async def get_captcha_id(self, headers):
+        await self._ensure_session()
         async with self.session.get(f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/authApi/captcha/id', headers=headers) as response:
             return (await response.json())['id']
 
     async def get_captcha_image(self, headers, captcha_id):
+        await self._ensure_session()
         async with self.session.get(f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/authApi/captcha/image/{captcha_id}', headers=headers) as response:
             return await response.read()
 
@@ -206,35 +221,42 @@ class TmsUser:
         return header
 
     async def get_request_owner(self, cookies, headers):
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/exchangeIndex/getExchangeIndexForCurrentUser',
-                cookies=cookies,
-                headers=headers,
-            ) as response:
-                return json.loads(await response.text())['data'][0]['userId']
+        await self._ensure_session()
+        async with self.session.get(
+            f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/exchangeIndex/getExchangeIndexForCurrentUser',
+            cookies=cookies,
+            headers=headers,
+        ) as response:
+            return json.loads(await response.text())['data'][0]['userId']
+
+    @classmethod
+    def clear_security_cache(cls, broker_no: Optional[str] = None) -> None:
+        if broker_no is None:
+            cls._security_cache.clear()
+            return
+        cls._security_cache.pop(str(broker_no), None)
+
+    async def get_securities(self, *, force_refresh: bool = False) -> List[Dict]:
+        broker_key = str(self.broker_no)
+        cached = self._security_cache.get(broker_key)
+        now = monotonic_time.monotonic()
+        if not force_refresh and cached and now - cached[0] < self._security_cache_ttl:
+            return cached[1]
+
+        _, stocks = await self._authenticated_request(
+            "GET",
+            f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/stock/securities',
+            expected_statuses={200},
+        )
+        self._security_cache[broker_key] = (now, stocks)
+        return stocks
 
     async def get_security_id(self, symbol) -> Dict:
         symbol = symbol.upper().strip()
-        await self._ensure_session()
-        cache_key = str(self.broker_no)
-        now = time.time()
-        cached = _SECURITIES_CACHE.get(cache_key)
-        if cached and now - cached[0] < _SECURITIES_CACHE_TTL_SECONDS:
-            symbol_map = cached[1]
-        else:
-            async with self.session.get(
-                f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/stock/securities',
-                cookies=self.tokens,
-                headers=self.headers,
-            ) as response:
-                if response.status == 401:
-                    logout_user(self.client_id, "access token expired")
-                    return {}
-                stocks = await response.json()
-            symbol_map = {stock['symbol']: stock for stock in stocks if stock.get('symbol')}
-            _SECURITIES_CACHE[cache_key] = (now, symbol_map)
-        return symbol_map.get(symbol, {})
+        for stock in await self.get_securities():
+            if stock.get('symbol') == symbol:
+                return stock
+        return {}
 
     async def login_request(self, logindata):
         json_data = {
@@ -245,16 +267,16 @@ class TmsUser:
             'captchaIdentifier': logindata['captcha_id'],
             'userCaptcha': logindata['captcha'],
         }
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/authApi/authenticate',
-                headers=self.headers,
-                json=json_data,
-            ) as response:
-                simple_cookie = SimpleCookie(response.cookies)
-                tokens_dict = {key: morsel.value for key, morsel in simple_cookie.items()}
-                response_data = await response.json()
-                return response_data, tokens_dict
+        await self._ensure_session()
+        async with self.session.post(
+            f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/authApi/authenticate',
+            headers=self.headers,
+            json=json_data,
+        ) as response:
+            simple_cookie = SimpleCookie(response.cookies)
+            tokens_dict = {key: morsel.value for key, morsel in simple_cookie.items()}
+            response_data = await response.json()
+            return response_data, tokens_dict
 
     @staticmethod
     def is_login_success(status: Optional[str]) -> bool:
@@ -403,6 +425,7 @@ class TmsUser:
         if not self.tokens or not self.headers:
             raise LoginFailedException("Cannot change password without an authenticated TMS session")
 
+        await self._ensure_session()
         payload = {
             "currentPassword": current_password,
             "newPassword": new_password,
@@ -416,7 +439,7 @@ class TmsUser:
         }
         url = f"https://tms{self.broker_no}.nepsetms.com.np/tmsapi/authApi/authenticate/updatepassword"
         async with self.session.post(
-            url, headers=headers, cookies=self.tokens, json=payload, timeout=30
+            url, headers=headers, cookies=self.tokens, json=payload, timeout=aiohttp.ClientTimeout(total=30)
         ) as response:
             response_text = await response.text()
             try:
@@ -436,24 +459,22 @@ class TmsUser:
 
     async def fetch_securities_details(self):
         url = f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/rtApi/ws/top25securities'
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.get(url, headers=self.headers, cookies=self.tokens) as response:
-                    response.raise_for_status()
-                    return await response.json()
-            except aiohttp.ClientError as e:
-                return {"error": str(e)}
+        try:
+            _, payload = await self._authenticated_request("GET", url, expected_statuses={200})
+            return payload
+        except aiohttp.ClientError as e:
+            return {"error": str(e)}
 
     async def get_client_details(self, cookies, headers, client_dealer_id):
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/clientApi/clientDealer/info/{client_dealer_id}',
-                cookies=cookies,
-                headers=headers,
-            ) as response:
-                if response.status != 200:
-                    response.raise_for_status()
-                return await response.json()
+        await self._ensure_session()
+        async with self.session.get(
+            f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/clientApi/clientDealer/info/{client_dealer_id}',
+            cookies=cookies,
+            headers=headers,
+        ) as response:
+            if response.status != 200:
+                response.raise_for_status()
+            return await response.json()
 
     async def save_login_info(self):
         db = get_db_session()
@@ -577,18 +598,13 @@ class TmsUser:
 
     async def check_exchange_session(self) -> Dict:
         url = f"https://tms{self.broker_no}.nepsetms.com.np/tmsapi/dnaApi/exchange/sessionCheck"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, cookies=self.tokens, headers=self.headers) as response:
-                return await response.json()
+        _, payload = await self._authenticated_request("GET", url, expected_statuses={200})
+        return payload
 
     async def get_order_book(self):
         url = f"https://tms{self.broker_no}.nepsetms.com.np/tmsapi/orderTradeApi/orderbook-v2/client/{self.client_details['id']}?&activeStatus=OPEN&activeStatus=PARTIALLY_TRADED&activeStatus=MODIFIED&activeStatus=PENDING"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=self.headers, cookies=self.tokens) as response:
-                if response.status == 200:
-                    return await response.json()
-                else:
-                    response.raise_for_status()
+        _, payload = await self._authenticated_request("GET", url, expected_statuses={200})
+        return payload
 
     @staticmethod
     def encode_base64(input_string: str) -> str:
@@ -613,21 +629,13 @@ class TmsUser:
 
     async def get_user_stock_details(self):
         url = f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/dp-holding/client/freebalance/{self.client_details["id"]}/CLI'
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, cookies=self.tokens, headers=self.headers) as response:
-                if response.status == 200:
-                    return await response.json()
-                else:
-                    response.raise_for_status()
+        _, payload = await self._authenticated_request("GET", url, expected_statuses={200})
+        return payload
 
     async def get_order_history(self):
         url = f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/orderTradeApi/orderbook-v2/client/{self.client_details["id"]}?&activeStatus=COMPLETED&activeStatus=CANCELLED&activeStatus=REJECTED&activeStatus=TMS_REJECTED&activeStatus=PARTIALLY_CANCELLED&activeStatus=MODIFIED_CANCELLED'
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=self.headers, cookies=self.tokens) as response:
-                if response.status == 200:
-                    return await response.json()
-                else:
-                    response.raise_for_status()
+        _, payload = await self._authenticated_request("GET", url, expected_statuses={200})
+        return payload
 
     async def cancel_order(self, exchange_order_id):
         json_data = {
@@ -636,12 +644,8 @@ class TmsUser:
             'exchangeOrderId': exchange_order_id,
         }
         url = f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/orderApi/order/cancel/'
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, cookies=self.tokens, headers=self.headers, json=json_data) as response:
-                if response.status == 200:
-                    return await response.json()
-                else:
-                    response.raise_for_status()
+        _, payload = await self._authenticated_request("POST", url, json=json_data, expected_statuses={200})
+        return payload
 
     async def order(self, orderPrice, orderQuantity, order_type, security=None):
         if not security:
@@ -762,72 +766,106 @@ class TmsUser:
             'orderPlacedBy': 2,
             'exchangeOrderId': None,
         }
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/orderApi/order/',
-                headers=self.headers,
-                cookies=self.tokens,
-                json=json_data
-            ) as response:
-                if response.status == 200:
-                    return {
-                        "status": response.status,
-                        "message": await response.text()
-                    }
-                else:
-                    try:
-                        content = await response.json()
-                        return {
-                            "status": response.status,
-                            "message": content
-                        }
-                    except Exception as e:
-                        return {
-                            "status": 500,
-                            "message": f"exception occurred while loading json: {str(e)} {await response.text()}"
-                        }
+        status, payload = await self._authenticated_request(
+            "POST",
+            f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/orderApi/order/',
+            json=json_data,
+            parse_json=False,
+        )
+        if status == 200:
+            return {"status": status, "message": payload}
+        try:
+            content = json.loads(payload) if payload else {}
+            return {"status": status, "message": content}
+        except Exception as e:
+            return {
+                "status": 500,
+                "message": f"exception occurred while loading json: {str(e)} {payload}",
+            }
 
     async def _ensure_session(self) -> None:
         if self.session is None or self.session.closed:
             self.session = aiohttp.ClientSession(
-                connector=aiohttp.TCPConnector(keepalive_timeout=60, limit=20)
+                connector=aiohttp.TCPConnector(keepalive_timeout=60, limit=20),
+                timeout=self.DEFAULT_TIMEOUT,
             )
 
     async def _recreate_session(self) -> None:
         if self.session and not self.session.closed:
             await self.session.close()
         self.session = aiohttp.ClientSession(
-            connector=aiohttp.TCPConnector(keepalive_timeout=60, limit=20)
+            connector=aiohttp.TCPConnector(keepalive_timeout=60, limit=20),
+            timeout=self.DEFAULT_TIMEOUT,
         )
 
-    async def get_stock_details_async(self, id: str, max_retries: int = 5) -> Optional[Dict]:
+    async def _refresh_authentication(self, reason: str = "access token expired") -> None:
+        async with self._auth_refresh_lock:
+            self.updates.append({
+                "status": "warn",
+                "message": "Session expired — refreshing login token and retrying…",
+            })
+            self.clear_security_cache(str(self.broker_no))
+            await self.try_cached_login()
+
+    async def _authenticated_request(
+        self,
+        method: str,
+        url: str,
+        *,
+        expected_statuses: Optional[set[int]] = None,
+        parse_json: bool = True,
+        retry_on_unauthorized: bool = True,
+        **kwargs,
+    ) -> tuple[int, object]:
+        await self._ensure_session()
+        explicit_headers = kwargs.pop("headers", None)
+        explicit_cookies = kwargs.pop("cookies", None)
+
+        for attempt in range(2):
+            request_kwargs = dict(kwargs)
+            request_kwargs["headers"] = explicit_headers or self.headers
+            request_kwargs["cookies"] = explicit_cookies or self.tokens
+
+            async with self.session.request(method.upper(), url, **request_kwargs) as response:
+                if response.status == 401 and retry_on_unauthorized and attempt == 0:
+                    await response.read()
+                    await self._refresh_authentication()
+                    continue
+
+                if expected_statuses and response.status not in expected_statuses:
+                    response.raise_for_status()
+
+                if parse_json:
+                    return response.status, await response.json(content_type=None)
+                return response.status, await response.text()
+
+        raise aiohttp.ClientResponseError(
+            request_info=response.request_info,
+            history=response.history,
+            status=response.status,
+            message=response.reason,
+            headers=response.headers,
+        )
+
+    async def get_stock_details_async(
+        self,
+        id: str,
+        max_retries: int = 1,
+        *,
+        retry_backoff: bool = False,
+    ) -> Optional[Dict]:
         url = f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/rtApi/ws/stockQuote/{id}'
         last_error = None
 
         for attempt in range(max_retries):
             try:
-                await self._ensure_session()
-                async with self.session.get(
+                _, response_data = await self._authenticated_request(
+                    "GET",
                     url,
-                    headers=self.headers,
-                    cookies=self.tokens,
-                    timeout=aiohttp.ClientTimeout(total=15),
-                ) as response:
-                    if response.status == 200:
-                        response_data = await response.json()
-                        return response_data['payload']['data'][0]
-
-                    if response.status == 401:
-                        self.updates.append({
-                            "status": "warn",
-                            "message": "Session expired — re-authenticating…",
-                        })
-                        await self.try_cached_login()
-                        continue
-
-                    body = await response.text()
-                    last_error = f"HTTP {response.status}: {body[:120]}"
-                    print(f"HTTP error: {last_error}, url={url}")
+                    expected_statuses={200},
+                    timeout=self.QUOTE_TIMEOUT,
+                )
+                return response_data['payload']['data'][0]
 
             except (aiohttp.ClientError, asyncio.TimeoutError, ConnectionError) as exc:
                 last_error = str(exc)
@@ -838,8 +876,9 @@ class TmsUser:
                 last_error = str(exc)
                 print(f"Unexpected error fetching stock details: {exc}, url={url}")
 
-            backoff = min(0.3 * (2 ** attempt), 5.0)
-            await asyncio.sleep(backoff)
+            if retry_backoff and attempt < max_retries - 1:
+                backoff = min(0.2 * (2 ** attempt), 1.0)
+                await asyncio.sleep(backoff)
 
         if last_error:
             self.updates.append({
@@ -868,7 +907,7 @@ class TmsUser:
                     start_time = asyncio.get_event_loop().time()
                     fetch_count = 0
 
-                response = await self.get_stock_details_async(id)
+                response = await self.get_stock_details_async(id, max_retries=1)
                 self.total_requests += 1
                 self.trial_requests += 1
 
@@ -1043,7 +1082,7 @@ class TmsUser:
                 if order_response.get('status') == 200:
                     traded_at = stock_details.get('lastTradedTime')
                     if traded_at:
-                        await log_time(traded_at, self.headers, order_response)
+                        await asyncio.to_thread(log_time, traded_at, self.headers, order_response)
                     order_limit += 1
                     total_orders.append(order_response)
                     self.updates.append({
