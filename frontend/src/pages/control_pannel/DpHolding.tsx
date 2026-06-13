@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import './DpHolding.css';
 import ErrorMessage from '../../components/ErrorMessage';
 
@@ -78,6 +78,7 @@ const DPHoldings: React.FC = () => {
   const [quoteLoading, setQuoteLoading] = useState(false);
   const [quoteError, setQuoteError] = useState('');
   const [sellSubmitting, setSellSubmitting] = useState(false);
+  const holdingsRequestId = useRef(0);
 
   useEffect(() => {
     const fetchLoggedInClientIDs = async () => {
@@ -95,16 +96,27 @@ const DPHoldings: React.FC = () => {
     fetchLoggedInClientIDs();
   }, []);
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const fetchHoldings = useCallback(async (selectedClientID: string) => {
+    if (!selectedClientID) {
+      setDPHoldings([]);
+      setHasFetched(false);
+      return;
+    }
+
+    const requestId = holdingsRequestId.current + 1;
+    holdingsRequestId.current = requestId;
     setIsLoading(true);
     setErrorMessage('');
     setHasFetched(true);
 
     try {
-      const response = await fetch(`${getApiUrl()}/dp_holdings?client_id=${clientID}`, {
+      const response = await fetch(`${getApiUrl()}/dp_holdings?client_id=${selectedClientID}`, {
         headers: { Accept: 'application/json' },
       });
+
+      if (requestId !== holdingsRequestId.current) {
+        return;
+      }
 
       if (!response.ok) {
         const data = await response.json().catch(() => ({}));
@@ -114,6 +126,10 @@ const DPHoldings: React.FC = () => {
       }
 
       const data = await response.json();
+      if (requestId !== holdingsRequestId.current) {
+        return;
+      }
+
       const processedData = data.map((holding: DPHolding) => {
         const gainedProfit = holding.valueAsOfLTP - holding.valueAsOfPreviousClosePrice;
         const percentChange = holding.valueAsOfPreviousClosePrice
@@ -138,9 +154,15 @@ const DPHoldings: React.FC = () => {
       setErrorMessage('Failed to fetch DP holdings. Check your API connection.');
       setDPHoldings([]);
     } finally {
-      setIsLoading(false);
+      if (requestId === holdingsRequestId.current) {
+        setIsLoading(false);
+      }
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    fetchHoldings(clientID);
+  }, [clientID, fetchHoldings]);
 
   const openSellDialog = async (holding: DPHolding) => {
     const symbol = holdingSymbol(holding);
@@ -283,7 +305,7 @@ const DPHoldings: React.FC = () => {
           </div>
         </div>
 
-        <form onSubmit={handleSubmit} className="dp-holdings-form">
+        <div className="dp-holdings-form">
           <div className="form-group">
             <label htmlFor="dpClientId">Client ID</label>
             <select
@@ -306,14 +328,7 @@ const DPHoldings: React.FC = () => {
               <span className="dp-holdings-hint">Log in via TMS Login tab first.</span>
             )}
           </div>
-          <button
-            type="submit"
-            className="btn btn-primary"
-            disabled={isLoading || loggedInClientIDs.length === 0}
-          >
-            {isLoading ? 'Loading...' : 'Fetch Holdings'}
-          </button>
-        </form>
+        </div>
       </div>
 
       {dpHoldings.length > 0 && (
@@ -420,7 +435,7 @@ const DPHoldings: React.FC = () => {
             <p>
               {hasFetched
                 ? 'No holdings found for this client.'
-                : 'Select a client and click Fetch Holdings to load data.'}
+                : 'Select a client to load DP holdings automatically.'}
             </p>
           </div>
         )}

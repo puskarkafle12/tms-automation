@@ -113,6 +113,11 @@
   margin-top: 0.25rem;
 }
 
+.schedule-order-hint-muted {
+  color: var(--color-text-muted);
+  display: block;
+}
+
 .schedule-order-script-group {
   position: relative;
   z-index: 2;

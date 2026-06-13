@@ -1,6 +1,5 @@
-from sqlalchemy import Column, Float, Integer, String, JSON, DateTime, func, event
-from database import Base, get_db_session
-from models.order_status_log import OrderStatusLog
+from sqlalchemy import Column, Float, Integer, String, JSON, DateTime, func, Index
+from database import Base
 from schemas.schemas import OrderCreateRequest
 
 class ScheduledOrder(Base):
@@ -16,6 +15,10 @@ class ScheduledOrder(Base):
     order_type = Column(String)
     last_updated = Column(DateTime, default=func.now(), onupdate=func.now())
 
+    __table_args__ = (
+        Index("ix_scheduled_orders_status_client_script", "status", "client_id", "script_name"),
+    )
+
     def __repr__(self):
         return f"<Order(order_id='{self.order_id}', client_id='{self.client_id}', security_details={self.security_details}, price={self.price}, status='{self.status}', last_updated='{self.last_updated}', qty={self.qty})>"
 
@@ -27,13 +30,3 @@ class ScheduledOrder(Base):
         self.qty = order_data.qty
         self.order_type = order_data.order_type
         self.status = order_data.status
-
-@event.listens_for(ScheduledOrder, 'after_delete')
-def after_delete_order(mapper, connection, target):
-    db = get_db_session()
-    try:
-        log_entry = OrderStatusLog(order_id=target.order_id, client_id=target.client_id, security_details=target.security_details, script_name=target.script_name, qty=target.qty, status=target.status,price=target.price,order_type=target.order_type)
-        db.add(log_entry)
-        db.commit()
-    finally:
-        db.close()

@@ -3,10 +3,12 @@ from typing import Any, Dict, Optional
 from zoneinfo import ZoneInfo
 
 NEPAL_TZ = ZoneInfo("Asia/Kathmandu")
-MARKET_OPEN = time(11, 0)
+MARKET_OPEN = time(9, 0)
 MARKET_CLOSE = time(15, 0)
-PRE_OPEN_START = time(10, 30)
-TRADING_WEEKDAYS = {6, 0, 1, 2, 3}
+PRE_OPEN_START = time(9, 0)
+# Sunday (6) through Friday (4) in Python weekday(); Saturday (5) is closed.
+TRADING_WEEKDAYS = {6, 0, 1, 2, 3, 4}
+MARKET_HOURS_LABEL = "Sun–Fri 9:00 AM–3:00 PM NPT"
 
 
 def get_nepal_now() -> datetime:
@@ -70,4 +72,17 @@ def parse_session_check_response(payload: Dict[str, Any]) -> Dict[str, Any]:
         "market_live_from_api": market_live_from_api,
         "session_data": data,
     }
+
+
+def is_market_hours_open(now: Optional[datetime] = None) -> bool:
+    return get_market_hours_status(now)["market_hours_open"]
+
+
+def is_market_live(hours: Optional[Dict[str, bool]] = None, session_active: bool = False) -> bool:
+    status = hours or get_market_hours_status()
+    return bool(status["market_hours_open"] and session_active)
+
+
+def outside_market_hours_message() -> str:
+    return f"Outside Nepal market hours ({MARKET_HOURS_LABEL})"
 

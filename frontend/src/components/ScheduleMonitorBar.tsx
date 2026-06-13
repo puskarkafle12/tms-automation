@@ -20,7 +20,7 @@ const ScheduleMonitorBar: React.FC = () => {
           <h3 className="page-monitor-bar-title">Scheduled Order Monitor</h3>
           <p className="page-monitor-bar-desc">
             {scheduledActive
-              ? 'Watching queued orders — executes when price conditions are met.'
+              ? 'Watching queued orders — executes only when market is open and TMS session is live.'
               : 'Stopped — start monitoring to execute queued orders automatically.'}
           </p>
         </div>

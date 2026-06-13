@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import './ScheduleOrder.css';
 import StockDetails from './StockDetails';
 import ErrorMessage from '../../components/ErrorMessage';
@@ -6,6 +6,12 @@ import ScriptNameAutocomplete, { ScriptOption } from '../../components/ScriptNam
 import ScheduleMonitorBar from '../../components/ScheduleMonitorBar';
 
 const getApiUrl = () => localStorage.getItem('apiUrl') || window.location.origin;
+
+interface DPHolding {
+  scrip?: string;
+  symbolName?: string;
+  currentBalance?: number;
+}
 
 const ScheduleOrder: React.FC = () => {
   const [clientID, setClientID] = useState('');
@@ -19,6 +25,23 @@ const ScheduleOrder: React.FC = () => {
   const [stockDetails, setStockDetails] = useState<any[]>([]);
   const [selectedStock, setSelectedStock] = useState<any | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [latestLtp, setLatestLtp] = useState<number | null>(null);
+  const [quoteLoading, setQuoteLoading] = useState(false);
+  const [quoteError, setQuoteError] = useState('');
+  const [holdingQty, setHoldingQty] = useState<number | null>(null);
+  const [holdingLabel, setHoldingLabel] = useState('');
+  const [holdingLoading, setHoldingLoading] = useState(false);
+  const [holdingError, setHoldingError] = useState('');
+  const quoteRequestId = useRef(0);
+  const holdingRequestId = useRef(0);
+
+  const buyHighLimit = useMemo(() => {
+    if (orderType !== 'buy' || !selectedStock?.high) {
+      return null;
+    }
+    const high = Number(selectedStock.high);
+    return Number.isFinite(high) && high > 0 ? high : null;
+  }, [orderType, selectedStock]);
 
   const scriptOptions = useMemo<ScriptOption[]>(
     () =>
@@ -71,25 +94,193 @@ const ScheduleOrder: React.FC = () => {
     setClientID(clientId);
     setScriptName('');
     setSelectedStock(null);
+    setPrice('');
+    setQty('');
+    setLatestLtp(null);
+    setQuoteError('');
+    setHoldingQty(null);
+    setHoldingLabel('');
+    setHoldingError('');
     await fetchStockDetails(clientId);
   };
 
   const handleScriptNameChange = (name: string) => {
-    setScriptName(name);
-    const stockDetail = stockDetails.find((stock) => stock.symbol === name);
+    const normalizedName = name.toUpperCase();
+    setScriptName(normalizedName);
+    const stockDetail = stockDetails.find((stock) => stock.symbol === normalizedName);
     setSelectedStock(stockDetail || null);
+    setHoldingQty(null);
+    setHoldingLabel('');
+    setHoldingError('');
   };
 
   const handleScriptNameSelect = (option: ScriptOption) => {
     setScriptName(option.symbol);
     const stockDetail = stockDetails.find((stock) => stock.symbol === option.symbol);
     setSelectedStock(stockDetail || null);
+    setHoldingQty(null);
+    setHoldingLabel('');
+    setHoldingError('');
+  };
+
+  const loadLatestQuote = useCallback(async (clientId: string, symbol: string) => {
+    const normalizedSymbol = symbol.trim().toUpperCase();
+    if (!clientId || !normalizedSymbol) {
+      setLatestLtp(null);
+      setQuoteError('');
+      return;
+    }
+
+    const requestId = quoteRequestId.current + 1;
+    quoteRequestId.current = requestId;
+    setQuoteLoading(true);
+    setQuoteError('');
+
+    try {
+      const params = new URLSearchParams({ client_id: clientId, symbol: normalizedSymbol });
+      const response = await fetch(`${getApiUrl()}/stock_quote?${params.toString()}`, {
+        headers: { Accept: 'application/json' },
+      });
+      if (requestId !== quoteRequestId.current) {
+        return;
+      }
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        setLatestLtp(null);
+        setQuoteError(data.detail || data.message || 'Latest LTP is not available.');
+        return;
+      }
+
+      const data = await response.json();
+      if (requestId !== quoteRequestId.current) {
+        return;
+      }
+      const ltp = Number(data?.quote?.ltp ?? 0);
+      if (ltp > 0) {
+        setLatestLtp(ltp);
+        setPrice(String(ltp));
+      } else {
+        setLatestLtp(null);
+        setQuoteError('Latest LTP is not available.');
+      }
+    } catch {
+      if (requestId === quoteRequestId.current) {
+        setLatestLtp(null);
+        setQuoteError('Failed to load latest LTP.');
+      }
+    } finally {
+      if (requestId === quoteRequestId.current) {
+        setQuoteLoading(false);
+      }
+    }
+  }, []);
+
+  const loadSellHolding = useCallback(async (clientId: string, symbol: string) => {
+    const normalizedSymbol = symbol.trim().toUpperCase();
+    if (!clientId || !normalizedSymbol || orderType !== 'sell') {
+      holdingRequestId.current += 1;
+      setHoldingQty(null);
+      setHoldingLabel('');
+      setHoldingError('');
+      return;
+    }
+
+    const requestId = holdingRequestId.current + 1;
+    holdingRequestId.current = requestId;
+    setHoldingLoading(true);
+    setHoldingError('');
+    setHoldingQty(null);
+    setHoldingLabel('');
+
+    try {
+      const response = await fetch(`${getApiUrl()}/dp_holdings?client_id=${encodeURIComponent(clientId)}`, {
+        headers: { Accept: 'application/json' },
+      });
+      if (requestId !== holdingRequestId.current) {
+        return;
+      }
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        setHoldingError(data.detail || data.message || 'Could not verify DP holdings for sell order.');
+        return;
+      }
+
+      const holdings: DPHolding[] = await response.json();
+      if (requestId !== holdingRequestId.current) {
+        return;
+      }
+      const match = holdings.find((holding) => {
+        const scrip = (holding.scrip || '').trim().toUpperCase();
+        const name = (holding.symbolName || '').trim().toUpperCase();
+        return scrip === normalizedSymbol || name === normalizedSymbol;
+      });
+
+      if (!match || Number(match.currentBalance || 0) <= 0) {
+        setHoldingError(`${normalizedSymbol} is not available in this client's DP holdings.`);
+        return;
+      }
+
+      setHoldingQty(Number(match.currentBalance || 0));
+      setHoldingLabel(match.symbolName || match.scrip || normalizedSymbol);
+    } catch {
+      if (requestId === holdingRequestId.current) {
+        setHoldingError('Could not verify DP holdings for sell order.');
+      }
+    } finally {
+      if (requestId === holdingRequestId.current) {
+        setHoldingLoading(false);
+      }
+    }
+  }, [orderType]);
+
+  useEffect(() => {
+    void loadLatestQuote(clientID, scriptName);
+  }, [clientID, scriptName, loadLatestQuote]);
+
+  useEffect(() => {
+    void loadSellHolding(clientID, scriptName);
+  }, [clientID, scriptName, orderType, loadSellHolding]);
+
+  const fillSellQuantityFromHolding = () => {
+    if (!holdingQty || holdingQty <= 0) {
+      return;
+    }
+    setQty(String(holdingQty));
+    if (latestLtp && latestLtp > 0) {
+      setPrice(String(latestLtp));
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setStatus('idle');
     setStatusMessage('');
+
+    const requestedQty = parseInt(qty, 10);
+    const requestedPrice = parseFloat(price);
+    if (orderType === 'buy' && buyHighLimit !== null && requestedPrice > buyHighLimit) {
+      setStatus('error');
+      setStatusMessage(`Buy price cannot exceed today's high (${buyHighLimit}).`);
+      return;
+    }
+    if (orderType === 'sell') {
+      if (holdingLoading) {
+        setStatus('error');
+        setStatusMessage('Still verifying DP holdings. Please wait a moment.');
+        return;
+      }
+      if (!holdingQty || holdingQty <= 0) {
+        setStatus('error');
+        setStatusMessage(holdingError || `${scriptName} is not available in DP holdings.`);
+        return;
+      }
+      if (requestedQty > holdingQty) {
+        setStatus('error');
+        setStatusMessage(`Sell quantity cannot exceed DP holding quantity (${holdingQty}).`);
+        return;
+      }
+    }
+
     setIsSubmitting(true);
 
     try {
@@ -102,8 +293,8 @@ const ScheduleOrder: React.FC = () => {
         body: JSON.stringify({
           client_id: clientID,
           script_name: scriptName,
-          price: parseInt(price, 10),
-          qty: parseInt(qty, 10),
+          price: requestedPrice,
+          qty: requestedQty,
           order_type: orderType,
         }),
       });
@@ -207,8 +398,15 @@ const ScheduleOrder: React.FC = () => {
                   onChange={(e) => setPrice(e.target.value)}
                   placeholder="Order price"
                   min="0"
+                  max={buyHighLimit ?? undefined}
+                  step="0.1"
                   required
                 />
+                {buyHighLimit !== null && (
+                  <span className="schedule-order-hint schedule-order-hint-muted">
+                    Max buy price: {buyHighLimit} (today&apos;s high)
+                  </span>
+                )}
               </div>
 
               <div className="form-group">
@@ -221,6 +419,7 @@ const ScheduleOrder: React.FC = () => {
                   onChange={(e) => setQty(e.target.value)}
                   placeholder="Number of shares"
                   min="1"
+                  max={orderType === 'sell' && holdingQty ? holdingQty : undefined}
                   required
                 />
               </div>
@@ -249,7 +448,7 @@ const ScheduleOrder: React.FC = () => {
             <button
               type="submit"
               className="btn btn-primary schedule-order-submit"
-              disabled={isSubmitting || loggedInClientIDs.length === 0}
+              disabled={isSubmitting || loggedInClientIDs.length === 0 || (orderType === 'sell' && holdingLoading)}
             >
               {isSubmitting ? 'Submitting...' : 'Schedule Order'}
             </button>
@@ -258,7 +457,18 @@ const ScheduleOrder: React.FC = () => {
 
         <div className="schedule-order-side-panel panel">
           {selectedStock ? (
-            <StockDetails stock={selectedStock} />
+            <StockDetails
+              stock={selectedStock}
+              orderType={orderType}
+              latestLtp={latestLtp}
+              quoteLoading={quoteLoading}
+              quoteError={quoteError}
+              holdingQty={holdingQty}
+              holdingLabel={holdingLabel}
+              holdingLoading={holdingLoading}
+              holdingError={holdingError}
+              onFillFromHolding={fillSellQuantityFromHolding}
+            />
           ) : (
             <div className="schedule-order-empty-side">
               <span style={{ fontSize: '2rem' }} aria-hidden="true">📈</span>

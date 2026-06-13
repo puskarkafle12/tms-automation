@@ -63,6 +63,17 @@ RUN chmod +x /app/docker-entrypoint-all-in-one.sh /app/scripts/show-public-url.s
 RUN rm -f /etc/nginx/sites-enabled/default \
     && nginx -t
 
+ARG GIT_COMMIT=unknown
+ARG SOURCE_VERSION=unknown
+ARG BUILD_DATE=unknown
+
+LABEL org.opencontainers.image.revision=$GIT_COMMIT \
+      org.opencontainers.image.source-version=$SOURCE_VERSION \
+      org.opencontainers.image.created=$BUILD_DATE
+
+ENV APP_GIT_COMMIT=$GIT_COMMIT \
+    APP_SOURCE_VERSION=$SOURCE_VERSION
+
 EXPOSE 80
 
 ENTRYPOINT ["/app/docker-entrypoint-all-in-one.sh"]
