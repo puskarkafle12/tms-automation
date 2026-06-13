@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import './OrderLogs.css';
 import CommonTable from '../../components/table/Table';
 import DialogBox from '../../components/dialog_box/DialogBox';
@@ -24,22 +24,36 @@ interface ScheduledOrderRow {
   actionRequired?: boolean;
 }
 
+const formatScanCount = (value: number | null | undefined): number => {
+  return Math.max(0, Math.round(Number(value) || 0));
+};
+
+const formatNepsePrice = (value: number | null | undefined): string => {
+  if (value == null || Number.isNaN(Number(value))) {
+    return '';
+  }
+  const num = Number(value);
+  if (Number.isInteger(num) || Math.abs(num - Math.round(num)) < 0.0001) {
+    return String(Math.round(num));
+  }
+  return num.toFixed(1);
+};
+
 const formatLiveScanStatus = (order: ScheduledOrderRow, monitoringActive: boolean): string => {
-  const base = order.status || 'pending';
+  const baseStatus = (order.status || 'pending').split(' (')[0];
   if (!monitoringActive) {
-    return `${base} (off)`;
+    return `${baseStatus} (off)`;
   }
-  const count = order.scanning_count ?? 0;
-  const ltp = order.current_price;
-  if (ltp != null && Number(ltp) > 0) {
-    return `${base} (${count} · ${Number(ltp).toFixed(1)})`;
+  const count = formatScanCount(order.scanning_count);
+  if (count > 0) {
+    return `${baseStatus} (${count})`;
   }
-  return `${base} (${count})`;
+  return baseStatus;
 };
 
 const TABS: { id: OrderTab; label: string; icon: string }[] = [
-  { id: 'logs', label: 'Order Logs', icon: '📋' },
   { id: 'scheduled', label: 'Scheduled', icon: '📅' },
+  { id: 'logs', label: 'Order Logs', icon: '📋' },
   { id: 'book', label: 'Order Book', icon: '📖' },
   { id: 'history', label: 'History', icon: '🕐' },
 ];
@@ -50,6 +64,10 @@ const GetOrderStatus: React.FC = () => {
   const [orderedDate, setOrderedDate] = useState<string>(todayDate);
   const [clientID, setClientID] = useState('');
   const [scriptName, setScriptName] = useState('');
+  const scriptNameRef = useRef(scriptName);
+  useEffect(() => {
+    scriptNameRef.current = scriptName;
+  }, [scriptName]);
   const [orderLogs, setOrderLogs] = useState<any[]>([]);
   const [scheduledOrders, setScheduledOrders] = useState<ScheduledOrderRow[]>([]);
   const [monitorIntervalMs, setMonitorIntervalMs] = useState(5000);
@@ -59,7 +77,7 @@ const GetOrderStatus: React.FC = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [hasLoaded, setHasLoaded] = useState(false);
   const [loggedInClientIDs, setLoggedInClientIDs] = useState<string[]>([]);
-  const [activeTab, setActiveTab] = useState<OrderTab>('logs');
+  const [activeTab, setActiveTab] = useState<OrderTab>('scheduled');
   const [dialogVisible, setDialogVisible] = useState(false);
   const [dialogMessage, setDialogMessage] = useState('');
   const [dialogAction, setDialogAction] = useState<() => void>(() => {});
@@ -120,8 +138,9 @@ const GetOrderStatus: React.FC = () => {
   const fetchOrderStatusLogs = useCallback(
     async (options?: { silent?: boolean }) => {
       const params = new URLSearchParams();
-      if (scriptName.trim()) {
-        params.set('script_name', scriptName.trim());
+      const filterScript = scriptNameRef.current.trim();
+      if (filterScript) {
+        params.set('script_name', filterScript);
       }
       if (orderedDate) {
         params.set('ordered_date', orderedDate);
@@ -154,7 +173,7 @@ const GetOrderStatus: React.FC = () => {
         }
       }
     },
-    [apiUrl, orderedDate, scriptName],
+    [apiUrl, orderedDate],
   );
 
   const fetchOrderHistory = useCallback(async (selectedClientId: string) => {
@@ -217,7 +236,7 @@ const GetOrderStatus: React.FC = () => {
       return undefined;
     }
 
-    const pollMs = monitoringActive ? 2000 : monitorIntervalMs;
+    const pollMs = monitoringActive ? 5000 : Math.max(monitorIntervalMs, 5000);
     const interval = window.setInterval(() => {
       void fetchOrderStatusLogs({ silent: true });
     }, pollMs);
@@ -295,6 +314,8 @@ const GetOrderStatus: React.FC = () => {
     () =>
       scheduledOrders.map((order) => ({
         ...order,
+        price: formatNepsePrice(order.price) || order.price,
+        qty: formatScanCount(order.qty),
         status: formatLiveScanStatus(order, monitoringActive),
         liveStatus: monitoringActive,
       })),

@@ -6,9 +6,10 @@ const GrabberMonitorBar: React.FC = () => {
   const {
     grabberActiveCount,
     grabberTotal,
-    grabberCanStart,
     grabberIsActive,
     hasGrabbers,
+    canStartGrabber,
+    canStopGrabber,
     grabberLoading,
     startGrabbers,
     stopGrabbers,
@@ -36,21 +37,17 @@ const GrabberMonitorBar: React.FC = () => {
         </span>
         <button
           type="button"
-          className="page-monitor-btn play"
-          onClick={startGrabbers}
-          disabled={
-            !grabberCanStart
-            || (grabberTotal > 0 && grabberActiveCount >= grabberTotal)
-            || grabberLoading !== null
-          }
-          title="Start grabber"
+          className={`page-monitor-btn play ${canStartGrabber ? 'is-enabled' : ''}`}
+          onClick={() => { void startGrabbers(); }}
+          disabled={!canStartGrabber || grabberLoading !== null}
+          title={canStartGrabber ? 'Start grabber' : hasGrabbers ? 'All grabbers running' : 'Add a grabber first'}
         >
           {grabberLoading === 'start' ? '…' : '▶'}
         </button>
         <button
           type="button"
-          className="page-monitor-btn stop"
-          onClick={stopGrabbers}
+          className={`page-monitor-btn stop ${grabberIsActive ? 'is-enabled' : 'is-available'}`}
+          onClick={() => { void stopGrabbers(); }}
           disabled={grabberLoading !== null}
           title="Stop all grabbers"
         >

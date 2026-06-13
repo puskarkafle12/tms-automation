@@ -72,19 +72,22 @@ const DashBoardPage: React.FC = () => {
   const pageMeta = PAGE_META[activeComponent] || PAGE_META.OrderStatus;
 
   const renderContent = () => {
-    const tabClass = (id: string) =>
-      `dashboard-tab-panel${activeComponent === id ? ' active' : ''}`;
-
-    return (
-      <div className="dashboard-panel">
-        <div className={tabClass('Login')}><Login /></div>
-        <div className={tabClass('ScheduleOrder')}><ScheduleOrder /></div>
-        <div className={tabClass('OrderStatus')}><OrderStatus /></div>
-        <div className={tabClass('DPHoldings')}><DPHoldings /></div>
-        <div className={tabClass('StockTable')}><StockTable /></div>
-        <div className={tabClass('StockGrabber')}><StockGrabberPage /></div>
-      </div>
-    );
+    switch (activeComponent) {
+      case 'Login':
+        return <Login />;
+      case 'ScheduleOrder':
+        return <ScheduleOrder />;
+      case 'OrderStatus':
+        return <OrderStatus />;
+      case 'DPHoldings':
+        return <DPHoldings />;
+      case 'StockTable':
+        return <StockTable />;
+      case 'StockGrabber':
+        return <StockGrabberPage />;
+      default:
+        return <OrderStatus />;
+    }
   };
 
   return (
@@ -95,7 +98,7 @@ const DashBoardPage: React.FC = () => {
       activeId={activeComponent}
       onNavigate={handleNavigate}
     >
-      {renderContent()}
+      <div className="dashboard-panel">{renderContent()}</div>
     </AppShell>
   );
 };

@@ -11,7 +11,7 @@ from fastapi import FastAPI, HTTPException, Depends, Query, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 import websockets
 from database import get_db
-from sqlalchemy import cast, DateTime
+from sqlalchemy import cast, DateTime, or_, and_
 from exceptions.login_exceptions import LoginFailedException
 from models.frontend_user import FrontendUser
 from models.logged_in_user import LoggedInUsers
@@ -44,14 +44,19 @@ from utils.market_status import (
     parse_session_check_response,
 )
 import config.tms_config as tms_config
+import time as time_module
+
 app = FastAPI(debug=True)
 SECRET_KEY = "your_secret_key_here"
 FRONTEND_BUILD_DIR = Path(__file__).resolve().parent / "frontend" / "build"
 
 # Store running tasks and updates
 running_tasks: Dict[str, asyncio.Task] = {}
+check_orders_task: Optional[asyncio.Task] = None
 running_grabbers: Dict[str, TmsUser] = {}
 stock_grabber_updates: Dict[str, List[Dict]] = {}
+_market_status_cache: Dict[str, object] = {"payload": None, "expires_at": 0.0}
+MARKET_STATUS_CACHE_SECONDS = 120
 
 async def _run_stock_grabber_task(
     tms_user: TmsUser,
@@ -233,6 +238,11 @@ async def read_root():
 
 @app.get("/market-status/")
 async def get_market_status(db: Session = Depends(get_db)):
+    now_mono = time_module.time()
+    cached_payload = _market_status_cache.get("payload")
+    if cached_payload and now_mono < float(_market_status_cache["expires_at"]):
+        return cached_payload
+
     now = get_nepal_now()
     hours = get_market_hours_status(now)
     nepal = format_nepal_datetime(now)
@@ -254,23 +264,28 @@ async def get_market_status(db: Session = Depends(get_db)):
     if logged_in and logged_in.tokens:
         client_id = logged_in.client_id
         broker_no = logged_in.broker_no
+        tms_user = TmsUser(
+            username=logged_in.client_id,
+            password="",
+            broker_no=logged_in.broker_no,
+        )
         try:
-            tms_user = TmsUser(
-                username=logged_in.client_id,
-                password="",
-                broker_no=logged_in.broker_no,
-            )
-            await tms_user.try_cached_login()
-            session_payload = await tms_user.check_exchange_session()
-            parsed = parse_session_check_response(session_payload)
-            tms_session_active = parsed["session_active"]
-            tms_session_message = parsed["session_message"]
-            market_live_from_api = parsed["market_live_from_api"]
-            session_data = parsed["session_data"]
+            async with asyncio.timeout(8):
+                await tms_user.try_cached_login()
+                session_payload = await tms_user.check_exchange_session()
+                parsed = parse_session_check_response(session_payload)
+                tms_session_active = parsed["session_active"]
+                tms_session_message = parsed["session_message"]
+                market_live_from_api = parsed["market_live_from_api"]
+                session_data = parsed["session_data"]
+        except TimeoutError:
+            tms_session_message = "Session check timed out"
         except LoginFailedException as exc:
             tms_session_message = exc.message
         except Exception as exc:
             tms_session_message = f"Unable to check TMS session: {exc}"
+        finally:
+            await tms_user.close()
 
     market_live = tms_session_active
 
@@ -283,7 +298,7 @@ async def get_market_status(db: Session = Depends(get_db)):
     else:
         market_phase = "closed"
 
-    return {
+    payload = {
         "nepal_time": nepal["iso"],
         "nepal_time_formatted": nepal["time"],
         "nepal_date_formatted": nepal["date"],
@@ -301,6 +316,9 @@ async def get_market_status(db: Session = Depends(get_db)):
         "broker_no": broker_no,
         "session_data": session_data,
     }
+    _market_status_cache["payload"] = payload
+    _market_status_cache["expires_at"] = now_mono + MARKET_STATUS_CACHE_SECONDS
+    return payload
 
 
 def _serialize_tms_account(user: User, session: Optional[LoggedInUsers]) -> dict:
@@ -592,11 +610,14 @@ async def get_order_status_logs(
     scheduled_orders = scheduled_query.all()
 
     scan_logs: Dict[tuple, OrderLog] = {}
-    scan_log_query = db.query(OrderLog)
-    if client_id:
-        scan_log_query = scan_log_query.filter(OrderLog.client_id == client_id)
-    for scan_log in scan_log_query.all():
-        scan_logs[(scan_log.client_id, scan_log.script_name)] = scan_log
+    if scheduled_orders:
+        pair_filters = [
+            and_(OrderLog.client_id == order.client_id, OrderLog.script_name == order.script_name)
+            for order in scheduled_orders
+        ]
+        if pair_filters:
+            for scan_log in db.query(OrderLog).filter(or_(*pair_filters)).all():
+                scan_logs[(scan_log.client_id, scan_log.script_name)] = scan_log
 
     scheduled_payload = []
     for order in scheduled_orders:
@@ -605,12 +626,12 @@ async def get_order_status_logs(
             "order_id": order.order_id,
             "client_id": order.client_id,
             "script_name": order.script_name,
-            "price": order.price,
-            "qty": order.qty,
+            "price": int(round(order.price)) if order.price is not None else order.price,
+            "qty": int(order.qty) if order.qty is not None else order.qty,
             "status": order.status,
             "order_type": order.order_type,
-            "scanning_count": scan_log.scanning_count if scan_log else 0,
-            "current_price": scan_log.current_price if scan_log else None,
+            "scanning_count": int(scan_log.scanning_count or 0) if scan_log else 0,
+            "current_price": int(round(scan_log.current_price)) if scan_log and scan_log.current_price is not None else None,
             "last_scan_at": scan_log.timestamp.isoformat() if scan_log and scan_log.timestamp else None,
         })
 
@@ -763,6 +784,7 @@ async def check_orders_endpoint(db: Session = Depends(get_db)):
     db.commit()
 
     global check_orders_task
+    tms_config.is_running = True
     check_orders_task = asyncio.create_task(monitor_order_task_func())
     return {"message": "Check orders loop started."}
 
@@ -771,11 +793,11 @@ async def check_orders_endpoint(db: Session = Depends(get_db)):
 async def stop_check_orders_endpoint():
     global check_orders_task
 
-    if not tms_config.is_running:
-        return JSONResponse(status_code=400, content={"message": "Check orders loop is not running."})
-
     tms_config.is_running = False
-    check_orders_task.cancel()
+    task = check_orders_task
+    if task is not None and not task.done():
+        task.cancel()
+    check_orders_task = None
     return {"message": "Check orders loop stopped."}
 
 

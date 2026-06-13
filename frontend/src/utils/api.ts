@@ -1,9 +1,17 @@
+export const getDefaultApiUrl = (): string => {
+  const { origin, port, hostname } = window.location;
+  if (port === '3000' && (hostname === 'localhost' || hostname === '127.0.0.1')) {
+    return 'http://localhost:8000';
+  }
+  return origin;
+};
+
 export const getApiUrl = (): string => {
   const stored = localStorage.getItem('apiUrl')?.trim();
   if (stored) {
     return stored.replace(/\/$/, '');
   }
-  return window.location.origin;
+  return getDefaultApiUrl();
 };
 
 const buildUrl = (path: string): string => {

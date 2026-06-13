@@ -45,7 +45,7 @@ const MarketStatusBar: React.FC = () => {
     void loadStatus();
     const poll = window.setInterval(() => {
       void loadStatus();
-    }, 30000);
+    }, 120000);
     return () => window.clearInterval(poll);
   }, [loadStatus]);
 
