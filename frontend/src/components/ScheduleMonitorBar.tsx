@@ -5,6 +5,8 @@ import { useMonitoringActions } from '../hooks/useMonitoringActions';
 const ScheduleMonitorBar: React.FC = () => {
   const {
     scheduledActive,
+    canStartSchedule,
+    canStopSchedule,
     scheduledLoading,
     startScheduled,
     stopScheduled,
@@ -30,21 +32,19 @@ const ScheduleMonitorBar: React.FC = () => {
         </span>
         <button
           type="button"
-          className={`page-monitor-btn play ${!scheduledActive ? 'is-enabled' : ''}`}
-          onClick={startScheduled}
+          className={`page-monitor-btn play ${canStartSchedule ? 'is-enabled' : ''}`}
+          onClick={() => { void startScheduled(); }}
           disabled={scheduledActive || scheduledLoading !== null}
           title={scheduledActive ? 'Monitoring is running' : 'Start monitoring'}
-          aria-pressed={scheduledActive}
         >
           {scheduledLoading === 'start' ? '…' : '▶'}
         </button>
         <button
           type="button"
-          className={`page-monitor-btn stop ${scheduledActive ? 'is-enabled' : ''}`}
-          onClick={stopScheduled}
-          disabled={!scheduledActive || scheduledLoading !== null}
-          title={!scheduledActive ? 'Monitoring is stopped' : 'Stop monitoring'}
-          aria-pressed={!scheduledActive}
+          className={`page-monitor-btn stop ${scheduledActive ? 'is-enabled' : 'is-available'}`}
+          onClick={() => { void stopScheduled(); }}
+          disabled={scheduledLoading !== null}
+          title="Stop monitoring"
         >
           {scheduledLoading === 'stop' ? '…' : '⏹'}
         </button>

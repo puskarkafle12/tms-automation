@@ -3,10 +3,11 @@ import ReactDOM from 'react-dom/client';
 import './index.css';
 import App from './App';
 import reportWebVitals from './reportWebVitals';
+import { getDefaultApiUrl } from './utils/api';
 
-const savedApiUrl = localStorage.getItem('apiUrl');
-if (!savedApiUrl || /^http:\/\/(localhost|127\.0\.0\.1):(200|8000)\/?$/.test(savedApiUrl)) {
-  localStorage.setItem('apiUrl', window.location.origin);
+const savedApiUrl = localStorage.getItem('apiUrl')?.trim();
+if (!savedApiUrl || /^https?:\/\/(localhost|127\.0\.0\.1):3000\/?$/.test(savedApiUrl)) {
+  localStorage.setItem('apiUrl', getDefaultApiUrl());
 }
 
 const root = ReactDOM.createRoot(

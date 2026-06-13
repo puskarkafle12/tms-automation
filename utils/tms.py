@@ -3,8 +3,9 @@ import base64
 from datetime import date, datetime, time
 from http.cookies import SimpleCookie
 import json
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple, Any
 import aiohttp
+import time
 from database import get_db_session
 from exceptions.login_exceptions import LoginFailedException
 from models.logged_in_user import LoggedInUsers
@@ -12,6 +13,9 @@ from models.tms_password_backup import TmsPasswordBackup
 from models.user import User
 from utils.tms_captcha_solver.imgto_txt import solve_captcha
 from utils.base_functions import calculate_high_price, get_tokens, log_time, logout_user, save_tokens
+
+_SECURITIES_CACHE: Dict[str, Tuple[float, Dict[str, Dict[str, Any]]]] = {}
+_SECURITIES_CACHE_TTL_SECONDS = 3600
 
 class TmsUser:
     def __init__(
@@ -212,19 +216,25 @@ class TmsUser:
 
     async def get_security_id(self, symbol) -> Dict:
         symbol = symbol.upper().strip()
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
+        await self._ensure_session()
+        cache_key = str(self.broker_no)
+        now = time.time()
+        cached = _SECURITIES_CACHE.get(cache_key)
+        if cached and now - cached[0] < _SECURITIES_CACHE_TTL_SECONDS:
+            symbol_map = cached[1]
+        else:
+            async with self.session.get(
                 f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/stock/securities',
                 cookies=self.tokens,
-                headers=self.headers
+                headers=self.headers,
             ) as response:
-                stocks = await response.json()
                 if response.status == 401:
-                    logout_user(self.client_id, "access token expired")  # Assumes logout_user is async-compatible
-                for stock in stocks:
-                    if stock['symbol'] == symbol:
-                        return stock
-                return {}
+                    logout_user(self.client_id, "access token expired")
+                    return {}
+                stocks = await response.json()
+            symbol_map = {stock['symbol']: stock for stock in stocks if stock.get('symbol')}
+            _SECURITIES_CACHE[cache_key] = (now, symbol_map)
+        return symbol_map.get(symbol, {})
 
     async def login_request(self, logindata):
         json_data = {

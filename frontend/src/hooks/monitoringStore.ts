@@ -8,6 +8,9 @@ interface MonitoringStoreState {
   grabberActiveCount: number;
   grabberTotal: number;
   grabberCanStart: boolean;
+  scheduledLoading: 'start' | 'stop' | null;
+  grabberLoading: 'start' | 'stop' | null;
+  actionMessage: string | null;
 }
 
 const state: MonitoringStoreState = {
@@ -15,6 +18,9 @@ const state: MonitoringStoreState = {
   grabberActiveCount: 0,
   grabberTotal: 0,
   grabberCanStart: false,
+  scheduledLoading: null,
+  grabberLoading: null,
+  actionMessage: null,
 };
 
 const runningGrabberIds = new Set<string>();
@@ -35,20 +41,40 @@ export const monitoringStore = {
     };
   },
   setScheduledActive: (active: boolean) => {
+    if (state.scheduledActive === active) {
+      return;
+    }
     state.scheduledActive = active;
     notify();
   },
   setGrabberStats: (active: number, total: number) => {
+    const canStart = total > 0;
+    if (
+      state.grabberActiveCount === active
+      && state.grabberTotal === total
+      && state.grabberCanStart === canStart
+    ) {
+      return;
+    }
     state.grabberActiveCount = active;
     state.grabberTotal = total;
+    state.grabberCanStart = canStart;
     notify();
   },
   setGrabberTotal: (total: number) => {
+    const canStart = total > 0;
+    if (state.grabberTotal === total && state.grabberCanStart === canStart) {
+      return;
+    }
     state.grabberTotal = total;
-    state.grabberCanStart = total > 0;
+    state.grabberCanStart = canStart;
     notify();
   },
   setGrabberRunning: (id: string, running: boolean) => {
+    const alreadyRunning = runningGrabberIds.has(id);
+    if (running === alreadyRunning) {
+      return;
+    }
     if (running) {
       runningGrabberIds.add(id);
     } else {
@@ -63,7 +89,31 @@ export const monitoringStore = {
     notify();
   },
   setGrabberCanStart: (canStart: boolean) => {
+    if (state.grabberCanStart === canStart) {
+      return;
+    }
     state.grabberCanStart = canStart;
+    notify();
+  },
+  setScheduledLoading: (loading: 'start' | 'stop' | null) => {
+    if (state.scheduledLoading === loading) {
+      return;
+    }
+    state.scheduledLoading = loading;
+    notify();
+  },
+  setGrabberLoading: (loading: 'start' | 'stop' | null) => {
+    if (state.grabberLoading === loading) {
+      return;
+    }
+    state.grabberLoading = loading;
+    notify();
+  },
+  setActionMessage: (message: string | null) => {
+    if (state.actionMessage === message) {
+      return;
+    }
+    state.actionMessage = message;
     notify();
   },
   setGrabberControlsGetter: (getter: GrabberControlsGetter | null) => {

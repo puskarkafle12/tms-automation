@@ -120,9 +120,15 @@
 }
 
 .page-monitor-btn:disabled {
-  opacity: 0.28;
+  opacity: 0.55;
   cursor: not-allowed;
-  filter: grayscale(0.4);
+}
+
+.page-monitor-btn:disabled:not(.is-enabled) {
+  background: #f8fafc;
+  border-color: var(--color-border);
+  color: var(--color-text-muted);
+  filter: none;
 }
 
 .page-monitor-btn.play {
@@ -155,6 +161,18 @@
   box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.15);
   opacity: 1;
   filter: none;
+}
+
+.page-monitor-btn.stop.is-available {
+  background: #fff;
+  border-color: #fca5a5;
+  color: #b91c1c;
+  opacity: 1;
+  filter: none;
+}
+
+.page-monitor-btn.stop.is-available:hover:not(:disabled) {
+  background: #fef2f2;
 }
 
 .page-monitor-btn.stop.is-enabled:hover:not(:disabled) {

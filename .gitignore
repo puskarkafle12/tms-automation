@@ -4,6 +4,7 @@ __pycache__
 traded_difference.txt
 test.py
 .env
+.venv/
 *.log
 *.json
 *.jsonl

@@ -148,6 +148,7 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
   });
 
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollingInFlightRef = useRef(false);
   const flashTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const startRef = useRef<(force?: boolean) => void>(() => {});
   const stopRef = useRef<() => void>(() => {});
@@ -394,10 +395,11 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
 
     pollingRef.current = setInterval(async () => {
       const activeSessionId = sessionIdRef.current;
-      if (!activeSessionId || isRestartingRef.current) {
+      if (!activeSessionId || isRestartingRef.current || pollingInFlightRef.current) {
         return;
       }
 
+      pollingInFlightRef.current = true;
       try {
         const pollRes = await fetch(`${getApiUrl()}/get_stock_grabber_updates/${activeSessionId}`);
         if (!pollRes.ok) throw new Error(`Poll failed: ${pollRes.status}`);
@@ -427,8 +429,10 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
         }
       } catch (err) {
         console.error('Poll error (will retry):', err);
+      } finally {
+        pollingInFlightRef.current = false;
       }
-    }, 800);
+    }, 1500);
   }, [processUpdate, resetSession]);
 
   const attachToSession = useCallback(async (existingSessionId: string) => {

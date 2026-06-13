@@ -35,8 +35,10 @@ const Login: React.FC = () => {
   const [errorMessage, setErrorMessage] = useState('');
   const [loadWarning, setLoadWarning] = useState('');
 
-  const loadAccounts = useCallback(async () => {
-    setLoading(true);
+  const loadAccounts = useCallback(async (options?: { silent?: boolean }) => {
+    if (!options?.silent) {
+      setLoading(true);
+    }
     setLoadWarning('');
     try {
       const data = await listTmsAccounts();
@@ -48,7 +50,9 @@ const Login: React.FC = () => {
       setLoggedInCount(0);
       setErrorMessage(extractApiErrorMessage(error));
     } finally {
-      setLoading(false);
+      if (!options?.silent) {
+        setLoading(false);
+      }
     }
   }, []);
 
@@ -158,10 +162,10 @@ const Login: React.FC = () => {
     try {
       const response = await loginTmsAccount(account.client_id);
       setSuccessMessage(formatLoginResponse(response));
-      await loadAccounts();
+      await loadAccounts({ silent: true });
     } catch (error) {
       setErrorMessage(extractApiErrorMessage(error));
-      await loadAccounts();
+      await loadAccounts({ silent: true });
     } finally {
       setActionLoading(null);
     }
@@ -186,7 +190,7 @@ const Login: React.FC = () => {
         <button
           type="button"
           className="btn btn-secondary tms-refresh-btn"
-          onClick={loadAccounts}
+          onClick={() => { void loadAccounts(); }}
           disabled={loading}
         >
           {loading ? 'Refreshing...' : 'Refresh'}
