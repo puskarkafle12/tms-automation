@@ -26,15 +26,48 @@ export async function syncMonitoringStatus(): Promise<boolean> {
   const backendActive = Number(data.active_grabber_count) || 0;
   const backendScanning = Number(data.grabber_scanning_count) || 0;
   const localTotal = loadGrabbers().length;
+  const current = monitoringStore.getState();
+
+  let scheduledActive = Boolean(data.scheduled_orders_active);
+  let scheduledScanning = Boolean(data.scheduled_scanning);
+  let scheduledPhase = phase;
+  let scheduledStatusMessage = data.scheduled_status_message || '';
+  let scheduledStartedAt = data.scheduled_started_at || null;
+  let grabberActiveCount = backendActive;
+  let grabberScanningCount = backendScanning;
+
+  if (current.scheduledLoading === 'start') {
+    scheduledActive = true;
+    if (scheduledPhase === 'stopped') {
+      scheduledPhase = 'waiting_hours';
+    }
+    if (!scheduledStatusMessage) {
+      scheduledStatusMessage = current.scheduledStatusMessage || 'Armed — waiting for market';
+    }
+    scheduledStartedAt = scheduledStartedAt || current.scheduledStartedAt;
+  } else if (current.scheduledLoading === 'stop') {
+    scheduledActive = false;
+    scheduledScanning = false;
+    scheduledPhase = 'stopped';
+    scheduledStatusMessage = '';
+    scheduledStartedAt = null;
+  }
+
+  if (current.grabberLoading === 'start') {
+    grabberActiveCount = Math.max(backendActive, current.grabberActiveCount);
+  } else if (current.grabberLoading === 'stop') {
+    grabberActiveCount = 0;
+    grabberScanningCount = 0;
+  }
 
   monitoringStore.applyBackendStatus({
-    scheduledActive: Boolean(data.scheduled_orders_active),
-    scheduledScanning: Boolean(data.scheduled_scanning),
-    scheduledPhase: phase,
-    scheduledStatusMessage: data.scheduled_status_message || '',
-    scheduledStartedAt: data.scheduled_started_at || null,
-    grabberActiveCount: backendActive,
-    grabberScanningCount: backendScanning,
+    scheduledActive,
+    scheduledScanning,
+    scheduledPhase,
+    scheduledStatusMessage,
+    scheduledStartedAt,
+    grabberActiveCount,
+    grabberScanningCount,
     grabberTotal: localTotal,
     remoteGrabbers: data.grabbers || [],
   });

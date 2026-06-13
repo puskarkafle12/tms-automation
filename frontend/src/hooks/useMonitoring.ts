@@ -154,6 +154,11 @@ export const useMonitoring = () => {
   const startGrabbers = useCallback(async () => {
     monitoringStore.setGrabberLoading('start');
     monitoringStore.setActionMessage(null);
+    const previousActiveCount = monitoringStore.getState().grabberActiveCount;
+    monitoringStore.patchGrabberStatus({
+      activeCount: previousActiveCount + 1,
+      scanningCount: 0,
+    });
 
     try {
       const controls = monitoringStore.getGrabberControls();
@@ -161,9 +166,6 @@ export const useMonitoring = () => {
         const idle = Array.from(controls.values()).find((control) => !control.getIsRunning());
         if (idle) {
           idle.start();
-          monitoringStore.patchGrabberStatus({
-            activeCount: monitoringStore.getState().grabberActiveCount + 1,
-          });
           void syncMonitoringStatus();
           return { ok: true as const };
         }
@@ -171,6 +173,7 @@ export const useMonitoring = () => {
 
       const grabbers = loadGrabbers();
       if (!grabbers.length) {
+        monitoringStore.patchGrabberStatus({ activeCount: previousActiveCount, scanningCount: 0 });
         const message = 'Add a stock grabber on the Stock Grabber tab first';
         monitoringStore.setActionMessage(message);
         return { ok: false as const, message };
@@ -193,6 +196,7 @@ export const useMonitoring = () => {
       );
 
       if (!idleGrabber) {
+        monitoringStore.patchGrabberStatus({ activeCount: previousActiveCount, scanningCount: 0 });
         const message = 'All grabbers are already running';
         monitoringStore.setActionMessage(message);
         return { ok: false as const, message };
@@ -200,14 +204,12 @@ export const useMonitoring = () => {
 
       const result = await startGrabberViaApi(idleGrabber);
       if (!result.ok) {
+        monitoringStore.patchGrabberStatus({ activeCount: previousActiveCount, scanningCount: 0 });
         monitoringStore.setActionMessage(result.message || 'Failed to start grabber');
         void syncMonitoringStatus();
         return { ok: false as const, message: result.message };
       }
 
-      monitoringStore.patchGrabberStatus({
-        activeCount: monitoringStore.getState().grabberActiveCount + 1,
-      });
       void syncMonitoringStatus();
       return { ok: true as const };
     } finally {
@@ -218,6 +220,8 @@ export const useMonitoring = () => {
   const stopGrabbers = useCallback(async () => {
     monitoringStore.setGrabberLoading('stop');
     monitoringStore.setActionMessage(null);
+    const previousActiveCount = monitoringStore.getState().grabberActiveCount;
+    monitoringStore.patchGrabberStatus({ activeCount: 0, scanningCount: 0 });
 
     try {
       const controls = monitoringStore.getGrabberControls();
@@ -235,15 +239,22 @@ export const useMonitoring = () => {
       if (!response.ok) {
         const data = await response.json().catch(() => ({}));
         const message = data.detail || data.message || 'Failed to stop grabbers';
+        monitoringStore.patchGrabberStatus({
+          activeCount: previousActiveCount,
+          scanningCount: 0,
+        });
         monitoringStore.setActionMessage(message);
         void syncMonitoringStatus();
         return { ok: false as const, message };
       }
 
-      monitoringStore.patchGrabberStatus({ activeCount: 0, scanningCount: 0 });
       void syncMonitoringStatus();
       return { ok: true as const };
     } catch {
+      monitoringStore.patchGrabberStatus({
+        activeCount: previousActiveCount,
+        scanningCount: 0,
+      });
       const message = 'Failed to stop stock grabbers';
       monitoringStore.setActionMessage(message);
       return { ok: false as const, message };

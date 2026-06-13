@@ -1,5 +1,7 @@
 import { GrabberControls } from '../types/monitoring';
 import { MonitorPhase, RemoteGrabberStatus } from '../types/monitoringStatus';
+import { loadGrabbers } from '../utils/grabberPersistence';
+import { loadMonitoringSnapshot, saveMonitoringSnapshot } from '../utils/monitoringPersistence';
 
 type Listener = () => void;
 type GrabberControlsGetter = () => Map<string, GrabberControls>;
@@ -42,12 +44,57 @@ let grabberControlsGetter: GrabberControlsGetter | null = null;
 
 const listeners = new Set<Listener>();
 
+let snapshotCache: MonitoringStoreState | null = null;
+
+const cloneState = (): MonitoringStoreState => ({
+  ...state,
+  remoteGrabbers: [...state.remoteGrabbers],
+});
+
 const notify = () => {
+  snapshotCache = cloneState();
   listeners.forEach((listener) => listener());
 };
 
+const persistSnapshot = () => {
+  saveMonitoringSnapshot({
+    savedAt: new Date().toISOString(),
+    scheduledActive: state.scheduledActive,
+    scheduledScanning: state.scheduledScanning,
+    scheduledPhase: state.scheduledPhase,
+    scheduledStatusMessage: state.scheduledStatusMessage,
+    scheduledStartedAt: state.scheduledStartedAt,
+    grabberActiveCount: state.grabberActiveCount,
+    grabberScanningCount: state.grabberScanningCount,
+    grabberTotal: state.grabberTotal,
+  });
+};
+
+const hydrateFromCache = () => {
+  const cached = loadMonitoringSnapshot();
+  const grabberTotal = Math.max(loadGrabbers().length, cached?.grabberTotal ?? 0);
+
+  if (cached) {
+    state.scheduledActive = cached.scheduledActive;
+    state.scheduledScanning = cached.scheduledScanning;
+    state.scheduledPhase = cached.scheduledPhase;
+    state.scheduledStatusMessage = cached.scheduledStatusMessage;
+    state.scheduledStartedAt = cached.scheduledStartedAt;
+    state.grabberActiveCount = cached.grabberActiveCount;
+    state.grabberScanningCount = cached.grabberScanningCount;
+  }
+
+  state.grabberTotal = grabberTotal;
+  state.grabberCanStart = grabberTotal > 0;
+  state.statusLoaded = true;
+  snapshotCache = cloneState();
+};
+
+hydrateFromCache();
+
 export const monitoringStore = {
   getState: () => state,
+  getSnapshot: () => snapshotCache ?? cloneState(),
   subscribe: (listener: Listener) => {
     listeners.add(listener);
     return () => {
@@ -77,6 +124,7 @@ export const monitoringStore = {
     state.grabberCanStart = payload.grabberTotal > 0;
     state.remoteGrabbers = payload.remoteGrabbers;
     notify();
+    persistSnapshot();
   },
   patchScheduledStatus: (patch: {
     active?: boolean;
@@ -95,12 +143,14 @@ export const monitoringStore = {
       state.scheduledStartedAt = new Date().toISOString();
     }
     notify();
+    persistSnapshot();
   },
   patchGrabberStatus: (patch: { activeCount?: number; scanningCount?: number }) => {
     state.statusLoaded = true;
     if (patch.activeCount !== undefined) state.grabberActiveCount = patch.activeCount;
     if (patch.scanningCount !== undefined) state.grabberScanningCount = patch.scanningCount;
     notify();
+    persistSnapshot();
   },
   setStatusLoaded: (loaded: boolean) => {
     if (state.statusLoaded === loaded) {
@@ -117,6 +167,7 @@ export const monitoringStore = {
     state.grabberTotal = total;
     state.grabberCanStart = canStart;
     notify();
+    persistSnapshot();
   },
   setScheduledLoading: (loading: 'start' | 'stop' | null) => {
     if (state.scheduledLoading === loading) {
