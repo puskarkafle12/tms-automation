@@ -4,6 +4,7 @@ import './index.css';
 import App from './App';
 import reportWebVitals from './reportWebVitals';
 import { getDefaultApiUrl } from './utils/api';
+import './hooks/monitoringStore';
 
 const savedApiUrl = localStorage.getItem('apiUrl')?.trim();
 if (!savedApiUrl || /^https?:\/\/(localhost|127\.0\.0\.1):3000\/?$/.test(savedApiUrl)) {

@@ -1,12 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useSyncExternalStore } from 'react';
 import { monitoringStore } from './monitoringStore';
 
-export const useMonitoringStore = () => {
-  const [snapshot, setSnapshot] = useState(monitoringStore.getState());
-
-  useEffect(() => {
-    return monitoringStore.subscribe(() => setSnapshot(monitoringStore.getState()));
-  }, []);
-
-  return snapshot;
-};
+export const useMonitoringStore = () => useSyncExternalStore(
+  monitoringStore.subscribe,
+  monitoringStore.getSnapshot,
+  monitoringStore.getSnapshot,
+);
