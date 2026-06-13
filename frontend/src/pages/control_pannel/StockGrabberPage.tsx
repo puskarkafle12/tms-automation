@@ -3,6 +3,7 @@ import './StockGrabberPage.css';
 import StockGrabber from './StockGrabber';
 import GrabberMonitorBar from '../../components/GrabberMonitorBar';
 import { monitoringStore } from '../../hooks/monitoringStore';
+import { syncMonitoringStatus } from '../../hooks/monitoringSync';
 import { GrabberControls } from '../../types/monitoring';
 import { fetchJson, getApiUrl } from '../../utils/api';
 import {
@@ -19,8 +20,15 @@ import {
 
 export type { StockGrabberInstance };
 
+const stripRuntimeGrabberState = (grabbers: StockGrabberInstance[]): StockGrabberInstance[] =>
+  grabbers.map((grabber) => ({
+    ...grabber,
+    isRunning: false,
+    sessionId: null,
+  }));
+
 const StockGrabberPage: React.FC = () => {
-  const [grabbers, setGrabbers] = useState<StockGrabberInstance[]>(() => loadGrabbers());
+  const [grabbers, setGrabbers] = useState<StockGrabberInstance[]>(() => stripRuntimeGrabberState(loadGrabbers()));
   const [hydrated, setHydrated] = useState(false);
   const [loggedInClientIDs, setLoggedInClientIDs] = useState<string[]>([]);
   const [newClientId, setNewClientId] = useState('');
@@ -51,6 +59,7 @@ const StockGrabberPage: React.FC = () => {
     }
     const active = result.data.grabbers || [];
     setGrabbers((prev) => dedupeGrabbers(mergeWithActiveGrabbers(prev, active)));
+    await syncMonitoringStatus();
   }, []);
 
   useEffect(() => {
@@ -81,13 +90,10 @@ const StockGrabberPage: React.FC = () => {
 
   const registerControls = useCallback((id: string, controls: GrabberControls) => {
     grabberControlsRef.current.set(id, controls);
-    monitoringStore.syncActiveFromControls();
   }, []);
 
   const unregisterControls = useCallback((id: string) => {
     grabberControlsRef.current.delete(id);
-    monitoringStore.setGrabberRunning(id, false);
-    monitoringStore.syncActiveFromControls();
   }, []);
 
   const handleGrabberStateChange = useCallback((id: string, patch: Partial<StockGrabberInstance>) => {
@@ -129,7 +135,6 @@ const StockGrabberPage: React.FC = () => {
     }
     setGrabbers((prev) => prev.filter((g) => g.id !== id));
     grabberControlsRef.current.delete(id);
-    monitoringStore.setGrabberRunning(id, false);
   };
 
   const sortedGrabbers = useMemo(() => sortGrabbersRunningFirst(grabbers), [grabbers]);

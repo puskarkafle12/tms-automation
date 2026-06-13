@@ -30,6 +30,7 @@ from schemas.schemas import (
 )
 from utils.base_functions import is_within_time_range, truncate_to_one_decimal_place
 from utils.monitor_order import monitor_order_task_func
+from utils.market_gate import resolve_market_gate
 from utils.tms import TmsUser
 import uvicorn
 import jwt
@@ -117,8 +118,25 @@ async def _run_stock_grabber_task(
     order_quantity: int,
     max_order_limit: int,
 ) -> None:
+    from datetime import timezone
+
+    tms_config.grabber_started_at[session_id] = datetime.now(timezone.utc)
+    tms_config.grabber_phase[session_id] = "waiting_hours"
+    tms_config.grabber_status_message[session_id] = "Armed — waiting for market"
+
     try:
         while True:
+            gate = await resolve_market_gate({tms_user.client_id: tms_user})
+            tms_config.grabber_phase[session_id] = gate["phase"]
+            tms_config.grabber_status_message[session_id] = gate["message"]
+
+            if not gate["can_scan"]:
+                stock_grabber_updates[session_id].append(
+                    {"status": "waiting", "message": gate["message"]}
+                )
+                await asyncio.sleep(tms_config.monitor_interval)
+                continue
+
             try:
                 result = await tms_user.stock_grabber(
                     order_quantity=order_quantity,
@@ -143,6 +161,9 @@ async def _run_stock_grabber_task(
     except asyncio.CancelledError:
         raise
     finally:
+        tms_config.grabber_started_at.pop(session_id, None)
+        tms_config.grabber_phase.pop(session_id, None)
+        tms_config.grabber_status_message.pop(session_id, None)
         await tms_user.close()
 
 
@@ -191,6 +212,9 @@ async def stock_grabber(request: StockGrabberRequest, db: Session = Depends(get_
     def _on_grabber_done(done_task: asyncio.Task) -> None:
         running_tasks.pop(session_id, None)
         running_grabbers.pop(session_id, None)
+        tms_config.grabber_started_at.pop(session_id, None)
+        tms_config.grabber_phase.pop(session_id, None)
+        tms_config.grabber_status_message.pop(session_id, None)
         if done_task.cancelled():
             return
         exc = done_task.exception()
@@ -209,6 +233,9 @@ async def stop_stock_grabber(session_id: str):
         task.cancel()
         del running_tasks[session_id]
         running_grabbers.pop(session_id, None)
+        tms_config.grabber_started_at.pop(session_id, None)
+        tms_config.grabber_phase.pop(session_id, None)
+        tms_config.grabber_status_message.pop(session_id, None)
         stock_grabber_updates[session_id].append({"status": "stopped", "message": "Stock grabber stopped"})
         return {"message": f"Stock grabber {session_id} stopped"}
     raise HTTPException(status_code=404, detail="Stock grabber not found")
@@ -236,6 +263,7 @@ async def active_stock_grabbers():
     grabbers = []
     for session_id, tms_user in running_grabbers.items():
         task = running_tasks.get(session_id)
+        started_at = tms_config.grabber_started_at.get(session_id)
         grabbers.append({
             "session_id": session_id,
             "client_id": tms_user.client_id,
@@ -244,6 +272,9 @@ async def active_stock_grabbers():
             "scanner_active": task is not None and not task.done(),
             "request_per_sec": tms_user.request_per_sec,
             "stable_rate": tms_user.stable_rate,
+            "phase": tms_config.grabber_phase.get(session_id, "armed"),
+            "status_message": tms_config.grabber_status_message.get(session_id, ""),
+            "started_at": started_at.isoformat() if started_at else None,
         })
     return {"grabbers": grabbers}
 
@@ -401,6 +432,23 @@ def _serialize_tms_account(user: User, session: Optional[LoggedInUsers]) -> dict
         "session_message": session.message if session else None,
         "last_updated": session.last_updated.isoformat() if session and session.last_updated else None,
     }
+
+def _compute_scheduled_live_status(
+    *,
+    monitoring_active: bool,
+    monitor_phase: str,
+    scanning_count: int,
+) -> str:
+    if not monitoring_active:
+        return "monitor stopped"
+    if monitor_phase == "waiting_hours":
+        return "waiting for market"
+    if monitor_phase == "waiting_session":
+        return "waiting for TMS session"
+    if scanning_count > 0:
+        return f"scanning ({scanning_count})"
+    return "scanning"
+
 
 def _order_status_log_from_order(order: ScheduledOrder) -> OrderStatusLog:
     return OrderStatusLog(
@@ -739,8 +787,10 @@ async def get_order_status_logs(
                 scan_logs[(scan_log.client_id, scan_log.script_name)] = scan_log
 
     scheduled_payload = []
+    monitor_phase = tms_config.scheduled_phase if tms_config.is_running else "stopped"
     for order in scheduled_orders:
         scan_log = scan_logs.get((order.client_id, order.script_name))
+        scanning_count = int(scan_log.scanning_count or 0) if scan_log else 0
         scheduled_payload.append({
             "order_id": order.order_id,
             "client_id": order.client_id,
@@ -749,15 +799,27 @@ async def get_order_status_logs(
             "qty": int(order.qty) if order.qty is not None else order.qty,
             "status": order.status,
             "order_type": order.order_type,
-            "scanning_count": int(scan_log.scanning_count or 0) if scan_log else 0,
+            "scanning_count": scanning_count,
             "current_price": int(round(scan_log.current_price)) if scan_log and scan_log.current_price is not None else None,
             "last_scan_at": scan_log.timestamp.isoformat() if scan_log and scan_log.timestamp else None,
+            "live_status": _compute_scheduled_live_status(
+                monitoring_active=tms_config.is_running,
+                monitor_phase=monitor_phase,
+                scanning_count=scanning_count,
+            ),
         })
 
     combined_results = {
         "order_logs": [log.__dict__ for log in order_logs],
         "scheduled_orders": scheduled_payload,
         "monitoring_active": tms_config.is_running,
+        "monitor_phase": monitor_phase,
+        "monitor_status_message": tms_config.scheduled_status_message,
+        "scheduled_started_at": (
+            tms_config.scheduled_started_at.isoformat()
+            if tms_config.scheduled_started_at
+            else None
+        ),
         "monitor_interval": tms_config.monitor_interval,
     }
 
@@ -895,7 +957,12 @@ async def check_orders_endpoint(db: Session = Depends(get_db)):
     db.commit()
 
     global check_orders_task
+    from datetime import timezone
+
     tms_config.is_running = True
+    tms_config.scheduled_started_at = datetime.now(timezone.utc)
+    tms_config.scheduled_phase = "waiting_hours"
+    tms_config.scheduled_status_message = "Armed — waiting for market"
     check_orders_task = asyncio.create_task(monitor_order_task_func())
     return {"message": "Check orders loop started."}
 
@@ -905,6 +972,9 @@ async def stop_check_orders_endpoint():
     global check_orders_task
 
     tms_config.is_running = False
+    tms_config.scheduled_started_at = None
+    tms_config.scheduled_phase = "stopped"
+    tms_config.scheduled_status_message = ""
     task = check_orders_task
     if task is not None and not task.done():
         task.cancel()
@@ -915,11 +985,39 @@ async def stop_check_orders_endpoint():
 @app.get("/monitoring-status/")
 async def monitoring_status():
     hours = get_market_hours_status(get_nepal_now())
+    monitor_phase = tms_config.scheduled_phase if tms_config.is_running else "stopped"
+    grabbers = []
+    scanning_count = 0
+    for session_id, tms_user in running_grabbers.items():
+        phase = tms_config.grabber_phase.get(session_id, "armed")
+        if phase == "active":
+            scanning_count += 1
+        started_at = tms_config.grabber_started_at.get(session_id)
+        grabbers.append({
+            "session_id": session_id,
+            "client_id": tms_user.client_id,
+            "stock_symbol": tms_user.stock_symbol,
+            "scan_count": getattr(tms_user, "scan_count", 0),
+            "phase": phase,
+            "status_message": tms_config.grabber_status_message.get(session_id, ""),
+            "started_at": started_at.isoformat() if started_at else None,
+        })
+
     return {
         "scheduled_orders_active": tms_config.is_running,
+        "scheduled_scanning": tms_config.is_running and monitor_phase == "active",
+        "scheduled_phase": monitor_phase,
+        "scheduled_status_message": tms_config.scheduled_status_message,
+        "scheduled_started_at": (
+            tms_config.scheduled_started_at.isoformat()
+            if tms_config.scheduled_started_at
+            else None
+        ),
         "market_open": hours["market_hours_open"],
         "monitor_interval": tms_config.monitor_interval,
         "active_grabber_count": len(running_grabbers),
+        "grabber_scanning_count": scanning_count,
+        "grabbers": grabbers,
     }
 
 
@@ -933,6 +1031,9 @@ async def stop_all_stock_grabbers():
             stopped.append(session_id)
             del running_tasks[session_id]
             running_grabbers.pop(session_id, None)
+            tms_config.grabber_started_at.pop(session_id, None)
+            tms_config.grabber_phase.pop(session_id, None)
+            tms_config.grabber_status_message.pop(session_id, None)
             if session_id in stock_grabber_updates:
                 stock_grabber_updates[session_id].append(
                     {"status": "stopped", "message": "Stock grabber stopped"}

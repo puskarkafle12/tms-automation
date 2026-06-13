@@ -66,6 +66,16 @@
   line-height: 1.2;
 }
 
+.monitoring-nav-chip-hint {
+  font-size: 0.5625rem;
+  color: var(--color-text-muted);
+  line-height: 1.2;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .monitoring-nav-chip-dot {
   width: 6px;
   height: 6px;
@@ -74,13 +84,23 @@
   flex-shrink: 0;
 }
 
-.monitoring-nav-chip.active .monitoring-nav-chip-dot {
+.monitoring-nav-chip.scheduled.active .monitoring-nav-chip-dot,
+.monitoring-nav-chip.grabber.active .monitoring-nav-chip-dot {
   background: #22c55e;
   animation: monitoring-nav-pulse 1.5s ease-in-out infinite;
 }
 
-.monitoring-nav-chip.ready .monitoring-nav-chip-dot {
+.monitoring-nav-chip.scheduled.waiting .monitoring-nav-chip-dot,
+.monitoring-nav-chip.grabber.waiting .monitoring-nav-chip-dot {
   background: #eab308;
+}
+
+.monitoring-nav-chip.grabber.ready .monitoring-nav-chip-dot {
+  background: #eab308;
+}
+
+.monitoring-nav-chip.waiting {
+  border-color: #fde047;
 }
 
 .monitoring-nav-chip-actions {
@@ -191,12 +211,12 @@
 }
 
 @media (max-width: 1100px) {
-  .monitoring-nav-chip-body {
+  .monitoring-nav-chip-label {
     display: none;
   }
 
-  .monitoring-nav-chip {
-    padding: 0.35rem 0.4rem;
+  .monitoring-nav-chip-body {
+    min-width: 3.5rem;
   }
 }
 
