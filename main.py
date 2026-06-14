@@ -422,9 +422,69 @@ def _decode_tms_account_password(password: Optional[str]) -> str:
         return password
 
 
+def _first_string_value(data: object, keys: set[str]) -> Optional[str]:
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if key in keys and isinstance(value, str) and value.strip():
+                return value.strip()
+        for value in data.values():
+            found = _first_string_value(value, keys)
+            if found:
+                return found
+    elif isinstance(data, list):
+        for value in data:
+            found = _first_string_value(value, keys)
+            if found:
+                return found
+    return None
+
+
+def _extract_tms_display_name(session: Optional[LoggedInUsers]) -> Optional[str]:
+    if not session or not session.tokens:
+        return None
+    tokens = session.tokens if isinstance(session.tokens, dict) else {}
+    login_response = tokens.get("login_response") if isinstance(tokens.get("login_response"), dict) else {}
+    client_dealer_member = (
+        login_response.get("clientDealerMember")
+        if isinstance(login_response.get("clientDealerMember"), dict)
+        else {}
+    )
+    preferred_roots = [
+        tokens.get("client_details"),
+        client_dealer_member,
+        client_dealer_member.get("client"),
+        login_response,
+    ]
+    name_keys = {
+        "displayName",
+        "clientName",
+        "clientDealerName",
+        "fullName",
+        "name",
+    }
+    for root in preferred_roots:
+        found = _first_string_value(root, name_keys)
+        if found:
+            return " ".join(found.split())
+
+    if isinstance(login_response, dict):
+        user = login_response.get("user")
+        if isinstance(user, dict):
+            parts = [
+                str(user.get(key, "")).strip()
+                for key in ("firstName", "middleName", "lastName")
+                if str(user.get(key, "")).strip()
+            ]
+            if parts:
+                return " ".join(parts)
+    return None
+
+
 def _serialize_tms_account(user: User, session: Optional[LoggedInUsers]) -> dict:
+    display_name = _extract_tms_display_name(session)
     return {
         "client_id": user.client_id,
+        "display_name": display_name,
         "broker_no": user.broker_no,
         "password": _decode_tms_account_password(user.password),
         "auto_login": bool(user.auto_login),
@@ -506,6 +566,7 @@ async def list_tms_accounts(db: Session = Depends(get_db)):
         if client_id not in account_ids:
             accounts.append({
                 "client_id": session.client_id,
+                "display_name": _extract_tms_display_name(session),
                 "broker_no": session.broker_no or "",
                 "auto_login": True,
                 "session_status": session.status,
@@ -694,6 +755,7 @@ async def get_logged_in_clients(db: Session = Depends(get_db)):
         sessions = [
             {
                 "client_id": user.client_id,
+                "display_name": _extract_tms_display_name(user),
                 "broker_no": user.broker_no or "",
                 "status": user.status,
                 "message": user.message,
