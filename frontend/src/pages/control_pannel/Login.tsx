@@ -38,25 +38,11 @@ const formatAccountLabel = (account: Pick<TmsAccount, 'client_id' | 'display_nam
   return broker ? `${name}[${broker}]` : name;
 };
 
-const shortStatusMessage = (message?: string | null) => {
-  if (!message) {
-    return '';
-  }
-  const normalized = message.toLowerCase();
-  if (normalized.includes('password')) return 'Password issue';
-  if (normalized.includes('captcha')) return 'Captcha failed';
-  if (normalized.includes('token')) return 'Token expired';
-  if (normalized.includes('credential') || normalized.includes('invalid')) return 'Invalid login';
-  if (normalized.includes('timeout')) return 'Request timeout';
-  if (normalized.includes('network') || normalized.includes('connection')) return 'Network issue';
-  return message.split(/\s+/).filter(Boolean).slice(0, 2).join(' ');
-};
-
-const shortRelativeTime = (value?: string | null) => {
+const shortRelativeTime = (value?: string | null, now = Date.now()) => {
   if (!value) {
     return '';
   }
-  const diffSeconds = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 1000));
+  const diffSeconds = Math.max(0, Math.floor((now - new Date(value).getTime()) / 1000));
   if (!Number.isFinite(diffSeconds)) {
     return '';
   }
@@ -66,6 +52,19 @@ const shortRelativeTime = (value?: string | null) => {
   const diffHours = Math.floor(diffMinutes / 60);
   if (diffHours < 24) return `${diffHours}h ago`;
   return `${Math.floor(diffHours / 24)}d ago`;
+};
+
+const statusDisplayText = (account: TmsAccount, now: number) => {
+  if (account.session_status === 'logged_in') {
+    const age = shortRelativeTime(account.last_updated, now);
+    return age ? `logged in (${age})` : 'logged in';
+  }
+  return account.session_message || formatSessionStatus(account.session_status);
+};
+
+const statusClassName = (account: TmsAccount) => {
+  const hasError = account.session_status !== 'logged_in' && Boolean(account.session_message);
+  return `tms-status ${hasError ? 'tms-status-error' : `tms-status-${account.session_status}`}`;
 };
 
 const Login: React.FC = () => {
@@ -89,6 +88,7 @@ const Login: React.FC = () => {
   const [importError, setImportError] = useState('');
   const [importPreviewText, setImportPreviewText] = useState('');
   const [exportJson, setExportJson] = useState('');
+  const [now, setNow] = useState(() => Date.now());
 
   const loadAccounts = useCallback(async (options?: { silent?: boolean }) => {
     if (!options?.silent) {
@@ -120,6 +120,11 @@ const Login: React.FC = () => {
   useEffect(() => {
     loadAccounts();
   }, [loadAccounts]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const resetMessages = () => {
     setSuccessMessage('');
@@ -471,8 +476,7 @@ const Login: React.FC = () => {
             <table className="tms-accounts-table">
               <thead>
                 <tr>
-                  <th>User</th>
-                  <th>Broker</th>
+                  <th>User (broker number)</th>
                   <th>Auto Login</th>
                   <th>Status</th>
                   <th>Actions</th>
@@ -484,21 +488,12 @@ const Login: React.FC = () => {
                     <td className="tms-client-id" title={`Client ID: ${account.client_id}`}>
                       {formatAccountLabel(account)}
                     </td>
-                    <td>{account.broker_no}</td>
                     <td>{account.auto_login ? 'Yes' : 'No'}</td>
                     <td>
                       <div className="tms-status-cell">
-                        <span className={`tms-status tms-status-${account.session_status}`}>
-                          {formatSessionStatus(account.session_status)}
+                        <span className={statusClassName(account)} title={account.session_message || undefined}>
+                          {statusDisplayText(account, now)}
                         </span>
-                        {account.last_updated && (
-                          <span className="tms-session-age">({shortRelativeTime(account.last_updated)})</span>
-                        )}
-                        {account.session_message && account.session_status !== 'logged_in' && (
-                          <span className="tms-session-error" title={account.session_message}>
-                            {shortStatusMessage(account.session_message)}
-                          </span>
-                        )}
                       </div>
                     </td>
                     <td className="tms-actions">

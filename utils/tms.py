@@ -12,7 +12,7 @@ from models.logged_in_user import LoggedInUsers
 from models.tms_password_backup import TmsPasswordBackup
 from models.user import User
 from utils.tms_captcha_solver.imgto_txt import solve_captcha
-from utils.base_functions import calculate_high_price, get_tokens, log_time, logout_user, save_tokens
+from utils.base_functions import calculate_high_price, get_tokens, log_time, logout_user, save_tokens, summarize_login_message
 
 class TmsUser:
     DEFAULT_TIMEOUT = aiohttp.ClientTimeout(total=12, connect=4, sock_read=8)
@@ -152,7 +152,7 @@ class TmsUser:
             )
             self.login_response["client_details"] = self.client_details
             if rotation_result.get("rotated"):
-                save_tokens(self.client_id, self.login_response, self.broker_no)
+                save_tokens(self.client_id, self.login_response, self.broker_no, update_login_time=False)
                 await self.save_login_info()
             return {
                 "status": "success",
@@ -588,6 +588,10 @@ class TmsUser:
             parts.append(f"http={http_status}")
         parts.append(message)
         return " | ".join(parts)
+
+    @staticmethod
+    def login_status_summary(message: str) -> str:
+        return summarize_login_message(message)
 
     def _create_response(self, response_json, tokens_dict):
         return {
