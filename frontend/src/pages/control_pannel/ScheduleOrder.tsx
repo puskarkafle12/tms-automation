@@ -17,6 +17,17 @@ interface DPHolding {
   percentChange?: string;
 }
 
+interface ClientSession {
+  client_id: string;
+  display_name?: string | null;
+  broker_no: string;
+}
+
+const clientLabel = (client: ClientSession) => {
+  const name = client.display_name?.trim() || client.client_id;
+  return client.broker_no ? `${name}[${client.broker_no}]` : name;
+};
+
 const ScheduleOrder: React.FC = () => {
   const [clientID, setClientID] = useState('');
   const [scriptName, setScriptName] = useState('');
@@ -24,7 +35,7 @@ const ScheduleOrder: React.FC = () => {
   const [qty, setQty] = useState('');
   const [status, setStatus] = useState<'idle' | 'success' | 'error'>('idle');
   const [statusMessage, setStatusMessage] = useState('');
-  const [loggedInClientIDs, setLoggedInClientIDs] = useState<string[]>([]);
+  const [loggedInClients, setLoggedInClients] = useState<ClientSession[]>([]);
   const [orderType, setOrderType] = useState<'buy' | 'sell'>('buy');
   const [stockDetails, setStockDetails] = useState<any[]>([]);
   const [sellHoldings, setSellHoldings] = useState<DPHolding[]>([]);
@@ -53,6 +64,11 @@ const ScheduleOrder: React.FC = () => {
     () => buildScheduleScriptOptions(orderType, stockDetails, sellHoldings),
     [orderType, sellHoldings, stockDetails],
   );
+
+  const selectedClientLabel = useMemo(() => {
+    const selectedClient = loggedInClients.find((client) => client.client_id === clientID);
+    return selectedClient ? clientLabel(selectedClient) : clientID;
+  }, [clientID, loggedInClients]);
 
   const fetchStockDetails = useCallback(async (clientId: string) => {
     if (!clientId) {
@@ -98,8 +114,12 @@ const ScheduleOrder: React.FC = () => {
         const response = await fetch(`${getApiUrl()}/logged_in_clients/`);
         if (response.ok) {
           const data = await response.json();
-          setLoggedInClientIDs(data.logged_in_client_ids);
-          const defaultClientId = data.logged_in_client_ids[0] || '';
+          const sessions: ClientSession[] = data.sessions || (data.logged_in_client_ids || []).map((id: string) => ({
+            client_id: id,
+            broker_no: '',
+          }));
+          setLoggedInClients(sessions);
+          const defaultClientId = sessions[0]?.client_id || '';
           setClientID(defaultClientId);
           await Promise.all([fetchStockDetails(defaultClientId), fetchSellHoldings(defaultClientId)]);
         }
@@ -344,8 +364,8 @@ const ScheduleOrder: React.FC = () => {
             </p>
           </div>
         </div>
-        {loggedInClientIDs.length > 0 && (
-          <span className="badge badge-success">{loggedInClientIDs.length} client(s) online</span>
+        {loggedInClients.length > 0 && (
+          <span className="badge badge-success">{loggedInClients.length} client(s) online</span>
         )}
       </div>
 
@@ -360,24 +380,24 @@ const ScheduleOrder: React.FC = () => {
           <div className="schedule-order-form">
             <div className="schedule-order-form-grid">
               <div className="form-group">
-                <label htmlFor="scheduleClientId">Client ID</label>
+                <label htmlFor="scheduleClientId">Client</label>
                 <select
                   id="scheduleClientId"
                   className="select"
                   value={clientID}
                   onChange={(e) => handleClientChange(e.target.value)}
-                  disabled={loggedInClientIDs.length === 0}
+                  disabled={loggedInClients.length === 0}
                   required
                 >
-                  {loggedInClientIDs.length === 0 ? (
+                  {loggedInClients.length === 0 ? (
                     <option value="">No logged-in clients</option>
                   ) : (
-                    loggedInClientIDs.map((id) => (
-                      <option key={id} value={id}>{id}</option>
+                    loggedInClients.map((client) => (
+                      <option key={client.client_id} value={client.client_id}>{clientLabel(client)}</option>
                     ))
                   )}
                 </select>
-                {loggedInClientIDs.length === 0 && (
+                {loggedInClients.length === 0 && (
                   <span className="schedule-order-hint">Log in via TMS Login tab first.</span>
                 )}
               </div>
@@ -395,10 +415,10 @@ const ScheduleOrder: React.FC = () => {
                   onSelect={handleScriptNameSelect}
                 />
                 {stockDetails.length === 0 && clientID && (
-                  <span className="schedule-order-hint">Loading scripts for {clientID}...</span>
+                  <span className="schedule-order-hint">Loading scripts for {selectedClientLabel}...</span>
                 )}
                 {orderType === 'sell' && sellHoldings.length === 0 && clientID && (
-                  <span className="schedule-order-hint">No sellable DP holdings found for {clientID}.</span>
+                  <span className="schedule-order-hint">No sellable DP holdings found for {selectedClientLabel}.</span>
                 )}
               </div>
             </div>
