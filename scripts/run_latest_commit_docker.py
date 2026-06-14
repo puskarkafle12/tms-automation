@@ -155,6 +155,30 @@ def image_exists(image: str) -> bool:
     ).returncode == 0
 
 
+def image_tags(repository: str) -> list[str]:
+    output = capture(
+        ["docker", "image", "ls", repository, "--format", "{{.Repository}}:{{.Tag}}"],
+        check=False,
+    )
+    return [
+        line.strip()
+        for line in output.splitlines()
+        if line.strip() and not line.strip().endswith(":<none>")
+    ]
+
+
+def cleanup_old_app_images(keep_tags: set[str]) -> None:
+    old_tags = sorted(tag for tag in image_tags(IMAGE_NAME) if tag not in keep_tags)
+    if not old_tags:
+        print("\nNo old tms-automation image tags to remove.")
+        return
+
+    print("\nRemoving old tms-automation image tags after successful startup.")
+    for tag in old_tags:
+        run(["docker", "image", "rm", tag], check=False)
+    run(["docker", "image", "prune", "-f"], check=False)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Build and run Docker from the current files on disk.",
@@ -201,8 +225,6 @@ def main() -> int:
     commit = current_commit()
     fingerprint = source_fingerprint()
     source_id = f"{commit}-{fingerprint}"
-    commit_tag = f"{IMAGE_NAME}:{commit}"
-    source_tag = f"{IMAGE_NAME}:workspace-{fingerprint}"
     compose_tag = f"{IMAGE_NAME}:{COMPOSE_IMAGE_TAG}"
     build_date = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
 
@@ -231,10 +253,6 @@ def main() -> int:
             f"BUILD_DATE={build_date}",
             "-t",
             compose_tag,
-            "-t",
-            commit_tag,
-            "-t",
-            source_tag,
         ]
         if args.no_cache:
             build_command.append("--no-cache")
@@ -246,8 +264,6 @@ def main() -> int:
     if image_exists(compose_tag):
         print("\nAvailable image tags:")
         print(f"  {compose_tag}")
-        print(f"  {commit_tag}")
-        print(f"  {source_tag}")
 
     if not args.no_run:
         running_image = running_container_image()
@@ -260,6 +276,7 @@ def main() -> int:
                 print("Database volume is preserved; not removing Docker volumes.")
                 remove_container_preserving_volumes("tms-automation")
             run([*compose, "up", "-d", "--no-build", "--force-recreate"])
+            cleanup_old_app_images({compose_tag})
         else:
             print("\nContainer already runs the matching source image; leaving it running.")
         print("\nApp:")
