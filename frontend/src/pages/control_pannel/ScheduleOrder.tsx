@@ -4,6 +4,8 @@ import StockDetails from './StockDetails';
 import ErrorMessage from '../../components/ErrorMessage';
 import ScriptNameAutocomplete, { ScriptOption } from '../../components/ScriptNameAutocomplete';
 import ScheduleMonitorBar from '../../components/ScheduleMonitorBar';
+import StrategySellForm, { StrategyPayload } from './StrategySellForm';
+import { buildScheduleScriptOptions } from './scheduleOrderHelpers';
 
 const getApiUrl = () => localStorage.getItem('apiUrl') || window.location.origin;
 
@@ -11,6 +13,8 @@ interface DPHolding {
   scrip?: string;
   symbolName?: string;
   currentBalance?: number;
+  ltp?: number;
+  percentChange?: string;
 }
 
 const ScheduleOrder: React.FC = () => {
@@ -23,9 +27,11 @@ const ScheduleOrder: React.FC = () => {
   const [loggedInClientIDs, setLoggedInClientIDs] = useState<string[]>([]);
   const [orderType, setOrderType] = useState<'buy' | 'sell'>('buy');
   const [stockDetails, setStockDetails] = useState<any[]>([]);
+  const [sellHoldings, setSellHoldings] = useState<DPHolding[]>([]);
   const [selectedStock, setSelectedStock] = useState<any | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [latestLtp, setLatestLtp] = useState<number | null>(null);
+  const [quote, setQuote] = useState<any | null>(null);
   const [quoteLoading, setQuoteLoading] = useState(false);
   const [quoteError, setQuoteError] = useState('');
   const [holdingQty, setHoldingQty] = useState<number | null>(null);
@@ -44,13 +50,8 @@ const ScheduleOrder: React.FC = () => {
   }, [orderType, selectedStock]);
 
   const scriptOptions = useMemo<ScriptOption[]>(
-    () =>
-      stockDetails.map((stock) => ({
-        symbol: stock.symbol,
-        ltp: stock.ltp,
-        percentChange: stock.percentChange,
-      })),
-    [stockDetails],
+    () => buildScheduleScriptOptions(orderType, stockDetails, sellHoldings),
+    [orderType, sellHoldings, stockDetails],
   );
 
   const fetchStockDetails = useCallback(async (clientId: string) => {
@@ -71,6 +72,26 @@ const ScheduleOrder: React.FC = () => {
     }
   }, []);
 
+  const fetchSellHoldings = useCallback(async (clientId: string) => {
+    if (!clientId) {
+      setSellHoldings([]);
+      return;
+    }
+    try {
+      const response = await fetch(`${getApiUrl()}/dp_holdings?client_id=${encodeURIComponent(clientId)}`, {
+        headers: { Accept: 'application/json' },
+      });
+      if (!response.ok) {
+        setSellHoldings([]);
+        return;
+      }
+      const holdings: DPHolding[] = await response.json();
+      setSellHoldings(holdings);
+    } catch {
+      setSellHoldings([]);
+    }
+  }, []);
+
   useEffect(() => {
     const loadInitialData = async () => {
       try {
@@ -80,7 +101,7 @@ const ScheduleOrder: React.FC = () => {
           setLoggedInClientIDs(data.logged_in_client_ids);
           const defaultClientId = data.logged_in_client_ids[0] || '';
           setClientID(defaultClientId);
-          await fetchStockDetails(defaultClientId);
+          await Promise.all([fetchStockDetails(defaultClientId), fetchSellHoldings(defaultClientId)]);
         }
       } catch (error) {
         console.error('Error fetching logged-in client IDs:', error);
@@ -88,20 +109,13 @@ const ScheduleOrder: React.FC = () => {
     };
 
     loadInitialData();
-  }, [fetchStockDetails]);
+  }, [fetchSellHoldings, fetchStockDetails]);
 
   const handleClientChange = async (clientId: string) => {
     setClientID(clientId);
-    setScriptName('');
-    setSelectedStock(null);
-    setPrice('');
-    setQty('');
-    setLatestLtp(null);
     setQuoteError('');
-    setHoldingQty(null);
-    setHoldingLabel('');
     setHoldingError('');
-    await fetchStockDetails(clientId);
+    await Promise.all([fetchStockDetails(clientId), fetchSellHoldings(clientId)]);
   };
 
   const handleScriptNameChange = (name: string) => {
@@ -109,8 +123,6 @@ const ScheduleOrder: React.FC = () => {
     setScriptName(normalizedName);
     const stockDetail = stockDetails.find((stock) => stock.symbol === normalizedName);
     setSelectedStock(stockDetail || null);
-    setHoldingQty(null);
-    setHoldingLabel('');
     setHoldingError('');
   };
 
@@ -118,15 +130,23 @@ const ScheduleOrder: React.FC = () => {
     setScriptName(option.symbol);
     const stockDetail = stockDetails.find((stock) => stock.symbol === option.symbol);
     setSelectedStock(stockDetail || null);
-    setHoldingQty(null);
-    setHoldingLabel('');
     setHoldingError('');
   };
+
+  useEffect(() => {
+    if (!scriptName) {
+      setSelectedStock(null);
+      return;
+    }
+    const normalizedName = scriptName.trim().toUpperCase();
+    setSelectedStock(stockDetails.find((stock) => stock.symbol === normalizedName) || null);
+  }, [scriptName, stockDetails]);
 
   const loadLatestQuote = useCallback(async (clientId: string, symbol: string) => {
     const normalizedSymbol = symbol.trim().toUpperCase();
     if (!clientId || !normalizedSymbol) {
       setLatestLtp(null);
+      setQuote(null);
       setQuoteError('');
       return;
     }
@@ -147,6 +167,7 @@ const ScheduleOrder: React.FC = () => {
       if (!response.ok) {
         const data = await response.json().catch(() => ({}));
         setLatestLtp(null);
+        setQuote(null);
         setQuoteError(data.detail || data.message || 'Latest LTP is not available.');
         return;
       }
@@ -155,10 +176,10 @@ const ScheduleOrder: React.FC = () => {
       if (requestId !== quoteRequestId.current) {
         return;
       }
+      setQuote(data?.quote || null);
       const ltp = Number(data?.quote?.ltp ?? 0);
       if (ltp > 0) {
         setLatestLtp(ltp);
-        setPrice(String(ltp));
       } else {
         setLatestLtp(null);
         setQuoteError('Latest LTP is not available.');
@@ -166,6 +187,7 @@ const ScheduleOrder: React.FC = () => {
     } catch {
       if (requestId === quoteRequestId.current) {
         setLatestLtp(null);
+        setQuote(null);
         setQuoteError('Failed to load latest LTP.');
       }
     } finally {
@@ -193,23 +215,7 @@ const ScheduleOrder: React.FC = () => {
     setHoldingLabel('');
 
     try {
-      const response = await fetch(`${getApiUrl()}/dp_holdings?client_id=${encodeURIComponent(clientId)}`, {
-        headers: { Accept: 'application/json' },
-      });
-      if (requestId !== holdingRequestId.current) {
-        return;
-      }
-      if (!response.ok) {
-        const data = await response.json().catch(() => ({}));
-        setHoldingError(data.detail || data.message || 'Could not verify DP holdings for sell order.');
-        return;
-      }
-
-      const holdings: DPHolding[] = await response.json();
-      if (requestId !== holdingRequestId.current) {
-        return;
-      }
-      const match = holdings.find((holding) => {
+      const match = sellHoldings.find((holding) => {
         const scrip = (holding.scrip || '').trim().toUpperCase();
         const name = (holding.symbolName || '').trim().toUpperCase();
         return scrip === normalizedSymbol || name === normalizedSymbol;
@@ -231,7 +237,7 @@ const ScheduleOrder: React.FC = () => {
         setHoldingLoading(false);
       }
     }
-  }, [orderType]);
+  }, [orderType, sellHoldings]);
 
   useEffect(() => {
     void loadLatestQuote(clientID, scriptName);
@@ -251,16 +257,23 @@ const ScheduleOrder: React.FC = () => {
     }
   };
 
-  const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
+  const submitStrategyOrder = async (strategyPayload: StrategyPayload) => {
     setStatus('idle');
     setStatusMessage('');
 
-    const requestedQty = parseInt(qty, 10);
-    const requestedPrice = parseFloat(price);
-    if (orderType === 'buy' && buyHighLimit !== null && requestedPrice > buyHighLimit) {
+    if (!clientID || !scriptName) {
+      setStatus('error');
+      setStatusMessage(`Select a client and script before scheduling a ${orderType} strategy.`);
+      return;
+    }
+    if (orderType === 'buy' && buyHighLimit !== null && strategyPayload.price > buyHighLimit) {
       setStatus('error');
       setStatusMessage(`Buy price cannot exceed today's high (${buyHighLimit}).`);
+      return;
+    }
+    if (orderType === 'buy' && !selectedStock) {
+      setStatus('error');
+      setStatusMessage(`${scriptName} is not a valid listed scrip for this client.`);
       return;
     }
     if (orderType === 'sell') {
@@ -274,7 +287,7 @@ const ScheduleOrder: React.FC = () => {
         setStatusMessage(holdingError || `${scriptName} is not available in DP holdings.`);
         return;
       }
-      if (requestedQty > holdingQty) {
+      if (strategyPayload.qty > holdingQty) {
         setStatus('error');
         setStatusMessage(`Sell quantity cannot exceed DP holding quantity (${holdingQty}).`);
         return;
@@ -293,15 +306,15 @@ const ScheduleOrder: React.FC = () => {
         body: JSON.stringify({
           client_id: clientID,
           script_name: scriptName,
-          price: requestedPrice,
-          qty: requestedQty,
           order_type: orderType,
+          security_details: selectedStock || {},
+          ...strategyPayload,
         }),
       });
 
       if (response.ok) {
         setStatus('success');
-        setStatusMessage(`Order scheduled for ${scriptName} (${orderType.toUpperCase()}).`);
+        setStatusMessage(`${strategyPayload.strategy_type} scheduled for ${scriptName}.`);
         setPrice('');
         setQty('');
       } else {
@@ -344,7 +357,7 @@ const ScheduleOrder: React.FC = () => {
           <h3 className="panel-title">Add Order</h3>
           <p className="panel-subtitle">Select a client, symbol, price, and quantity.</p>
 
-          <form onSubmit={handleSubmit} className="schedule-order-form">
+          <div className="schedule-order-form">
             <div className="schedule-order-form-grid">
               <div className="form-group">
                 <label htmlFor="scheduleClientId">Client ID</label>
@@ -375,8 +388,8 @@ const ScheduleOrder: React.FC = () => {
                   id="scheduleScriptName"
                   value={scriptName}
                   options={scriptOptions}
-                  placeholder="Type to search — e.g. CREST"
-                  disabled={stockDetails.length === 0}
+                  placeholder={orderType === 'sell' ? 'Search owned holding' : 'Type to search — e.g. CREST'}
+                  disabled={!clientID || (orderType === 'buy' ? stockDetails.length === 0 : sellHoldings.length === 0)}
                   required
                   onChange={handleScriptNameChange}
                   onSelect={handleScriptNameSelect}
@@ -384,44 +397,9 @@ const ScheduleOrder: React.FC = () => {
                 {stockDetails.length === 0 && clientID && (
                   <span className="schedule-order-hint">Loading scripts for {clientID}...</span>
                 )}
-              </div>
-            </div>
-
-            <div className="schedule-order-form-grid">
-              <div className="form-group">
-                <label htmlFor="schedulePrice">Price</label>
-                <input
-                  id="schedulePrice"
-                  type="number"
-                  className="input"
-                  value={price}
-                  onChange={(e) => setPrice(e.target.value)}
-                  placeholder="Order price"
-                  min="0"
-                  max={buyHighLimit ?? undefined}
-                  step="0.1"
-                  required
-                />
-                {buyHighLimit !== null && (
-                  <span className="schedule-order-hint schedule-order-hint-muted">
-                    Max buy price: {buyHighLimit} (today&apos;s high)
-                  </span>
+                {orderType === 'sell' && sellHoldings.length === 0 && clientID && (
+                  <span className="schedule-order-hint">No sellable DP holdings found for {clientID}.</span>
                 )}
-              </div>
-
-              <div className="form-group">
-                <label htmlFor="scheduleQty">Quantity</label>
-                <input
-                  id="scheduleQty"
-                  type="number"
-                  className="input"
-                  value={qty}
-                  onChange={(e) => setQty(e.target.value)}
-                  placeholder="Number of shares"
-                  min="1"
-                  max={orderType === 'sell' && holdingQty ? holdingQty : undefined}
-                  required
-                />
               </div>
             </div>
 
@@ -445,14 +423,22 @@ const ScheduleOrder: React.FC = () => {
               </div>
             </div>
 
-            <button
-              type="submit"
-              className="btn btn-primary schedule-order-submit"
-              disabled={isSubmitting || loggedInClientIDs.length === 0 || (orderType === 'sell' && holdingLoading)}
-            >
-              {isSubmitting ? 'Submitting...' : 'Schedule Order'}
-            </button>
-          </form>
+            <div className="schedule-strategy-wrap">
+              <StrategySellForm
+                key={orderType}
+                side={orderType}
+                currentLtp={latestLtp}
+                availableQty={orderType === 'sell' ? holdingQty : null}
+                averageBuyPrice={null}
+                topBuyPrice={latestLtp}
+                initialQty={qty}
+                initialPrice={latestLtp ? String(latestLtp) : price}
+                isSubmitting={isSubmitting}
+                submitError={orderType === 'sell' ? holdingError || quoteError : quoteError}
+                onSubmit={submitStrategyOrder}
+              />
+            </div>
+          </div>
         </div>
 
         <div className="schedule-order-side-panel panel">
@@ -463,6 +449,8 @@ const ScheduleOrder: React.FC = () => {
               latestLtp={latestLtp}
               quoteLoading={quoteLoading}
               quoteError={quoteError}
+              topBuy={quote?.topBuy || []}
+              topSell={quote?.topSell || []}
               holdingQty={holdingQty}
               holdingLabel={holdingLabel}
               holdingLoading={holdingLoading}

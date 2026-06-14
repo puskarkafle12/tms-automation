@@ -1,6 +1,7 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import './DpHolding.css';
 import ErrorMessage from '../../components/ErrorMessage';
+import StrategySellForm, { StrategyPayload } from './StrategySellForm';
 
 interface DPHolding {
   clientID: string;
@@ -148,8 +149,6 @@ const DPHoldings: React.FC = () => {
   const [successMessage, setSuccessMessage] = useState('');
   const [hasFetched, setHasFetched] = useState(false);
   const [sellHolding, setSellHolding] = useState<DPHolding | null>(null);
-  const [sellPrice, setSellPrice] = useState('');
-  const [sellQty, setSellQty] = useState('');
   const [quote, setQuote] = useState<StockQuote | null>(null);
   const [quoteLoading, setQuoteLoading] = useState(false);
   const [quoteError, setQuoteError] = useState('');
@@ -294,8 +293,6 @@ const DPHoldings: React.FC = () => {
     const symbol = holdingSymbol(holding);
     const quoteClientId = (holding as CombinedHolding).holders?.[0]?.clientID || clientID;
     setSellHolding(holding);
-    setSellPrice(String(holding.ltp || ''));
-    setSellQty('');
     setQuote(null);
     setQuoteError('');
     setSuccessMessage('');
@@ -319,9 +316,6 @@ const DPHoldings: React.FC = () => {
       const data = await response.json();
       const nextQuote = data.quote || null;
       setQuote(nextQuote);
-      if (nextQuote?.ltp) {
-        setSellPrice(String(nextQuote.ltp));
-      }
     } catch {
       setQuoteError('Stock quote unavailable.');
     } finally {
@@ -331,22 +325,19 @@ const DPHoldings: React.FC = () => {
 
   const closeSellDialog = () => {
     setSellHolding(null);
-    setSellPrice('');
-    setSellQty('');
     setQuote(null);
     setQuoteError('');
     setSellSubmitting(false);
   };
 
-  const submitSellOrder = async (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
+  const submitSellOrder = async (strategyPayload: StrategyPayload) => {
     if (!sellHolding) {
       return;
     }
 
     const symbol = holdingSymbol(sellHolding);
-    const qty = Number.parseInt(sellQty, 10);
-    const price = Number.parseFloat(sellPrice);
+    const qty = strategyPayload.qty;
+    const price = strategyPayload.price;
     const availableQty = Number(sellHolding.currentBalance || 0);
 
     if (!symbol || !qty || qty < 1 || !price || price <= 0) {
@@ -392,9 +383,9 @@ const DPHoldings: React.FC = () => {
           body: JSON.stringify({
             client_id: order.client_id,
             script_name: symbol,
-            price,
-            qty: order.qty,
             order_type: 'sell',
+            ...strategyPayload,
+            qty: order.qty,
             security_details: quote?.security || {},
           }),
         });
@@ -408,8 +399,8 @@ const DPHoldings: React.FC = () => {
 
       setSuccessMessage(
         orders.length > 1
-          ? `Combined sell scheduled for ${symbol} across ${orders.length} users.`
-          : `Sell order scheduled for ${symbol}.`,
+          ? `${strategyPayload.strategy_type} scheduled for ${symbol} across ${orders.length} users.`
+          : `${strategyPayload.strategy_type} scheduled for ${symbol}.`,
       );
       closeSellDialog();
     } catch {
@@ -703,39 +694,22 @@ const DPHoldings: React.FC = () => {
               </div>
             )}
 
-            <form className="dp-sell-form" onSubmit={submitSellOrder}>
-              <div className="form-group">
-                <label htmlFor="dpSellQty">Quantity</label>
-                <input
-                  id="dpSellQty"
-                  className="input"
-                  type="number"
-                  min="1"
-                  max={sellHolding.currentBalance || undefined}
-                  value={sellQty}
-                  onChange={(e) => setSellQty(e.target.value)}
-                  placeholder="Shares to sell"
-                  required
-                />
-              </div>
-              <div className="form-group">
-                <label htmlFor="dpSellPrice">Price</label>
-                <input
-                  id="dpSellPrice"
-                  className="input"
-                  type="number"
-                  min="0"
-                  step="0.1"
-                  value={sellPrice}
-                  onChange={(e) => setSellPrice(e.target.value)}
-                  placeholder="Sell price"
-                  required
-                />
-              </div>
-              <button type="submit" className="btn btn-primary dp-sell-submit" disabled={sellSubmitting}>
-                {sellSubmitting ? 'Scheduling...' : 'Schedule Sell Order'}
-              </button>
-            </form>
+            <StrategySellForm
+              key={`${holdingSymbol(sellHolding)}-${quote?.ltp || sellHolding.ltp || ''}`}
+              currentLtp={Number(quote?.ltp ?? sellHolding.ltp ?? 0)}
+              availableQty={Number(sellHolding.currentBalance || 0)}
+              averageBuyPrice={
+                sellHolding.currentBalance
+                  ? Number(sellHolding.valueAsOfPreviousClosePrice || 0) / Number(sellHolding.currentBalance || 1)
+                  : null
+              }
+              topBuyPrice={quote?.topBuy?.find((row) => Number(row.price || 0) > 0)?.price || null}
+              initialQty={String(sellHolding.currentBalance || '')}
+              initialPrice={String(quote?.ltp || sellHolding.ltp || '')}
+              isSubmitting={sellSubmitting}
+              submitError={quoteError}
+              onSubmit={submitSellOrder}
+            />
           </div>
         </div>
       )}

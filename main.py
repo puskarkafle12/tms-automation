@@ -529,14 +529,14 @@ def _compute_scheduled_live_status(
     return "scanning"
 
 
-def _order_status_log_from_order(order: ScheduledOrder) -> OrderStatusLog:
+def _order_status_log_from_order(order: ScheduledOrder, status: Optional[str] = None) -> OrderStatusLog:
     return OrderStatusLog(
         order_id=order.order_id,
         client_id=order.client_id,
         security_details=order.security_details,
         script_name=order.script_name,
         qty=order.qty,
-        status=order.status,
+        status=status or order.status,
         price=order.price,
         order_type=order.order_type,
     )
@@ -552,8 +552,80 @@ def _serialize_scheduled_order(order: ScheduledOrder) -> dict:
         "qty": order.qty,
         "status": order.status,
         "order_type": order.order_type,
+        "strategy_type": order.strategy_type or "Fixed Price",
+        "side": order.side or order.order_type,
+        "symbol": order.symbol or order.script_name,
+        "company_name": order.company_name,
+        "remaining_quantity": order.remaining_quantity,
+        "limit_price": order.limit_price,
+        "stop_loss_price": order.stop_loss_price,
+        "stop_limit_price": order.stop_limit_price,
+        "book_profit_price": order.book_profit_price,
+        "profit_target_price": order.profit_target_price,
+        "trailing_drop_percent": order.trailing_drop_percent,
+        "stable_band_percent": order.stable_band_percent,
+        "minimum_wait_minutes": order.minimum_wait_minutes,
+        "consecutive_drop_checks": order.consecutive_drop_checks,
+        "activation_price": order.activation_price,
+        "target_reached": order.target_reached,
+        "target_reached_at": order.target_reached_at.isoformat() if order.target_reached_at else None,
+        "highest_tracked_price": order.highest_tracked_price,
+        "highest_tracked_at": order.highest_tracked_at.isoformat() if order.highest_tracked_at else None,
+        "protected_price": order.protected_price,
+        "average_buy_price": order.average_buy_price,
+        "partial_legs": order.partial_legs,
+        "executed_legs": order.executed_legs,
+        "execution_price": order.execution_price,
+        "execution_price_source": order.execution_price_source,
+        "execution_reason": order.execution_reason,
+        "executed_at": order.executed_at.isoformat() if order.executed_at else None,
+        "cancelled_reason": order.cancelled_reason,
+        "failed_reason": order.failed_reason,
+        "expiry_time": order.expiry_time.isoformat() if order.expiry_time else None,
+        "expiry_action": order.expiry_action,
+        "max_allowed_slippage_percent": order.max_allowed_slippage_percent,
+        "emergency_execution": order.emergency_execution,
+        "user_allocation": order.user_allocation,
+        "last_checked_ltp": order.last_checked_ltp,
+        "last_checked_at": order.last_checked_at.isoformat() if order.last_checked_at else None,
+        "below_stop_loss_check_count": order.below_stop_loss_check_count,
+        "consecutive_drop_count": order.consecutive_drop_count,
+        "created_at": order.created_at.isoformat() if order.created_at else None,
+        "updated_at": order.updated_at.isoformat() if order.updated_at else None,
         "last_updated": order.last_updated.isoformat() if order.last_updated else None,
     }
+
+
+def _validate_strategy_order(order_data: OrderCreateRequest) -> None:
+    strategy = (order_data.strategy_type or "Fixed Price").strip()
+    if order_data.qty <= 0:
+        raise HTTPException(status_code=400, detail="Quantity must be greater than zero.")
+    if order_data.order_type.lower() == "buy":
+        if strategy in {"Fixed Price", "Fixed Price Buy", "Buy Below Price", "Breakout Buy", "Dip Buy"} and order_data.price <= 0:
+            raise HTTPException(status_code=400, detail="Buy trigger price must be greater than zero.")
+        if strategy == "Time-Based Buy" and not order_data.expiry_time:
+            raise HTTPException(status_code=400, detail="Expiry time is required.")
+    if order_data.order_type.lower() == "sell":
+        if strategy in {"Fixed Price", "Fixed Price Sell"} and order_data.price <= 0:
+            raise HTTPException(status_code=400, detail="Sell price must be greater than zero.")
+        if strategy == "Fast Stop Loss" and not order_data.stop_loss_price:
+            raise HTTPException(status_code=400, detail="Stop-loss trigger price is required.")
+        if strategy == "Stop Limit Sell" and (not order_data.stop_loss_price or not order_data.stop_limit_price):
+            raise HTTPException(status_code=400, detail="Stop trigger and limit price are required.")
+        if strategy == "Trailing Stop Loss" and (order_data.trailing_drop_percent or 0) <= 0:
+            raise HTTPException(status_code=400, detail="Trailing drop percent must be greater than zero.")
+        if strategy == "Smart Profit Booking" and not order_data.profit_target_price:
+            raise HTTPException(status_code=400, detail="Profit target price is required.")
+        if strategy == "Book Profit + Stop Loss" and (not order_data.book_profit_price or not order_data.stop_loss_price):
+            raise HTTPException(status_code=400, detail="Book profit and stop-loss trigger prices are required.")
+        if strategy == "Partial Profit Booking" and not order_data.partial_legs:
+            raise HTTPException(status_code=400, detail="Partial profit legs are required.")
+        if strategy == "Break-Even Protection" and not order_data.average_buy_price:
+            raise HTTPException(status_code=400, detail="Average buy price is required.")
+        if strategy == "Time-Based Exit" and not order_data.expiry_time:
+            raise HTTPException(status_code=400, detail="Expiry time is required.")
+        if strategy == "Emergency Exit" and not order_data.emergency_execution:
+            raise HTTPException(status_code=400, detail="Emergency exit requires confirmation.")
 
 
 async def _get_script_high(tms_user: TmsUser, script_name: str) -> Optional[float]:
@@ -747,6 +819,7 @@ async def cancel_order(client_id: str, exchange_order_id: str, db: Session = Dep
 
 @app.post("/add_order/")
 async def add_order(order_data: OrderCreateRequest, db: Session = Depends(get_db)):
+    _validate_strategy_order(order_data)
     if order_data.order_type.lower() == "buy":
         user = db.query(User).filter(User.client_id == order_data.client_id).first()
         if not user:
@@ -817,7 +890,7 @@ async def delete_scheduled_order(
         raise HTTPException(status_code=404, detail="Order not found")
 
     for order in orders_to_delete:
-        db.add(_order_status_log_from_order(order))
+        db.add(_order_status_log_from_order(order, status="cancelled"))
         db.delete(order)
     db.commit()
 
@@ -832,6 +905,7 @@ async def list_scheduled_orders(db: Session = Depends(get_db)):
 
 @app.post("/scheduled_orders/")
 async def create_scheduled_order(order_data: OrderCreateRequest, db: Session = Depends(get_db)):
+    _validate_strategy_order(order_data)
     if not db.query(User).filter(User.client_id == order_data.client_id).first():
         raise HTTPException(status_code=404, detail="User not found")
     order = ScheduledOrder(order_data)
@@ -925,6 +999,32 @@ async def get_order_status_logs(
             "qty": int(order.qty) if order.qty is not None else order.qty,
             "status": order.status,
             "order_type": order.order_type,
+            "strategy_type": order.strategy_type or "Fixed Price",
+            "side": order.side or order.order_type,
+            "created_at": order.created_at.isoformat() if order.created_at else None,
+            "remaining_quantity": order.remaining_quantity,
+            "stop_loss_price": order.stop_loss_price,
+            "stop_limit_price": order.stop_limit_price,
+            "book_profit_price": order.book_profit_price,
+            "profit_target_price": order.profit_target_price,
+            "trailing_drop_percent": order.trailing_drop_percent,
+            "stable_band_percent": order.stable_band_percent,
+            "minimum_wait_minutes": order.minimum_wait_minutes,
+            "consecutive_drop_checks": order.consecutive_drop_checks,
+            "activation_price": order.activation_price,
+            "average_buy_price": order.average_buy_price,
+            "highest_tracked_price": order.highest_tracked_price,
+            "target_reached_at": order.target_reached_at.isoformat() if order.target_reached_at else None,
+            "execution_price": order.execution_price,
+            "execution_price_source": order.execution_price_source,
+            "execution_reason": order.execution_reason,
+            "executed_at": order.executed_at.isoformat() if order.executed_at else None,
+            "expiry_time": order.expiry_time.isoformat() if order.expiry_time else None,
+            "expiry_action": order.expiry_action,
+            "max_allowed_slippage_percent": order.max_allowed_slippage_percent,
+            "user_allocation": order.user_allocation,
+            "failed_reason": order.failed_reason,
+            "cancelled_reason": order.cancelled_reason,
             "scanning_count": scanning_count,
             "current_price": int(round(scan_log.current_price)) if scan_log and scan_log.current_price is not None else None,
             "last_scan_at": scan_log.timestamp.isoformat() if scan_log and scan_log.timestamp else None,

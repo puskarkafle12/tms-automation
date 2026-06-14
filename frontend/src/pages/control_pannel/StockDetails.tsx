@@ -19,11 +19,20 @@ interface StockDetailsProps {
   latestLtp?: number | null;
   quoteLoading?: boolean;
   quoteError?: string;
+  topBuy?: QuoteLevel[];
+  topSell?: QuoteLevel[];
   holdingQty?: number | null;
   holdingLabel?: string;
   holdingLoading?: boolean;
   holdingError?: string;
   onFillFromHolding?: () => void;
+}
+
+interface QuoteLevel {
+  sequenceId?: number;
+  quantity?: number;
+  price?: number;
+  totalOrders?: number;
 }
 
 const formatDate = (dateArray: number[]) => {
@@ -39,6 +48,8 @@ const StockDetails: React.FC<StockDetailsProps> = ({
   latestLtp = null,
   quoteLoading = false,
   quoteError = '',
+  topBuy = [],
+  topSell = [],
   holdingQty = null,
   holdingLabel = '',
   holdingLoading = false,
@@ -113,6 +124,42 @@ const StockDetails: React.FC<StockDetailsProps> = ({
       </div>
       {quoteError && <p className="stock-details-error">{quoteError}</p>}
       {orderType === 'sell' && holdingError && <p className="stock-details-error">{holdingError}</p>}
+      <div className="stock-depth-grid">
+        <MarketDepthTable title="Top Buy Orders" rows={topBuy} />
+        <MarketDepthTable title="Top Sell Orders" rows={topSell} />
+      </div>
+    </div>
+  );
+};
+
+const MarketDepthTable: React.FC<{ title: string; rows: QuoteLevel[] }> = ({ title, rows }) => {
+  const activeRows = rows.filter((row) => Number(row.price || 0) > 0 || Number(row.quantity || 0) > 0);
+
+  return (
+    <div className="stock-depth-card">
+      <h4>{title}</h4>
+      {activeRows.length > 0 ? (
+        <table>
+          <thead>
+            <tr>
+              <th>Price</th>
+              <th>Qty</th>
+              <th>Orders</th>
+            </tr>
+          </thead>
+          <tbody>
+            {activeRows.map((row, index) => (
+              <tr key={`${title}-${row.sequenceId ?? index}`}>
+                <td>{row.price ? formatNumber(Number(row.price)) : '-'}</td>
+                <td>{row.quantity ? formatNumber(Number(row.quantity)) : '-'}</td>
+                <td>{row.totalOrders ?? '-'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : (
+        <p>Market depth unavailable</p>
+      )}
     </div>
   );
 };

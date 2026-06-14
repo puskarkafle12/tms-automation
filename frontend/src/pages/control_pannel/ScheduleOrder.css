@@ -107,6 +107,10 @@
   padding: 0.75rem;
 }
 
+.schedule-strategy-wrap {
+  margin-top: 1rem;
+}
+
 .schedule-order-hint {
   font-size: 0.75rem;
   color: var(--color-danger);

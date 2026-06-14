@@ -1,0 +1,98 @@
+.strategy-details-page {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  max-width: 1200px;
+}
+
+.strategy-details-hero {
+  padding: 1.25rem 1.5rem;
+  background: linear-gradient(135deg, #f8fafc 0%, #f0fdf4 100%);
+  border-color: #bbf7d0;
+}
+
+.strategy-details-hero h2,
+.strategy-details-hero p {
+  margin: 0;
+}
+
+.strategy-details-hero h2 {
+  font-size: 1.25rem;
+  font-weight: 700;
+}
+
+.strategy-details-hero p {
+  margin-top: 0.35rem;
+  color: var(--color-text-muted);
+  font-size: 0.9rem;
+}
+
+.strategy-details-section {
+  padding: 1.25rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.strategy-details-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.strategy-details-section-header h3 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.strategy-details-pill {
+  border-radius: 999px;
+  padding: 0.3rem 0.65rem;
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.strategy-details-pill.buy {
+  background: #f0fdf4;
+  color: #166534;
+  border: 1px solid #86efac;
+}
+
+.strategy-details-pill.sell {
+  background: #fef2f2;
+  color: #991b1b;
+  border: 1px solid #fca5a5;
+}
+
+.strategy-details-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 0.85rem;
+}
+
+.strategy-details-card {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 1rem;
+  background: var(--color-bg);
+}
+
+.strategy-details-card h4 {
+  margin: 0 0 0.6rem;
+  font-size: 0.95rem;
+  font-weight: 800;
+}
+
+.strategy-details-card p {
+  margin: 0.45rem 0 0;
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+
+.strategy-details-card strong {
+  color: var(--color-text);
+}
