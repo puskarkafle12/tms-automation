@@ -27,12 +27,7 @@ def main() -> None:
             print(f"Seeded frontend user: {seed_user}")
             print("Use FRONTEND_SEED_USER and FRONTEND_SEED_PASSWORD in .env to customize.")
         else:
-            if existing.password != seed_password:
-                existing.password = seed_password
-                db.commit()
-                print(f"Updated frontend user password: {seed_user}")
-            else:
-                print(f"Frontend user already exists: {seed_user}")
+            print(f"Frontend user already exists: {seed_user}")
         print("Database tables are ready.")
     finally:
         db.close()

@@ -21,3 +21,4 @@ services:
 
 volumes:
   tms_postgres_data:
+    name: tms-automation_tms_postgres_data
