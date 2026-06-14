@@ -32,6 +32,12 @@ const emptyForm = {
 
 const formatSessionStatus = (status: string) => status.replace(/_/g, ' ');
 
+const formatAccountLabel = (account: Pick<TmsAccount, 'client_id' | 'display_name' | 'broker_no'>) => {
+  const name = account.display_name?.trim() || account.client_id;
+  const broker = account.broker_no?.trim();
+  return broker ? `${name}(${broker})` : name;
+};
+
 const Login: React.FC = () => {
   const [accounts, setAccounts] = useState<TmsAccount[]>([]);
   const [loggedInCount, setLoggedInCount] = useState(0);
@@ -376,8 +382,7 @@ const Login: React.FC = () => {
             {loggedInAccounts.map((account) => (
               <div key={account.client_id} className="tms-logged-in-chip">
                 <span className="tms-online-dot" aria-hidden="true" />
-                <strong>{account.client_id}</strong>
-                <span>Broker {account.broker_no}</span>
+                <strong title={`Client ID: ${account.client_id}`}>{formatAccountLabel(account)}</strong>
                 {account.last_updated && (
                   <span className="tms-session-time">
                     Updated {new Date(account.last_updated).toLocaleString()}
@@ -430,7 +435,7 @@ const Login: React.FC = () => {
             <table className="tms-accounts-table">
               <thead>
                 <tr>
-                  <th>Client ID</th>
+                  <th>User</th>
                   <th>Broker</th>
                   <th>Auto Login</th>
                   <th>Status</th>
@@ -440,7 +445,9 @@ const Login: React.FC = () => {
               <tbody>
                 {accounts.map((account) => (
                   <tr key={account.client_id}>
-                    <td className="tms-client-id">{account.client_id}</td>
+                    <td className="tms-client-id" title={`Client ID: ${account.client_id}`}>
+                      {formatAccountLabel(account)}
+                    </td>
                     <td>{account.broker_no}</td>
                     <td>{account.auto_login ? 'Yes' : 'No'}</td>
                     <td>
