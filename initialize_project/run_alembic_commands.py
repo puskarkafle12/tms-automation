@@ -1,7 +1,6 @@
 import os
 import shutil
 import subprocess
-from sqlalchemy import create_engine, text
 
 # Set your database URL here
 DATABASE_URL = "postgresql+psycopg2://username:password@localhost/dbname"
@@ -13,16 +12,6 @@ def delete_alembic_versions_folder():
         print(f"Deleted Alembic versions folder: {alembic_versions_path}")
     else:
         print(f"Alembic versions folder does not exist: {alembic_versions_path}")
-
-def drop_alembic_versions_table():
-    engine = create_engine(DATABASE_URL)
-    with engine.connect() as connection:
-        try:
-            connection.execute(text("DROP TABLE IF EXISTS alembic_version"))
-            print("Dropped Alembic versions table from the database.")
-        except Exception as e:
-            print(f"Error dropping Alembic versions table: {e}")
-
 def run_alembic_commands():
     try:
         # Generate the initial migration script
@@ -55,7 +44,6 @@ def run_alembic_commands():
 if __name__ == "__main__":
     # Delete the existing Alembic versions
     # delete_alembic_versions_folder()
-    # drop_alembic_versions_table()
     
     # Run the Alembic commands
     run_alembic_commands()

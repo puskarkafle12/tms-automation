@@ -38,6 +38,18 @@ export interface LoggedInSession {
   last_updated: string | null;
 }
 
+export interface ScheduledOrder {
+  order_id?: number;
+  client_id: string;
+  security_details?: Record<string, unknown>;
+  script_name: string;
+  price: number;
+  qty: number;
+  status?: string;
+  order_type: string;
+  last_updated?: string | null;
+}
+
 const DEFAULT_API_URL = window.location.origin;
 
 export const getApiUrl = () => {
@@ -107,6 +119,29 @@ export const updateTmsAccount = async (clientId: string, payload: TmsAccountUpda
 
 export const deleteTmsAccount = async (clientId: string) => {
   const response = await axios.delete(`${getApiUrl()}/tms-accounts/${encodeURIComponent(clientId)}`);
+  return response.data;
+};
+
+export const listScheduledOrders = async (): Promise<ScheduledOrder[]> => {
+  const response = await axios.get<{ scheduled_orders: ScheduledOrder[] }>(`${getApiUrl()}/scheduled_orders/`);
+  return response.data.scheduled_orders || [];
+};
+
+export const createScheduledOrder = async (payload: ScheduledOrder) => {
+  const response = await axios.post(`${getApiUrl()}/scheduled_orders/`, {
+    client_id: payload.client_id,
+    security_details: payload.security_details || {},
+    script_name: payload.script_name,
+    price: Number(payload.price),
+    qty: Number(payload.qty),
+    order_type: payload.order_type,
+    status: payload.status || 'pending',
+  });
+  return response.data;
+};
+
+export const clearScheduledOrders = async () => {
+  const response = await axios.delete(`${getApiUrl()}/scheduled_orders/`);
   return response.data;
 };
 

@@ -463,6 +463,20 @@ def _order_status_log_from_order(order: ScheduledOrder) -> OrderStatusLog:
     )
 
 
+def _serialize_scheduled_order(order: ScheduledOrder) -> dict:
+    return {
+        "order_id": order.order_id,
+        "client_id": order.client_id,
+        "security_details": order.security_details or {},
+        "script_name": order.script_name,
+        "price": order.price,
+        "qty": order.qty,
+        "status": order.status,
+        "order_type": order.order_type,
+        "last_updated": order.last_updated.isoformat() if order.last_updated else None,
+    }
+
+
 async def _get_script_high(tms_user: TmsUser, script_name: str) -> Optional[float]:
     normalized = script_name.strip().upper()
     security = await tms_user.get_security_id(normalized)
@@ -720,6 +734,30 @@ async def delete_scheduled_order(
     db.commit()
 
     return {"message": "Order deleted successfully"}
+
+
+@app.get("/scheduled_orders/")
+async def list_scheduled_orders(db: Session = Depends(get_db)):
+    orders = db.query(ScheduledOrder).order_by(ScheduledOrder.order_id).all()
+    return {"scheduled_orders": [_serialize_scheduled_order(order) for order in orders]}
+
+
+@app.post("/scheduled_orders/")
+async def create_scheduled_order(order_data: OrderCreateRequest, db: Session = Depends(get_db)):
+    if not db.query(User).filter(User.client_id == order_data.client_id).first():
+        raise HTTPException(status_code=404, detail="User not found")
+    order = ScheduledOrder(order_data)
+    db.add(order)
+    db.commit()
+    db.refresh(order)
+    return {"message": "Scheduled order created", "order": _serialize_scheduled_order(order)}
+
+
+@app.delete("/scheduled_orders/")
+async def clear_scheduled_orders(db: Session = Depends(get_db)):
+    deleted_count = db.query(ScheduledOrder).delete(synchronize_session=False)
+    db.commit()
+    return {"message": f"Deleted {deleted_count} scheduled order(s)"}
 
 
 @app.post("/update_monitor_interval")

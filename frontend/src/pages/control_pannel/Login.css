@@ -154,6 +154,13 @@
   margin-bottom: 1rem;
 }
 
+.tms-panel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  justify-content: flex-end;
+}
+
 .tms-panel-header .tms-section-title {
   margin-bottom: 0.25rem;
 }
@@ -322,6 +329,105 @@
   animation: tms-spin 0.8s linear infinite;
 }
 
+.tms-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: rgba(15, 23, 42, 0.45);
+}
+
+.tms-modal {
+  width: min(720px, 100%);
+  max-height: calc(100vh - 2rem);
+  overflow: auto;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 20px 50px rgba(15, 23, 42, 0.2);
+  padding: 1.25rem 1.5rem;
+}
+
+.tms-modal-header,
+.tms-modal-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.tms-modal-header {
+  margin-bottom: 1rem;
+}
+
+.tms-radio-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-bottom: 1rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.tms-radio-group label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  cursor: pointer;
+}
+
+.tms-json-textarea {
+  min-height: 220px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+.tms-export-json-wrap {
+  position: relative;
+  margin-bottom: 1rem;
+}
+
+.tms-export-json-wrap .tms-json-textarea {
+  padding-right: 3rem;
+  width: 100%;
+}
+
+.tms-copy-json-btn {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+}
+
+.tms-copy-json-btn::before,
+.tms-copy-json-btn::after {
+  content: "";
+  position: absolute;
+  width: 0.72rem;
+  height: 0.9rem;
+  border: 2px solid currentColor;
+  border-radius: 2px;
+}
+
+.tms-copy-json-btn::before {
+  top: 0.42rem;
+  left: 0.5rem;
+  background: var(--color-surface);
+}
+
+.tms-copy-json-btn::after {
+  top: 0.65rem;
+  left: 0.72rem;
+  background: var(--color-surface);
+}
+
 @keyframes tms-spin {
   to {
     transform: rotate(360deg);
@@ -342,6 +448,16 @@
 
   .tms-panel-header {
     flex-direction: column;
+  }
+
+  .tms-panel-actions,
+  .tms-modal-actions {
+    justify-content: stretch;
+  }
+
+  .tms-panel-actions .btn,
+  .tms-modal-actions .btn {
+    flex: 1;
   }
 
   .tms-login-grid {

@@ -1,15 +1,25 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import './Login.css';
 import ErrorMessage from '../../components/ErrorMessage';
 import { extractApiErrorMessage } from '../../utils/apiError';
 import {
   TmsAccount,
+  clearScheduledOrders,
+  createScheduledOrder,
   createTmsAccount,
   deleteTmsAccount,
+  listScheduledOrders,
   listTmsAccounts,
   loginTmsAccount,
   updateTmsAccount,
 } from '../../api/tmsAccounts.api';
+import {
+  TmsExportType,
+  copyJsonToClipboard,
+  downloadJsonFile,
+  exportTmsData,
+  parseImportData,
+} from '../../utils/tmsDataPortability';
 
 type FormMode = 'create' | 'edit' | null;
 
@@ -34,6 +44,15 @@ const Login: React.FC = () => {
   const [successMessage, setSuccessMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
   const [loadWarning, setLoadWarning] = useState('');
+  const [importOpen, setImportOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [importType, setImportType] = useState<TmsExportType>('users-only');
+  const [exportType, setExportType] = useState<TmsExportType>('users-only');
+  const [importText, setImportText] = useState('');
+  const [importFileName, setImportFileName] = useState('');
+  const [importError, setImportError] = useState('');
+  const [importPreviewText, setImportPreviewText] = useState('');
+  const [exportJson, setExportJson] = useState('');
 
   const loadAccounts = useCallback(async (options?: { silent?: boolean }) => {
     if (!options?.silent) {
@@ -65,6 +84,13 @@ const Login: React.FC = () => {
     setErrorMessage('');
   };
 
+  const resetImportState = () => {
+    setImportText('');
+    setImportFileName('');
+    setImportError('');
+    setImportPreviewText('');
+  };
+
   const openCreateForm = () => {
     resetMessages();
     setFormMode('create');
@@ -90,6 +116,82 @@ const Login: React.FC = () => {
     setFormMode(null);
     setEditingClientId(null);
     setForm(emptyForm);
+  };
+
+  const refreshImportPreview = useCallback((jsonText: string, selectedType: TmsExportType) => {
+    if (!jsonText.trim()) {
+      setImportPreviewText('');
+      setImportError('');
+      return;
+    }
+    try {
+      const parsed = parseImportData(jsonText, selectedType);
+      const preview = parsed.preview;
+      const parts = [
+        `${preview.uniqueUsers} unique user(s) found`,
+        `${preview.duplicateUsers} duplicate user(s) skipped/merged`,
+      ];
+      if (selectedType === 'users-with-data') {
+        parts.push(`${preview.scheduledOrders} scheduled order(s) found`);
+        parts.push(`${preview.duplicateScheduledOrders} duplicate scheduled order(s) skipped/merged`);
+      }
+      setImportPreviewText(parts.join('. '));
+      setImportError(parsed.skippedScheduledOrders > 0 ? 'Some scheduled orders could not be imported' : '');
+    } catch (error) {
+      setImportPreviewText('');
+      setImportError(error instanceof Error ? error.message : 'Invalid JSON format');
+    }
+  }, []);
+
+  const handleImportTextChange = (value: string) => {
+    setImportText(value);
+    refreshImportPreview(value, importType);
+  };
+
+  const handleImportTypeChange = (value: TmsExportType) => {
+    setImportType(value);
+    refreshImportPreview(importText, value);
+  };
+
+  const handleImportFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) {
+      return;
+    }
+    setImportFileName(file.name);
+    const text = await file.text();
+    setImportText(text);
+    refreshImportPreview(text, importType);
+  };
+
+  const openImportModal = () => {
+    resetMessages();
+    resetImportState();
+    setImportOpen(true);
+  };
+
+  const openExportModal = async () => {
+    resetMessages();
+    setActionLoading('export');
+    try {
+      const scheduledOrders = exportType === 'users-with-data' ? await listScheduledOrders() : [];
+      setExportJson(exportTmsData(exportType, accounts, scheduledOrders));
+      setExportOpen(true);
+    } catch (error) {
+      setErrorMessage(extractApiErrorMessage(error));
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleExportTypeChange = async (value: TmsExportType) => {
+    setExportType(value);
+    try {
+      const scheduledOrders = value === 'users-with-data' ? await listScheduledOrders() : [];
+      setExportJson(exportTmsData(value, accounts, scheduledOrders));
+    } catch (error) {
+      setErrorMessage(extractApiErrorMessage(error));
+    }
   };
 
   const handleSave = async (e: React.FormEvent) => {
@@ -146,6 +248,56 @@ const Login: React.FC = () => {
     }
   };
 
+  const handleImport = async () => {
+    resetMessages();
+    setImportError('');
+    setActionLoading('import');
+    try {
+      const parsed = parseImportData(importText, importType);
+      if (parsed.skippedScheduledOrders > 0 && importType === 'users-with-data') {
+        setImportError('Some scheduled orders could not be imported');
+      }
+
+      if (importType === 'users-with-data') {
+        await clearScheduledOrders();
+      }
+
+      for (const account of accounts) {
+        try {
+          await deleteTmsAccount(account.client_id);
+        } catch {
+          // A logged-in session can appear without a saved account row.
+        }
+      }
+      for (const item of parsed.users) {
+        await createTmsAccount(item.user);
+      }
+      let failedScheduledOrders = parsed.skippedScheduledOrders;
+      if (importType === 'users-with-data') {
+        const orders = parsed.users.flatMap((item) => item.scheduledOrders);
+        for (const order of orders) {
+          try {
+            await createScheduledOrder(order);
+          } catch {
+            failedScheduledOrders += 1;
+          }
+        }
+      }
+
+      setSuccessMessage('TMS data imported successfully');
+      if (failedScheduledOrders > 0) {
+        setErrorMessage('Some scheduled orders could not be imported');
+      }
+      setImportOpen(false);
+      resetImportState();
+      await loadAccounts();
+    } catch (error) {
+      setImportError(error instanceof Error ? error.message : extractApiErrorMessage(error));
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
   const formatLoginResponse = (response: { message?: Record<string, string> }) => {
     const payload = response?.message || {};
     const loginMessage = payload.message || 'TMS login successful';
@@ -172,6 +324,7 @@ const Login: React.FC = () => {
   };
 
   const loggedInAccounts = accounts.filter((a) => a.session_status === 'logged_in');
+  const exportContainsSensitiveData = useMemo(() => exportJson.trim().length > 0, [exportJson]);
 
   return (
     <div className="tms-login-page">
@@ -243,9 +396,22 @@ const Login: React.FC = () => {
               <h3 className="tms-section-title">All Accounts</h3>
               <p className="panel-subtitle">Saved broker credentials and session status.</p>
             </div>
-            <button type="button" className="btn btn-primary" onClick={openCreateForm}>
-              + Add Account
-            </button>
+            <div className="tms-panel-actions">
+              <button type="button" className="btn btn-secondary" onClick={openImportModal}>
+                Import
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => { void openExportModal(); }}
+                disabled={actionLoading === 'export'}
+              >
+                Export
+              </button>
+              <button type="button" className="btn btn-primary" onClick={openCreateForm}>
+                + Add Account
+              </button>
+            </div>
           </div>
 
           {loading ? (
@@ -401,6 +567,133 @@ const Login: React.FC = () => {
           </div>
         )}
       </div>
+
+      {importOpen && (
+        <div className="tms-modal-backdrop" role="presentation">
+          <div className="tms-modal" role="dialog" aria-modal="true" aria-labelledby="importTmsTitle">
+            <div className="tms-modal-header">
+              <h3 id="importTmsTitle" className="tms-section-title">Import TMS Data</h3>
+              <button type="button" className="btn btn-secondary btn-sm" onClick={() => setImportOpen(false)}>
+                Cancel
+              </button>
+            </div>
+            <div className="tms-radio-group">
+              <label>
+                <input
+                  type="radio"
+                  checked={importType === 'users-only'}
+                  onChange={() => handleImportTypeChange('users-only')}
+                />
+                Users only
+              </label>
+              <label>
+                <input
+                  type="radio"
+                  checked={importType === 'users-with-data'}
+                  onChange={() => handleImportTypeChange('users-with-data')}
+                />
+                Users + data
+              </label>
+            </div>
+            <div className="form-group">
+              <label htmlFor="tmsImportFile">Import from file</label>
+              <input id="tmsImportFile" type="file" accept=".json,application/json" onChange={handleImportFile} />
+              {importFileName && <p className="tms-muted">Selected: {importFileName}</p>}
+            </div>
+            <div className="form-group">
+              <label htmlFor="tmsImportJson">Paste JSON</label>
+              <textarea
+                id="tmsImportJson"
+                className="input tms-json-textarea"
+                value={importText}
+                onChange={(event) => handleImportTextChange(event.target.value)}
+                placeholder="Paste TMS export JSON here"
+              />
+            </div>
+            {importPreviewText && <ErrorMessage message={importPreviewText} variant="info" persistent />}
+            {importError && <ErrorMessage message={importError} variant="error" persistent />}
+            <div className="tms-modal-actions">
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => { void handleImport(); }}
+                disabled={!importText.trim() || actionLoading === 'import'}
+              >
+                {actionLoading === 'import' ? 'Importing...' : 'Import'}
+              </button>
+              <button type="button" className="btn btn-secondary" onClick={() => setImportOpen(false)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {exportOpen && (
+        <div className="tms-modal-backdrop" role="presentation">
+          <div className="tms-modal" role="dialog" aria-modal="true" aria-labelledby="exportTmsTitle">
+            <div className="tms-modal-header">
+              <h3 id="exportTmsTitle" className="tms-section-title">Export TMS Data</h3>
+              <button type="button" className="btn btn-secondary btn-sm" onClick={() => setExportOpen(false)}>
+                Cancel
+              </button>
+            </div>
+            <div className="tms-radio-group">
+              <label>
+                <input
+                  type="radio"
+                  checked={exportType === 'users-only'}
+                  onChange={() => { void handleExportTypeChange('users-only'); }}
+                />
+                Users only
+              </label>
+              <label>
+                <input
+                  type="radio"
+                  checked={exportType === 'users-with-data'}
+                  onChange={() => { void handleExportTypeChange('users-with-data'); }}
+                />
+                Users + data
+              </label>
+            </div>
+            {exportContainsSensitiveData && (
+              <ErrorMessage
+                message="This JSON may contain sensitive information such as usernames, passwords, PINs, account details, and scheduled order details. Store it safely."
+                variant="info"
+                persistent
+              />
+            )}
+            <div className="tms-export-json-wrap">
+              <textarea className="input tms-json-textarea" value={exportJson} readOnly />
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm tms-copy-json-btn"
+                aria-label="Copy JSON"
+                title="Copy JSON"
+                onClick={async () => {
+                  await copyJsonToClipboard(exportJson);
+                  setSuccessMessage('JSON copied');
+                }}
+              />
+            </div>
+            <div className="tms-modal-actions">
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => {
+                  downloadJsonFile(exportJson, exportType);
+                  setSuccessMessage('Export file downloaded');
+                }}
+              >
+                Download JSON File
+              </button>
+              <button type="button" className="btn btn-secondary" onClick={() => setExportOpen(false)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

@@ -130,6 +130,21 @@ def running_container_image() -> str:
     )
 
 
+def container_exists(name: str) -> bool:
+    return subprocess.run(
+        ["docker", "container", "inspect", name],
+        cwd=ROOT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    ).returncode == 0
+
+
+def remove_container_preserving_volumes(name: str) -> None:
+    run(["docker", "stop", name], check=False)
+    run(["docker", "rm", name])
+
+
 def image_exists(image: str) -> bool:
     return subprocess.run(
         ["docker", "image", "inspect", image],
@@ -240,6 +255,10 @@ def main() -> int:
         recreate = args.force_recreate or build_needed or running_source != source_id
         if recreate:
             sys.stdout.flush()
+            if container_exists("tms-automation"):
+                print("\nRemoving old tms-automation container after successful image build.")
+                print("Database volume is preserved; not removing Docker volumes.")
+                remove_container_preserving_volumes("tms-automation")
             run([*compose, "up", "-d", "--no-build", "--force-recreate"])
         else:
             print("\nContainer already runs the matching source image; leaving it running.")
