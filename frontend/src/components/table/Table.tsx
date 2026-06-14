@@ -68,10 +68,13 @@ const CommonTable: React.FC<CommonTableProps> = ({ data, onAction, columns, empt
 
   // Format value for display
   const formatValue = (value: any) => {
+    if (React.isValidElement(value)) {
+      return value;
+    }
     if (typeof value === 'object' && value !== null) {
       return JSON.stringify(value);
     }
-    return value;
+    return value == null || value === '' ? '-' : value;
   };
 
   return (

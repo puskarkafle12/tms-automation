@@ -19,6 +19,27 @@ interface ScheduledOrderRow {
   qty: number;
   status: string;
   order_type: string;
+  created_at?: string | null;
+  strategy_type?: string;
+  side?: string;
+  stop_loss_price?: number | null;
+  stop_limit_price?: number | null;
+  book_profit_price?: number | null;
+  profit_target_price?: number | null;
+  trailing_drop_percent?: number | null;
+  stable_band_percent?: number | null;
+  minimum_wait_minutes?: number | null;
+  consecutive_drop_checks?: number | null;
+  activation_price?: number | null;
+  average_buy_price?: number | null;
+  highest_tracked_price?: number | null;
+  target_reached_at?: string | null;
+  execution_price?: number | null;
+  execution_price_source?: string | null;
+  execution_reason?: string | null;
+  expiry_time?: string | null;
+  expiry_action?: string | null;
+  max_allowed_slippage_percent?: number | null;
   scanning_count?: number;
   current_price?: number | null;
   live_status?: string;
@@ -29,22 +50,141 @@ const formatScanCount = (value: number | null | undefined): number => {
   return Math.max(0, Math.round(Number(value) || 0));
 };
 
-const formatNepsePrice = (value: number | null | undefined): string => {
-  if (value == null || Number.isNaN(Number(value))) {
-    return '';
-  }
-  const num = Number(value);
-  if (Number.isInteger(num) || Math.abs(num - Math.round(num)) < 0.0001) {
-    return String(Math.round(num));
-  }
-  return num.toFixed(1);
-};
-
 const formatLiveScanStatus = (order: ScheduledOrderRow): string => {
   if (order.live_status) {
     return order.live_status;
   }
   return order.status || 'pending';
+};
+
+const isRealValue = (value: unknown): boolean => {
+  if (value == null) return false;
+  if (typeof value === 'string') return value.trim() !== '';
+  return true;
+};
+
+const getVisibleColumns = (rows: any[], baseColumns: string[], optionalColumns: string[] = []) => [
+  ...baseColumns,
+  ...optionalColumns.filter((column) => rows.some((row) => isRealValue(row[column]))),
+];
+
+const toTitleCase = (value: string) =>
+  value
+    .replace(/_/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+
+const getOrderSide = (order: Partial<ScheduledOrderRow> | any): 'BUY' | 'SELL' | 'UNKNOWN' => {
+  const side = String(order.side || order.order_type || '').toUpperCase();
+  if (side === 'BUY' || side === 'SELL') return side;
+  return 'UNKNOWN';
+};
+
+const formatStrategyType = (strategy: unknown, sideValue: unknown): string => {
+  const side = String(sideValue || '').toUpperCase();
+  const raw = String(strategy || '').trim();
+  if (!raw || raw === 'Fixed Price') {
+    if (side === 'BUY') return 'Fixed Price Buy';
+    if (side === 'SELL') return 'Fixed Price Sell';
+    return 'Fixed Price';
+  }
+  return toTitleCase(raw);
+};
+
+const formatDateTime = (value: string | null | undefined) => {
+  if (!value) return '';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+};
+
+const formatCurrency = (value: number | string | null | undefined) => {
+  if (value == null || value === '' || Number.isNaN(Number(value))) return '';
+  return `Rs. ${Number(value).toLocaleString('en-NP', { maximumFractionDigits: 2 })}`;
+};
+
+const formatPercent = (value: number | null | undefined) => {
+  if (value == null || Number.isNaN(Number(value))) return '';
+  return `${value}%`;
+};
+
+const addDetail = (items: Array<{ label: string; value: string }>, label: string, value: unknown, formatter?: (value: any) => string) => {
+  if (!isRealValue(value)) return;
+  const formatted = formatter ? formatter(value) : String(value);
+  if (isRealValue(formatted)) {
+    items.push({ label, value: formatted });
+  }
+};
+
+const getStrategyDetails = (order: ScheduledOrderRow) => {
+  const side = getOrderSide(order);
+  const strategy = formatStrategyType(order.strategy_type, side);
+  const details: Array<{ label: string; value: string }> = [];
+
+  addDetail(details, 'Strategy', strategy);
+  addDetail(details, 'Side', side);
+  addDetail(details, 'Stock', order.script_name);
+  addDetail(details, 'Quantity', order.qty);
+  addDetail(details, 'Status', order.status || order.live_status);
+  addDetail(details, 'Created At', order.created_at, formatDateTime);
+
+  if (strategy === 'Fixed Price Buy') {
+    addDetail(details, 'Buy Price', order.price, formatCurrency);
+  } else if (strategy === 'Fixed Price Sell') {
+    addDetail(details, 'Sell Price', order.price, formatCurrency);
+  } else if (strategy === 'Buy Below Price' || strategy === 'Dip Buy') {
+    addDetail(details, 'Trigger Buy Price', order.price, formatCurrency);
+  } else if (strategy === 'Breakout Buy') {
+    addDetail(details, 'Breakout Trigger Price', order.price, formatCurrency);
+    addDetail(details, 'Confirmation Checks', order.consecutive_drop_checks);
+  } else if (strategy === 'Time-Based Buy') {
+    addDetail(details, 'Buy Price', order.price, formatCurrency);
+    addDetail(details, 'Expiry Time', order.expiry_time, formatDateTime);
+    addDetail(details, 'Expiry Action', order.expiry_action);
+  } else if (strategy === 'Fast Stop Loss') {
+    addDetail(details, 'Stop Loss Price', order.stop_loss_price, formatCurrency);
+    addDetail(details, 'Max Allowed Slippage', order.max_allowed_slippage_percent, formatPercent);
+    addDetail(details, 'Execution Rule', 'Use Top Buy if available, otherwise latest LTP.');
+  } else if (strategy === 'Stop Limit Sell') {
+    addDetail(details, 'Stop Trigger', order.stop_loss_price, formatCurrency);
+    addDetail(details, 'Minimum Sell Price', order.stop_limit_price, formatCurrency);
+  } else if (strategy === 'Trailing Stop Loss') {
+    addDetail(details, 'Activation Price', order.activation_price, formatCurrency);
+    addDetail(details, 'Highest Tracked Price', order.highest_tracked_price, formatCurrency);
+    addDetail(details, 'Trailing Drop', order.trailing_drop_percent, formatPercent);
+  } else if (strategy === 'Smart Profit Booking') {
+    addDetail(details, 'Profit Target', order.profit_target_price, formatCurrency);
+    addDetail(details, 'Highest Tracked Price', order.highest_tracked_price, formatCurrency);
+    addDetail(details, 'Minimum Wait Time', order.minimum_wait_minutes ? `${order.minimum_wait_minutes} minutes` : '');
+    addDetail(details, 'Trailing Drop', order.trailing_drop_percent, formatPercent);
+    addDetail(details, 'Stable Band', order.stable_band_percent, formatPercent);
+    addDetail(details, 'Target Reached At', order.target_reached_at, formatDateTime);
+  } else if (strategy === 'Book Profit + Stop Loss') {
+    addDetail(details, 'Book Profit Target', order.book_profit_price, formatCurrency);
+    addDetail(details, 'Stop Loss Price', order.stop_loss_price, formatCurrency);
+    addDetail(details, 'Highest Tracked Price', order.highest_tracked_price, formatCurrency);
+  } else if (strategy === 'Partial Profit Booking') {
+    addDetail(details, 'Highest Tracked Price', order.highest_tracked_price, formatCurrency);
+    addDetail(details, 'Trailing Drop', order.trailing_drop_percent, formatPercent);
+  } else if (strategy === 'Break-Even Protection') {
+    addDetail(details, 'Average Buy Price', order.average_buy_price, formatCurrency);
+    addDetail(details, 'Activation Price', order.activation_price, formatCurrency);
+    addDetail(details, 'Highest Tracked Price', order.highest_tracked_price, formatCurrency);
+    addDetail(details, 'Trailing Drop', order.trailing_drop_percent, formatPercent);
+  } else if (strategy === 'Time-Based Exit') {
+    addDetail(details, 'Target Price', order.profit_target_price, formatCurrency);
+    addDetail(details, 'Stop Loss Price', order.stop_loss_price, formatCurrency);
+    addDetail(details, 'Expiry Time', order.expiry_time, formatDateTime);
+    addDetail(details, 'Expiry Action', order.expiry_action);
+  } else if (strategy === 'Emergency Exit') {
+    addDetail(details, 'Execution Rule', 'Sell immediately using Top Buy if available.');
+    addDetail(details, 'Max Allowed Slippage', order.max_allowed_slippage_percent, formatPercent);
+  }
+
+  addDetail(details, 'Execution Price', order.execution_price, formatCurrency);
+  addDetail(details, 'Execution Price Source', order.execution_price_source);
+  addDetail(details, 'Execution Reason', order.execution_reason);
+  return details;
 };
 
 const TABS: { id: OrderTab; label: string; icon: string }[] = [
@@ -77,6 +217,7 @@ const GetOrderStatus: React.FC = () => {
   const [dialogVisible, setDialogVisible] = useState(false);
   const [dialogMessage, setDialogMessage] = useState('');
   const [dialogAction, setDialogAction] = useState<() => void>(() => {});
+  const [strategyDetailsOrder, setStrategyDetailsOrder] = useState<ScheduledOrderRow | null>(null);
   const [errorMessage, setErrorMessage] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
   const apiUrl = localStorage.getItem('apiUrl') || window.location.origin;
@@ -308,27 +449,85 @@ const GetOrderStatus: React.FC = () => {
 
   const scheduledRows = useMemo(
     () =>
-      scheduledOrders.map((order) => ({
-        ...order,
-        price: formatNepsePrice(order.price) || order.price,
-        qty: formatScanCount(order.qty),
-        status: formatLiveScanStatus(order),
-      })),
+      scheduledOrders.map((order) => {
+        const side = getOrderSide(order);
+        const strategyLabel = formatStrategyType(order.strategy_type, side);
+        return {
+          ...order,
+          order_type: side,
+          strategy_type: (
+            <button
+              type="button"
+              className={`strategy-chip ${side === 'BUY' ? 'buy' : side === 'SELL' ? 'sell' : ''}`}
+              onClick={() => setStrategyDetailsOrder(order)}
+            >
+              {strategyLabel}
+            </button>
+          ),
+          created_at: formatDateTime(order.created_at || order.target_reached_at || ''),
+          qty: formatScanCount(order.qty),
+          status: formatLiveScanStatus(order),
+        };
+      }),
     [scheduledOrders],
+  );
+
+  const orderLogRows = useMemo(
+    () =>
+      orderLogs.map((order) => {
+        const side = getOrderSide(order);
+        const strategyLabel = formatStrategyType(order.strategy_type, side);
+        const detailOrder: ScheduledOrderRow = {
+          order_id: order.order_id || 0,
+          client_id: order.client_id || '',
+          script_name: order.script_name || '',
+          price: Number(order.execution_price ?? order.price ?? 0),
+          qty: Number(order.qty || 0),
+          status: order.status || '',
+          order_type: String(order.order_type || side).toLowerCase(),
+          strategy_type: strategyLabel,
+          side,
+          created_at: order.timestamp,
+          execution_price: order.execution_price ?? order.price,
+          execution_reason: order.status,
+        };
+        return {
+          timestamp: formatDateTime(order.timestamp),
+          script_name: order.script_name,
+          order_type: side,
+          qty: formatScanCount(order.qty),
+          strategy_type: (
+            <button
+              type="button"
+              className={`strategy-chip ${side === 'BUY' ? 'buy' : side === 'SELL' ? 'sell' : ''}`}
+              onClick={() => setStrategyDetailsOrder(detailOrder)}
+            >
+              {strategyLabel}
+            </button>
+          ),
+          status: order.status,
+          price: formatCurrency(order.execution_price ?? order.price),
+        };
+      }),
+    [orderLogs],
   );
 
   const tabData: Record<OrderTab, { count: number; columns: string[]; rows: any[]; empty: string }> = {
     logs: {
       count: orderLogs.length,
-      columns: ['client_id', 'script_name', 'qty', 'price', 'order_type', 'status', 'timestamp'],
-      rows: orderLogs,
+      columns: getVisibleColumns(
+        orderLogRows,
+        ['timestamp', 'script_name', 'order_type', 'qty', 'strategy_type', 'status'],
+        ['price'],
+      ),
+      rows: orderLogRows,
       empty: hasLoaded
         ? 'No order logs found for today.'
         : 'Loading order logs...',
     },
     scheduled: {
       count: scheduledOrders.length,
-      columns: ['client_id', 'script_name', 'order_type', 'price', 'status', 'qty'],
+      columns: ['script_name', 'order_type', 'qty', 'strategy_type', 'status', 'created_at'],
       rows: scheduledRows,
       empty: hasLoaded
         ? 'No scheduled orders found.'
@@ -497,6 +696,30 @@ const GetOrderStatus: React.FC = () => {
           onConfirm={dialogAction}
           onCancel={() => setDialogVisible(false)}
         />
+      )}
+
+      {strategyDetailsOrder && (
+        <div className="strategy-details-backdrop" role="presentation" onClick={() => setStrategyDetailsOrder(null)}>
+          <div className="strategy-details-modal" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+            <div className="strategy-details-header">
+              <div>
+                <h3>Strategy Details</h3>
+                <p>{strategyDetailsOrder.script_name}</p>
+              </div>
+              <button type="button" className="strategy-details-close" onClick={() => setStrategyDetailsOrder(null)} aria-label="Close strategy details">
+                ×
+              </button>
+            </div>
+            <dl className="strategy-details-list">
+              {getStrategyDetails(strategyDetailsOrder).map((item) => (
+                <div key={item.label} className="strategy-details-row">
+                  <dt>{item.label}</dt>
+                  <dd>{item.value}</dd>
+                </div>
+              ))}
+            </dl>
+          </div>
+        </div>
       )}
     </div>
   );

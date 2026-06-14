@@ -127,6 +127,110 @@
   margin: 0;
 }
 
+.common-table .strategy-chip,
+.strategy-chip {
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  padding: 0.3rem 0.65rem;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-size: 0.75rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.common-table .strategy-chip.buy,
+.strategy-chip.buy {
+  border-color: #86efac;
+  background: #f0fdf4;
+  color: #166534;
+}
+
+.common-table .strategy-chip.sell,
+.strategy-chip.sell {
+  border-color: #fca5a5;
+  background: #fef2f2;
+  color: #991b1b;
+}
+
+.strategy-details-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: rgba(15, 23, 42, 0.45);
+}
+
+.strategy-details-modal {
+  width: min(520px, 100%);
+  max-height: 85vh;
+  overflow: auto;
+  background: var(--color-surface);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  box-shadow: var(--shadow-lg);
+}
+
+.strategy-details-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.strategy-details-header h3,
+.strategy-details-header p {
+  margin: 0;
+}
+
+.strategy-details-header p {
+  margin-top: 0.25rem;
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+}
+
+.strategy-details-close {
+  border: none;
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  font-size: 1.5rem;
+  line-height: 1;
+}
+
+.strategy-details-list {
+  margin: 0;
+  padding: 0.75rem 1.25rem 1.25rem;
+}
+
+.strategy-details-row {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr);
+  gap: 1rem;
+  padding: 0.65rem 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.strategy-details-row:last-child {
+  border-bottom: none;
+}
+
+.strategy-details-row dt {
+  color: var(--color-text-muted);
+  font-weight: 700;
+}
+
+.strategy-details-row dd {
+  margin: 0;
+  color: var(--color-text);
+  font-weight: 600;
+}
+
 .order-logs-loading {
   display: flex;
   flex-direction: column;

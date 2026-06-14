@@ -1,7 +1,8 @@
 # schemas.py
 
 from pydantic import BaseModel
-from typing import Dict, Optional
+from datetime import datetime
+from typing import Any, Dict, Optional
 class OrderCreateRequest(BaseModel):
     client_id: str
     security_details: Dict={}
@@ -10,6 +11,30 @@ class OrderCreateRequest(BaseModel):
     qty: int
     order_type: str
     status: str = "pending"
+    strategy_type: Optional[str] = "Fixed Price"
+    side: Optional[str] = None
+    symbol: Optional[str] = None
+    company_name: Optional[str] = None
+    remaining_quantity: Optional[int] = None
+    limit_price: Optional[float] = None
+    stop_loss_price: Optional[float] = None
+    stop_limit_price: Optional[float] = None
+    book_profit_price: Optional[float] = None
+    profit_target_price: Optional[float] = None
+    trailing_drop_percent: Optional[float] = None
+    stable_band_percent: Optional[float] = None
+    minimum_wait_minutes: Optional[int] = None
+    consecutive_drop_checks: Optional[int] = None
+    activation_price: Optional[float] = None
+    protected_price: Optional[float] = None
+    average_buy_price: Optional[float] = None
+    partial_legs: Optional[Any] = None
+    executed_legs: Optional[Any] = None
+    expiry_time: Optional[datetime] = None
+    expiry_action: Optional[str] = None
+    max_allowed_slippage_percent: Optional[float] = None
+    emergency_execution: Optional[bool] = False
+    user_allocation: Optional[Any] = None
 
 class LoginRequest(BaseModel):
     username: str

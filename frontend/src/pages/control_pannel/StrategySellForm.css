@@ -1,0 +1,47 @@
+.strategy-sell-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.strategy-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.strategy-helper,
+.strategy-error {
+  display: block;
+  margin-top: 0.35rem;
+  font-size: 0.78rem;
+}
+
+.strategy-helper {
+  color: var(--color-text-muted);
+}
+
+.strategy-error {
+  color: var(--color-danger);
+  font-weight: 600;
+}
+
+.strategy-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.strategy-submit {
+  width: 100%;
+  padding: 0.75rem;
+}
+
+@media (max-width: 720px) {
+  .strategy-grid {
+    grid-template-columns: 1fr;
+  }
+}
