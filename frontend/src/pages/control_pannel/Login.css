@@ -236,6 +236,11 @@
   max-width: 220px;
 }
 
+.tms-session-age {
+  font-size: 0.6875rem;
+  color: var(--color-text-muted);
+}
+
 .tms-actions {
   display: flex;
   flex-wrap: wrap;

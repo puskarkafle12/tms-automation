@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import './DpHolding.css';
 import ErrorMessage from '../../components/ErrorMessage';
 
@@ -14,6 +14,17 @@ interface DPHolding {
   previousCloseprice?: number;
   ltp?: number;
   currentBalance?: number;
+}
+
+interface ClientSession {
+  client_id: string;
+  display_name?: string | null;
+  broker_no: string;
+}
+
+interface CombinedHolding extends DPHolding {
+  holders: DPHolding[];
+  clientCount: number;
 }
 
 interface QuoteLevel {
@@ -53,6 +64,13 @@ const formatCurrency = (value: number) =>
 
 const holdingSymbol = (holding: DPHolding) => holding.scrip || holding.symbolName || '';
 
+const clientLabel = (client: ClientSession) => {
+  const name = client.display_name?.trim() || client.client_id;
+  return client.broker_no ? `${name}[${client.broker_no}]` : name;
+};
+
+const normalizeSymbol = (holding: DPHolding) => holdingSymbol(holding).trim().toUpperCase();
+
 const formatValue = (value: unknown) => {
   if (typeof value === 'number') {
     return value.toLocaleString('en-NP', { maximumFractionDigits: 2 });
@@ -63,10 +81,68 @@ const formatValue = (value: unknown) => {
   return '-';
 };
 
+const processHoldings = (holdings: DPHolding[]) =>
+  holdings.map((holding) => {
+    const gainedProfit = (holding.valueAsOfLTP || 0) - (holding.valueAsOfPreviousClosePrice || 0);
+    const percentChange = holding.valueAsOfPreviousClosePrice
+      ? ((gainedProfit / holding.valueAsOfPreviousClosePrice) * 100).toFixed(1)
+      : '0.0';
+
+    return {
+      ...holding,
+      percentChange,
+      gainedProfit,
+      color:
+        (holding.valueAsOfLTP || 0) > (holding.valueAsOfPreviousClosePrice || 0)
+          ? 'lightgreen'
+          : (holding.valueAsOfLTP || 0) < (holding.valueAsOfPreviousClosePrice || 0)
+            ? 'red'
+            : 'lightyellow',
+    };
+  });
+
+const combineHoldings = (holdings: DPHolding[]): CombinedHolding[] => {
+  const bySymbol = new Map<string, CombinedHolding>();
+  for (const holding of holdings) {
+    const symbol = normalizeSymbol(holding);
+    if (!symbol) {
+      continue;
+    }
+    const existing = bySymbol.get(symbol);
+    if (existing) {
+      existing.holders.push(holding);
+      existing.clientCount = new Set(existing.holders.map((item) => item.clientID)).size;
+      existing.currentBalance = (existing.currentBalance || 0) + (holding.currentBalance || 0);
+      existing.valueAsOfLTP = (existing.valueAsOfLTP || 0) + (holding.valueAsOfLTP || 0);
+      existing.valueAsOfPreviousClosePrice =
+        (existing.valueAsOfPreviousClosePrice || 0) + (holding.valueAsOfPreviousClosePrice || 0);
+      existing.gainedProfit = (existing.valueAsOfLTP || 0) - (existing.valueAsOfPreviousClosePrice || 0);
+      existing.percentChange = existing.valueAsOfPreviousClosePrice
+        ? (((existing.gainedProfit || 0) / existing.valueAsOfPreviousClosePrice) * 100).toFixed(1)
+        : '0.0';
+      existing.ltp = holding.ltp || existing.ltp;
+      existing.previousCloseprice = holding.previousCloseprice || existing.previousCloseprice;
+    } else {
+      bySymbol.set(symbol, {
+        ...holding,
+        clientID: 'combined',
+        scrip: symbol,
+        holders: [holding],
+        clientCount: 1,
+      });
+    }
+  }
+  return processHoldings(Array.from(bySymbol.values())) as CombinedHolding[];
+};
+
 const DPHoldings: React.FC = () => {
   const [loggedInClientIDs, setLoggedInClientIDs] = useState<string[]>([]);
+  const [loggedInClients, setLoggedInClients] = useState<ClientSession[]>([]);
+  const [selectedCombinedClients, setSelectedCombinedClients] = useState<string[]>([]);
   const [clientID, setClientID] = useState('');
   const [dpHoldings, setDPHoldings] = useState<DPHolding[]>([]);
+  const [combinedHoldings, setCombinedHoldings] = useState<CombinedHolding[]>([]);
+  const [holdingMode, setHoldingMode] = useState<'single' | 'combined'>('single');
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
@@ -86,8 +162,15 @@ const DPHoldings: React.FC = () => {
         const response = await fetch(`${getApiUrl()}/logged_in_clients/`);
         if (response.ok) {
           const data = await response.json();
-          setLoggedInClientIDs(data.logged_in_client_ids);
-          setClientID(data.logged_in_client_ids[0] || '');
+          const sessions: ClientSession[] = data.sessions || (data.logged_in_client_ids || []).map((id: string) => ({
+            client_id: id,
+            broker_no: '',
+          }));
+          const ids = sessions.map((client) => client.client_id);
+          setLoggedInClients(sessions);
+          setLoggedInClientIDs(ids);
+          setSelectedCombinedClients(ids);
+          setClientID(ids[0] || '');
         }
       } catch (error) {
         console.error('Error fetching logged-in client IDs:', error);
@@ -130,26 +213,7 @@ const DPHoldings: React.FC = () => {
         return;
       }
 
-      const processedData = data.map((holding: DPHolding) => {
-        const gainedProfit = holding.valueAsOfLTP - holding.valueAsOfPreviousClosePrice;
-        const percentChange = holding.valueAsOfPreviousClosePrice
-          ? ((gainedProfit / holding.valueAsOfPreviousClosePrice) * 100).toFixed(1)
-          : '0.0';
-
-        return {
-          ...holding,
-          percentChange,
-          gainedProfit,
-          color:
-            holding.valueAsOfLTP > holding.valueAsOfPreviousClosePrice
-              ? 'lightgreen'
-              : holding.valueAsOfLTP < holding.valueAsOfPreviousClosePrice
-                ? 'red'
-                : 'lightyellow',
-        };
-      });
-
-      setDPHoldings(processedData);
+      setDPHoldings(processHoldings(data));
     } catch (error) {
       setErrorMessage('Failed to fetch DP holdings. Check your API connection.');
       setDPHoldings([]);
@@ -160,12 +224,75 @@ const DPHoldings: React.FC = () => {
     }
   }, []);
 
+
   useEffect(() => {
-    fetchHoldings(clientID);
-  }, [clientID, fetchHoldings]);
+    if (holdingMode === 'single') {
+      fetchHoldings(clientID);
+    }
+  }, [clientID, fetchHoldings, holdingMode]);
+
+  const fetchCombinedHoldings = useCallback(async (clientIds: string[]) => {
+    const selectedIds = clientIds.filter(Boolean);
+    if (selectedIds.length === 0) {
+      setCombinedHoldings([]);
+      setHasFetched(false);
+      return;
+    }
+
+    const requestId = holdingsRequestId.current + 1;
+    holdingsRequestId.current = requestId;
+    setIsLoading(true);
+    setErrorMessage('');
+    setHasFetched(true);
+
+    try {
+      const allHoldings = await Promise.all(
+        selectedIds.map(async (id) => {
+          const response = await fetch(`${getApiUrl()}/dp_holdings?client_id=${encodeURIComponent(id)}`, {
+            headers: { Accept: 'application/json' },
+          });
+          if (!response.ok) {
+            return [];
+          }
+          const data = await response.json();
+          return processHoldings(
+            data.map((holding: DPHolding) => ({
+              ...holding,
+              clientID: id,
+            })),
+          );
+        }),
+      );
+
+      if (requestId !== holdingsRequestId.current) {
+        return;
+      }
+      setCombinedHoldings(combineHoldings(allHoldings.flat()));
+    } catch {
+      setErrorMessage('Failed to fetch combined holdings. Check your API connection.');
+      setCombinedHoldings([]);
+    } finally {
+      if (requestId === holdingsRequestId.current) {
+        setIsLoading(false);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    if (holdingMode === 'combined') {
+      void fetchCombinedHoldings(selectedCombinedClients);
+    }
+  }, [fetchCombinedHoldings, holdingMode, selectedCombinedClients]);
+
+  const toggleCombinedClient = (id: string) => {
+    setSelectedCombinedClients((prev) =>
+      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id],
+    );
+  };
 
   const openSellDialog = async (holding: DPHolding) => {
     const symbol = holdingSymbol(holding);
+    const quoteClientId = (holding as CombinedHolding).holders?.[0]?.clientID || clientID;
     setSellHolding(holding);
     setSellPrice(String(holding.ltp || ''));
     setSellQty('');
@@ -173,14 +300,14 @@ const DPHoldings: React.FC = () => {
     setQuoteError('');
     setSuccessMessage('');
 
-    if (!clientID || !symbol) {
+    if (!quoteClientId || !symbol) {
       setQuoteError('Stock quote is not available for this holding.');
       return;
     }
 
     setQuoteLoading(true);
     try {
-      const params = new URLSearchParams({ client_id: clientID, symbol });
+      const params = new URLSearchParams({ client_id: quoteClientId, symbol });
       const response = await fetch(`${getApiUrl()}/stock_quote?${params.toString()}`, {
         headers: { Accept: 'application/json' },
       });
@@ -234,29 +361,56 @@ const DPHoldings: React.FC = () => {
     setSellSubmitting(true);
     setQuoteError('');
     try {
-      const response = await fetch(`${getApiUrl()}/add_order/`, {
-        method: 'POST',
-        headers: {
-          Accept: 'application/json',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          client_id: clientID,
-          script_name: symbol,
-          price,
-          qty,
-          order_type: 'sell',
-          security_details: quote?.security || {},
-        }),
-      });
-
-      if (!response.ok) {
-        const data = await response.json().catch(() => ({}));
-        setQuoteError(data.detail || data.message || 'Failed to schedule sell order.');
+      const holders = (sellHolding as CombinedHolding).holders?.length
+        ? [...(sellHolding as CombinedHolding).holders]
+        : [{ ...sellHolding, clientID }];
+      let remainingQty = qty;
+      const orders = [];
+      for (const holder of holders) {
+        if (remainingQty <= 0) {
+          break;
+        }
+        const holderQty = Math.min(remainingQty, Number(holder.currentBalance || 0));
+        if (holderQty <= 0 || !holder.clientID) {
+          continue;
+        }
+        orders.push({ client_id: holder.clientID, qty: holderQty });
+        remainingQty -= holderQty;
+      }
+      if (remainingQty > 0) {
+        setQuoteError(`Quantity cannot exceed combined holding balance (${availableQty}).`);
         return;
       }
 
-      setSuccessMessage(`Sell order scheduled for ${symbol}.`);
+      for (const order of orders) {
+        const response = await fetch(`${getApiUrl()}/add_order/`, {
+          method: 'POST',
+          headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            client_id: order.client_id,
+            script_name: symbol,
+            price,
+            qty: order.qty,
+            order_type: 'sell',
+            security_details: quote?.security || {},
+          }),
+        });
+
+        if (!response.ok) {
+          const data = await response.json().catch(() => ({}));
+          setQuoteError(data.detail || data.message || 'Failed to schedule sell order.');
+          return;
+        }
+      }
+
+      setSuccessMessage(
+        orders.length > 1
+          ? `Combined sell scheduled for ${symbol} across ${orders.length} users.`
+          : `Sell order scheduled for ${symbol}.`,
+      );
       closeSellDialog();
     } catch {
       setQuoteError('Failed to schedule sell order. Check your API connection.');
@@ -265,7 +419,8 @@ const DPHoldings: React.FC = () => {
     }
   };
 
-  const totals = dpHoldings.reduce(
+  const visibleHoldings = holdingMode === 'combined' ? combinedHoldings : dpHoldings;
+  const totals = visibleHoldings.reduce(
     (acc, row) => {
       acc.valueAsOfPreviousClosePrice += row.valueAsOfPreviousClosePrice || 0;
       acc.valueAsOfLTP += row.valueAsOfLTP || 0;
@@ -301,41 +456,82 @@ const DPHoldings: React.FC = () => {
         <div className="dp-holdings-filters-header">
           <div>
             <h3 className="panel-title">Get Holdings</h3>
-            <p className="panel-subtitle">Select a client to load their current DP holdings from TMS.</p>
+            <p className="panel-subtitle">Select one client or combine multiple logged-in clients into one portfolio.</p>
+          </div>
+          <div className="dp-holdings-tabs" role="tablist" aria-label="DP holding view">
+            <button
+              type="button"
+              className={holdingMode === 'single' ? 'active' : ''}
+              onClick={() => setHoldingMode('single')}
+            >
+              Single Client
+            </button>
+            <button
+              type="button"
+              className={holdingMode === 'combined' ? 'active' : ''}
+              onClick={() => setHoldingMode('combined')}
+            >
+              Combined Holding
+            </button>
           </div>
         </div>
 
         <div className="dp-holdings-form">
-          <div className="form-group">
-            <label htmlFor="dpClientId">Client ID</label>
-            <select
-              id="dpClientId"
-              className="select"
-              value={clientID}
-              onChange={(e) => setClientID(e.target.value)}
-              disabled={loggedInClientIDs.length === 0}
-              required
-            >
-              {loggedInClientIDs.length === 0 ? (
-                <option value="">No logged-in clients</option>
-              ) : (
-                loggedInClientIDs.map((id) => (
-                  <option key={id} value={id}>{id}</option>
-                ))
+          {holdingMode === 'single' ? (
+            <div className="form-group">
+              <label htmlFor="dpClientId">User</label>
+              <select
+                id="dpClientId"
+                className="select"
+                value={clientID}
+                onChange={(e) => setClientID(e.target.value)}
+                disabled={loggedInClientIDs.length === 0}
+                required
+              >
+                {loggedInClientIDs.length === 0 ? (
+                  <option value="">No logged-in clients</option>
+                ) : (
+                  loggedInClients.map((client) => (
+                    <option key={client.client_id} value={client.client_id}>{clientLabel(client)}</option>
+                  ))
+                )}
+              </select>
+              {loggedInClientIDs.length === 0 && (
+                <span className="dp-holdings-hint">Log in via TMS Login tab first.</span>
               )}
-            </select>
-            {loggedInClientIDs.length === 0 && (
-              <span className="dp-holdings-hint">Log in via TMS Login tab first.</span>
-            )}
-          </div>
+            </div>
+          ) : (
+            <div className="form-group dp-combined-user-picker">
+              <label>Combined Users</label>
+              <div className="dp-combined-client-list">
+                {loggedInClients.map((client) => (
+                  <label key={client.client_id} className="dp-combined-client-chip">
+                    <input
+                      type="checkbox"
+                      checked={selectedCombinedClients.includes(client.client_id)}
+                      onChange={() => toggleCombinedClient(client.client_id)}
+                    />
+                    {clientLabel(client)}
+                  </label>
+                ))}
+              </div>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => setSelectedCombinedClients(loggedInClientIDs)}
+              >
+                Add all users
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
-      {dpHoldings.length > 0 && (
+      {visibleHoldings.length > 0 && (
         <div className="dp-holdings-stats">
           <div className="dp-holdings-stat-card">
             <span className="dp-holdings-stat-label">Holdings</span>
-            <span className="dp-holdings-stat-value">{dpHoldings.length}</span>
+            <span className="dp-holdings-stat-value">{visibleHoldings.length}</span>
           </div>
           <div className="dp-holdings-stat-card">
             <span className="dp-holdings-stat-label">Prev. Close Value</span>
@@ -358,7 +554,9 @@ const DPHoldings: React.FC = () => {
         <div className="dp-holdings-content-header">
           <h3 className="panel-title">Holdings Table</h3>
           {clientID && hasFetched && !isLoading && (
-            <span className="badge badge-muted">{clientID}</span>
+            <span className="badge badge-muted">
+              {holdingMode === 'combined' ? `${selectedCombinedClients.length} users` : clientID}
+            </span>
           )}
         </div>
 
@@ -367,13 +565,14 @@ const DPHoldings: React.FC = () => {
             <span className="dp-holdings-spinner" aria-hidden="true" />
             <p>Fetching DP holdings from TMS...</p>
           </div>
-        ) : dpHoldings.length > 0 ? (
+        ) : visibleHoldings.length > 0 ? (
           <>
             <div className="common-table-wrap">
               <table className="common-table dp-holdings-table">
                 <thead>
                   <tr>
                     <th>Scrip</th>
+                    {holdingMode === 'combined' && <th>Users</th>}
                     <th>LTP</th>
                     <th>Prev. Close</th>
                     <th>LTP Value</th>
@@ -384,12 +583,15 @@ const DPHoldings: React.FC = () => {
                   </tr>
                 </thead>
                 <tbody>
-                  {dpHoldings.map((holding, index) => (
+                  {visibleHoldings.map((holding, index) => (
                     <tr key={`${holdingSymbol(holding)}-${index}`} style={{ backgroundColor: holding.color }}>
                       <td>
                         <strong>{formatValue(holding.scrip)}</strong>
                         <span className="dp-holdings-symbol-name">{holding.symbolName}</span>
                       </td>
+                      {holdingMode === 'combined' && (
+                        <td>{(holding as CombinedHolding).clientCount || 1}</td>
+                      )}
                       <td>{formatValue(holding.ltp)}</td>
                       <td>{formatValue(holding.previousCloseprice)}</td>
                       <td>{formatValue(holding.valueAsOfLTP)}</td>
@@ -434,7 +636,9 @@ const DPHoldings: React.FC = () => {
             <span style={{ fontSize: '2rem', opacity: 0.5 }} aria-hidden="true">📂</span>
             <p>
               {hasFetched
-                ? 'No holdings found for this client.'
+                ? holdingMode === 'combined'
+                  ? 'No combined holdings found for selected users.'
+                  : 'No holdings found for this client.'
                 : 'Select a client to load DP holdings automatically.'}
             </p>
           </div>
@@ -446,7 +650,7 @@ const DPHoldings: React.FC = () => {
           <div className="dp-sell-modal panel" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
             <div className="dp-sell-modal-header">
               <div>
-                <h3>Sell {holdingSymbol(sellHolding)}</h3>
+                <h3>{(sellHolding as CombinedHolding).holders?.length ? 'Combined Sell' : 'Sell'} {holdingSymbol(sellHolding)}</h3>
                 <p>{sellHolding.symbolName || quote?.security?.securityName || 'DP holding sell order'}</p>
               </div>
               <button type="button" className="dp-sell-close" onClick={closeSellDialog} aria-label="Close">×</button>
@@ -463,6 +667,12 @@ const DPHoldings: React.FC = () => {
                 <span>Balance</span>
                 <strong>{formatValue(sellHolding.currentBalance)}</strong>
               </div>
+              {(sellHolding as CombinedHolding).holders?.length && (
+                <div>
+                  <span>Users</span>
+                  <strong>{(sellHolding as CombinedHolding).clientCount}</strong>
+                </div>
+              )}
               <div>
                 <span>Day Range</span>
                 <strong>{quote ? `${formatValue(quote.dayLow)} - ${formatValue(quote.dayHigh)}` : '-'}</strong>
@@ -477,6 +687,21 @@ const DPHoldings: React.FC = () => {
               <DepthTable title="Top Buy" rows={quote?.topBuy || []} />
               <DepthTable title="Top Sell" rows={quote?.topSell || []} />
             </div>
+
+            {(sellHolding as CombinedHolding).holders?.length && (
+              <div className="dp-combined-allocation">
+                <h4>Sell allocation by user</h4>
+                {(sellHolding as CombinedHolding).holders.map((holder) => {
+                  const client = loggedInClients.find((item) => item.client_id === holder.clientID);
+                  return (
+                    <div key={`${holder.clientID}-${holdingSymbol(holder)}`} className="dp-combined-allocation-row">
+                      <span>{client ? clientLabel(client) : holder.clientID}</span>
+                      <strong>{formatValue(holder.currentBalance)}</strong>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
 
             <form className="dp-sell-form" onSubmit={submitSellOrder}>
               <div className="form-group">

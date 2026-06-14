@@ -150,6 +150,7 @@ class TmsUser:
             self.client_details = await self.get_client_details(
                 self.tokens, self.headers, self.login_response['client_dealer_id']
             )
+            self.login_response["client_details"] = self.client_details
             if rotation_result.get("rotated"):
                 save_tokens(self.client_id, self.login_response, self.broker_no)
                 await self.save_login_info()
@@ -168,10 +169,11 @@ class TmsUser:
                 self.tokens = self.login_response['tokens']
                 self.headers = self.get_header(self.login_response['request_owner'], self.tokens)
                 rotation_result = await self.rotate_password_if_expired()
-                save_tokens(self.client_id, self.login_response, self.broker_no)
                 self.client_details = await self.get_client_details(
                     self.tokens, self.headers, self.login_response['client_dealer_id']
                 )
+                self.login_response["client_details"] = self.client_details
+                save_tokens(self.client_id, self.login_response, self.broker_no)
                 await self.save_login_info()
                 if rotation_result.get("rotated"):
                     message = rotation_result["message"]

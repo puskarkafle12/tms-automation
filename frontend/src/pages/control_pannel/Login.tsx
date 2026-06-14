@@ -35,7 +35,37 @@ const formatSessionStatus = (status: string) => status.replace(/_/g, ' ');
 const formatAccountLabel = (account: Pick<TmsAccount, 'client_id' | 'display_name' | 'broker_no'>) => {
   const name = account.display_name?.trim() || account.client_id;
   const broker = account.broker_no?.trim();
-  return broker ? `${name}(${broker})` : name;
+  return broker ? `${name}[${broker}]` : name;
+};
+
+const shortStatusMessage = (message?: string | null) => {
+  if (!message) {
+    return '';
+  }
+  const normalized = message.toLowerCase();
+  if (normalized.includes('password')) return 'Password issue';
+  if (normalized.includes('captcha')) return 'Captcha failed';
+  if (normalized.includes('token')) return 'Token expired';
+  if (normalized.includes('credential') || normalized.includes('invalid')) return 'Invalid login';
+  if (normalized.includes('timeout')) return 'Request timeout';
+  if (normalized.includes('network') || normalized.includes('connection')) return 'Network issue';
+  return message.split(/\s+/).filter(Boolean).slice(0, 2).join(' ');
+};
+
+const shortRelativeTime = (value?: string | null) => {
+  if (!value) {
+    return '';
+  }
+  const diffSeconds = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 1000));
+  if (!Number.isFinite(diffSeconds)) {
+    return '';
+  }
+  if (diffSeconds < 60) return `${diffSeconds}s ago`;
+  const diffMinutes = Math.floor(diffSeconds / 60);
+  if (diffMinutes < 60) return `${diffMinutes}m ago`;
+  const diffHours = Math.floor(diffMinutes / 60);
+  if (diffHours < 24) return `${diffHours}h ago`;
+  return `${Math.floor(diffHours / 24)}d ago`;
 };
 
 const Login: React.FC = () => {
@@ -67,7 +97,13 @@ const Login: React.FC = () => {
     setLoadWarning('');
     try {
       const data = await listTmsAccounts();
-      setAccounts(data.accounts);
+      setAccounts(
+        [...data.accounts].sort((a, b) => {
+          const aOnline = a.session_status === 'logged_in' ? 0 : 1;
+          const bOnline = b.session_status === 'logged_in' ? 0 : 1;
+          return aOnline - bOnline || formatAccountLabel(a).localeCompare(formatAccountLabel(b));
+        }),
+      );
       setLoggedInCount(data.logged_in_count);
       setLoadWarning(data.notice || '');
     } catch (error) {
@@ -455,9 +491,12 @@ const Login: React.FC = () => {
                         <span className={`tms-status tms-status-${account.session_status}`}>
                           {formatSessionStatus(account.session_status)}
                         </span>
+                        {account.last_updated && (
+                          <span className="tms-session-age">({shortRelativeTime(account.last_updated)})</span>
+                        )}
                         {account.session_message && account.session_status !== 'logged_in' && (
                           <span className="tms-session-error" title={account.session_message}>
-                            {account.session_message}
+                            {shortStatusMessage(account.session_message)}
                           </span>
                         )}
                       </div>
