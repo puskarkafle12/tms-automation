@@ -216,7 +216,7 @@
   border-radius: 999px;
   font-size: 0.75rem;
   font-weight: 600;
-  text-transform: capitalize;
+  white-space: nowrap;
 }
 
 .tms-status-logged_in {
@@ -227,6 +227,11 @@
 .tms-status-logged_out {
   background: var(--color-bg);
   color: var(--color-text-muted);
+}
+
+.tms-status-error {
+  background: var(--color-danger-soft);
+  color: var(--color-danger);
 }
 
 .tms-session-error {

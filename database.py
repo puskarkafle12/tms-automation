@@ -31,6 +31,7 @@ def get_db():
 def ensure_performance_indexes():
     statements = [
         "CREATE INDEX IF NOT EXISTS ix_logged_in_users_status_last_updated ON logged_in_users (status, last_updated)",
+        "ALTER TABLE logged_in_users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMP",
         "CREATE INDEX IF NOT EXISTS ix_scheduled_orders_status_client_script ON scheduled_orders (status, client_id, script_name)",
         "CREATE INDEX IF NOT EXISTS ix_order_logs_client_script ON order_logs (client_id, script_name)",
         "CREATE INDEX IF NOT EXISTS ix_order_status_logs_timestamp_client_script ON order_status_logs (timestamp, client_id, script_name)",

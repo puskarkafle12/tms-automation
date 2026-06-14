@@ -29,6 +29,7 @@ from schemas.schemas import (
     UserLogin,
 )
 from utils.base_functions import is_within_time_range, truncate_to_one_decimal_place
+from utils.base_functions import summarize_login_message
 from utils.monitor_order import monitor_order_task_func
 from utils.market_gate import resolve_market_gate
 from utils.tms import TmsUser
@@ -490,8 +491,26 @@ def _serialize_tms_account(user: User, session: Optional[LoggedInUsers]) -> dict
         "auto_login": bool(user.auto_login),
         "session_status": session.status if session else "logged_out",
         "session_message": session.message if session else None,
-        "last_updated": session.last_updated.isoformat() if session and session.last_updated else None,
+        "last_updated": session.last_login_at.isoformat() if session and session.last_login_at else None,
     }
+
+
+def _record_tms_login_failure(
+    db: Session,
+    *,
+    client_id: str,
+    broker_no: Optional[str],
+    message: str,
+) -> None:
+    session = db.query(LoggedInUsers).filter(LoggedInUsers.client_id == client_id).first()
+    if not session:
+        session = LoggedInUsers(client_id=client_id, tokens={}, broker_no=broker_no or "", status="logged_out")
+        db.add(session)
+    session.status = "logged_out"
+    session.broker_no = broker_no or session.broker_no
+    session.message = summarize_login_message(message)
+    db.commit()
+
 
 def _compute_scheduled_live_status(
     *,
@@ -571,7 +590,7 @@ async def list_tms_accounts(db: Session = Depends(get_db)):
                 "auto_login": True,
                 "session_status": session.status,
                 "session_message": session.message,
-                "last_updated": session.last_updated.isoformat() if session.last_updated else None,
+                "last_updated": session.last_login_at.isoformat() if session.last_login_at else None,
             })
 
     accounts.sort(key=lambda account: account["client_id"])
@@ -653,6 +672,7 @@ async def login_tms_account(client_id: str, db: Session = Depends(get_db)):
             "password_rotated": False,
         }
     except LoginFailedException as e:
+        _record_tms_login_failure(db, client_id=client_id, broker_no=user.broker_no, message=e.message)
         raise HTTPException(status_code=401, detail=e.message)
 
     if login_status.get("status") != "success":
@@ -678,6 +698,12 @@ async def login(login_request: LoginRequest, db: Session = Depends(get_db)):
     try:
         login_status = await tms_instance.try_cached_login()  # Await the async call
     except LoginFailedException as e:
+        _record_tms_login_failure(
+            db,
+            client_id=login_request.username,
+            broker_no=login_request.broker_no,
+            message=e.message,
+        )
         await tms_instance.close()
         raise HTTPException(status_code=401, detail=e.message)
 

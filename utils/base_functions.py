@@ -13,6 +13,30 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from functools import wraps
 import time
+from datetime import datetime, timezone
+
+
+def summarize_login_message(message: str | None) -> str:
+    text = " ".join(str(message or "").split())
+    lowered = text.lower()
+    if not lowered:
+        return ""
+    if "captcha" in lowered:
+        return "Captcha failed"
+    if "inactive" in lowered or "not active" in lowered or "suspended" in lowered or "blocked" in lowered:
+        return "Account inactive"
+    if "password" in lowered:
+        return "Password issue"
+    if "token" in lowered:
+        return "Token expired"
+    if "credential" in lowered or "invalid" in lowered:
+        return "Invalid login"
+    if "timeout" in lowered:
+        return "Request timeout"
+    if "network" in lowered or "connection" in lowered:
+        return "Network issue"
+    words = text.split()
+    return " ".join(words[:2]) if words else text
 
 def get_function_time(func):
     @wraps(func)
@@ -102,15 +126,23 @@ def is_within_time_range(start_time, end_time, current_time=None):
     _ = (start_time, end_time, current_time)
     return get_market_hours_status(get_nepal_now())["market_hours_open"]
 
-def save_tokens(client_id, tokens,broker_no):
+def save_tokens(client_id, tokens, broker_no, *, update_login_time: bool = True):
     db = get_db_session()
     try:
         user = db.query(LoggedInUsers).filter_by(client_id=client_id).first()
         if user:
             user.tokens = tokens
             user.status="logged_in"
+            if update_login_time:
+                user.last_login_at = datetime.now(timezone.utc)
         else:
-            user = LoggedInUsers(client_id=client_id, tokens=tokens,broker_no=broker_no,status="logged_in")
+            user = LoggedInUsers(
+                client_id=client_id,
+                tokens=tokens,
+                broker_no=broker_no,
+                status="logged_in",
+                last_login_at=datetime.now(timezone.utc) if update_login_time else None,
+            )
             db.add(user)
         db.commit()
         return True
