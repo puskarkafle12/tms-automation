@@ -59,7 +59,8 @@ COPY --from=frontend-build /frontend/build /app/frontend/build
 COPY docker-entrypoint-all-in-one.sh /app/docker-entrypoint-all-in-one.sh
 COPY scripts/show-public-url.sh /app/scripts/show-public-url.sh
 COPY nginx-tms-automation.conf /etc/nginx/conf.d/tms-automation.conf
-RUN chmod +x /app/docker-entrypoint-all-in-one.sh /app/scripts/show-public-url.sh
+RUN chmod +x /app/docker-entrypoint-all-in-one.sh /app/scripts/show-public-url.sh \
+    && sed -i 's/\r$//' /app/docker-entrypoint-all-in-one.sh /app/scripts/show-public-url.sh
 RUN rm -f /etc/nginx/sites-enabled/default \
     && nginx -t
 

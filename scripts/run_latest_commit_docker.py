@@ -66,12 +66,33 @@ def docker_compose_command() -> list[str]:
         return ["docker-compose"]
 
 
+def ensure_docker_daemon() -> None:
+    result = subprocess.run(
+        ["docker", "info"],
+        cwd=ROOT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if result.returncode == 0:
+        return
+    stderr = (result.stderr or "").lower()
+    if "cannot connect" in stderr or "dockerdesktoplinuxengine" in stderr:
+        raise SystemExit(
+            "Docker is installed but the Docker Desktop engine is not running.\n"
+            "Start Docker Desktop from the Start menu, wait until it shows "
+            "'Docker Desktop is running', then run this script again."
+        )
+    raise SystemExit(f"Docker is not available: {result.stderr.strip() or 'docker info failed'}")
+
+
 def ensure_required_tools() -> None:
     for command in (["git", "--version"], ["docker", "--version"]):
         try:
             subprocess.check_output(command, text=True)
         except (subprocess.CalledProcessError, FileNotFoundError) as exc:
             raise SystemExit(f"Required command not found or not working: {command[0]}") from exc
+    ensure_docker_daemon()
     docker_compose_command()
 
 

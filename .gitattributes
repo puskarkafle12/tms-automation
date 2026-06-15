@@ -1,0 +1,2 @@
+*.sh text eol=lf
+docker-entrypoint-all-in-one.sh text eol=lf

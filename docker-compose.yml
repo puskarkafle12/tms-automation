@@ -16,6 +16,11 @@ services:
       DB_NAME: stock
       FRONTEND_SEED_USER: admin
       FRONTEND_SEED_PASSWORD: admin
+      TUNNEL_PROVIDER: ngrok
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:-}
+      NGROK_DOMAIN: ${NGROK_DOMAIN:-}
+    env_file:
+      - .env
     volumes:
       - tms_postgres_data:/var/lib/postgresql/data
 
