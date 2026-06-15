@@ -120,6 +120,74 @@ class TestTmsPerformanceOptimizations(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake_session.calls[0][2]["headers"], {"x-xsrf-token": "old"})
         self.assertEqual(fake_session.calls[1][2]["headers"], {"x-xsrf-token": "new"})
 
+    async def test_stock_grabber_cancels_previous_matching_orders_after_new_order(self):
+        user = self.TmsUser(
+            broker_no="35",
+            username="u",
+            password="p",
+            stock_symbol="ABC",
+            resume_previous_ltp=100,
+        )
+        cancelled_order_ids = []
+        order_book_calls = 0
+
+        before_order_book = [
+            {"exchangeOrderId": "old-abc", "symbol": "ABC"},
+            {"exchangeOrderId": "old-xyz", "symbol": "XYZ"},
+        ]
+        after_order_book = [
+            {"exchangeOrderId": "old-abc", "symbol": "ABC"},
+            {"exchangeOrderId": "new-abc", "symbol": "ABC"},
+            {"exchangeOrderId": "old-xyz", "symbol": "XYZ"},
+        ]
+
+        async def fake_ensure_session():
+            return None
+
+        async def fake_get_security_id(symbol):
+            return {"id": "1", "symbol": symbol}
+
+        async def fake_price_scanner(security_id, previous_ltp, session_id):
+            return {
+                "twoPercentHigh": 103,
+                "changePercentage": 2,
+                "ltp": 101,
+            }
+
+        async def fake_order(order_price, order_quantity, order_type, security=None):
+            return {"status": 200, "message": "placed"}
+
+        async def fake_get_order_book():
+            nonlocal order_book_calls
+            order_book_calls += 1
+            return before_order_book if order_book_calls == 1 else after_order_book
+
+        async def fake_cancel_order(exchange_order_id):
+            cancelled_order_ids.append(exchange_order_id)
+            return {"status": 200}
+
+        user._ensure_session = fake_ensure_session
+        user.get_security_id = fake_get_security_id
+        user.price_scanner = fake_price_scanner
+        user.order = fake_order
+        user.get_order_book = fake_get_order_book
+        user.cancel_order = fake_cancel_order
+
+        result = await user.stock_grabber(
+            order_quantity=10,
+            session_id="test-session",
+            max_order_limit=1,
+        )
+
+        self.assertEqual(result["message"], "successfully ordered shares")
+        self.assertEqual(cancelled_order_ids, ["old-abc"])
+        self.assertTrue(
+            any(
+                update.get("message") == "Cancelled 1 previous ABC order(s)"
+                for update in user.updates
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

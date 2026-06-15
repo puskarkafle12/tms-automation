@@ -622,6 +622,94 @@ class TmsUser:
         return payload
 
     @staticmethod
+    def _order_book_rows(payload) -> List[Dict]:
+        if isinstance(payload, list):
+            return [row for row in payload if isinstance(row, dict)]
+        if not isinstance(payload, dict):
+            return []
+        for key in ("content", "data", "result", "orderBook", "orders"):
+            rows = payload.get(key)
+            if isinstance(rows, list):
+                return [row for row in rows if isinstance(row, dict)]
+        return []
+
+    @staticmethod
+    def _nested_value(row: Dict, paths: List[List[str]]):
+        for path in paths:
+            current = row
+            for key in path:
+                if not isinstance(current, dict) or key not in current:
+                    current = None
+                    break
+                current = current[key]
+            if current not in (None, ""):
+                return current
+        return None
+
+    @classmethod
+    def _order_book_symbol(cls, row: Dict) -> str:
+        value = cls._nested_value(row, [
+            ["symbol"],
+            ["script_name"],
+            ["securitySymbol"],
+            ["security", "symbol"],
+            ["orderBook", "security", "symbol"],
+        ])
+        return str(value or "").strip().upper()
+
+    @classmethod
+    def _order_book_exchange_order_id(cls, row: Dict) -> Optional[str]:
+        value = cls._nested_value(row, [
+            ["exchangeOrderId"],
+            ["exchange_order_id"],
+            ["orderBook", "exchangeOrderId"],
+        ])
+        if value in (None, ""):
+            return None
+        return str(value).strip()
+
+    async def get_open_order_ids_for_symbol(self, symbol: str) -> set[str]:
+        normalized_symbol = (symbol or "").strip().upper()
+        if not normalized_symbol:
+            return set()
+        order_book = await self.get_order_book()
+        order_ids = set()
+        for row in self._order_book_rows(order_book):
+            if self._order_book_symbol(row) != normalized_symbol:
+                continue
+            exchange_order_id = self._order_book_exchange_order_id(row)
+            if exchange_order_id:
+                order_ids.add(exchange_order_id)
+        return order_ids
+
+    async def cancel_open_orders_for_symbol(self, symbol: str, exchange_order_ids: set[str]) -> List[Dict]:
+        if not exchange_order_ids:
+            return []
+        normalized_symbol = (symbol or "").strip().upper()
+        order_book = await self.get_order_book()
+        results = []
+        for row in self._order_book_rows(order_book):
+            if self._order_book_symbol(row) != normalized_symbol:
+                continue
+            exchange_order_id = self._order_book_exchange_order_id(row)
+            if not exchange_order_id or exchange_order_id not in exchange_order_ids:
+                continue
+            try:
+                response = await self.cancel_order(exchange_order_id)
+                results.append({
+                    "exchangeOrderId": exchange_order_id,
+                    "status": "cancelled",
+                    "response": response,
+                })
+            except Exception as exc:
+                results.append({
+                    "exchangeOrderId": exchange_order_id,
+                    "status": "failed",
+                    "message": str(exc),
+                })
+        return results
+
+    @staticmethod
     def encode_base64(input_string: str) -> str:
         input_bytes = input_string.encode('utf-8')
         base64_encoded_bytes = base64.b64encode(input_bytes)
@@ -1118,6 +1206,14 @@ class TmsUser:
                     else self.final_order_quantity
                 )
                 target_price = stock_details['twoPercentHigh']
+                try:
+                    previous_order_ids = await self.get_open_order_ids_for_symbol(self.stock_symbol)
+                except Exception as exc:
+                    previous_order_ids = set()
+                    self.updates.append({
+                        "status": "warn",
+                        "message": f"Could not read previous {self.stock_symbol} orders before placing: {exc}",
+                    })
                 await self._ensure_session()
                 order_response = await self.order(target_price, order_quantity_to_use, 'buy')
                 self.updates.append({
@@ -1138,6 +1234,38 @@ class TmsUser:
                         "status": "info",
                         "message": f"Order {order_limit}/{max_order_limit} placed at Rs. {target_price}",
                     })
+                    if previous_order_ids:
+                        try:
+                            cancel_results = await self.cancel_open_orders_for_symbol(
+                                self.stock_symbol,
+                                previous_order_ids,
+                            )
+                        except Exception as exc:
+                            cancel_results = []
+                            self.updates.append({
+                                "status": "warn",
+                                "message": f"Could not cancel previous {self.stock_symbol} orders: {exc}",
+                            })
+                        if cancel_results:
+                            cancelled_count = sum(1 for item in cancel_results if item.get("status") == "cancelled")
+                            failed_count = len(cancel_results) - cancelled_count
+                            self.updates.append({
+                                "status": "info" if failed_count == 0 else "warn",
+                                "message": (
+                                    f"Cancelled {cancelled_count} previous {self.stock_symbol} order(s)"
+                                    if failed_count == 0
+                                    else (
+                                        f"Cancelled {cancelled_count} previous {self.stock_symbol} order(s); "
+                                        f"{failed_count} cancellation(s) failed"
+                                    )
+                                ),
+                                "cancelled_orders": cancel_results,
+                            })
+                    else:
+                        self.updates.append({
+                            "status": "info",
+                            "message": f"No previous open {self.stock_symbol} orders to cancel",
+                        })
                 else:
                     fail_msg = order_response.get('message', 'unknown error')
                     self.updates.append({
