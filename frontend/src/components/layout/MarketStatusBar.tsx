@@ -32,11 +32,14 @@ const buildStatusTitle = (status: MarketStatus | null) => {
 
   const parts = [
     status.tms_session_message,
-    `Trading hours: Sun–Fri 9:00 AM–3:00 PM NPT`,
+    `Pre-open: Sun–Fri 10:30 AM–10:45 AM NPT`,
+    `Trading hours: Sun–Fri 11:00 AM–3:00 PM NPT`,
   ];
 
   if (!status.is_trading_day) {
     parts.push('Weekend / non-trading day');
+  } else if (status.market_phase === 'pre_open') {
+    parts.push('Pre-open session');
   } else if (!status.market_hours_open) {
     parts.push('Outside market hours');
   }
@@ -75,7 +78,9 @@ const MarketStatusBar: React.FC = () => {
   }, [loadStatus]);
 
   const isMarketOpen = status?.market_live ?? false;
-  const statusLabel = isMarketOpen ? 'Market Open' : 'Market Closed';
+  const isPreOpen = status?.market_phase === 'pre_open';
+  const statusClass = isMarketOpen ? 'live' : isPreOpen ? 'pre-open' : 'closed';
+  const statusLabel = isMarketOpen ? 'Market Open' : isPreOpen ? 'Pre Open' : 'Market Closed';
 
   return (
     <div className="market-status-bar">
@@ -86,7 +91,7 @@ const MarketStatusBar: React.FC = () => {
         <span className="market-status-date">{clock.date}</span>
       </div>
       <span
-        className={`market-status-pill ${isMarketOpen ? 'live' : 'closed'}`}
+        className={`market-status-pill ${statusClass}`}
         title={buildStatusTitle(status)}
       >
         <span className="market-status-dot" />

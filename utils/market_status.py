@@ -3,12 +3,14 @@ from typing import Any, Dict, Optional
 from zoneinfo import ZoneInfo
 
 NEPAL_TZ = ZoneInfo("Asia/Kathmandu")
-MARKET_OPEN = time(9, 0)
+MARKET_OPEN = time(11, 0)
 MARKET_CLOSE = time(15, 0)
-PRE_OPEN_START = time(9, 0)
+PRE_OPEN_START = time(10, 30)
+PRE_OPEN_CLOSE = time(10, 45)
 # Sunday (6) through Friday (4) in Python weekday(); Saturday (5) is closed.
 TRADING_WEEKDAYS = {6, 0, 1, 2, 3, 4}
-MARKET_HOURS_LABEL = "Sun–Fri 9:00 AM–3:00 PM NPT"
+MARKET_HOURS_LABEL = "Sun–Fri 11:00 AM–3:00 PM NPT"
+PRE_OPEN_HOURS_LABEL = "Sun–Fri 10:30 AM–10:45 AM NPT"
 
 
 def get_nepal_now() -> datetime:
@@ -20,13 +22,13 @@ def get_market_hours_status(now: Optional[datetime] = None) -> Dict[str, bool]:
     is_trading_day = current.weekday() in TRADING_WEEKDAYS
     current_time = current.time()
     in_continuous = MARKET_OPEN <= current_time <= MARKET_CLOSE
-    in_pre_open = PRE_OPEN_START <= current_time < MARKET_OPEN
+    in_pre_open = PRE_OPEN_START <= current_time <= PRE_OPEN_CLOSE
 
     return {
         "is_trading_day": is_trading_day,
         "is_pre_open": is_trading_day and in_pre_open,
         "is_continuous": is_trading_day and in_continuous,
-        "market_hours_open": is_trading_day and (in_continuous or in_pre_open),
+        "market_hours_open": is_trading_day and in_continuous,
     }
 
 
@@ -84,5 +86,4 @@ def is_market_live(hours: Optional[Dict[str, bool]] = None, session_active: bool
 
 
 def outside_market_hours_message() -> str:
-    return f"Outside Nepal market hours ({MARKET_HOURS_LABEL})"
-
+    return f"Outside Nepal market hours ({MARKET_HOURS_LABEL}; pre-open {PRE_OPEN_HOURS_LABEL})"
