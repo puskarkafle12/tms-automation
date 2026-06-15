@@ -35,3 +35,19 @@ export const buildScheduleScriptOptions = (
     percentChange: stock.percentChange,
   }));
 };
+
+export const mergeUniqueStockDetails = (existing: any[] = [], incoming: any[] = []) => {
+  const bySymbol = new Map<string, any>();
+  [...existing, ...incoming].forEach((stock) => {
+    const symbol = String(stock?.symbol || stock?.scrip || stock?.symbolName || '').trim().toUpperCase();
+    if (!symbol) {
+      return;
+    }
+    bySymbol.set(symbol, {
+      ...bySymbol.get(symbol),
+      ...stock,
+      symbol,
+    });
+  });
+  return Array.from(bySymbol.values()).sort((a, b) => String(a.symbol).localeCompare(String(b.symbol)));
+};

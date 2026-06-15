@@ -6,7 +6,7 @@ import ScriptNameAutocomplete, { ScriptOption } from '../../components/ScriptNam
 import ScheduleMonitorBar from '../../components/ScheduleMonitorBar';
 import StrategySellForm, { STRATEGY_HELP } from './StrategySellForm';
 import type { StrategyPayload, StrategyType } from './StrategySellForm';
-import { buildScheduleScriptOptions } from './scheduleOrderHelpers';
+import { buildScheduleScriptOptions, mergeUniqueStockDetails } from './scheduleOrderHelpers';
 import {
   getBuyScripCacheKey,
   getCachedScripSuggestions,
@@ -40,6 +40,7 @@ const clientLabel = (client: ClientSession) => {
 const ScheduleOrder: React.FC = () => {
   const [clientID, setClientID] = useState('');
   const [scriptName, setScriptName] = useState('');
+  const [selectedScriptSymbol, setSelectedScriptSymbol] = useState('');
   const [price, setPrice] = useState('');
   const [qty, setQty] = useState('');
   const [status, setStatus] = useState<'idle' | 'success' | 'error'>('idle');
@@ -67,6 +68,11 @@ const ScheduleOrder: React.FC = () => {
   const holdingRequestId = useRef(0);
   const buyScripRequestId = useRef(0);
   const sellScripRequestId = useRef(0);
+  const stockDetailsRef = useRef<any[]>([]);
+
+  useEffect(() => {
+    stockDetailsRef.current = stockDetails;
+  }, [stockDetails]);
 
   const buyHighLimit = useMemo(() => {
     if (orderType !== 'buy' || !selectedStock?.high) {
@@ -125,7 +131,7 @@ const ScheduleOrder: React.FC = () => {
       return;
     }
 
-    const cacheKey = getBuyScripCacheKey(clientId);
+    const cacheKey = getBuyScripCacheKey(null, true);
     const cached = getCachedScripSuggestions<any[]>(cacheKey);
     if (!forceRefresh && cached) {
       setStockDetails(cached.data);
@@ -152,11 +158,12 @@ const ScheduleOrder: React.FC = () => {
       }
       if (response.ok) {
         const data = await response.json();
-        const nextStockDetails = Array.isArray(data?.payload?.data) ? data.payload.data : [];
+        const responseStockDetails = Array.isArray(data?.payload?.data) ? data.payload.data : [];
+        const nextStockDetails = mergeUniqueStockDetails(cached?.data || stockDetailsRef.current, responseStockDetails);
         setStockDetails(nextStockDetails);
         setCachedScripSuggestions(cacheKey, nextStockDetails, {
           orderSide: 'buy',
-          clientId,
+          clientId: 'all',
         });
         setBuyScriptRefreshMessage('');
       } else {
@@ -284,6 +291,11 @@ const ScheduleOrder: React.FC = () => {
   const handleScriptNameChange = (name: string) => {
     const normalizedName = name.toUpperCase();
     setScriptName(normalizedName);
+    setSelectedScriptSymbol('');
+    quoteRequestId.current += 1;
+    holdingRequestId.current += 1;
+    setLatestLtp(null);
+    setQuote(null);
     const stockDetail = stockDetails.find((stock) => stock.symbol === normalizedName);
     setSelectedStock(stockDetail || null);
     setHoldingError('');
@@ -291,6 +303,7 @@ const ScheduleOrder: React.FC = () => {
 
   const handleScriptNameSelect = (option: ScriptOption) => {
     setScriptName(option.symbol);
+    setSelectedScriptSymbol(option.symbol);
     const stockDetail = stockDetails.find((stock) => stock.symbol === option.symbol);
     setSelectedStock(stockDetail || null);
     setHoldingError('');
@@ -305,7 +318,7 @@ const ScheduleOrder: React.FC = () => {
     setSelectedStock(stockDetails.find((stock) => stock.symbol === normalizedName) || null);
   }, [scriptName, stockDetails]);
 
-  const loadLatestQuote = useCallback(async (clientId: string, symbol: string) => {
+  const loadLatestQuote = useCallback(async (clientId: string, symbol: string, options?: { silent?: boolean }) => {
     const normalizedSymbol = symbol.trim().toUpperCase();
     if (!clientId || !normalizedSymbol) {
       setLatestLtp(null);
@@ -316,8 +329,12 @@ const ScheduleOrder: React.FC = () => {
 
     const requestId = quoteRequestId.current + 1;
     quoteRequestId.current = requestId;
-    setQuoteLoading(true);
-    setQuoteError('');
+    if (!options?.silent) {
+      setQuoteLoading(true);
+    }
+    if (!options?.silent) {
+      setQuoteError('');
+    }
 
     try {
       const params = new URLSearchParams({ client_id: clientId, symbol: normalizedSymbol });
@@ -329,9 +346,11 @@ const ScheduleOrder: React.FC = () => {
       }
       if (!response.ok) {
         const data = await response.json().catch(() => ({}));
-        setLatestLtp(null);
-        setQuote(null);
-        setQuoteError(data.detail || data.message || 'Latest LTP is not available.');
+        if (!options?.silent) {
+          setLatestLtp(null);
+          setQuote(null);
+          setQuoteError(data.detail || data.message || 'Latest LTP is not available.');
+        }
         return;
       }
 
@@ -344,14 +363,18 @@ const ScheduleOrder: React.FC = () => {
       if (ltp > 0) {
         setLatestLtp(ltp);
       } else {
-        setLatestLtp(null);
-        setQuoteError('Latest LTP is not available.');
+        if (!options?.silent) {
+          setLatestLtp(null);
+          setQuoteError('Latest LTP is not available.');
+        }
       }
     } catch {
       if (requestId === quoteRequestId.current) {
-        setLatestLtp(null);
-        setQuote(null);
-        setQuoteError('Failed to load latest LTP.');
+        if (!options?.silent) {
+          setLatestLtp(null);
+          setQuote(null);
+          setQuoteError('Failed to load latest LTP.');
+        }
       }
     } finally {
       if (requestId === quoteRequestId.current) {
@@ -360,7 +383,7 @@ const ScheduleOrder: React.FC = () => {
     }
   }, []);
 
-  const loadSellHolding = useCallback(async (clientId: string, symbol: string) => {
+  const loadSellHolding = useCallback(async (clientId: string, symbol: string, options?: { silent?: boolean }) => {
     const normalizedSymbol = symbol.trim().toUpperCase();
     if (!clientId || !normalizedSymbol || orderType !== 'sell') {
       holdingRequestId.current += 1;
@@ -372,10 +395,12 @@ const ScheduleOrder: React.FC = () => {
 
     const requestId = holdingRequestId.current + 1;
     holdingRequestId.current = requestId;
-    setHoldingLoading(true);
-    setHoldingError('');
-    setHoldingQty(null);
-    setHoldingLabel('');
+    if (!options?.silent) {
+      setHoldingLoading(true);
+      setHoldingError('');
+      setHoldingQty(null);
+      setHoldingLabel('');
+    }
 
     try {
       const match = sellHoldings.find((holding) => {
@@ -385,7 +410,9 @@ const ScheduleOrder: React.FC = () => {
       });
 
       if (!match || Number(match.currentBalance || 0) <= 0) {
-        setHoldingError(`${normalizedSymbol} is not available in this client's DP holdings.`);
+        if (!options?.silent) {
+          setHoldingError(`${normalizedSymbol} is not available in this client's DP holdings.`);
+        }
         return;
       }
 
@@ -393,7 +420,9 @@ const ScheduleOrder: React.FC = () => {
       setHoldingLabel(match.symbolName || match.scrip || normalizedSymbol);
     } catch {
       if (requestId === holdingRequestId.current) {
-        setHoldingError('Could not verify DP holdings for sell order.');
+        if (!options?.silent) {
+          setHoldingError('Could not verify DP holdings for sell order.');
+        }
       }
     } finally {
       if (requestId === holdingRequestId.current) {
@@ -403,12 +432,26 @@ const ScheduleOrder: React.FC = () => {
   }, [orderType, sellHoldings]);
 
   useEffect(() => {
-    void loadLatestQuote(clientID, scriptName);
-  }, [clientID, scriptName, loadLatestQuote]);
+    void loadLatestQuote(clientID, selectedScriptSymbol);
+  }, [clientID, selectedScriptSymbol, loadLatestQuote]);
 
   useEffect(() => {
-    void loadSellHolding(clientID, scriptName);
-  }, [clientID, scriptName, orderType, loadSellHolding]);
+    const normalizedSymbol = selectedScriptSymbol.trim().toUpperCase();
+    if (!clientID || !normalizedSymbol) {
+      return undefined;
+    }
+    const interval = window.setInterval(() => {
+      void loadLatestQuote(clientID, normalizedSymbol, { silent: true });
+      if (orderType === 'sell') {
+        void loadSellHolding(clientID, normalizedSymbol, { silent: true });
+      }
+    }, 10000);
+    return () => window.clearInterval(interval);
+  }, [clientID, loadLatestQuote, loadSellHolding, orderType, selectedScriptSymbol]);
+
+  useEffect(() => {
+    void loadSellHolding(clientID, selectedScriptSymbol);
+  }, [clientID, selectedScriptSymbol, orderType, loadSellHolding]);
 
   const fillSellQuantityFromHolding = () => {
     if (!holdingQty || holdingQty <= 0) {
@@ -538,6 +581,7 @@ const ScheduleOrder: React.FC = () => {
                   placeholder={orderType === 'sell' ? 'Search owned holding' : 'Type to search — e.g. CREST'}
                   disabled={!clientID || (activeScriptLoading && !hasActiveScriptCache)}
                   required
+                  maxResults={Math.max(scriptOptions.length, 10)}
                   actionTitle="Refresh scrip suggestions"
                   actionLoading={activeScriptLoading}
                   onAction={refreshScriptSuggestions}
@@ -629,7 +673,6 @@ const ScheduleOrder: React.FC = () => {
           <div className="schedule-order-chart-header">
             <div>
               <h3 className="panel-title">{chartSymbol} Chart</h3>
-              <p className="panel-subtitle">NEPSE Alpha trading view</p>
             </div>
           </div>
           <div className="schedule-order-chart-box">

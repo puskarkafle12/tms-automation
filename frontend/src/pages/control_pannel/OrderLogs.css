@@ -19,7 +19,7 @@
 
 .order-logs-form-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 1rem;
   align-items: end;
 }
@@ -125,6 +125,26 @@
   font-size: 1rem;
   font-weight: 600;
   margin: 0;
+}
+
+.order-log-stock-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 0.12rem;
+  min-width: 130px;
+}
+
+.order-log-stock-cell strong {
+  color: var(--color-text);
+  font-size: 0.9rem;
+  font-weight: 800;
+}
+
+.order-log-stock-cell span {
+  color: var(--color-text-muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1.25;
 }
 
 .common-table .strategy-chip,

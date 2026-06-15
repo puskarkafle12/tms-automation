@@ -1,8 +1,8 @@
 .dp-holdings-page {
   display: flex;
   flex-direction: column;
-  gap: 1.25rem;
-  max-width: 1200px;
+  gap: 1rem;
+  max-width: 1240px;
 }
 
 .dp-holdings-hero {
@@ -10,55 +10,55 @@
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
-  padding: 1.25rem 1.5rem;
-  background: linear-gradient(135deg, #f8fafc 0%, #fdf4ff 100%);
-  border-color: #e9d5ff;
-}
-
-.dp-holdings-hero-content {
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-}
-
-.dp-holdings-hero-icon {
-  width: 48px;
-  height: 48px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 1.5rem;
+  padding: 1.15rem 1.25rem;
   background: #fff;
-  border: 1px solid #e9d5ff;
-  border-radius: 12px;
 }
 
 .dp-holdings-hero-title {
   margin: 0;
-  font-size: 1.25rem;
-  font-weight: 700;
+  font-size: 1.35rem;
+  font-weight: 800;
+  letter-spacing: 0;
 }
 
 .dp-holdings-hero-subtitle {
   margin: 0.25rem 0 0;
-  font-size: 0.875rem;
+  font-size: 0.9rem;
   color: var(--color-text-muted);
 }
 
+.dp-holdings-status {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  color: var(--color-text-muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
 .dp-holdings-filters {
-  padding: 1.5rem;
+  display: grid;
+  grid-template-columns: minmax(260px, 0.8fr) minmax(320px, 1.2fr);
+  gap: 1rem;
+}
+
+.dp-holdings-filters-header,
+.dp-holdings-form {
+  padding: 1rem;
 }
 
 .dp-holdings-filters-header {
   display: flex;
-  align-items: flex-start;
+  flex-direction: column;
   justify-content: space-between;
   gap: 1rem;
-  margin-bottom: 1.25rem;
 }
 
 .dp-holdings-tabs {
   display: inline-flex;
+  width: fit-content;
   padding: 0.25rem;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
@@ -71,7 +71,7 @@
   background: transparent;
   color: var(--color-text-muted);
   cursor: pointer;
-  font-weight: 600;
+  font-weight: 700;
   padding: 0.5rem 0.75rem;
 }
 
@@ -82,24 +82,26 @@
 }
 
 .dp-holdings-form {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 1rem;
-  align-items: end;
+  display: flex;
+  align-items: center;
 }
 
-.dp-holdings-form .form-group {
+.dp-holdings-form .form-group,
+.dp-sell-form .form-group {
   margin-bottom: 0;
 }
 
-.dp-holdings-hint {
-  font-size: 0.75rem;
+.dp-holdings-hint,
+.dp-field-error {
+  display: block;
+  margin-top: 0.35rem;
   color: var(--color-danger);
-  margin-top: 0.25rem;
+  font-size: 0.75rem;
+  font-weight: 600;
 }
 
 .dp-combined-user-picker {
-  grid-column: 1 / -1;
+  width: 100%;
 }
 
 .dp-combined-client-list {
@@ -117,71 +119,212 @@
   border: 1px solid var(--color-border);
   border-radius: 999px;
   background: var(--color-bg);
+  color: var(--color-text-muted);
   font-size: 0.8125rem;
-  font-weight: 600;
+  font-weight: 700;
   cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+
+.dp-combined-client-chip.active {
+  border-color: var(--color-primary);
+  background: var(--color-primary-soft);
+  color: var(--color-primary);
+}
+
+.dp-combined-client-chip input {
+  margin: 0;
+}
+
+.dp-combined-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  color: var(--color-text-muted);
+  font-size: 0.8rem;
+  font-weight: 700;
 }
 
 .dp-holdings-stats {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 1rem;
 }
 
 .dp-holdings-stat-card {
+  position: relative;
+  overflow: hidden;
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  padding: 1rem 1.25rem;
+  padding: 1rem 1.1rem;
   display: flex;
   flex-direction: column;
   gap: 0.25rem;
+  min-height: 116px;
 }
 
-.dp-holdings-stat-card.profit {
+.dp-holdings-stat-card.positive {
   border-color: #86efac;
-  background: linear-gradient(180deg, #f0fdf4 0%, #ecfdf5 100%);
+  background: #f0fdf4;
 }
 
-.dp-holdings-stat-card.loss {
+.dp-holdings-stat-card.negative {
   border-color: #fca5a5;
-  background: linear-gradient(180deg, #fef2f2 0%, #fff1f2 100%);
+  background: #fef2f2;
+}
+
+.dp-holdings-stat-card.neutral {
+  background: #f8fafc;
+}
+
+.dp-holdings-stat-icon {
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 0.25rem;
+  border-radius: 8px;
+  background: var(--color-bg);
+  color: var(--color-primary);
+  font-size: 0.72rem;
+  font-weight: 800;
 }
 
 .dp-holdings-stat-label {
-  font-size: 0.75rem;
-  font-weight: 600;
+  font-size: 0.72rem;
+  font-weight: 800;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--color-text-muted);
 }
 
 .dp-holdings-stat-value {
-  font-size: 1.375rem;
-  font-weight: 700;
+  font-size: 1.28rem;
+  font-weight: 800;
+  color: var(--color-text);
+  line-height: 1.25;
+}
+
+.dp-holdings-stat-note {
+  font-size: 0.84rem;
+  font-weight: 800;
+}
+
+.positive {
+  color: var(--color-success) !important;
+}
+
+.negative {
+  color: var(--color-danger) !important;
+}
+
+.neutral {
+  color: var(--color-text-muted) !important;
+}
+
+.dp-allocation-panel {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.35fr) minmax(0, 1fr);
+  gap: 1.25rem;
+  padding: 1.15rem 1.25rem;
+}
+
+.dp-allocation-list {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.dp-allocation-row {
+  display: grid;
+  grid-template-columns: minmax(170px, 0.35fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 0.85rem;
+}
+
+.dp-allocation-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  color: var(--color-text-muted);
+  font-size: 0.82rem;
+}
+
+.dp-allocation-meta strong {
   color: var(--color-text);
 }
 
-.dp-holdings-stat-value.positive {
-  color: var(--color-success);
+.dp-allocation-track {
+  height: 9px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--color-bg);
 }
 
-.dp-holdings-stat-value.negative {
-  color: var(--color-danger);
+.dp-allocation-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--color-primary);
 }
 
 .dp-holdings-content {
-  padding: 1.25rem;
-  min-height: 200px;
+  padding: 1.15rem;
+  min-height: 240px;
 }
 
-.dp-holdings-content-header {
+.dp-holdings-content-header,
+.dp-holdings-toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 1rem;
+}
+
+.dp-holdings-content-header {
   margin-bottom: 1rem;
-  padding-bottom: 0.75rem;
-  border-bottom: 1px solid var(--color-border);
+}
+
+.dp-holdings-toolbar {
+  margin-bottom: 1rem;
+  padding: 0.85rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+}
+
+.dp-search-input {
+  min-width: min(360px, 100%);
+}
+
+.dp-filter-group {
+  display: inline-flex;
+  padding: 0.2rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.dp-filter-group button {
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 800;
+  padding: 0.45rem 0.65rem;
+}
+
+.dp-filter-group button.active {
+  background: var(--color-primary);
+  color: #fff;
+}
+
+.dp-sort-select {
+  min-width: 170px;
 }
 
 .dp-holdings-loading,
@@ -211,70 +354,122 @@
   }
 }
 
-.dp-holdings-totals {
-  margin-top: 1rem;
-  padding: 1rem 1.25rem;
-  border-radius: var(--radius-md);
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-  gap: 1rem;
+.dp-holdings-table {
+  background: #fff;
 }
 
-.dp-holdings-totals.profit {
-  background: var(--color-success-soft);
-  border: 1px solid #a7f3d0;
+.dp-holdings-table th,
+.dp-holdings-table td {
+  vertical-align: middle;
 }
 
-.dp-holdings-totals.loss {
-  background: var(--color-danger-soft);
-  border: 1px solid #fecaca;
+.dp-holdings-table tbody tr {
+  background: #fff;
+  transition: background 0.15s ease;
 }
 
-.dp-holdings-total-item {
+.dp-holdings-table tbody tr:hover,
+.dp-holdings-table tbody tr.expanded {
+  background: #f8fafc;
+}
+
+.dp-stock-cell {
   display: flex;
   flex-direction: column;
-  gap: 0.125rem;
+  align-items: flex-start;
+  gap: 0.2rem;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 0;
+  text-align: left;
 }
 
-.dp-holdings-total-label {
-  font-size: 0.6875rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--color-text-muted);
-}
-
-.dp-holdings-total-value {
-  font-size: 1rem;
-  font-weight: 700;
-}
-
-.dp-holdings-table .positive {
-  color: var(--color-success);
-  font-weight: 700;
-}
-
-.dp-holdings-table .negative {
-  color: var(--color-danger);
-  font-weight: 700;
+.dp-stock-symbol {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  min-width: 46px;
+  justify-content: center;
+  padding: 0.22rem 0.45rem;
+  border: 1px solid #bfdbfe;
+  border-radius: 7px;
+  background: #eff6ff;
+  color: var(--color-primary);
+  font-weight: 800;
 }
 
 .dp-holdings-symbol-name {
   display: block;
-  max-width: 220px;
-  margin-top: 0.125rem;
+  max-width: 260px;
   color: var(--color-text-muted);
   font-size: 0.75rem;
   white-space: normal;
 }
 
+.dp-holdings-table td.positive,
+.dp-holdings-table td.negative,
+.dp-holdings-table td.neutral {
+  font-weight: 800;
+}
+
+.dp-holdings-table td.positive span,
+.dp-holdings-table td.negative span,
+.dp-holdings-table td.neutral span {
+  display: block;
+  margin-top: 0.15rem;
+  font-size: 0.75rem;
+}
+
 .dp-sell-btn {
   background: var(--color-danger-soft) !important;
   color: var(--color-danger) !important;
+  border-radius: 8px !important;
 }
 
 .dp-sell-btn:hover {
   background: #fecaca !important;
+}
+
+.dp-details-row td {
+  padding: 0 !important;
+  background: #f8fafc;
+}
+
+.dp-details-panel {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+  gap: 0.75rem;
+  padding: 1rem;
+  border-top: 1px solid var(--color-border);
+}
+
+.dp-details-panel div {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.dp-details-panel span {
+  color: var(--color-text-muted);
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.dp-details-panel strong {
+  font-size: 0.88rem;
+}
+
+.dp-details-users,
+.dp-details-actions {
+  grid-column: 1 / -1;
+}
+
+.dp-details-actions {
+  flex-direction: row !important;
+  align-items: center;
 }
 
 .dp-sell-modal-backdrop {
@@ -285,12 +480,12 @@
   align-items: center;
   justify-content: center;
   padding: 1rem;
-  background: rgb(15 23 42 / 0.48);
+  background: rgb(15 23 42 / 0.56);
 }
 
 .dp-sell-modal {
-  width: min(920px, 100%);
-  max-height: min(86vh, 780px);
+  width: min(940px, 100%);
+  max-height: min(88vh, 820px);
   overflow-y: auto;
   padding: 1.25rem;
 }
@@ -301,24 +496,24 @@
   justify-content: space-between;
   gap: 1rem;
   margin-bottom: 1rem;
-  padding-bottom: 0.75rem;
+  padding-bottom: 0.85rem;
   border-bottom: 1px solid var(--color-border);
 }
 
 .dp-sell-modal-header h3 {
   margin: 0;
-  font-size: 1.125rem;
+  font-size: 1.25rem;
 }
 
 .dp-sell-modal-header p {
   margin: 0.25rem 0 0;
   color: var(--color-text-muted);
-  font-size: 0.875rem;
+  font-size: 0.9rem;
 }
 
 .dp-sell-close {
-  width: 32px;
-  height: 32px;
+  width: 34px;
+  height: 34px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   background: var(--color-surface);
@@ -335,24 +530,27 @@
   margin-bottom: 1rem;
 }
 
-.dp-sell-summary div {
+.dp-sell-summary div,
+.dp-order-summary {
   display: flex;
   flex-direction: column;
-  gap: 0.125rem;
-  padding: 0.75rem;
+  gap: 0.2rem;
+  padding: 0.8rem;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-bg);
 }
 
-.dp-sell-summary span {
+.dp-sell-summary span,
+.dp-order-summary span {
   color: var(--color-text-muted);
-  font-size: 0.75rem;
-  font-weight: 600;
+  font-size: 0.72rem;
+  font-weight: 800;
   text-transform: uppercase;
 }
 
-.dp-sell-summary strong {
+.dp-sell-summary strong,
+.dp-order-summary strong {
   color: var(--color-text);
   font-size: 1rem;
 }
@@ -364,14 +562,17 @@
   margin-bottom: 1rem;
 }
 
-.dp-combined-allocation {
+.dp-combined-allocation,
+.dp-depth-table {
   margin-bottom: 1rem;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   overflow: hidden;
 }
 
-.dp-combined-allocation h4 {
+.dp-combined-allocation h4,
+.dp-depth-table h4,
+.dp-order-summary h4 {
   margin: 0;
   padding: 0.75rem 1rem;
   background: var(--color-bg);
@@ -379,39 +580,20 @@
   font-size: 0.875rem;
 }
 
-.dp-combined-allocation-row {
-  display: flex;
-  justify-content: space-between;
-  gap: 1rem;
-  padding: 0.65rem 1rem;
-  border-bottom: 1px solid var(--color-border);
-  font-size: 0.875rem;
+.dp-order-summary h4 {
+  padding: 0;
+  border-bottom: 0;
 }
 
-.dp-combined-allocation-row:last-child {
-  border-bottom: none;
-}
-
-.dp-depth-table {
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  overflow: hidden;
-}
-
-.dp-depth-table h4 {
-  margin: 0;
-  padding: 0.75rem 1rem;
-  background: var(--color-bg);
-  border-bottom: 1px solid var(--color-border);
-  font-size: 0.875rem;
-}
-
+.dp-combined-allocation table,
 .dp-depth-table table {
   width: 100%;
   border-collapse: collapse;
   font-size: 0.8125rem;
 }
 
+.dp-combined-allocation th,
+.dp-combined-allocation td,
 .dp-depth-table th,
 .dp-depth-table td {
   padding: 0.625rem 0.75rem;
@@ -419,11 +601,14 @@
   text-align: right;
 }
 
+.dp-combined-allocation th:first-child,
+.dp-combined-allocation td:first-child,
 .dp-depth-table th:first-child,
 .dp-depth-table td:first-child {
   text-align: left;
 }
 
+.dp-combined-allocation tbody tr:last-child td,
 .dp-depth-table tbody tr:last-child td {
   border-bottom: none;
 }
@@ -437,13 +622,44 @@
 
 .dp-sell-form {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr)) auto;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 1rem;
-  align-items: end;
+  align-items: start;
 }
 
-.dp-sell-form .form-group {
-  margin-bottom: 0;
+.dp-quantity-control,
+.dp-sell-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.dp-quantity-control .input {
+  flex: 1;
+}
+
+.dp-order-summary,
+.dp-sell-actions {
+  grid-column: 1 / -1;
+}
+
+.dp-order-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.dp-order-summary h4 {
+  grid-column: 1 / -1;
+}
+
+.dp-order-summary div {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.dp-sell-actions {
+  justify-content: flex-end;
 }
 
 .dp-sell-submit {
@@ -451,19 +667,54 @@
   white-space: nowrap;
 }
 
+@media (max-width: 980px) {
+  .dp-holdings-filters,
+  .dp-allocation-panel,
+  .dp-holdings-stats {
+    grid-template-columns: 1fr;
+  }
+
+  .dp-holdings-toolbar {
+    flex-wrap: wrap;
+  }
+
+  .dp-search-input,
+  .dp-filter-group,
+  .dp-sort-select {
+    flex: 1 1 100%;
+  }
+}
+
 @media (max-width: 768px) {
   .dp-holdings-hero,
-  .dp-holdings-filters-header {
+  .dp-holdings-content-header,
+  .dp-allocation-row {
     flex-direction: column;
     align-items: stretch;
   }
 
-  .dp-holdings-form {
+  .dp-holdings-status,
+  .dp-holdings-tabs {
+    justify-content: flex-start;
+    width: 100%;
+  }
+
+  .dp-holdings-tabs button {
+    flex: 1;
+  }
+
+  .dp-allocation-row,
+  .dp-depth-grid,
+  .dp-sell-form,
+  .dp-order-summary {
     grid-template-columns: 1fr;
   }
 
-  .dp-depth-grid,
-  .dp-sell-form {
-    grid-template-columns: 1fr;
+  .dp-sell-actions {
+    justify-content: stretch;
+  }
+
+  .dp-sell-actions .btn {
+    flex: 1;
   }
 }

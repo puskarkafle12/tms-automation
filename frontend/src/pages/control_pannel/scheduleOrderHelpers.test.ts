@@ -1,4 +1,4 @@
-import { buildScheduleScriptOptions } from './scheduleOrderHelpers';
+import { buildScheduleScriptOptions, mergeUniqueStockDetails } from './scheduleOrderHelpers';
 
 describe('buildScheduleScriptOptions', () => {
   const stockDetails = [
@@ -26,5 +26,20 @@ describe('buildScheduleScriptOptions', () => {
       'BBB',
       'DDD',
     ]);
+  });
+
+  test('BUY cache merge keeps old unique scrips and adds new API scrips', () => {
+    expect(
+      mergeUniqueStockDetails(
+        [
+          { symbol: 'AAA', ltp: 100 },
+          { symbol: 'BBB', ltp: 200 },
+        ],
+        [
+          { symbol: 'BBB', ltp: 210 },
+          { symbol: 'CCC', ltp: 300 },
+        ],
+      ).map((stock) => `${stock.symbol}:${stock.ltp}`),
+    ).toEqual(['AAA:100', 'BBB:210', 'CCC:300']);
   });
 });

@@ -46,6 +46,28 @@ interface ScheduledOrderRow {
   actionRequired?: boolean;
 }
 
+interface ClientSession {
+  client_id: string;
+  display_name?: string | null;
+  broker_no?: string | null;
+}
+
+const formatClientLabel = (session?: ClientSession | null, fallbackClientId = '') => {
+  if (!session) {
+    return fallbackClientId;
+  }
+  const name = session.display_name?.trim() || session.client_id || fallbackClientId;
+  const broker = session.broker_no?.trim();
+  return broker ? `${name}[${broker}]` : name;
+};
+
+const StockClientCell: React.FC<{ symbol: string; clientLabel: string }> = ({ symbol, clientLabel }) => (
+  <div className="order-log-stock-cell">
+    <strong>{symbol || '-'}</strong>
+    {clientLabel && <span>{clientLabel}</span>}
+  </div>
+);
+
 const formatScanCount = (value: number | null | undefined): number => {
   return Math.max(0, Math.round(Number(value) || 0));
 };
@@ -198,7 +220,6 @@ const todayDate = () => format(new Date(), 'yyyy-MM-dd');
 
 const GetOrderStatus: React.FC = () => {
   const [orderedDate, setOrderedDate] = useState<string>(todayDate);
-  const [clientID, setClientID] = useState('');
   const [scriptName, setScriptName] = useState('');
   const scriptNameRef = useRef(scriptName);
   useEffect(() => {
@@ -213,6 +234,7 @@ const GetOrderStatus: React.FC = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [hasLoaded, setHasLoaded] = useState(false);
   const [loggedInClientIDs, setLoggedInClientIDs] = useState<string[]>([]);
+  const [clientSessions, setClientSessions] = useState<ClientSession[]>([]);
   const [activeTab, setActiveTab] = useState<OrderTab>('scheduled');
   const [dialogVisible, setDialogVisible] = useState(false);
   const [dialogMessage, setDialogMessage] = useState('');
@@ -227,15 +249,18 @@ const GetOrderStatus: React.FC = () => {
       const response = await fetch(`${apiUrl}/logged_in_clients/`);
       if (response.ok) {
         const data = await response.json();
-        setLoggedInClientIDs(data.logged_in_client_ids);
-        if (data.logged_in_client_ids.length > 0) {
-          setClientID(data.logged_in_client_ids[0]);
-        }
+        const sessions: ClientSession[] = Array.isArray(data.sessions)
+          ? data.sessions
+          : (data.logged_in_client_ids || []).map((id: string) => ({ client_id: id }));
+        setClientSessions(sessions);
+        setLoggedInClientIDs(sessions.map((session) => session.client_id));
       } else {
+        setClientSessions([]);
         setLoggedInClientIDs([]);
         setErrorMessage('Failed to fetch logged-in client IDs');
       }
     } catch (error: any) {
+      setClientSessions([]);
       setLoggedInClientIDs([]);
       setErrorMessage(`Error fetching logged-in client IDs: ${error.message}`);
     }
@@ -259,17 +284,31 @@ const GetOrderStatus: React.FC = () => {
     setOrderedDate(date ? format(date, 'yyyy-MM-dd') : todayDate());
   };
 
+  const clientLabelMap = useMemo(() => {
+    const labels = new Map<string, string>();
+    clientSessions.forEach((session) => {
+      labels.set(session.client_id, formatClientLabel(session, session.client_id));
+    });
+    return labels;
+  }, [clientSessions]);
+
+  const getClientLabel = useCallback(
+    (clientId: string) => clientLabelMap.get(clientId) || clientId,
+    [clientLabelMap],
+  );
+
   const fetchOrderBook = useCallback(async (selectedClientId: string) => {
     if (!selectedClientId) {
-      setOrderBook([]);
-      return;
+      return [];
     }
     const response = await fetch(`${apiUrl}/get_order_book?client_id=${selectedClientId}`);
     if (response.ok) {
-      setOrderBook(await response.json());
-    } else {
-      setOrderBook([]);
+      const rows = await response.json();
+      return Array.isArray(rows)
+        ? rows.map((row) => ({ ...row, client_id: selectedClientId }))
+        : [];
     }
+    return [];
   }, [apiUrl]);
 
   const fetchOrderStatusLogs = useCallback(
@@ -315,20 +354,32 @@ const GetOrderStatus: React.FC = () => {
 
   const fetchOrderHistory = useCallback(async (selectedClientId: string) => {
     if (!selectedClientId) {
-      setOrderHistory([]);
-      return;
+      return [];
     }
     const response = await fetch(`${apiUrl}/order_history?client_id=${selectedClientId}`);
     if (response.ok) {
-      setOrderHistory(await response.json());
-    } else {
-      setOrderHistory([]);
+      const rows = await response.json();
+      return Array.isArray(rows)
+        ? rows.map((row) => ({ ...row, client_id: selectedClientId }))
+        : [];
     }
+    return [];
   }, [apiUrl]);
 
-  const loadClientTmsData = useCallback(
-    async (selectedClientId: string) => {
-      await Promise.all([fetchOrderBook(selectedClientId), fetchOrderHistory(selectedClientId)]);
+  const loadAllClientTmsData = useCallback(
+    async (clientIds: string[]) => {
+      if (clientIds.length === 0) {
+        setOrderBook([]);
+        setOrderHistory([]);
+        return;
+      }
+
+      const [bookResults, historyResults] = await Promise.all([
+        Promise.all(clientIds.map((id) => fetchOrderBook(id).catch(() => []))),
+        Promise.all(clientIds.map((id) => fetchOrderHistory(id).catch(() => []))),
+      ]);
+      setOrderBook(bookResults.flat());
+      setOrderHistory(historyResults.flat());
     },
     [fetchOrderBook, fetchOrderHistory],
   );
@@ -361,12 +412,8 @@ const GetOrderStatus: React.FC = () => {
   }, [loadLogsAndScheduled]);
 
   useEffect(() => {
-    const bookClient = clientID || loggedInClientIDs[0] || '';
-    if (!bookClient) {
-      return;
-    }
-    void loadClientTmsData(bookClient);
-  }, [clientID, loadClientTmsData, loggedInClientIDs]);
+    void loadAllClientTmsData(loggedInClientIDs);
+  }, [loadAllClientTmsData, loggedInClientIDs]);
 
   useEffect(() => {
     if (!hasLoaded) {
@@ -387,10 +434,7 @@ const GetOrderStatus: React.FC = () => {
     setIsLoading(true);
     try {
       await loadLogsAndScheduled({ silent: true });
-      const bookClient = clientID || loggedInClientIDs[0] || '';
-      if (bookClient) {
-        await loadClientTmsData(bookClient);
-      }
+      await loadAllClientTmsData(loggedInClientIDs);
       setSuccessMessage('Data refreshed');
     } catch {
       setErrorMessage('Failed to refresh order data.');
@@ -399,15 +443,19 @@ const GetOrderStatus: React.FC = () => {
     }
   };
 
-  const handleCancelOrder = async (exchangeSecurityID: number) => {
+  const handleCancelOrder = async (clientId: string, exchangeSecurityID: number) => {
+    if (!clientId) {
+      setErrorMessage('Cannot cancel order because client ID is missing.');
+      return;
+    }
     try {
       const response = await fetch(
-        `${apiUrl}/cancel_order/?client_id=${clientID}&exchange_order_id=${exchangeSecurityID}`,
+        `${apiUrl}/cancel_order/?client_id=${clientId}&exchange_order_id=${exchangeSecurityID}`,
         { method: 'DELETE' },
       );
       if (response.ok) {
         setSuccessMessage('Order cancelled successfully');
-        await fetchOrderBook(clientID);
+        await loadAllClientTmsData(loggedInClientIDs);
       } else {
         setErrorMessage('Failed to cancel order');
       }
@@ -440,7 +488,7 @@ const GetOrderStatus: React.FC = () => {
     } else if (actionType === 'Cancel') {
       setDialogMessage('Are you sure you want to cancel this order?');
       setDialogAction(() => () => {
-        handleCancelOrder(row.exchangeOrderId);
+        handleCancelOrder(row.client_id, row.exchangeOrderId);
         setDialogVisible(false);
       });
       setDialogVisible(true);
@@ -454,6 +502,7 @@ const GetOrderStatus: React.FC = () => {
         const strategyLabel = formatStrategyType(order.strategy_type, side);
         return {
           ...order,
+          stock: <StockClientCell symbol={order.script_name} clientLabel={getClientLabel(order.client_id)} />,
           order_type: side,
           strategy_type: (
             <button
@@ -469,7 +518,7 @@ const GetOrderStatus: React.FC = () => {
           status: formatLiveScanStatus(order),
         };
       }),
-    [scheduledOrders],
+    [getClientLabel, scheduledOrders],
   );
 
   const orderLogRows = useMemo(
@@ -493,7 +542,7 @@ const GetOrderStatus: React.FC = () => {
         };
         return {
           timestamp: formatDateTime(order.timestamp),
-          script_name: order.script_name,
+          stock: <StockClientCell symbol={order.script_name} clientLabel={getClientLabel(order.client_id || '')} />,
           order_type: side,
           qty: formatScanCount(order.qty),
           strategy_type: (
@@ -509,15 +558,31 @@ const GetOrderStatus: React.FC = () => {
           price: formatCurrency(order.execution_price ?? order.price),
         };
       }),
-    [orderLogs],
+    [getClientLabel, orderLogs],
   );
+
+  const decorateTmsRows = useCallback(
+    (rows: any[]) =>
+      rows.map((row) => {
+        const symbol = row.symbol || row.script_name || '';
+        const clientId = row.client_id || '';
+        return {
+          ...row,
+          stock: <StockClientCell symbol={symbol} clientLabel={getClientLabel(clientId)} />,
+        };
+      }),
+    [getClientLabel],
+  );
+
+  const orderBookRows = useMemo(() => decorateTmsRows(orderBook), [decorateTmsRows, orderBook]);
+  const orderHistoryRows = useMemo(() => decorateTmsRows(orderHistory), [decorateTmsRows, orderHistory]);
 
   const tabData: Record<OrderTab, { count: number; columns: string[]; rows: any[]; empty: string }> = {
     logs: {
       count: orderLogs.length,
       columns: getVisibleColumns(
         orderLogRows,
-        ['timestamp', 'script_name', 'order_type', 'qty', 'strategy_type', 'status'],
+        ['timestamp', 'stock', 'order_type', 'qty', 'strategy_type', 'status'],
         ['price'],
       ),
       rows: orderLogRows,
@@ -527,7 +592,7 @@ const GetOrderStatus: React.FC = () => {
     },
     scheduled: {
       count: scheduledOrders.length,
-      columns: ['script_name', 'order_type', 'qty', 'strategy_type', 'status', 'created_at'],
+      columns: ['stock', 'order_type', 'qty', 'strategy_type', 'status', 'created_at'],
       rows: scheduledRows,
       empty: hasLoaded
         ? 'No scheduled orders found.'
@@ -536,8 +601,7 @@ const GetOrderStatus: React.FC = () => {
     book: {
       count: orderBook.length,
       columns: [
-        'clientMemberCode',
-        'symbol',
+        'stock',
         'buyOrSell',
         'orderQuantity',
         'orderPrice',
@@ -546,14 +610,13 @@ const GetOrderStatus: React.FC = () => {
         'totalTradedQuantity',
         'remainingOrderQuantity',
       ],
-      rows: orderBook,
+      rows: orderBookRows,
       empty: hasLoaded ? 'No open orders in the order book.' : 'Loading order book...',
     },
     history: {
       count: orderHistory.length,
       columns: [
-        'clientMemberCode',
-        'symbol',
+        'stock',
         'buyOrSell',
         'orderQuantity',
         'orderPrice',
@@ -562,7 +625,7 @@ const GetOrderStatus: React.FC = () => {
         'totalTradedQuantity',
         'remainingOrderQuantity',
       ],
-      rows: orderHistory,
+      rows: orderHistoryRows,
       empty: hasLoaded ? 'No order history found.' : 'Loading order history...',
     },
   };
@@ -576,7 +639,7 @@ const GetOrderStatus: React.FC = () => {
           <div>
             <h2 className="panel-title">Order Logs</h2>
             <p className="panel-subtitle">
-              Today&apos;s logs and all scheduled orders load automatically. Use filters to narrow results.
+              Combined logs for all clients load automatically. Use filters to narrow results.
             </p>
           </div>
           {loggedInClientIDs.length > 0 && (
@@ -589,30 +652,6 @@ const GetOrderStatus: React.FC = () => {
 
         <form onSubmit={handleSubmit} className="order-logs-form">
           <div className="order-logs-form-grid">
-            <div className="form-group">
-              <label htmlFor="clientId">Client ID (book / history)</label>
-              <select
-                id="clientId"
-                className="select"
-                value={clientID}
-                onChange={(e) => setClientID(e.target.value)}
-                disabled={loggedInClientIDs.length === 0}
-              >
-                {loggedInClientIDs.length === 0 ? (
-                  <option value="">No logged-in clients</option>
-                ) : (
-                  loggedInClientIDs.map((id) => (
-                    <option key={id} value={id}>
-                      {id}
-                    </option>
-                  ))
-                )}
-              </select>
-              {loggedInClientIDs.length === 0 && (
-                <span className="order-logs-hint">Log in via TMS Login tab first.</span>
-              )}
-            </div>
-
             <div className="form-group">
               <label htmlFor="scriptName">Script Name</label>
               <input
