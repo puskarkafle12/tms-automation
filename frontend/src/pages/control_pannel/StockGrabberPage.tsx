@@ -160,7 +160,7 @@ const StockGrabberPage: React.FC = () => {
           <div>
             <h2 className="stock-grabber-hero-title">Stock Grabber</h2>
             <p className="stock-grabber-hero-subtitle">
-              Add symbols below — each grabber scans at 2% high and orders when price changes.
+              Add symbols below — each grabber scans at 3% high and orders when price changes.
             </p>
           </div>
         </div>

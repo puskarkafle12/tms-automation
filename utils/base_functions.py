@@ -64,7 +64,7 @@ def logout_user(client_id: str,message):
         db.close()
 
 NEPSE_INTRADAY_LIMIT_PERCENT = 15
-STOCK_GRABBER_TARGET_RISE_PERCENT = 2
+STOCK_GRABBER_TARGET_RISE_PERCENT = 3
 STOCK_GRABBER_CAP_THRESHOLD_PERCENT = 7.843
 
 
@@ -86,13 +86,24 @@ def is_stock_grabber_stop_reached(change_in_percentage, stop_buy_after_percent=N
 
 
 def calculate_high_price(ltp, change_in_percentage):
+    """
+    Calculate high/ordered price based on NEPSE grabber logic.
+
+    Example:
+    LTP 469.2  -> 483.2
+    LTP 483.2  -> 497.6
+
+    Logic:
+    Add 3% from current LTP and truncate to 1 decimal.
+    """
     if change_in_percentage > STOCK_GRABBER_CAP_THRESHOLD_PERCENT:
-        original_price = ltp*100/(change_in_percentage+100)
-        intraday_limit_price = (original_price * NEPSE_INTRADAY_LIMIT_PERCENT / 100) + original_price
+        original_price = ltp * 100 / (change_in_percentage + 100)
+        intraday_limit_price = (
+            original_price * NEPSE_INTRADAY_LIMIT_PERCENT / 100
+        ) + original_price
         return truncate_to_one_decimal(intraday_limit_price)
 
-    high_price = ltp + (2 / 100) * ltp
-    # truncating the decimal e.g., 12.343 to 12.3
+    high_price = ltp + (STOCK_GRABBER_TARGET_RISE_PERCENT / 100) * ltp
     return truncate_to_one_decimal(high_price)
 
 # '2023-09-29 19:16:39.806085' to datetime obj

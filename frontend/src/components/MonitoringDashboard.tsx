@@ -168,7 +168,7 @@ const MonitoringDashboard: React.FC<MonitoringDashboardProps> = ({
               <div className="monitoring-card-heading">
                 <h3 className="monitoring-card-title">Stock Grabber</h3>
                 <p className="monitoring-card-desc">
-                  Scans at 2% high price — places orders when the price moves.
+                  Scans at 3% high price — places orders when the price moves.
                 </p>
               </div>
               <span className={`monitoring-status-badge ${grabberIsActive ? 'active' : hasGrabbers ? 'warn' : 'idle'}`}>

@@ -109,7 +109,7 @@ export const getGrabberDisplay = (input: {
     badgeLabel,
     badgeClass,
     description: input.scanningCount > 0
-      ? `Scanning ${input.scanningCount} of ${input.activeCount} grabber${input.activeCount !== 1 ? 's' : ''} at 2% high price.`
+      ? `Scanning ${input.scanningCount} of ${input.activeCount} grabber${input.activeCount !== 1 ? 's' : ''} at 3% high price.`
       : isActive
         ? `${input.activeCount} grabber${input.activeCount !== 1 ? 's' : ''} armed${waitingCount > 0 ? ' — waiting for market to open' : ''}.`
         : hasGrabbers

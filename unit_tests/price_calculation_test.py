@@ -10,7 +10,7 @@ class TestCalculateHighPrice(unittest.TestCase):
    
     def test1(self):
         result = calculate_high_price(100,2)
-        self.assertEqual(result, 102) 
+        self.assertEqual(result, 103) 
    
     def test2(self):
         result = calculate_high_price(991.5,10)
@@ -18,10 +18,10 @@ class TestCalculateHighPrice(unittest.TestCase):
         
     def test3(self):
         result = calculate_high_price(991.5,7)
-        self.assertEqual(result, 1011.3) 
+        self.assertEqual(result, 1021.2) 
     def test4(self):
         result = calculate_high_price(452.47,0)
-        self.assertEqual(result,461.5) 
+        self.assertEqual(result,466.0) 
     def test5(self):
         result = calculate_high_price(208.30,9.98)
         self.assertEqual(result, 217.8)
@@ -30,7 +30,11 @@ class TestCalculateHighPrice(unittest.TestCase):
         self.assertEqual(result, 367.7)
     def test7(self):
         result = calculate_high_price(141,-0.704225)
-        self.assertEqual(result, 143.8) 
+        self.assertEqual(result, 145.2) 
+
+    def test_nepse_ordered_price_examples(self):
+        self.assertEqual(calculate_high_price(469.2, 0), 483.2)
+        self.assertEqual(calculate_high_price(483.2, 0), 497.6)
 
     def test_caps_target_at_new_fifteen_percent_limit(self):
         result = calculate_high_price(115, 15)

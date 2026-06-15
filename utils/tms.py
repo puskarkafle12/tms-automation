@@ -1063,7 +1063,7 @@ class TmsUser:
             "message": (
                 f"Resuming {self.stock_symbol} from scan #{self.scan_count}"
                 if resuming
-                else f"Scanning {self.stock_symbol} — will order at +2% high (max {max_order_limit} orders)"
+                else f"Scanning {self.stock_symbol} — will order at +3% high (max {max_order_limit} orders)"
             ),
         })
         total_orders = []
@@ -1161,7 +1161,7 @@ class TmsUser:
         if len(total_orders) > 0:
             self.updates.append({
                 "status": "completed",
-                "message": f"Done — placed {len(total_orders)} order(s) at +2% high",
+                "message": f"Done — placed {len(total_orders)} order(s) at +3% high",
                 "total_orders": len(total_orders),
             })
             return {"message": "successfully ordered shares", "totalOrders": total_orders}

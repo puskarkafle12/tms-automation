@@ -101,7 +101,7 @@ const formatTime = () =>
 const CONNECTION_LABELS: Record<ConnectionStatus, string> = {
   idle: 'Ready to monitor',
   connecting: 'Connecting / restarting…',
-  live: 'Live — scanning for +2% target under 15% cap',
+  live: 'Live — scanning for +3% target under 15% cap',
   waiting: 'Armed — waiting for market to open',
   stopped: 'Monitor stopped',
 };
