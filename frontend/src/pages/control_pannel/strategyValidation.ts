@@ -1,3 +1,5 @@
+import { normalizeSellQty } from './lotSize';
+
 export type StrategyType =
   | 'Fixed Price'
   | 'Fixed Price Buy'
@@ -37,6 +39,7 @@ export interface StrategyPayload {
   expiry_action?: string;
   max_allowed_slippage_percent?: number;
   emergency_execution?: boolean;
+  odd_lot_allowed?: boolean;
 }
 
 export interface StrategyFormValues {
@@ -60,6 +63,9 @@ export interface StrategyFormValues {
   secondPercent: string;
   expiryTime: string;
   emergencyConfirmed: boolean;
+  boardLotSize?: number;
+  oddLotAllowed?: boolean;
+  investmentAmount?: string;
 }
 
 export const toPositiveNumber = (value: string) => {
@@ -67,15 +73,65 @@ export const toPositiveNumber = (value: string) => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 };
 
+const NEPAL_OFFSET_MINUTES = 5 * 60 + 45;
+
+export const parseNepalDateTimeLocalToUtcMs = (value: string) => {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return Number.NaN;
+  }
+
+  const localMatch = trimmed.match(
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/,
+  );
+  if (!localMatch) {
+    return new Date(trimmed).getTime();
+  }
+
+  const [, year, month, day, hour, minute, second = '0'] = localMatch;
+  return Date.UTC(
+    Number(year),
+    Number(month) - 1,
+    Number(day),
+    Number(hour),
+    Number(minute) - NEPAL_OFFSET_MINUTES,
+    Number(second),
+  );
+};
+
+export const nepalDateTimeLocalToIso = (value: string) => {
+  const timestamp = parseNepalDateTimeLocalToUtcMs(value);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : '';
+};
+
 export const validateStrategyForm = (values: StrategyFormValues): string => {
   const parsedQty = Number.parseInt(values.qty, 10);
   const ltp = Number(values.currentLtp || 0);
+  const lotSize = Math.max(1, Number(values.boardLotSize || 10));
 
   if (!parsedQty || parsedQty <= 0) {
+    if (values.side === 'buy' && values.investmentAmount) {
+      return `Amount is not enough to buy minimum board lot of ${lotSize} kitta.`;
+    }
     return 'Quantity must be greater than zero.';
   }
   if (values.availableQty && parsedQty > values.availableQty) {
     return `Quantity cannot exceed available holding (${values.availableQty}).`;
+  }
+  if (!values.oddLotAllowed && values.side === 'buy' && parsedQty % lotSize !== 0) {
+    return `Quantity must be a board-lot multiple of ${lotSize} kitta.`;
+  }
+  if (!values.oddLotAllowed && values.side === 'buy' && parsedQty < lotSize) {
+    return `Amount is not enough to buy minimum board lot of ${lotSize} kitta.`;
+  }
+  if (!values.oddLotAllowed && values.side === 'sell' && values.availableQty) {
+    const normalized = normalizeSellQty(parsedQty, values.availableQty, lotSize);
+    if (!normalized.isSellAll && normalized.error) {
+      return normalized.error;
+    }
+    if (!normalized.isSellAll && normalized.qty !== parsedQty) {
+      return normalized.warning || `Use suggested board-lot quantity ${normalized.qty}.`;
+    }
   }
   if (
     (values.strategy === 'Fixed Price' ||
@@ -138,7 +194,9 @@ export const validateStrategyForm = (values: StrategyFormValues): string => {
   }
   if (values.strategy === 'Time-Based Exit' || values.strategy === 'Time-Based Buy') {
     if (!values.expiryTime) return 'Expiry date/time is required.';
-    if (new Date(values.expiryTime).getTime() <= Date.now()) return 'Expiry time must be in the future.';
+    if (parseNepalDateTimeLocalToUtcMs(values.expiryTime) <= Date.now()) {
+      return 'Expiry time must be in the future.';
+    }
   }
   if (values.strategy === 'Emergency Exit' && !values.emergencyConfirmed) {
     return 'Confirm emergency exit risk before submitting.';

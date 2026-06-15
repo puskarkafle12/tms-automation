@@ -1,4 +1,9 @@
-import { StrategyFormValues, StrategyType, validateStrategyForm } from './strategyValidation';
+import {
+  StrategyFormValues,
+  StrategyType,
+  nepalDateTimeLocalToIso,
+  validateStrategyForm,
+} from './strategyValidation';
 
 const futureDate = () => new Date(Date.now() + 60 * 60 * 1000).toISOString();
 
@@ -52,6 +57,36 @@ describe('validateStrategyForm', () => {
     expect(validateStrategyForm({ ...baseValues('Fixed Price Sell'), qty: '' })).toBe(
       'Quantity must be greater than zero.',
     );
+  });
+
+  test('blocks odd-lot buy quantity by default', () => {
+    expect(validateStrategyForm({ ...baseValues('Fixed Price Buy', 'buy'), qty: '5' })).toBe(
+      'Quantity must be a board-lot multiple of 10 kitta.',
+    );
+  });
+
+  test('allows odd-lot buy when Odd Lot Mode is enabled', () => {
+    expect(validateStrategyForm({ ...baseValues('Fixed Price Buy', 'buy'), qty: '5', oddLotAllowed: true })).toBe('');
+  });
+
+  test('suggests safe sell quantity when sale would leave odd-lot remainder', () => {
+    expect(validateStrategyForm({ ...baseValues('Fixed Price Sell'), qty: '60', availableQty: 67 })).toContain(
+      'Suggested safe quantity: 50',
+    );
+  });
+
+  test('blocks partial sell that cannot avoid odd-lot remainder', () => {
+    expect(validateStrategyForm({ ...baseValues('Fixed Price Sell'), qty: '10', availableQty: 12 })).toBe(
+      'Partial sell would leave odd-lot shares. Use Sell All or adjust quantity.',
+    );
+  });
+
+  test('allows sell all when holding itself is odd lot', () => {
+    expect(validateStrategyForm({ ...baseValues('Fixed Price Sell'), qty: '67', availableQty: 67 })).toBe('');
+  });
+
+  test('converts time-based expiry from Nepal time to UTC ISO', () => {
+    expect(nepalDateTimeLocalToIso('2026-06-15T10:30')).toBe('2026-06-15T04:45:00.000Z');
   });
 
   test('shows required message for Book Profit + Stop Loss', () => {

@@ -4,8 +4,16 @@ import StockDetails from './StockDetails';
 import ErrorMessage from '../../components/ErrorMessage';
 import ScriptNameAutocomplete, { ScriptOption } from '../../components/ScriptNameAutocomplete';
 import ScheduleMonitorBar from '../../components/ScheduleMonitorBar';
-import StrategySellForm, { StrategyPayload } from './StrategySellForm';
+import StrategySellForm, { STRATEGY_HELP } from './StrategySellForm';
+import type { StrategyPayload, StrategyType } from './StrategySellForm';
 import { buildScheduleScriptOptions } from './scheduleOrderHelpers';
+import {
+  getBuyScripCacheKey,
+  getCachedScripSuggestions,
+  getSellScripCacheKey,
+  isCacheValid,
+  setCachedScripSuggestions,
+} from './scriptSuggestionCache';
 
 const getApiUrl = () => localStorage.getItem('apiUrl') || window.location.origin;
 
@@ -13,6 +21,7 @@ interface DPHolding {
   scrip?: string;
   symbolName?: string;
   currentBalance?: number;
+  valueAsOfPreviousClosePrice?: number;
   ltp?: number;
   percentChange?: string;
 }
@@ -37,8 +46,13 @@ const ScheduleOrder: React.FC = () => {
   const [statusMessage, setStatusMessage] = useState('');
   const [loggedInClients, setLoggedInClients] = useState<ClientSession[]>([]);
   const [orderType, setOrderType] = useState<'buy' | 'sell'>('buy');
+  const [selectedStrategy, setSelectedStrategy] = useState<StrategyType>('Fixed Price Buy');
   const [stockDetails, setStockDetails] = useState<any[]>([]);
   const [sellHoldings, setSellHoldings] = useState<DPHolding[]>([]);
+  const [buyScripLoading, setBuyScripLoading] = useState(false);
+  const [sellScripLoading, setSellScripLoading] = useState(false);
+  const [buyScriptRefreshMessage, setBuyScriptRefreshMessage] = useState('');
+  const [sellScriptRefreshMessage, setSellScriptRefreshMessage] = useState('');
   const [selectedStock, setSelectedStock] = useState<any | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [latestLtp, setLatestLtp] = useState<number | null>(null);
@@ -51,6 +65,8 @@ const ScheduleOrder: React.FC = () => {
   const [holdingError, setHoldingError] = useState('');
   const quoteRequestId = useRef(0);
   const holdingRequestId = useRef(0);
+  const buyScripRequestId = useRef(0);
+  const sellScripRequestId = useRef(0);
 
   const buyHighLimit = useMemo(() => {
     if (orderType !== 'buy' || !selectedStock?.high) {
@@ -70,41 +86,157 @@ const ScheduleOrder: React.FC = () => {
     return selectedClient ? clientLabel(selectedClient) : clientID;
   }, [clientID, loggedInClients]);
 
-  const fetchStockDetails = useCallback(async (clientId: string) => {
+  const selectedSellHolding = useMemo(() => {
+    const normalizedSymbol = scriptName.trim().toUpperCase();
+    if (!normalizedSymbol || orderType !== 'sell') {
+      return null;
+    }
+    return sellHoldings.find((holding) => {
+      const scrip = (holding.scrip || '').trim().toUpperCase();
+      const name = (holding.symbolName || '').trim().toUpperCase();
+      return scrip === normalizedSymbol || name === normalizedSymbol;
+    }) || null;
+  }, [orderType, scriptName, sellHoldings]);
+
+  const averageBuyPrice = useMemo(() => {
+    const holdingValue = Number(selectedSellHolding?.valueAsOfPreviousClosePrice || 0);
+    const holdingBalance = Number(selectedSellHolding?.currentBalance || 0);
+    return holdingValue > 0 && holdingBalance > 0 ? holdingValue / holdingBalance : null;
+  }, [selectedSellHolding]);
+
+  const activeScriptLoading = orderType === 'buy' ? buyScripLoading : sellScripLoading;
+  const hasActiveScriptCache = orderType === 'buy' ? stockDetails.length > 0 : sellHoldings.length > 0;
+  const activeScriptRefreshMessage =
+    orderType === 'buy' ? buyScriptRefreshMessage : sellScriptRefreshMessage;
+  const chartSymbol = scriptName.trim().toUpperCase();
+  const selectedStrategyDescription =
+    selectedStrategy === 'Fixed Price Buy' || selectedStrategy === 'Fixed Price Sell' || selectedStrategy === 'Fixed Price'
+      ? ''
+      : STRATEGY_HELP[selectedStrategy]?.helper || '';
+
+  const changeOrderSide = (nextSide: 'buy' | 'sell') => {
+    setOrderType(nextSide);
+    setSelectedStrategy(nextSide === 'buy' ? 'Fixed Price Buy' : 'Fixed Price Sell');
+  };
+
+  const fetchStockDetails = useCallback(async (clientId: string, forceRefresh = false) => {
     if (!clientId) {
+      setStockDetails([]);
       return;
     }
+
+    const cacheKey = getBuyScripCacheKey(clientId);
+    const cached = getCachedScripSuggestions<any[]>(cacheKey);
+    if (!forceRefresh && cached) {
+      setStockDetails(cached.data);
+      if (isCacheValid(cached)) {
+        setBuyScripLoading(false);
+        setBuyScriptRefreshMessage('');
+        return;
+      }
+      setBuyScriptRefreshMessage('Refreshing scrip list...');
+    } else {
+      if (!forceRefresh) {
+        setStockDetails([]);
+      }
+      setBuyScripLoading(true);
+      setBuyScriptRefreshMessage('');
+    }
+
+    const requestId = buyScripRequestId.current + 1;
+    buyScripRequestId.current = requestId;
     try {
       const response = await fetch(`${getApiUrl()}/get_script_details?client_id=${encodeURIComponent(clientId)}`);
+      if (requestId !== buyScripRequestId.current) {
+        return;
+      }
       if (response.ok) {
         const data = await response.json();
-        setStockDetails(data.payload.data);
+        const nextStockDetails = Array.isArray(data?.payload?.data) ? data.payload.data : [];
+        setStockDetails(nextStockDetails);
+        setCachedScripSuggestions(cacheKey, nextStockDetails, {
+          orderSide: 'buy',
+          clientId,
+        });
+        setBuyScriptRefreshMessage('');
       } else {
-        setStockDetails([]);
+        if (cached) {
+          setBuyScriptRefreshMessage('Using cached scrip list. Refresh failed.');
+        } else {
+          setStockDetails([]);
+        }
       }
     } catch (error) {
       console.error('Error fetching stock details:', error);
-      setStockDetails([]);
+      if (cached) {
+        setBuyScriptRefreshMessage('Using cached scrip list. Refresh failed.');
+      } else {
+        setStockDetails([]);
+      }
+    } finally {
+      if (requestId === buyScripRequestId.current) {
+        setBuyScripLoading(false);
+      }
     }
   }, []);
 
-  const fetchSellHoldings = useCallback(async (clientId: string) => {
+  const fetchSellHoldings = useCallback(async (clientId: string, forceRefresh = false) => {
     if (!clientId) {
       setSellHoldings([]);
       return;
     }
+    const cacheKey = getSellScripCacheKey(clientId);
+    const cached = getCachedScripSuggestions<DPHolding[]>(cacheKey);
+    if (!forceRefresh && cached) {
+      setSellHoldings(cached.data);
+      if (isCacheValid(cached)) {
+        setSellScripLoading(false);
+        setSellScriptRefreshMessage('');
+        return;
+      }
+      setSellScriptRefreshMessage('Refreshing scrip list...');
+    } else {
+      if (!forceRefresh) {
+        setSellHoldings([]);
+      }
+      setSellScripLoading(true);
+      setSellScriptRefreshMessage('');
+    }
+
+    const requestId = sellScripRequestId.current + 1;
+    sellScripRequestId.current = requestId;
     try {
       const response = await fetch(`${getApiUrl()}/dp_holdings?client_id=${encodeURIComponent(clientId)}`, {
         headers: { Accept: 'application/json' },
       });
+      if (requestId !== sellScripRequestId.current) {
+        return;
+      }
       if (!response.ok) {
-        setSellHoldings([]);
+        if (cached) {
+          setSellScriptRefreshMessage('Using cached scrip list. Refresh failed.');
+        } else {
+          setSellHoldings([]);
+        }
         return;
       }
       const holdings: DPHolding[] = await response.json();
       setSellHoldings(holdings);
+      setCachedScripSuggestions(cacheKey, holdings, {
+        orderSide: 'sell',
+        clientId,
+      });
+      setSellScriptRefreshMessage('');
     } catch {
-      setSellHoldings([]);
+      if (cached) {
+        setSellScriptRefreshMessage('Using cached scrip list. Refresh failed.');
+      } else {
+        setSellHoldings([]);
+      }
+    } finally {
+      if (requestId === sellScripRequestId.current) {
+        setSellScripLoading(false);
+      }
     }
   }, []);
 
@@ -136,6 +268,17 @@ const ScheduleOrder: React.FC = () => {
     setQuoteError('');
     setHoldingError('');
     await Promise.all([fetchStockDetails(clientId), fetchSellHoldings(clientId)]);
+  };
+
+  const refreshScriptSuggestions = () => {
+    if (!clientID) {
+      return;
+    }
+    if (orderType === 'buy') {
+      void fetchStockDetails(clientID, true);
+      return;
+    }
+    void fetchSellHoldings(clientID, true);
   };
 
   const handleScriptNameChange = (name: string) => {
@@ -272,9 +415,6 @@ const ScheduleOrder: React.FC = () => {
       return;
     }
     setQty(String(holdingQty));
-    if (latestLtp && latestLtp > 0) {
-      setPrice(String(latestLtp));
-    }
   };
 
   const submitStrategyOrder = async (strategyPayload: StrategyPayload) => {
@@ -354,28 +494,15 @@ const ScheduleOrder: React.FC = () => {
     <div className="schedule-order-page">
       <ScheduleMonitorBar key="schedule-monitor" />
 
-      <div className="schedule-order-hero panel">
-        <div className="schedule-order-hero-content">
-          <div className="schedule-order-hero-icon" aria-hidden="true">📅</div>
-          <div>
-            <h2 className="schedule-order-hero-title">Schedule Order</h2>
-            <p className="schedule-order-hero-subtitle">
-              Queue buy or sell orders, then start monitoring to execute when price is hit.
-            </p>
-          </div>
-        </div>
-        {loggedInClients.length > 0 && (
-          <span className="badge badge-success">{loggedInClients.length} client(s) online</span>
-        )}
-      </div>
-
       {status === 'success' && <ErrorMessage message={statusMessage} variant="success" />}
       {status === 'error' && <ErrorMessage message={statusMessage} variant="error" persistent />}
 
       <div className="schedule-order-layout">
         <div className="schedule-order-form-panel panel">
           <h3 className="panel-title">Add Order</h3>
-          <p className="panel-subtitle">Select a client, symbol, price, and quantity.</p>
+          {selectedStrategyDescription && (
+            <p className="schedule-strategy-description">{selectedStrategyDescription}</p>
+          )}
 
           <div className="schedule-order-form">
             <div className="schedule-order-form-grid">
@@ -409,52 +536,63 @@ const ScheduleOrder: React.FC = () => {
                   value={scriptName}
                   options={scriptOptions}
                   placeholder={orderType === 'sell' ? 'Search owned holding' : 'Type to search — e.g. CREST'}
-                  disabled={!clientID || (orderType === 'buy' ? stockDetails.length === 0 : sellHoldings.length === 0)}
+                  disabled={!clientID || (activeScriptLoading && !hasActiveScriptCache)}
                   required
+                  actionTitle="Refresh scrip suggestions"
+                  actionLoading={activeScriptLoading}
+                  onAction={refreshScriptSuggestions}
                   onChange={handleScriptNameChange}
                   onSelect={handleScriptNameSelect}
                 />
-                {stockDetails.length === 0 && clientID && (
+                {activeScriptLoading && !hasActiveScriptCache && clientID && (
                   <span className="schedule-order-hint">Loading scripts for {selectedClientLabel}...</span>
                 )}
-                {orderType === 'sell' && sellHoldings.length === 0 && clientID && (
+                {activeScriptRefreshMessage && (
+                  <span className="schedule-order-hint schedule-order-hint-muted">{activeScriptRefreshMessage}</span>
+                )}
+                {orderType === 'sell' && !sellScripLoading && sellHoldings.length === 0 && clientID && (
                   <span className="schedule-order-hint">No sellable DP holdings found for {selectedClientLabel}.</span>
                 )}
-              </div>
-            </div>
-
-            <div className="form-group">
-              <label>Order Type</label>
-              <div className="schedule-order-type-toggle">
-                <button
-                  type="button"
-                  className={`schedule-order-type-btn ${orderType === 'buy' ? 'active-buy' : ''}`}
-                  onClick={() => setOrderType('buy')}
-                >
-                  Buy
-                </button>
-                <button
-                  type="button"
-                  className={`schedule-order-type-btn ${orderType === 'sell' ? 'active-sell' : ''}`}
-                  onClick={() => setOrderType('sell')}
-                >
-                  Sell
-                </button>
               </div>
             </div>
 
             <div className="schedule-strategy-wrap">
               <StrategySellForm
                 key={orderType}
+                scriptName={scriptName}
+                sideControl={(
+                  <div className="form-group schedule-side-field">
+                    <label>Side</label>
+                    <div className="schedule-order-type-toggle">
+                      <button
+                        type="button"
+                        className={`schedule-order-type-btn ${orderType === 'buy' ? 'active-buy' : ''}`}
+                        onClick={() => changeOrderSide('buy')}
+                      >
+                        Buy
+                      </button>
+                      <button
+                        type="button"
+                        className={`schedule-order-type-btn ${orderType === 'sell' ? 'active-sell' : ''}`}
+                        onClick={() => changeOrderSide('sell')}
+                      >
+                        Sell
+                      </button>
+                    </div>
+                  </div>
+                )}
                 side={orderType}
                 currentLtp={latestLtp}
                 availableQty={orderType === 'sell' ? holdingQty : null}
-                averageBuyPrice={null}
-                topBuyPrice={latestLtp}
+                averageBuyPrice={orderType === 'sell' ? averageBuyPrice : null}
+                topBuyPrice={quote?.topBuy?.find((row: any) => Number(row.price || 0) > 0)?.price || null}
+                topSellPrice={quote?.topSell?.find((row: any) => Number(row.price || 0) > 0)?.price || null}
                 initialQty={qty}
-                initialPrice={latestLtp ? String(latestLtp) : price}
+                initialPrice={orderType === 'sell' && latestLtp ? String(latestLtp) : price}
+                securityDetails={selectedStock || quote?.security || null}
                 isSubmitting={isSubmitting}
                 submitError={orderType === 'sell' ? holdingError || quoteError : quoteError}
+                onStrategyChange={setSelectedStrategy}
                 onSubmit={submitStrategyOrder}
               />
             </div>
@@ -485,6 +623,23 @@ const ScheduleOrder: React.FC = () => {
           )}
         </div>
       </div>
+
+      {chartSymbol && (
+        <div className="schedule-order-chart-panel panel">
+          <div className="schedule-order-chart-header">
+            <div>
+              <h3 className="panel-title">{chartSymbol} Chart</h3>
+              <p className="panel-subtitle">NEPSE Alpha trading view</p>
+            </div>
+          </div>
+          <div className="schedule-order-chart-box">
+            <iframe
+              title={`${chartSymbol} NEPSE chart`}
+              src={`https://nepsealpha.com/nepse-chart?symbol=${encodeURIComponent(chartSymbol)}`}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 };

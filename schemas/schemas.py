@@ -35,6 +35,7 @@ class OrderCreateRequest(BaseModel):
     max_allowed_slippage_percent: Optional[float] = None
     emergency_execution: Optional[bool] = False
     user_allocation: Optional[Any] = None
+    odd_lot_allowed: Optional[bool] = False
 
 class LoginRequest(BaseModel):
     username: str
@@ -52,6 +53,7 @@ class StockGrabberRequest(BaseModel):
     stock_symbol: str
     order_quantity: int
     max_order_limit: Optional[int] = 0
+    stop_buy_after_percent: Optional[float] = 15.0
     request_per_sec: Optional[float] = 2.0
     resume_scan_count: Optional[int] = 0
     resume_previous_ltp: Optional[float] = 0.0

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import './DpHolding.css';
 import ErrorMessage from '../../components/ErrorMessage';
 import StrategySellForm, { StrategyPayload } from './StrategySellForm';
+import { getBoardLotSize, normalizeSellQty } from './lotSize';
 
 interface DPHolding {
   clientID: string;
@@ -134,6 +135,49 @@ const combineHoldings = (holdings: DPHolding[]): CombinedHolding[] => {
     }
   }
   return processHoldings(Array.from(bySymbol.values())) as CombinedHolding[];
+};
+
+const allocateBoardLotSafeSell = (holders: DPHolding[], qty: number, lotSize: number) => {
+  const targetQty = Math.max(0, Math.floor(qty));
+  const optionsByHolder = holders.map((holder) => {
+    const holdingQty = Math.max(0, Math.floor(Number(holder.currentBalance || 0)));
+    const options = new Set<number>([0]);
+    for (let candidate = lotSize; candidate <= Math.min(holdingQty, targetQty); candidate += lotSize) {
+      const normalized = normalizeSellQty(candidate, holdingQty, lotSize);
+      if (normalized.qty === candidate || normalized.isSellAll) {
+        options.add(candidate);
+      }
+    }
+    if (holdingQty <= targetQty) {
+      options.add(holdingQty);
+    }
+    return { holder, options: Array.from(options).sort((a, b) => b - a) };
+  });
+
+  const allocations = new Map<number, Array<{ client_id: string; qty: number }>>();
+  allocations.set(0, []);
+
+  for (const { holder, options } of optionsByHolder) {
+    const next = new Map(allocations);
+    for (const [sum, current] of Array.from(allocations.entries())) {
+      for (const option of options) {
+        const nextSum = sum + option;
+        if (nextSum > targetQty || next.has(nextSum)) {
+          continue;
+        }
+        next.set(
+          nextSum,
+          option > 0 && holder.clientID
+            ? [...current, { client_id: holder.clientID, qty: option }]
+            : current,
+        );
+      }
+    }
+    allocations.clear();
+    next.forEach((value, key) => allocations.set(key, value));
+  }
+
+  return allocations.get(targetQty) || null;
 };
 
 const DPHoldings: React.FC = () => {
@@ -355,21 +399,32 @@ const DPHoldings: React.FC = () => {
       const holders = (sellHolding as CombinedHolding).holders?.length
         ? [...(sellHolding as CombinedHolding).holders]
         : [{ ...sellHolding, clientID }];
-      let remainingQty = qty;
-      const orders = [];
-      for (const holder of holders) {
-        if (remainingQty <= 0) {
-          break;
-        }
-        const holderQty = Math.min(remainingQty, Number(holder.currentBalance || 0));
-        if (holderQty <= 0 || !holder.clientID) {
-          continue;
-        }
-        orders.push({ client_id: holder.clientID, qty: holderQty });
-        remainingQty -= holderQty;
-      }
-      if (remainingQty > 0) {
-        setQuoteError(`Quantity cannot exceed combined holding balance (${availableQty}).`);
+      const lotSize = getBoardLotSize(quote?.security || sellHolding);
+      const orders = strategyPayload.odd_lot_allowed
+        ? (() => {
+          let remainingQty = qty;
+          const greedyOrders = [];
+          for (const holder of holders) {
+            if (remainingQty <= 0) {
+              break;
+            }
+            const holderQty = Math.min(remainingQty, Number(holder.currentBalance || 0));
+            if (holderQty <= 0 || !holder.clientID) {
+              continue;
+            }
+            greedyOrders.push({ client_id: holder.clientID, qty: holderQty });
+            remainingQty -= holderQty;
+          }
+          return remainingQty > 0 ? null : greedyOrders;
+        })()
+        : allocateBoardLotSafeSell(holders, qty, lotSize);
+
+      if (!orders) {
+        setQuoteError(
+          strategyPayload.odd_lot_allowed
+            ? `Quantity cannot exceed combined holding balance (${availableQty}).`
+            : 'Could not split this combined sell into board-lot safe per-user orders. Use Sell All, enable Odd Lot Mode, or adjust quantity.',
+        );
         return;
       }
 
@@ -706,6 +761,7 @@ const DPHoldings: React.FC = () => {
               topBuyPrice={quote?.topBuy?.find((row) => Number(row.price || 0) > 0)?.price || null}
               initialQty={String(sellHolding.currentBalance || '')}
               initialPrice={String(quote?.ltp || sellHolding.ltp || '')}
+              securityDetails={quote?.security || sellHolding}
               isSubmitting={sellSubmitting}
               submitError={quoteError}
               onSubmit={submitSellOrder}

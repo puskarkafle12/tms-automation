@@ -3,18 +3,25 @@ import './StrategySellForm.css';
 import {
   StrategyPayload,
   StrategyType,
+  nepalDateTimeLocalToIso,
   toPositiveNumber,
   validateStrategyForm,
 } from './strategyValidation';
+import {
+  getBoardLotSize,
+  normalizeSellQty,
+  ScripLotMetadata,
+} from './lotSize';
+import { calculateQuantityFromAmount, getOrderEstimate } from '../../utils/orderEstimate';
 export type { StrategyPayload, StrategyType } from './strategyValidation';
 
-const STRATEGY_HELP: Record<StrategyType, { helper: string; button: string }> = {
+export const STRATEGY_HELP: Record<StrategyType, { helper: string; button: string }> = {
   'Fixed Price': {
-    helper: 'Sell at your selected price.',
+    helper: '',
     button: 'Schedule Sell Order',
   },
   'Fixed Price Buy': {
-    helper: 'Buy at your selected price.',
+    helper: '',
     button: 'Schedule Buy Order',
   },
   'Buy Below Price': {
@@ -34,7 +41,7 @@ const STRATEGY_HELP: Record<StrategyType, { helper: string; button: string }> = 
     button: 'Schedule Time-Based Buy',
   },
   'Fixed Price Sell': {
-    helper: 'Sell at your selected price.',
+    helper: '',
     button: 'Schedule Sell Order',
   },
   'Fast Stop Loss': {
@@ -99,34 +106,49 @@ export const SELL_STRATEGIES: StrategyType[] = [
 export const STRATEGIES = [...BUY_STRATEGIES, ...SELL_STRATEGIES];
 
 interface Props {
+  scriptName?: string;
+  sideControl?: React.ReactNode;
   currentLtp?: number | null;
   availableQty?: number | null;
   averageBuyPrice?: number | null;
   topBuyPrice?: number | null;
+  topSellPrice?: number | null;
   side?: 'buy' | 'sell';
   initialQty?: string;
   initialPrice?: string;
+  securityDetails?: ScripLotMetadata | null;
+  holdingDays?: number;
   isSubmitting?: boolean;
   submitError?: string;
+  onStrategyChange?: (strategy: StrategyType) => void;
   onSubmit: (payload: StrategyPayload) => Promise<void> | void;
 }
 
 const StrategySellForm: React.FC<Props> = ({
+  scriptName,
+  sideControl,
   currentLtp,
   availableQty,
   averageBuyPrice,
   topBuyPrice,
+  topSellPrice,
   side = 'sell',
   initialQty = '',
   initialPrice = '',
+  securityDetails,
+  holdingDays = 400,
   isSubmitting = false,
   submitError,
+  onStrategyChange,
   onSubmit,
 }) => {
   const strategies = side === 'buy' ? BUY_STRATEGIES : SELL_STRATEGIES;
   const [strategy, setStrategy] = useState<StrategyType>(side === 'buy' ? 'Fixed Price Buy' : 'Fixed Price Sell');
   const [qty, setQty] = useState(initialQty);
   const [price, setPrice] = useState(initialPrice);
+  const [quantityMode, setQuantityMode] = useState<'quantity' | 'amount'>('quantity');
+  const [investmentAmount, setInvestmentAmount] = useState('');
+  const [oddLotAllowed] = useState(false);
   const [stopLossPrice, setStopLossPrice] = useState('');
   const [stopLimitPrice, setStopLimitPrice] = useState('');
   const [bookProfitPrice, setBookProfitPrice] = useState('');
@@ -147,6 +169,89 @@ const StrategySellForm: React.FC<Props> = ({
   const [expiryTime, setExpiryTime] = useState('');
   const [expiryAction, setExpiryAction] = useState('Cancel strategy');
   const [localError, setLocalError] = useState('');
+  const boardLotSize = useMemo(() => getBoardLotSize(securityDetails), [securityDetails]);
+
+  const priceSource = useMemo(() => {
+    const userPrice = toPositiveNumber(price);
+    if (userPrice) return { price: userPrice, source: 'User price' };
+    if (side === 'buy' && topSellPrice) return { price: topSellPrice, source: 'Top Sell' };
+    if (side === 'sell' && topBuyPrice) return { price: topBuyPrice, source: 'Top Buy' };
+    if (currentLtp) return { price: currentLtp, source: 'LTP fallback' };
+    return { price: 0, source: 'Missing price' };
+  }, [currentLtp, price, side, topBuyPrice, topSellPrice]);
+
+  const amountPlan = useMemo(() => {
+    const lotSizeForAmount = oddLotAllowed ? 1 : boardLotSize;
+    const plan = calculateQuantityFromAmount(Number(investmentAmount || 0), priceSource.price, lotSizeForAmount);
+    if (side !== 'sell' || !availableQty || plan.quantity <= 0) {
+      return plan;
+    }
+    if (oddLotAllowed) {
+      const quantity = Math.min(plan.quantity, availableQty);
+      return {
+        quantity,
+        estimatedAmount: quantity * priceSource.price,
+        unusedAmount: Math.max(0, Number(investmentAmount || 0) - quantity * priceSource.price),
+      };
+    }
+    const normalized = normalizeSellQty(plan.quantity, availableQty, boardLotSize);
+    const quantity = normalized.qty || 0;
+    return {
+      quantity,
+      estimatedAmount: quantity * priceSource.price,
+      unusedAmount: Math.max(0, Number(investmentAmount || 0) - quantity * priceSource.price),
+    };
+  }, [availableQty, boardLotSize, investmentAmount, oddLotAllowed, priceSource.price, side]);
+
+  const parsedQty = Number.parseInt(qty, 10) || 0;
+  const sellPlan = useMemo(() => {
+    if (side !== 'sell' || !availableQty || parsedQty <= 0) {
+      return null;
+    }
+    return normalizeSellQty(parsedQty, availableQty, boardLotSize);
+  }, [availableQty, boardLotSize, parsedQty, side]);
+
+  const estimatePrice = priceSource.price;
+  const orderEstimate = useMemo(
+    () => getOrderEstimate({
+      side: side === 'buy' ? 'BUY' : 'SELL',
+      quantity: parsedQty,
+      price: estimatePrice,
+      investmentAmount: Number(investmentAmount || 0),
+      averageBuyPrice,
+      holdingDays,
+      lotSize: boardLotSize,
+      priceSource: priceSource.source,
+    }),
+    [
+      averageBuyPrice,
+      boardLotSize,
+      estimatePrice,
+      holdingDays,
+      investmentAmount,
+      parsedQty,
+      priceSource.source,
+      side,
+    ],
+  );
+  const estimatedAmount = orderEstimate.grossAmount;
+  const showSuggestedQty = Boolean(
+    side === 'sell'
+    && sellPlan?.qty
+    && sellPlan.qty !== parsedQty
+    && (sellPlan.warning || sellPlan.error),
+  );
+  const warningText = sellPlan?.error || sellPlan?.warning || '';
+  const summaryParts = [
+    scriptName?.trim(),
+    parsedQty > 0 ? `${parsedQty} kitta` : '',
+    strategy,
+    side === 'sell' && orderEstimate.netEstimateAvailable
+      ? `Net Rs. ${(orderEstimate.netReceivable || 0).toLocaleString('en-NP', { maximumFractionDigits: 2 })}`
+      : estimatedAmount > 0
+        ? `Est. Rs. ${(side === 'buy' ? orderEstimate.estimatedCost || 0 : estimatedAmount).toLocaleString('en-NP', { maximumFractionDigits: 2 })}`
+        : '',
+  ].filter(Boolean);
 
   const validationError = useMemo(() => {
     return validateStrategyForm({
@@ -170,17 +275,23 @@ const StrategySellForm: React.FC<Props> = ({
       secondPercent,
       expiryTime,
       emergencyConfirmed,
+      boardLotSize,
+      oddLotAllowed,
+      investmentAmount,
     });
   }, [
     availableQty,
     averagePrice,
+    boardLotSize,
     bookProfitPrice,
     currentLtp,
     emergencyConfirmed,
     expiryTime,
     firstPercent,
     firstTarget,
+    investmentAmount,
     minimumWaitMinutes,
+    oddLotAllowed,
     price,
     profitTargetPrice,
     qty,
@@ -194,6 +305,12 @@ const StrategySellForm: React.FC<Props> = ({
     trailingDropPercent,
   ]);
 
+  useEffect(() => {
+    if (quantityMode === 'amount') {
+      setQty(amountPlan.quantity > 0 ? String(amountPlan.quantity) : '');
+    }
+  }, [amountPlan.quantity, quantityMode]);
+
   const submit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (validationError) {
@@ -202,7 +319,7 @@ const StrategySellForm: React.FC<Props> = ({
     }
     setLocalError('');
     const parsedQty = Number.parseInt(qty, 10);
-    const fallbackPrice = toPositiveNumber(price) || topBuyPrice || currentLtp || 0;
+    const fallbackPrice = toPositiveNumber(price) || (side === 'buy' ? topSellPrice : topBuyPrice) || currentLtp || 0;
     const payload: StrategyPayload = {
       strategy_type: strategy,
       price: fallbackPrice,
@@ -210,6 +327,7 @@ const StrategySellForm: React.FC<Props> = ({
       status: strategy === 'Fixed Price' || strategy === 'Fixed Price Buy' || strategy === 'Fixed Price Sell' ? 'pending' : 'Waiting',
       max_allowed_slippage_percent: Number(maxSlippage) || 1,
       emergency_execution: emergencyExecution || strategy === 'Emergency Exit',
+      odd_lot_allowed: oddLotAllowed,
     };
     if (strategy === 'Fast Stop Loss' || strategy === 'Stop Limit Sell' || strategy === 'Book Profit + Stop Loss') {
       payload.stop_loss_price = Number(stopLossPrice);
@@ -241,7 +359,7 @@ const StrategySellForm: React.FC<Props> = ({
     if (strategy === 'Time-Based Exit' || strategy === 'Time-Based Buy') {
       payload.profit_target_price = Number(profitTargetPrice || bookProfitPrice || price || 0);
       payload.stop_loss_price = Number(stopLossPrice || 0);
-      payload.expiry_time = new Date(expiryTime).toISOString();
+      payload.expiry_time = nepalDateTimeLocalToIso(expiryTime);
       payload.expiry_action = expiryAction;
     }
     await onSubmit(payload);
@@ -251,14 +369,33 @@ const StrategySellForm: React.FC<Props> = ({
     setLocalError('');
   }, [validationError]);
 
+  const useSuggestedQty = () => {
+    if (sellPlan?.qty) {
+      setQty(String(sellPlan.qty));
+    }
+  };
+
+  const useMaxQty = () => {
+    if (availableQty && availableQty > 0) {
+      setQty(String(availableQty));
+    }
+  };
+
+  const handleStrategyChange = (nextStrategy: StrategyType) => {
+    setStrategy(nextStrategy);
+    onStrategyChange?.(nextStrategy);
+  };
+
   return (
     <form className="strategy-sell-form" onSubmit={submit} noValidate>
-      <div className="form-group">
-        <label htmlFor="strategyType">Strategy</label>
-        <select id="strategyType" className="select" value={strategy} onChange={(e) => setStrategy(e.target.value as StrategyType)}>
-          {strategies.map((item) => <option key={item} value={item}>{item}</option>)}
-        </select>
-        <span className="strategy-helper">{STRATEGY_HELP[strategy].helper}</span>
+      <div className="strategy-side-row">
+        {sideControl}
+        <div className="form-group strategy-field">
+          <label htmlFor="strategyType">Strategy</label>
+          <select id="strategyType" className="select" value={strategy} onChange={(e) => handleStrategyChange(e.target.value as StrategyType)}>
+            {strategies.map((item) => <option key={item} value={item}>{item}</option>)}
+          </select>
+        </div>
       </div>
 
       {(localError || submitError) && <p className="strategy-error" role="alert">{localError || submitError}</p>}
@@ -266,7 +403,37 @@ const StrategySellForm: React.FC<Props> = ({
       <div className="strategy-grid">
         <div className="form-group">
           <label htmlFor="strategyQty">Quantity</label>
-          <input id="strategyQty" className="input" type="number" min="1" max={availableQty || undefined} value={qty} onChange={(e) => setQty(e.target.value)} />
+          {(side === 'buy' || side === 'sell') && (
+            <div className="strategy-mode-toggle" role="group" aria-label="Quantity input mode">
+              <button type="button" className={quantityMode === 'quantity' ? 'active' : ''} onClick={() => setQuantityMode('quantity')}>
+                Qty
+              </button>
+              <button type="button" className={quantityMode === 'amount' ? 'active' : ''} onClick={() => setQuantityMode('amount')}>
+                NPR Amount
+              </button>
+            </div>
+          )}
+          {quantityMode === 'amount' ? (
+            <input
+              id="strategyInvestmentAmount"
+              className="input"
+              type="number"
+              min="0"
+              step="0.01"
+              value={investmentAmount}
+              onChange={(e) => setInvestmentAmount(e.target.value)}
+              placeholder={side === 'buy' ? 'Investment amount in NPR' : 'Desired sell amount in NPR'}
+            />
+          ) : (
+            <div className="strategy-qty-row">
+              <input id="strategyQty" className="input" type="number" min="1" max={availableQty || undefined} value={qty} onChange={(e) => setQty(e.target.value)} />
+              {side === 'sell' && availableQty && availableQty > 0 && (
+                <button type="button" className="btn btn-secondary btn-sm" onClick={useMaxQty}>
+                  Max
+                </button>
+              )}
+            </div>
+          )}
         </div>
         {(strategy === 'Fixed Price' || strategy === 'Fixed Price Buy' || strategy === 'Fixed Price Sell' || strategy === 'Buy Below Price' || strategy === 'Breakout Buy' || strategy === 'Dip Buy') && (
           <div className="form-group">
@@ -355,7 +522,7 @@ const StrategySellForm: React.FC<Props> = ({
         {(strategy === 'Time-Based Exit' || strategy === 'Time-Based Buy') && (
           <>
             <div className="form-group">
-              <label htmlFor="expiryTime">Expiry date/time</label>
+              <label htmlFor="expiryTime">Expiry date/time (Nepal Time)</label>
               <input id="expiryTime" className="input" type="datetime-local" value={expiryTime} onChange={(e) => setExpiryTime(e.target.value)} />
             </div>
             <div className="form-group">
@@ -375,6 +542,19 @@ const StrategySellForm: React.FC<Props> = ({
           </div>
         )}
       </div>
+
+      {summaryParts.length > 0 && (
+        <div className="strategy-order-summary">
+          <span className={`strategy-summary-side ${side}`}>{side.toUpperCase()}</span>
+          <span>{summaryParts.join(' · ')}</span>
+        </div>
+      )}
+      {warningText && <p className="strategy-warning">{warningText}</p>}
+      {showSuggestedQty && (
+        <button type="button" className="btn btn-secondary btn-sm strategy-suggest-btn" onClick={useSuggestedQty}>
+          Use Suggested Quantity
+        </button>
+      )}
 
       {(strategy === 'Fast Stop Loss' || strategy === 'Emergency Exit') && (
         <label className="strategy-checkbox">

@@ -15,6 +15,10 @@ interface ScriptNameAutocompleteProps {
   disabled?: boolean;
   required?: boolean;
   maxResults?: number;
+  actionLabel?: string;
+  actionTitle?: string;
+  actionLoading?: boolean;
+  onAction?: () => void;
   onChange: (value: string) => void;
   onSelect: (option: ScriptOption) => void;
 }
@@ -50,6 +54,10 @@ const ScriptNameAutocomplete: React.FC<ScriptNameAutocompleteProps> = ({
   disabled = false,
   required = false,
   maxResults = 10,
+  actionLabel = '↻',
+  actionTitle = 'Refresh',
+  actionLoading = false,
+  onAction,
   onChange,
   onSelect,
 }) => {
@@ -146,9 +154,22 @@ const ScriptNameAutocomplete: React.FC<ScriptNameAutocompleteProps> = ({
           onFocus={() => setIsOpen(true)}
           onKeyDown={handleKeyDown}
         />
-        <span className={`script-autocomplete-chevron ${showDropdown ? 'open' : ''}`} aria-hidden="true">
-          ▾
-        </span>
+        {onAction ? (
+          <button
+            type="button"
+            className={`script-autocomplete-action ${actionLoading ? 'loading' : ''}`}
+            onClick={onAction}
+            disabled={disabled || actionLoading}
+            title={actionTitle}
+            aria-label={actionTitle}
+          >
+            {actionLabel}
+          </button>
+        ) : (
+          <span className={`script-autocomplete-chevron ${showDropdown ? 'open' : ''}`} aria-hidden="true">
+            ▾
+          </span>
+        )}
       </div>
 
       {showDropdown && (

@@ -12,7 +12,16 @@ from models.logged_in_user import LoggedInUsers
 from models.tms_password_backup import TmsPasswordBackup
 from models.user import User
 from utils.tms_captcha_solver.imgto_txt import solve_captcha
-from utils.base_functions import calculate_high_price, get_tokens, log_time, logout_user, save_tokens, summarize_login_message
+from utils.base_functions import (
+    NEPSE_INTRADAY_LIMIT_PERCENT,
+    calculate_high_price,
+    get_tokens,
+    is_stock_grabber_stop_reached,
+    log_time,
+    logout_user,
+    save_tokens,
+    summarize_login_message,
+)
 
 class TmsUser:
     DEFAULT_TIMEOUT = aiohttp.ClientTimeout(total=12, connect=4, sock_read=8)
@@ -1026,9 +1035,25 @@ class TmsUser:
                 self.updates.append({"status": "backoff", "delay": delay})
                 await asyncio.sleep(delay)
 
-    async def stock_grabber(self, order_quantity: int, session_id: str, max_order_limit: int = 4) -> Dict:
+    async def stock_grabber(
+        self,
+        order_quantity: int,
+        session_id: str,
+        max_order_limit: int = 4,
+        stop_buy_after_percent: float = NEPSE_INTRADAY_LIMIT_PERCENT,
+    ) -> Dict:
         self.order_quantity = order_quantity
         max_order_limit = 4 if not max_order_limit or int(max_order_limit) < 1 else int(max_order_limit)
+        configured_stop = (
+            NEPSE_INTRADAY_LIMIT_PERCENT
+            if stop_buy_after_percent is None
+            else float(stop_buy_after_percent)
+        )
+        stop_buy_after_percent = min(
+            NEPSE_INTRADAY_LIMIT_PERCENT,
+            max(0, configured_stop),
+        )
+        self.stop_buy_after_percent = stop_buy_after_percent
 
         await self._ensure_session()
 
@@ -1069,9 +1094,27 @@ class TmsUser:
                         previous_ltp = float(stock_details['ltp'])
                     continue
 
+                change_percentage = float(stock_details.get('changePercentage', 0) or 0)
+                if is_stock_grabber_stop_reached(change_percentage, stop_buy_after_percent):
+                    message = (
+                        f"Stopped buying {self.stock_symbol}: change {change_percentage}% "
+                        f"reached stop threshold {stop_buy_after_percent}%"
+                    )
+                    self.updates.append({
+                        "status": "completed",
+                        "message": message,
+                        "total_orders": len(total_orders),
+                        "change_percentage": change_percentage,
+                    })
+                    return {
+                        "message": message,
+                        "totalOrders": total_orders,
+                        "stop_reason": "stop_buy_after_percent",
+                    }
+
                 order_quantity_to_use = (
                     self.order_quantity
-                    if stock_details.get('changePercentage', 0) <= 7.4
+                    if change_percentage <= 7.4
                     else self.final_order_quantity
                 )
                 target_price = stock_details['twoPercentHigh']

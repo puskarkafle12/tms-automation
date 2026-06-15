@@ -63,17 +63,37 @@ def logout_user(client_id: str,message):
     finally:
         db.close()
 
+NEPSE_INTRADAY_LIMIT_PERCENT = 15
+STOCK_GRABBER_TARGET_RISE_PERCENT = 2
+STOCK_GRABBER_CAP_THRESHOLD_PERCENT = 7.843
+
+
+def truncate_to_one_decimal(value):
+    return math.floor(value * 10 ** 1) / 10 ** 1
+
+
+def is_stock_grabber_stop_reached(change_in_percentage, stop_buy_after_percent=NEPSE_INTRADAY_LIMIT_PERCENT):
+    configured_stop = (
+        NEPSE_INTRADAY_LIMIT_PERCENT
+        if stop_buy_after_percent is None
+        else float(stop_buy_after_percent)
+    )
+    stop_percent = min(
+        NEPSE_INTRADAY_LIMIT_PERCENT,
+        max(0, configured_stop),
+    )
+    return float(change_in_percentage or 0) >= stop_percent
+
+
 def calculate_high_price(ltp, change_in_percentage):
-    if change_in_percentage > 7.843:
+    if change_in_percentage > STOCK_GRABBER_CAP_THRESHOLD_PERCENT:
         original_price = ltp*100/(change_in_percentage+100)
-        ten_percent_change = (original_price * 10/ 100 )+ original_price
-        high_price = math.floor(ten_percent_change * 10 ** 1) / 10 ** 1
-        return high_price
+        intraday_limit_price = (original_price * NEPSE_INTRADAY_LIMIT_PERCENT / 100) + original_price
+        return truncate_to_one_decimal(intraday_limit_price)
 
     high_price = ltp + (2 / 100) * ltp
     # truncating the decimal e.g., 12.343 to 12.3
-    high_price = math.floor(high_price * 10 ** 1) / 10 ** 1
-    return high_price
+    return truncate_to_one_decimal(high_price)
 
 # '2023-09-29 19:16:39.806085' to datetime obj
 

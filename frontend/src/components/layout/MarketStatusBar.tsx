@@ -77,16 +77,13 @@ const MarketStatusBar: React.FC = () => {
   const isMarketOpen = status?.market_live ?? false;
   const statusLabel = isMarketOpen ? 'Market Open' : 'Market Closed';
 
-  const displayTime = status?.nepal_time_formatted || clock.time;
-  const displayDate = status?.nepal_date_formatted || clock.date;
-
   return (
     <div className="market-status-bar">
       <div className="market-status-clock">
         <span className="market-status-time" title="Nepal Time (NPT)">
-          {displayTime} NPT
+          {clock.time} NPT
         </span>
-        <span className="market-status-date">{displayDate}</span>
+        <span className="market-status-date">{clock.date}</span>
       </div>
       <span
         className={`market-status-pill ${isMarketOpen ? 'live' : 'closed'}`}

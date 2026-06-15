@@ -32,6 +32,16 @@ const emptyForm = {
 
 const formatSessionStatus = (status: string) => status.replace(/_/g, ' ');
 
+const formatTmsStatusMessage = (message?: string | null) => {
+  if (!message) {
+    return '';
+  }
+  if (/\bstatus=106\b/.test(message)) {
+    return 'status=106 | Account Disabled';
+  }
+  return message;
+};
+
 const formatAccountLabel = (account: Pick<TmsAccount, 'client_id' | 'display_name' | 'broker_no'>) => {
   const name = account.display_name?.trim() || account.client_id;
   const broker = account.broker_no?.trim();
@@ -42,10 +52,11 @@ const shortRelativeTime = (value?: string | null, now = Date.now()) => {
   if (!value) {
     return '';
   }
-  const diffSeconds = Math.max(0, Math.floor((now - new Date(value).getTime()) / 1000));
-  if (!Number.isFinite(diffSeconds)) {
+  const timestamp = new Date(value).getTime();
+  if (!Number.isFinite(timestamp) || timestamp > now + 5000) {
     return '';
   }
+  const diffSeconds = Math.max(0, Math.floor((now - timestamp) / 1000));
   if (diffSeconds < 60) return `${diffSeconds}s ago`;
   const diffMinutes = Math.floor(diffSeconds / 60);
   if (diffMinutes < 60) return `${diffMinutes}m ago`;
@@ -54,12 +65,15 @@ const shortRelativeTime = (value?: string | null, now = Date.now()) => {
   return `${Math.floor(diffHours / 24)}d ago`;
 };
 
+const accountSessionTimestamp = (account: TmsAccount) =>
+  account.last_login_at || account.session_updated_at || account.last_updated || null;
+
 const statusDisplayText = (account: TmsAccount, now: number) => {
   if (account.session_status === 'logged_in') {
-    const age = shortRelativeTime(account.last_updated, now);
+    const age = shortRelativeTime(accountSessionTimestamp(account), now);
     return age ? `logged in (${age})` : 'logged in';
   }
-  return account.session_message || formatSessionStatus(account.session_status);
+  return formatTmsStatusMessage(account.session_message) || formatSessionStatus(account.session_status);
 };
 
 const statusClassName = (account: TmsAccount) => {
@@ -363,7 +377,7 @@ const Login: React.FC = () => {
       setSuccessMessage(formatLoginResponse(response));
       await loadAccounts({ silent: true });
     } catch (error) {
-      setErrorMessage(extractApiErrorMessage(error));
+      setErrorMessage(formatTmsStatusMessage(extractApiErrorMessage(error)));
       await loadAccounts({ silent: true });
     } finally {
       setActionLoading(null);
@@ -424,9 +438,9 @@ const Login: React.FC = () => {
               <div key={account.client_id} className="tms-logged-in-chip">
                 <span className="tms-online-dot" aria-hidden="true" />
                 <strong title={`Client ID: ${account.client_id}`}>{formatAccountLabel(account)}</strong>
-                {account.last_updated && (
+                {accountSessionTimestamp(account) && (
                   <span className="tms-session-time">
-                    Updated {new Date(account.last_updated).toLocaleString()}
+                    Updated {new Date(accountSessionTimestamp(account) as string).toLocaleString()}
                   </span>
                 )}
               </div>
@@ -491,7 +505,7 @@ const Login: React.FC = () => {
                     <td>{account.auto_login ? 'Yes' : 'No'}</td>
                     <td>
                       <div className="tms-status-cell">
-                        <span className={statusClassName(account)} title={account.session_message || undefined}>
+                        <span className={statusClassName(account)} title={formatTmsStatusMessage(account.session_message) || undefined}>
                           {statusDisplayText(account, now)}
                         </span>
                       </div>

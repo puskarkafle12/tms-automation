@@ -9,6 +9,8 @@ export interface TmsAccount {
   session_status: string;
   session_message: string | null;
   last_updated: string | null;
+  last_login_at?: string | null;
+  session_updated_at?: string | null;
 }
 
 export interface TmsAccountListResponse {
@@ -71,6 +73,8 @@ const sessionToAccount = (session: LoggedInSession): TmsAccount => ({
   session_status: session.status,
   session_message: session.message,
   last_updated: session.last_updated,
+  session_updated_at: session.last_updated,
+  last_login_at: null,
 });
 
 export const listLoggedInSessions = async (): Promise<LoggedInSession[]> => {

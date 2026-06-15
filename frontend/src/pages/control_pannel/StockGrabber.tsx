@@ -10,6 +10,7 @@ interface StockGrabberRequest {
   stock_symbol: string;
   order_quantity: number;
   request_per_sec: number;
+  stop_buy_after_percent: number;
   broker_no: string;
   resume_scan_count?: number;
   resume_previous_ltp?: number;
@@ -65,6 +66,7 @@ interface GrabberPersistState {
   isRunning: boolean;
   order_quantity: number;
   request_per_sec: number;
+  stop_buy_after_percent: number;
   scanCount: number;
   stableRate: number | null;
 }
@@ -79,6 +81,7 @@ interface StockGrabberProps {
   resumeStableRate?: number | null;
   initialOrderQuantity?: number;
   initialRequestPerSec?: number;
+  initialStopBuyAfterPercent?: number;
   symbolAlreadyRunning?: boolean;
   onRemove: () => void;
   onRunningChange?: (running: boolean) => void;
@@ -98,7 +101,7 @@ const formatTime = () =>
 const CONNECTION_LABELS: Record<ConnectionStatus, string> = {
   idle: 'Ready to monitor',
   connecting: 'Connecting / restarting…',
-  live: 'Live — scanning for +2% high price',
+  live: 'Live — scanning for +2% target under 15% cap',
   waiting: 'Armed — waiting for market to open',
   stopped: 'Monitor stopped',
 };
@@ -113,6 +116,7 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
   resumeStableRate = null,
   initialOrderQuantity,
   initialRequestPerSec,
+  initialStopBuyAfterPercent,
   symbolAlreadyRunning = false,
   onRemove,
   onRunningChange,
@@ -126,11 +130,11 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
     stock_symbol,
     order_quantity: initialOrderQuantity ?? 10,
     request_per_sec: initialRequestPerSec ?? 3,
+    stop_buy_after_percent: initialStopBuyAfterPercent ?? 15,
     broker_no: '35',
   });
   const [isRunning, setIsRunning] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('idle');
-  const [sessionId, setSessionId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [showEvents, setShowEvents] = useState(false);
@@ -183,6 +187,7 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
       isRunning: isRunningRef.current,
       order_quantity: formDataRef.current.order_quantity,
       request_per_sec: formDataRef.current.request_per_sec,
+      stop_buy_after_percent: formDataRef.current.stop_buy_after_percent,
       scanCount: liveStatsRef.current.totalFetches,
       stableRate: liveStatsRef.current.stableRate,
     });
@@ -321,7 +326,8 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
       if (status === 'completed') {
         const placed = Number(update.total_orders ?? 0);
         if (placed <= 0) {
-          return false;
+          addEvent('info', '⏹', update.message || 'Grabber completed without placing an order');
+          return true;
         }
         addEvent('order', '🏁', update.message || `Finished — ${placed} order(s) placed`);
         return true;
@@ -355,7 +361,6 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
     setRunning(false);
     setConnectionStatus('stopped');
     stopPolling();
-    setSessionId(null);
     sessionIdRef.current = null;
     isStartingRef.current = false;
     stableLoggedRef.current = false;
@@ -370,7 +375,6 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
     stopPolling();
     const oldSession = sessionIdRef.current;
     sessionIdRef.current = null;
-    setSessionId(null);
     isRunningRef.current = false;
     isStartingRef.current = false;
 
@@ -459,7 +463,6 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
     onFocusCard?.();
 
     sessionIdRef.current = existingSessionId;
-    setSessionId(existingSessionId);
 
     try {
       const pollRes = await fetch(`${getApiUrl()}/get_stock_grabber_updates/${existingSessionId}`);
@@ -485,7 +488,6 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
       beginPolling();
     } catch {
       sessionIdRef.current = null;
-      setSessionId(null);
       isStartingRef.current = false;
       addEvent('warn', '🔄', 'Session lost — restarting scanner…');
       await startRef.current(true);
@@ -550,7 +552,6 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
       }
 
       const data = await res.json();
-      setSessionId(data.session_id);
       sessionIdRef.current = data.session_id;
       lastScanAtRef.current = Date.now();
       setConnectionStatus('live');
@@ -636,7 +637,9 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
     const { name, value } = e.target;
     setFormData((prev) => ({
       ...prev,
-      [name]: name === 'order_quantity' || name === 'request_per_sec' ? parseFloat(value) || 0 : value,
+      [name]: name === 'order_quantity' || name === 'request_per_sec' || name === 'stop_buy_after_percent'
+        ? parseFloat(value) || 0
+        : value,
     }));
   };
 
@@ -810,6 +813,22 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
                 onChange={handleInputChange}
                 disabled={isRunning}
               />
+            </div>
+            <div className="form-group">
+              <label htmlFor={`stop-buy-${instanceId}`}>Stop Buy After %</label>
+              <input
+                id={`stop-buy-${instanceId}`}
+                type="number"
+                name="stop_buy_after_percent"
+                className="input"
+                value={formData.stop_buy_after_percent}
+                onChange={handleInputChange}
+                disabled={isRunning}
+                min={0}
+                max={15}
+                step={0.1}
+              />
+              <span className="sg-settings-hint">Stops new buys at or above this day change. Max 15%.</span>
             </div>
           </div>
         </div>

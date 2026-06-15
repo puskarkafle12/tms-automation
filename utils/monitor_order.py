@@ -10,6 +10,7 @@ from models.logged_in_user import LoggedInUsers
 from models.order_status_log import OrderStatusLog
 from models.scheduled_order import ScheduledOrder
 from utils.base_functions import truncate_to_one_decimal_place
+from utils.lot_size import get_board_lot_size, is_regular_lot_qty, normalize_sell_qty, round_down_to_board_lot
 from utils.log_sender import store_or_update_logs
 from utils.market_gate import resolve_market_gate
 from utils.tms import TmsUser
@@ -18,7 +19,15 @@ import config.tms_config as config
 
 
 MAX_PRICE_FETCH_CONCURRENCY = 5
-TERMINAL_STATUSES = {"order_placed", "Executed", "Cancelled", "Failed", "Expired", "Blocked by slippage"}
+TERMINAL_STATUSES = {
+    "order_placed",
+    "Executed",
+    "Cancelled",
+    "Failed",
+    "Expired",
+    "Blocked by slippage",
+    "BlockedByLotRule",
+}
 ACTIVE_STATUSES = {
     "pending",
     "Waiting",
@@ -33,6 +42,57 @@ ACTIVE_STATUSES = {
     "Stop-loss triggered",
     "Partially executed",
 }
+
+
+async def _latest_holding_qty(tms_user: TmsUser, script_name: str) -> int:
+    normalized_symbol = script_name.strip().upper()
+    holdings = await tms_user.get_user_stock_details()
+    for holding in holdings or []:
+        scrip = str(holding.get("scrip") or "").strip().upper()
+        name = str(holding.get("symbolName") or "").strip().upper()
+        if scrip == normalized_symbol or name == normalized_symbol:
+            return int(float(holding.get("currentBalance") or 0))
+    return 0
+
+
+async def _validate_execution_lot_rule(
+    db_order: ScheduledOrder,
+    tms_user: TmsUser,
+    requested_qty: int,
+    security_details: Optional[dict],
+) -> Optional[str]:
+    merged_security = {
+        **(db_order.security_details or {}),
+        **(security_details or {}),
+    }
+    odd_lot_allowed = bool(merged_security.get("odd_lot_allowed") or merged_security.get("oddLotAllowed"))
+    if odd_lot_allowed:
+        return None
+
+    lot_size = get_board_lot_size(merged_security)
+    if (db_order.order_type or "").lower() == "buy":
+        if not is_regular_lot_qty(requested_qty, lot_size):
+            return f"Execution blocked because quantity {requested_qty} is not a board-lot multiple of {lot_size} kitta."
+        if requested_qty < lot_size:
+            return f"Execution blocked because buy quantity is below minimum board lot of {lot_size} kitta."
+        return None
+
+    holding_qty = await _latest_holding_qty(tms_user, db_order.script_name)
+    if holding_qty <= 0:
+        return f"Execution blocked because {db_order.script_name} is not available in DP holdings."
+    if requested_qty > holding_qty:
+        return f"Execution blocked because selling {requested_qty} exceeds latest holding {holding_qty}."
+
+    normalized = normalize_sell_qty(requested_qty, holding_qty, lot_size)
+    if not normalized.get("is_sell_all") and normalized.get("qty") != requested_qty:
+        remaining = holding_qty - requested_qty
+        if 0 < remaining < lot_size:
+            return (
+                f"Execution blocked because selling {requested_qty} from {holding_qty} "
+                f"would leave {remaining} kitta odd-lot remainder."
+            )
+        return normalized.get("error") or normalized.get("warning") or "Execution blocked by board-lot rule."
+    return None
 
 
 @dataclass
@@ -307,16 +367,32 @@ def _evaluate_strategy(db_order: ScheduledOrder, current_price: float, quote: Op
         legs = db_order.partial_legs if isinstance(db_order.partial_legs, list) else []
         executed = set(db_order.executed_legs or [])
         total_qty = int(db_order.qty or 0)
+        lot_size = get_board_lot_size(db_order.security_details or {})
+        odd_lot_allowed = bool((db_order.security_details or {}).get("odd_lot_allowed"))
         for index, leg in enumerate(legs):
             leg_id = str(leg.get("id") or index)
             target = float(leg.get("targetPrice") or 0)
             percent = float(leg.get("sellPercent") or 0)
             if leg_id not in executed and target > 0 and percent > 0 and current_price >= target:
                 leg_qty = max(1, int(total_qty * percent / 100))
+                remaining_before_leg = int(db_order.remaining_quantity or total_qty)
+                if not odd_lot_allowed:
+                    normalized_leg = normalize_sell_qty(
+                        round_down_to_board_lot(leg_qty, lot_size),
+                        remaining_before_leg,
+                        lot_size,
+                    )
+                    leg_qty = int(normalized_leg.get("qty") or 0)
+                    if leg_qty <= 0:
+                        _mark_tracking(db_order, "BlockedByLotRule", current_price)
+                        db_order.failed_reason = (
+                            "Partial profit leg blocked because board-lot safe split is not possible."
+                        )
+                        return None
                 return {
                     "action": "execute",
                     "price": execution_price,
-                    "qty": min(leg_qty, int(db_order.remaining_quantity or total_qty)),
+                    "qty": min(leg_qty, remaining_before_leg),
                     "source": execution_source,
                     "reason": f"Partial profit leg {leg_id} reached",
                     "leg_id": leg_id,
@@ -566,15 +642,39 @@ async def monitor_order_task_func():
                             db_order.runner_lock_id = f"{order.order_id}:{snapshot.scan_count}"
                             db.flush()
                             tms_user = tms_users_instances[order.client_id]
+                            execution_qty = int(decision.get("qty") or db_order.remaining_quantity or order.qty)
+                            lot_rule_error = await _validate_execution_lot_rule(
+                                db_order,
+                                tms_user,
+                                execution_qty,
+                                snapshot.security_details,
+                            )
+                            if lot_rule_error:
+                                db_order.status = "BlockedByLotRule"
+                                db_order.failed_reason = lot_rule_error
+                                await store_or_update_logs(
+                                    db,
+                                    order.client_id,
+                                    order.script_name,
+                                    count_dict[key],
+                                    current_price,
+                                    False,
+                                    lot_rule_error,
+                                    commit=False,
+                                )
+                                db.add(_status_log_from_order(db_order))
+                                db.delete(db_order)
+                                continue
+
                             order_response = await tms_user.order(
                                 target_price,
-                                int(decision.get("qty") or db_order.remaining_quantity or order.qty),
+                                execution_qty,
                                 security=snapshot.security_details,
                                 order_type=order.order_type,
                             )
 
                             if order_response.get("status") == 200:
-                                executed_qty = int(decision.get("qty") or db_order.remaining_quantity or order.qty)
+                                executed_qty = execution_qty
                                 db_order.execution_price = target_price
                                 db_order.execution_price_source = decision.get("source") or "Target price"
                                 db_order.execution_reason = decision.get("reason")

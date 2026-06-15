@@ -30,6 +30,7 @@ from schemas.schemas import (
 )
 from utils.base_functions import is_within_time_range, truncate_to_one_decimal_place
 from utils.base_functions import summarize_login_message
+from utils.lot_size import get_board_lot_size, is_regular_lot_qty, normalize_sell_qty
 from utils.monitor_order import monitor_order_task_func
 from utils.market_gate import resolve_market_gate
 from utils.tms import TmsUser
@@ -118,6 +119,7 @@ async def _run_stock_grabber_task(
     session_id: str,
     order_quantity: int,
     max_order_limit: int,
+    stop_buy_after_percent: float,
 ) -> None:
     from datetime import timezone
 
@@ -143,9 +145,10 @@ async def _run_stock_grabber_task(
                     order_quantity=order_quantity,
                     session_id=session_id,
                     max_order_limit=max_order_limit,
+                    stop_buy_after_percent=stop_buy_after_percent,
                 )
                 placed = len(result.get("totalOrders") or [])
-                if placed > 0 or result.get("message") == "ACCESS_TOKEN_EXPIRED":
+                if placed > 0 or result.get("message") == "ACCESS_TOKEN_EXPIRED" or result.get("stop_reason"):
                     break
                 tms_user.updates.append({
                     "status": "scanning",
@@ -186,6 +189,8 @@ async def stock_grabber(request: StockGrabberRequest, db: Session = Depends(get_
             )
 
     max_order_limit = int(request.max_order_limit) if request.max_order_limit and int(request.max_order_limit) > 0 else 4
+    configured_stop = 15.0 if request.stop_buy_after_percent is None else float(request.stop_buy_after_percent)
+    stop_buy_after_percent = min(15.0, max(0.0, configured_stop))
 
     tms_user = TmsUser(
         broker_no=user.broker_no,
@@ -205,6 +210,7 @@ async def stock_grabber(request: StockGrabberRequest, db: Session = Depends(get_
             session_id,
             request.order_quantity,
             max_order_limit,
+            stop_buy_after_percent,
         )
     )
     running_tasks[session_id] = task
@@ -272,6 +278,7 @@ async def active_stock_grabbers():
             "scan_count": getattr(tms_user, "scan_count", 0),
             "scanner_active": task is not None and not task.done(),
             "request_per_sec": tms_user.request_per_sec,
+            "stop_buy_after_percent": getattr(tms_user, "stop_buy_after_percent", 15.0),
             "stable_rate": tms_user.stable_rate,
             "phase": tms_config.grabber_phase.get(session_id, "armed"),
             "status_message": tms_config.grabber_status_message.get(session_id, ""),
@@ -483,6 +490,8 @@ def _extract_tms_display_name(session: Optional[LoggedInUsers]) -> Optional[str]
 
 def _serialize_tms_account(user: User, session: Optional[LoggedInUsers]) -> dict:
     display_name = _extract_tms_display_name(session)
+    session_updated_at = session.last_updated.isoformat() if session and session.last_updated else None
+    last_login_at = session.last_login_at.isoformat() if session and session.last_login_at else None
     return {
         "client_id": user.client_id,
         "display_name": display_name,
@@ -491,7 +500,9 @@ def _serialize_tms_account(user: User, session: Optional[LoggedInUsers]) -> dict
         "auto_login": bool(user.auto_login),
         "session_status": session.status if session else "logged_out",
         "session_message": session.message if session else None,
-        "last_updated": session.last_login_at.isoformat() if session and session.last_login_at else None,
+        "last_updated": session_updated_at,
+        "last_login_at": last_login_at,
+        "session_updated_at": session_updated_at,
     }
 
 
@@ -598,9 +609,23 @@ def _serialize_scheduled_order(order: ScheduledOrder) -> dict:
 
 def _validate_strategy_order(order_data: OrderCreateRequest) -> None:
     strategy = (order_data.strategy_type or "Fixed Price").strip()
+    security_details = order_data.security_details or {}
+    odd_lot_allowed = bool(security_details.get("odd_lot_allowed") or security_details.get("oddLotAllowed"))
+    lot_size = get_board_lot_size(security_details)
     if order_data.qty <= 0:
         raise HTTPException(status_code=400, detail="Quantity must be greater than zero.")
+    if (
+        not odd_lot_allowed
+        and order_data.order_type.lower() == "buy"
+        and not is_regular_lot_qty(order_data.qty, lot_size)
+    ):
+        raise HTTPException(status_code=400, detail=f"Quantity must be a board-lot multiple of {lot_size} kitta.")
     if order_data.order_type.lower() == "buy":
+        if not odd_lot_allowed and order_data.qty < lot_size:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Amount is not enough to buy minimum board lot of {lot_size} kitta.",
+            )
         if strategy in {"Fixed Price", "Fixed Price Buy", "Buy Below Price", "Breakout Buy", "Dip Buy"} and order_data.price <= 0:
             raise HTTPException(status_code=400, detail="Buy trigger price must be greater than zero.")
         if strategy == "Time-Based Buy" and not order_data.expiry_time:
@@ -626,6 +651,36 @@ def _validate_strategy_order(order_data: OrderCreateRequest) -> None:
             raise HTTPException(status_code=400, detail="Expiry time is required.")
         if strategy == "Emergency Exit" and not order_data.emergency_execution:
             raise HTTPException(status_code=400, detail="Emergency exit requires confirmation.")
+
+
+async def _validate_sell_lot_against_holdings(order_data: OrderCreateRequest, tms_user: TmsUser) -> None:
+    security_details = order_data.security_details or {}
+    odd_lot_allowed = bool(security_details.get("odd_lot_allowed") or security_details.get("oddLotAllowed"))
+    if odd_lot_allowed:
+        return
+
+    lot_size = get_board_lot_size(security_details)
+    holdings = await tms_user.get_user_stock_details()
+    normalized_symbol = order_data.script_name.strip().upper()
+    holding_qty = 0
+    for holding in holdings or []:
+        scrip = str(holding.get("scrip") or "").strip().upper()
+        name = str(holding.get("symbolName") or "").strip().upper()
+        if scrip == normalized_symbol or name == normalized_symbol:
+            holding_qty = int(float(holding.get("currentBalance") or 0))
+            break
+
+    if holding_qty <= 0:
+        raise HTTPException(status_code=400, detail=f"{order_data.script_name} is not available in DP holdings.")
+    if order_data.qty > holding_qty:
+        raise HTTPException(status_code=400, detail=f"Sell quantity cannot exceed DP holding quantity ({holding_qty}).")
+
+    normalized = normalize_sell_qty(order_data.qty, holding_qty, lot_size)
+    if not normalized.get("is_sell_all") and normalized.get("qty") != order_data.qty:
+        raise HTTPException(
+            status_code=400,
+            detail=normalized.get("error") or normalized.get("warning") or "Sell quantity violates board-lot rules.",
+        )
 
 
 async def _get_script_high(tms_user: TmsUser, script_name: str) -> Optional[float]:
@@ -662,7 +717,9 @@ async def list_tms_accounts(db: Session = Depends(get_db)):
                 "auto_login": True,
                 "session_status": session.status,
                 "session_message": session.message,
-                "last_updated": session.last_login_at.isoformat() if session.last_login_at else None,
+                "last_updated": session.last_updated.isoformat() if session.last_updated else None,
+                "last_login_at": session.last_login_at.isoformat() if session.last_login_at else None,
+                "session_updated_at": session.last_updated.isoformat() if session.last_updated else None,
             })
 
     accounts.sort(key=lambda account: account["client_id"])
@@ -751,6 +808,12 @@ async def login_tms_account(client_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=401, detail="Login failed")
 
     session = db.query(LoggedInUsers).filter(LoggedInUsers.client_id == client_id).first()
+    if session:
+        session.status = "logged_in"
+        session.message = summarize_login_message(login_status.get("message") or "Logged in")
+        session.last_login_at = datetime.utcnow()
+        db.commit()
+        db.refresh(session)
     return {
         "message": login_status,
         "account": _serialize_tms_account(user, session),
@@ -819,12 +882,21 @@ async def cancel_order(client_id: str, exchange_order_id: str, db: Session = Dep
 
 @app.post("/add_order/")
 async def add_order(order_data: OrderCreateRequest, db: Session = Depends(get_db)):
+    incoming_security_details = order_data.security_details or {}
+    order_data.security_details = {
+        **incoming_security_details,
+        "odd_lot_allowed": bool(
+            order_data.odd_lot_allowed
+            or incoming_security_details.get("odd_lot_allowed")
+            or incoming_security_details.get("oddLotAllowed")
+        ),
+    }
     _validate_strategy_order(order_data)
-    if order_data.order_type.lower() == "buy":
-        user = db.query(User).filter(User.client_id == order_data.client_id).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
+    user = db.query(User).filter(User.client_id == order_data.client_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
 
+    if order_data.order_type.lower() == "buy":
         tms_user_instance = await get_cached_tms_user(user)
         script_high = await _get_script_high(tms_user_instance, order_data.script_name)
         if script_high is not None:
@@ -838,6 +910,9 @@ async def add_order(order_data: OrderCreateRequest, db: Session = Depends(get_db
                         f"({day_high}) for {order_data.script_name}."
                     ),
                 )
+    elif order_data.order_type.lower() == "sell":
+        tms_user_instance = await get_cached_tms_user(user)
+        await _validate_sell_lot_against_holdings(order_data, tms_user_instance)
 
     order = ScheduledOrder(order_data)
     db.add(order)
@@ -905,9 +980,22 @@ async def list_scheduled_orders(db: Session = Depends(get_db)):
 
 @app.post("/scheduled_orders/")
 async def create_scheduled_order(order_data: OrderCreateRequest, db: Session = Depends(get_db)):
+    incoming_security_details = order_data.security_details or {}
+    order_data.security_details = {
+        **incoming_security_details,
+        "odd_lot_allowed": bool(
+            order_data.odd_lot_allowed
+            or incoming_security_details.get("odd_lot_allowed")
+            or incoming_security_details.get("oddLotAllowed")
+        ),
+    }
     _validate_strategy_order(order_data)
-    if not db.query(User).filter(User.client_id == order_data.client_id).first():
+    user = db.query(User).filter(User.client_id == order_data.client_id).first()
+    if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    if order_data.order_type.lower() == "sell":
+        tms_user_instance = await get_cached_tms_user(user)
+        await _validate_sell_lot_against_holdings(order_data, tms_user_instance)
     order = ScheduledOrder(order_data)
     db.add(order)
     db.commit()
@@ -1224,6 +1312,7 @@ async def monitoring_status():
             "client_id": tms_user.client_id,
             "stock_symbol": tms_user.stock_symbol,
             "scan_count": getattr(tms_user, "scan_count", 0),
+            "stop_buy_after_percent": getattr(tms_user, "stop_buy_after_percent", 15.0),
             "phase": phase,
             "status_message": tms_config.grabber_status_message.get(session_id, ""),
             "started_at": started_at.isoformat() if started_at else None,

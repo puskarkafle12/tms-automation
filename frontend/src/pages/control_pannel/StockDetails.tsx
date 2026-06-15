@@ -35,12 +35,16 @@ interface QuoteLevel {
   totalOrders?: number;
 }
 
-const formatDate = (dateArray: number[]) => {
+const formatDate = (dateArray?: number[]) => {
+  if (!Array.isArray(dateArray) || dateArray.length < 6) {
+    return '-';
+  }
   const [year, month, day, hour, minute, second] = dateArray;
   return `${day}-${month}-${year} ${hour}:${minute}:${second}`;
 };
 
-const formatNumber = (value: number) => value.toLocaleString('en-NP');
+const formatNumber = (value?: number | null) =>
+  Number.isFinite(Number(value)) ? Number(value).toLocaleString('en-NP') : '-';
 
 const StockDetails: React.FC<StockDetailsProps> = ({
   stock,
@@ -60,7 +64,8 @@ const StockDetails: React.FC<StockDetailsProps> = ({
     return <p className="stock-details-empty">No stock details available.</p>;
   }
 
-  const isPositive = stock.percentChange >= 0;
+  const percentChange = Number(stock.percentChange || 0);
+  const changeTone = percentChange > 0 ? 'positive' : percentChange < 0 ? 'negative' : 'neutral';
   const displayLtp = quoteLoading
     ? 'Loading...'
     : latestLtp && latestLtp > 0
@@ -77,7 +82,6 @@ const StockDetails: React.FC<StockDetailsProps> = ({
     { label: 'Volume', value: formatNumber(stock.volume) },
     { label: 'Prev. Close', value: formatNumber(stock.previousClose) },
     { label: 'Change', value: formatNumber(stock.change) },
-    { label: 'Last Traded Vol.', value: formatNumber(stock.lastTradedVolume) },
     { label: 'Last Traded', value: formatDate(stock.lastTradedTime) },
   ];
 
@@ -90,9 +94,12 @@ const StockDetails: React.FC<StockDetailsProps> = ({
   return (
     <div className="stock-details">
       <div className="stock-details-header">
-        <h3 className="stock-details-title">{stock.symbol}</h3>
-        <span className={`stock-details-change ${isPositive ? 'positive' : 'negative'}`}>
-          {isPositive ? '+' : ''}{stock.percentChange}%
+        <div>
+          <span className="stock-details-eyebrow">Market Snapshot</span>
+          <h3 className="stock-details-title">{stock.symbol}</h3>
+        </div>
+        <span className={`stock-details-change ${changeTone}`}>
+          {percentChange > 0 ? '+' : ''}{percentChange}%
         </span>
       </div>
       <div className="stock-details-grid">
@@ -108,16 +115,19 @@ const StockDetails: React.FC<StockDetailsProps> = ({
               holdingQty && holdingQty > 0 ? 'available' : 'missing'
             }`}
           >
-            <span className="stock-details-label">DP Holding Qty</span>
-            <button
-              type="button"
-              className="stock-details-value stock-details-action-value"
-              onClick={onFillFromHolding}
-              disabled={!holdingQty || holdingQty <= 0 || holdingLoading}
-              title={holdingQty ? 'Use full holding quantity and latest LTP' : 'No holding quantity available'}
-            >
-              {holdingDisplay}
-            </button>
+            <span className="stock-details-label">Holding Qty</span>
+            <div className="stock-details-holding-row">
+              <span className="stock-details-value">{holdingDisplay}</span>
+              <button
+                type="button"
+                className="stock-details-action-value"
+                onClick={onFillFromHolding}
+                disabled={!holdingQty || holdingQty <= 0 || holdingLoading}
+                title={holdingQty ? 'Use full holding quantity' : 'No holding quantity available'}
+              >
+                Max
+              </button>
+            </div>
             {holdingLabel && <span className="stock-details-hint">{holdingLabel}</span>}
           </div>
         )}

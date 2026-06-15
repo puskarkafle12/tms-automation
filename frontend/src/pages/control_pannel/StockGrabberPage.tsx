@@ -268,6 +268,7 @@ const StockGrabberPage: React.FC = () => {
                 resumeStableRate={grabber.stableRate}
                 initialOrderQuantity={grabber.order_quantity}
                 initialRequestPerSec={grabber.request_per_sec}
+                initialStopBuyAfterPercent={grabber.stop_buy_after_percent}
                 onRemove={() => removeGrabber(grabber.id)}
                 onRegisterControls={registerControls}
                 onUnregisterControls={unregisterControls}
