@@ -2,4 +2,4 @@
 set -eu
 
 cd "$(dirname "$0")/.."
-exec python3 scripts/run_latest_commit_docker.py "$@"
+exec python3 scripts/run_latest_commit_docker.py --pull-git "$@"
