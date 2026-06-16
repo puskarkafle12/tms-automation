@@ -504,7 +504,21 @@ def _serialize_tms_account(user: User, session: Optional[LoggedInUsers]) -> dict
         "last_updated": session_updated_at,
         "last_login_at": last_login_at,
         "session_updated_at": session_updated_at,
+        "collateral": None,
+        "collateral_error": None,
     }
+
+
+async def _attach_tms_account_collateral(account: dict, user: Optional[User]) -> None:
+    if account.get("session_status") != "logged_in" or not user:
+        return
+    try:
+        tms_user = await get_cached_tms_user(user)
+        account["collateral"] = await tms_user.get_client_collateral()
+        account["collateral_error"] = None
+    except Exception as exc:
+        account["collateral"] = None
+        account["collateral_error"] = str(exc)
 
 
 def _record_tms_login_failure(
@@ -707,6 +721,7 @@ async def list_tms_accounts(db: Session = Depends(get_db)):
         for session in db.query(LoggedInUsers).all()
     }
     account_ids = {user.client_id for user in users}
+    user_by_client_id = {user.client_id: user for user in users}
     accounts = [_serialize_tms_account(user, sessions.get(user.client_id)) for user in users]
 
     for client_id, session in sessions.items():
@@ -721,8 +736,14 @@ async def list_tms_accounts(db: Session = Depends(get_db)):
                 "last_updated": session.last_updated.isoformat() if session.last_updated else None,
                 "last_login_at": session.last_login_at.isoformat() if session.last_login_at else None,
                 "session_updated_at": session.last_updated.isoformat() if session.last_updated else None,
+                "collateral": None,
+                "collateral_error": None,
             })
 
+    await asyncio.gather(*[
+        _attach_tms_account_collateral(account, user_by_client_id.get(account["client_id"]))
+        for account in accounts
+    ])
     accounts.sort(key=lambda account: account["client_id"])
     logged_in = [a for a in accounts if a["session_status"] == "logged_in"]
     return {"accounts": accounts, "logged_in_count": len(logged_in)}

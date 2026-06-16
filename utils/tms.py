@@ -735,6 +735,24 @@ class TmsUser:
         _, payload = await self._authenticated_request("GET", url, expected_statuses={200})
         return payload
 
+    @staticmethod
+    def calculate_available_collateral(payload: Dict) -> Dict:
+        collateral_amount = float(payload.get("collateralAmount") or 0)
+        utilized_collateral_amount = float(payload.get("utilizedcollateralAmount") or 0)
+        multiplication_factor = float(payload.get("collateralMultiplicationFactor") or 1)
+        available_collateral = (collateral_amount * multiplication_factor) - utilized_collateral_amount
+        return {
+            "collateralAmount": collateral_amount,
+            "utilizedcollateralAmount": utilized_collateral_amount,
+            "collateralMultiplicationFactor": multiplication_factor,
+            "availableCollateral": available_collateral,
+        }
+
+    async def get_client_collateral(self):
+        url = f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/dashboard/client/collateral/{self.client_details["id"]}'
+        _, payload = await self._authenticated_request("GET", url, expected_statuses={200})
+        return self.calculate_available_collateral(payload or {})
+
     async def get_order_history(self):
         url = f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/orderTradeApi/orderbook-v2/client/{self.client_details["id"]}?&activeStatus=COMPLETED&activeStatus=CANCELLED&activeStatus=REJECTED&activeStatus=TMS_REJECTED&activeStatus=PARTIALLY_CANCELLED&activeStatus=MODIFIED_CANCELLED'
         _, payload = await self._authenticated_request("GET", url, expected_statuses={200})

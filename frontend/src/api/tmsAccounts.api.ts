@@ -6,6 +6,13 @@ export interface TmsAccount {
   broker_no: string;
   password?: string;
   auto_login: boolean;
+  collateral?: {
+    collateralAmount: number;
+    utilizedcollateralAmount: number;
+    collateralMultiplicationFactor: number;
+    availableCollateral: number;
+  } | null;
+  collateral_error?: string | null;
   session_status: string;
   session_message: string | null;
   last_updated: string | null;
@@ -72,6 +79,8 @@ const sessionToAccount = (session: LoggedInSession): TmsAccount => ({
   auto_login: true,
   session_status: session.status,
   session_message: session.message,
+  collateral: null,
+  collateral_error: null,
   last_updated: session.last_updated,
   session_updated_at: session.last_updated,
   last_login_at: null,

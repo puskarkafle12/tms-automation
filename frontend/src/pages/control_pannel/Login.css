@@ -234,6 +234,24 @@
   color: var(--color-danger);
 }
 
+.tms-collateral {
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.tms-collateral-positive {
+  color: var(--color-success);
+}
+
+.tms-collateral-negative {
+  color: var(--color-danger);
+}
+
+.tms-collateral-muted {
+  color: var(--color-text-muted);
+  font-weight: 500;
+}
+
 .tms-session-error {
   font-size: 0.75rem;
   color: var(--color-danger);

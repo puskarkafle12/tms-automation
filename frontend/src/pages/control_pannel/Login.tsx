@@ -81,6 +81,24 @@ const statusClassName = (account: TmsAccount) => {
   return `tms-status ${hasError ? 'tms-status-error' : `tms-status-${account.session_status}`}`;
 };
 
+const formatCollateralAmount = (value?: number | null) => {
+  if (value == null || !Number.isFinite(Number(value))) {
+    return 'Collateral unavailable';
+  }
+  return `Rs. ${Number(value).toLocaleString('en-NP', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+};
+
+const collateralClassName = (account: TmsAccount) => {
+  const value = account.collateral?.availableCollateral;
+  if (value == null || !Number.isFinite(Number(value))) {
+    return 'tms-collateral tms-collateral-muted';
+  }
+  return `tms-collateral ${Number(value) < 0 ? 'tms-collateral-negative' : 'tms-collateral-positive'}`;
+};
+
 const Login: React.FC = () => {
   const [accounts, setAccounts] = useState<TmsAccount[]>([]);
   const [loggedInCount, setLoggedInCount] = useState(0);
@@ -491,7 +509,7 @@ const Login: React.FC = () => {
               <thead>
                 <tr>
                   <th>User (broker number)</th>
-                  <th>Auto Login</th>
+                  <th>Available Collateral</th>
                   <th>Status</th>
                   <th>Actions</th>
                 </tr>
@@ -502,7 +520,11 @@ const Login: React.FC = () => {
                     <td className="tms-client-id" title={`Client ID: ${account.client_id}`}>
                       {formatAccountLabel(account)}
                     </td>
-                    <td>{account.auto_login ? 'Yes' : 'No'}</td>
+                    <td>
+                      <span className={collateralClassName(account)} title={account.collateral_error || undefined}>
+                        {formatCollateralAmount(account.collateral?.availableCollateral)}
+                      </span>
+                    </td>
                     <td>
                       <div className="tms-status-cell">
                         <span className={statusClassName(account)} title={formatTmsStatusMessage(account.session_message) || undefined}>

@@ -120,6 +120,18 @@ class TestTmsPerformanceOptimizations(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake_session.calls[0][2]["headers"], {"x-xsrf-token": "old"})
         self.assertEqual(fake_session.calls[1][2]["headers"], {"x-xsrf-token": "new"})
 
+    async def test_available_collateral_calculation(self):
+        collateral = self.TmsUser.calculate_available_collateral({
+            "collateralAmount": 200000.0,
+            "utilizedcollateralAmount": 200460.0,
+            "collateralMultiplicationFactor": 1.0,
+        })
+
+        self.assertEqual(collateral["collateralAmount"], 200000.0)
+        self.assertEqual(collateral["utilizedcollateralAmount"], 200460.0)
+        self.assertEqual(collateral["collateralMultiplicationFactor"], 1.0)
+        self.assertEqual(collateral["availableCollateral"], -460.0)
+
     async def test_stock_grabber_cancels_previous_matching_orders_after_new_order(self):
         user = self.TmsUser(
             broker_no="35",
