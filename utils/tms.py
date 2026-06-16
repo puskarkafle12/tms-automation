@@ -28,6 +28,8 @@ class TmsUser:
     QUOTE_TIMEOUT = aiohttp.ClientTimeout(total=3, connect=1, sock_read=2)
     _security_cache: Dict[str, tuple[float, List[Dict]]] = {}
     _security_cache_ttl = 300.0
+    _collateral_cache: Dict[str, tuple[float, Dict]] = {}
+    _collateral_cache_ttl = 300.0
 
     def __init__(
         self,
@@ -246,6 +248,31 @@ class TmsUser:
             cls._security_cache.clear()
             return
         cls._security_cache.pop(str(broker_no), None)
+
+    @classmethod
+    def clear_collateral_cache(cls, client_id: Optional[str] = None) -> None:
+        if client_id is None:
+            cls._collateral_cache.clear()
+            return
+        cls._collateral_cache.pop(str(client_id), None)
+
+    @classmethod
+    def get_cached_collateral_for_client(cls, client_id: str) -> Optional[Dict]:
+        cached = cls._collateral_cache.get(str(client_id))
+        now = monotonic_time.monotonic()
+        if cached and now - cached[0] < cls._collateral_cache_ttl:
+            return cached[1]
+        return None
+
+    def _collateral_cache_key(self) -> str:
+        if self.client_id:
+            return str(self.client_id)
+        if self.client_details:
+            return str(self.client_details.get("id") or "")
+        return ""
+
+    def get_cached_client_collateral(self) -> Optional[Dict]:
+        return self.get_cached_collateral_for_client(self._collateral_cache_key())
 
     async def get_securities(self, *, force_refresh: bool = False) -> List[Dict]:
         broker_key = str(self.broker_no)
@@ -748,10 +775,50 @@ class TmsUser:
             "availableCollateral": available_collateral,
         }
 
-    async def get_client_collateral(self):
+    @staticmethod
+    def has_collateral_values(payload) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        return any(
+            payload.get(key) is not None
+            for key in (
+                "collateralAmount",
+                "utilizedcollateralAmount",
+                "collateralMultiplicationFactor",
+            )
+        )
+
+    async def get_client_collateral(self, *, force_refresh: bool = False):
+        if not force_refresh:
+            cached = self.get_cached_client_collateral()
+            if cached is not None:
+                return cached
+
         url = f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/dashboard/client/collateral/{self.client_details["id"]}'
-        _, payload = await self._authenticated_request("GET", url, expected_statuses={200})
-        return self.calculate_available_collateral(payload or {})
+        payload = None
+        for attempt in range(2):
+            _, payload = await self._authenticated_request("GET", url, expected_statuses={200})
+            if self.has_collateral_values(payload):
+                break
+            if attempt == 0:
+                await asyncio.sleep(0.5)
+        if not self.has_collateral_values(payload):
+            raise RuntimeError("Collateral response did not include collateral values")
+        collateral = self.calculate_available_collateral(payload or {})
+        cache_key = self._collateral_cache_key()
+        if cache_key:
+            self._collateral_cache[cache_key] = (monotonic_time.monotonic(), collateral)
+        return collateral
+
+    async def refresh_client_collateral(self) -> Optional[Dict]:
+        try:
+            return await self.get_client_collateral(force_refresh=True)
+        except Exception as exc:
+            self.updates.append({
+                "status": "warn",
+                "message": f"Could not refresh collateral: {exc}",
+            })
+            return None
 
     async def get_order_history(self):
         url = f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/orderTradeApi/orderbook-v2/client/{self.client_details["id"]}?&activeStatus=COMPLETED&activeStatus=CANCELLED&activeStatus=REJECTED&activeStatus=TMS_REJECTED&activeStatus=PARTIALLY_CANCELLED&activeStatus=MODIFIED_CANCELLED'
@@ -1248,6 +1315,7 @@ class TmsUser:
                         await asyncio.to_thread(log_time, traded_at, self.headers, order_response)
                     order_limit += 1
                     total_orders.append(order_response)
+                    await self.refresh_client_collateral()
                     self.updates.append({
                         "status": "info",
                         "message": f"Order {order_limit}/{max_order_limit} placed at Rs. {target_price}",

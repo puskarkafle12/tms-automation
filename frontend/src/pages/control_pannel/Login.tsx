@@ -11,6 +11,7 @@ import {
   listScheduledOrders,
   listTmsAccounts,
   loginTmsAccount,
+  refreshTmsAccountCollateral,
   updateTmsAccount,
 } from '../../api/tmsAccounts.api';
 import {
@@ -108,6 +109,7 @@ const Login: React.FC = () => {
   const [editingClientId, setEditingClientId] = useState<string | null>(null);
   const [showPassword, setShowPassword] = useState(false);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [collateralRefreshing, setCollateralRefreshing] = useState(false);
   const [successMessage, setSuccessMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
   const [loadWarning, setLoadWarning] = useState('');
@@ -402,6 +404,20 @@ const Login: React.FC = () => {
     }
   };
 
+  const handleRefreshCollateral = async () => {
+    resetMessages();
+    setCollateralRefreshing(true);
+    try {
+      const result = await refreshTmsAccountCollateral();
+      setSuccessMessage(result.message || 'Collateral refreshed.');
+      await loadAccounts({ silent: true });
+    } catch (error) {
+      setErrorMessage(extractApiErrorMessage(error));
+    } finally {
+      setCollateralRefreshing(false);
+    }
+  };
+
   const loggedInAccounts = accounts.filter((a) => a.session_status === 'logged_in');
   const exportContainsSensitiveData = useMemo(() => exportJson.trim().length > 0, [exportJson]);
 
@@ -475,6 +491,16 @@ const Login: React.FC = () => {
               <p className="panel-subtitle">Saved broker credentials and session status.</p>
             </div>
             <div className="tms-panel-actions">
+              <button
+                type="button"
+                className="btn btn-secondary tms-icon-button"
+                onClick={() => { void handleRefreshCollateral(); }}
+                disabled={collateralRefreshing || accounts.length === 0}
+                aria-label="Refresh collateral"
+                title="Refresh collateral"
+              >
+                <span className={`tms-refresh-icon ${collateralRefreshing ? 'spinning' : ''}`} aria-hidden="true" />
+              </button>
               <button type="button" className="btn btn-secondary" onClick={openImportModal}>
                 Import
               </button>

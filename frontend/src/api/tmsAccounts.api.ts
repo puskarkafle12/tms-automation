@@ -166,6 +166,11 @@ export const loginTmsAccount = async (clientId: string) => {
   return response.data;
 };
 
+export const refreshTmsAccountCollateral = async () => {
+  const response = await axios.post(`${getApiUrl()}/tms-accounts/refresh-collateral`);
+  return response.data;
+};
+
 export const loginTmsWithCredentials = async (payload: {
   username: string;
   password: string;

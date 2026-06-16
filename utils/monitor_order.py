@@ -674,6 +674,7 @@ async def monitor_order_task_func():
                             )
 
                             if order_response.get("status") == 200:
+                                await tms_user.refresh_client_collateral()
                                 executed_qty = execution_qty
                                 db_order.execution_price = target_price
                                 db_order.execution_price_source = decision.get("source") or "Target price"

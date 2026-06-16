@@ -11,9 +11,11 @@ class TestTmsPerformanceOptimizations(unittest.IsolatedAsyncioTestCase):
 
         self.TmsUser = TmsUser
         self.TmsUser.clear_security_cache()
+        self.TmsUser.clear_collateral_cache()
 
     async def asyncTearDown(self):
         self.TmsUser.clear_security_cache()
+        self.TmsUser.clear_collateral_cache()
 
     async def test_tms_user_session_is_lazy_and_reused(self):
         user = self.TmsUser(broker_no="35", username="u", password="p", request_per_sec=1)
@@ -131,6 +133,48 @@ class TestTmsPerformanceOptimizations(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(collateral["utilizedcollateralAmount"], 200460.0)
         self.assertEqual(collateral["collateralMultiplicationFactor"], 1.0)
         self.assertEqual(collateral["availableCollateral"], -460.0)
+
+    async def test_collateral_cache_returns_unexpired_value_only(self):
+        collateral = {"availableCollateral": 500.0}
+        self.TmsUser._collateral_cache["u"] = (time.monotonic(), collateral)
+
+        self.assertEqual(self.TmsUser.get_cached_collateral_for_client("u"), collateral)
+
+        self.TmsUser._collateral_cache["u"] = (
+            time.monotonic() - self.TmsUser._collateral_cache_ttl - 1,
+            collateral,
+        )
+        self.assertIsNone(self.TmsUser.get_cached_collateral_for_client("u"))
+
+    async def test_collateral_fetch_retries_once_when_response_has_no_values(self):
+        user = self.TmsUser(broker_no="35", username="u", password="p")
+        user.client_details = {"id": 123}
+        payloads = [
+            {},
+            {
+                "collateralAmount": 200000.0,
+                "utilizedcollateralAmount": 200460.0,
+                "collateralMultiplicationFactor": 1.0,
+            },
+        ]
+
+        async def fake_authenticated_request(method, url, **kwargs):
+            return 200, payloads.pop(0)
+
+        async def fake_sleep(delay):
+            return None
+
+        original_sleep = asyncio.sleep
+        asyncio.sleep = fake_sleep
+        user._authenticated_request = fake_authenticated_request
+        try:
+            collateral = await user.get_client_collateral(force_refresh=True)
+        finally:
+            asyncio.sleep = original_sleep
+
+        self.assertEqual(collateral["availableCollateral"], -460.0)
+        self.assertEqual(payloads, [])
+        self.assertEqual(self.TmsUser.get_cached_collateral_for_client("u"), collateral)
 
     async def test_stock_grabber_cancels_previous_matching_orders_after_new_order(self):
         user = self.TmsUser(

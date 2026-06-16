@@ -510,15 +510,30 @@ def _serialize_tms_account(user: User, session: Optional[LoggedInUsers]) -> dict
 
 
 async def _attach_tms_account_collateral(account: dict, user: Optional[User]) -> None:
-    if account.get("session_status") != "logged_in" or not user:
+    if not user:
         return
+    account["collateral"] = TmsUser.get_cached_collateral_for_client(user.client_id)
+    account["collateral_error"] = None if account["collateral"] else "Collateral cache empty or expired"
+
+
+async def _refresh_tms_account_collateral(user: User) -> dict:
     try:
-        tms_user = await get_cached_tms_user(user)
-        account["collateral"] = await tms_user.get_client_collateral()
-        account["collateral_error"] = None
+        await invalidate_cached_tms_user(user.client_id)
+        tms_user = await get_cached_tms_user(user, request_per_sec=5)
+        collateral = await tms_user.get_client_collateral(force_refresh=True)
+        return {
+            "client_id": user.client_id,
+            "status": "success",
+            "collateral": collateral,
+            "message": "Collateral refreshed",
+        }
     except Exception as exc:
-        account["collateral"] = None
-        account["collateral_error"] = str(exc)
+        return {
+            "client_id": user.client_id,
+            "status": "failed",
+            "collateral": None,
+            "message": str(exc),
+        }
 
 
 def _record_tms_login_failure(
@@ -747,6 +762,21 @@ async def list_tms_accounts(db: Session = Depends(get_db)):
     accounts.sort(key=lambda account: account["client_id"])
     logged_in = [a for a in accounts if a["session_status"] == "logged_in"]
     return {"accounts": accounts, "logged_in_count": len(logged_in)}
+
+
+@app.post("/tms-accounts/refresh-collateral")
+async def refresh_tms_account_collateral(db: Session = Depends(get_db)):
+    users = db.query(User).order_by(User.client_id).all()
+    results = await asyncio.gather(*[
+        _refresh_tms_account_collateral(user)
+        for user in users
+    ])
+    refreshed_count = sum(1 for result in results if result["status"] == "success")
+    return {
+        "message": f"Refreshed collateral for {refreshed_count} account(s)",
+        "refreshed_count": refreshed_count,
+        "results": results,
+    }
 
 
 @app.post("/tms-accounts/")
