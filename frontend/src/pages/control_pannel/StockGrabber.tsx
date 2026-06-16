@@ -61,6 +61,14 @@ interface LiveStats {
   stableRate: number | null;
 }
 
+interface FetchSpeedTest {
+  running: boolean;
+  fetches: number;
+  errors: number;
+  rate: number | null;
+  message: string;
+}
+
 interface GrabberPersistState {
   sessionId: string | null;
   isRunning: boolean;
@@ -141,6 +149,13 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
   const [ltpFlash, setLtpFlash] = useState<'up' | 'down' | null>(null);
   const [priceHistory, setPriceHistory] = useState<number[]>([]);
   const [activity, setActivity] = useState<ActivityItem[]>([]);
+  const [fetchSpeedTest, setFetchSpeedTest] = useState<FetchSpeedTest>({
+    running: false,
+    fetches: 0,
+    errors: 0,
+    rate: null,
+    message: '',
+  });
   const [liveStats, setLiveStats] = useState<LiveStats>({
     ltp: null,
     changePct: null,
@@ -588,6 +603,73 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
     }
   };
 
+  const testFetchSpeed = async () => {
+    if (isRunningRef.current || fetchSpeedTest.running) {
+      return;
+    }
+    if (!formDataRef.current.client_id || !formDataRef.current.stock_symbol) {
+      setError('Client ID and stock symbol are required to test fetch speed.');
+      return;
+    }
+
+    setError(null);
+    setFetchSpeedTest({
+      running: true,
+      fetches: 0,
+      errors: 0,
+      rate: null,
+      message: 'Testing for 5 seconds...',
+    });
+
+    const startedAt = performance.now();
+    const endAt = startedAt + 5000;
+    let fetches = 0;
+    let errors = 0;
+    let lastLtp: number | null = null;
+    const params = new URLSearchParams({
+      client_id: formDataRef.current.client_id,
+      symbol: formDataRef.current.stock_symbol,
+    });
+
+    while (performance.now() < endAt) {
+      try {
+        const response = await fetch(`${getApiUrl()}/stock_quote?${params.toString()}`, {
+          cache: 'no-store',
+        });
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        const data = await response.json();
+        if (!data?.quote) {
+          throw new Error('Quote missing');
+        }
+        fetches += 1;
+        if (data.quote.ltp !== undefined && data.quote.ltp !== null) {
+          lastLtp = Number(data.quote.ltp);
+        }
+      } catch {
+        errors += 1;
+      }
+      const snapshotFetches = fetches;
+      const snapshotErrors = errors;
+      setFetchSpeedTest((prev) => ({ ...prev, fetches: snapshotFetches, errors: snapshotErrors }));
+    }
+
+    const elapsedSeconds = Math.max(0.1, (performance.now() - startedAt) / 1000);
+    const rate = fetches / elapsedSeconds;
+    if (lastLtp !== null && Number.isFinite(lastLtp)) {
+      updateLtp(lastLtp);
+    }
+    setFetchSpeedTest({
+      running: false,
+      fetches,
+      errors,
+      rate,
+      message: `${rate.toFixed(2)} fetch/s over ${elapsedSeconds.toFixed(1)}s`,
+    });
+    addEvent('info', '⚡', `Fetch test: ${rate.toFixed(2)}/s (${fetches} ok, ${errors} failed)`);
+  };
+
   useEffect(() => {
     if (connectionStatus !== 'stopped') {
       return undefined;
@@ -790,17 +872,33 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
             </div>
             <div className="form-group">
               <label htmlFor={`rate-${instanceId}`}>Req / Sec</label>
-              <input
-                id={`rate-${instanceId}`}
-                type="number"
-                name="request_per_sec"
-                className="input"
-                value={formData.request_per_sec}
-                onChange={handleInputChange}
-                disabled={isRunning}
-                min={0.5}
-                step={0.5}
-              />
+              <div className="sg-rate-row">
+                <input
+                  id={`rate-${instanceId}`}
+                  type="number"
+                  name="request_per_sec"
+                  className="input"
+                  value={formData.request_per_sec}
+                  onChange={handleInputChange}
+                  disabled={isRunning}
+                  min={0.5}
+                  step={0.5}
+                />
+                <button
+                  type="button"
+                  className={`sg-test-fetch-btn ${fetchSpeedTest.running ? 'running' : ''}`}
+                  onClick={() => { void testFetchSpeed(); }}
+                  disabled={isRunning || fetchSpeedTest.running}
+                  title="Test fetch speed for 5 seconds"
+                >
+                  {fetchSpeedTest.running ? 'Testing...' : 'Test 5s'}
+                </button>
+              </div>
+              {(fetchSpeedTest.message || fetchSpeedTest.running) && (
+                <span className="sg-fetch-test-result">
+                  {fetchSpeedTest.message || 'Testing...'} · {fetchSpeedTest.fetches} ok / {fetchSpeedTest.errors} fail
+                </span>
+              )}
             </div>
             <div className="form-group">
               <label htmlFor={`broker-${instanceId}`}>Broker</label>
