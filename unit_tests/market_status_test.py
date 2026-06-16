@@ -1,7 +1,7 @@
 from datetime import datetime
 import unittest
 
-from utils.market_status import NEPAL_TZ, get_market_hours_status
+from utils.market_status import NEPAL_TZ, get_market_hours_status, nepal_date_utc_bounds
 
 
 class TestMarketStatus(unittest.TestCase):
@@ -36,6 +36,12 @@ class TestMarketStatus(unittest.TestCase):
         self.assertFalse(status["is_pre_open"])
         self.assertFalse(status["is_continuous"])
         self.assertFalse(status["market_hours_open"])
+
+    def test_nepal_calendar_day_converts_to_utc_bounds(self):
+        start_utc, end_utc = nepal_date_utc_bounds(datetime(2026, 6, 15).date())
+
+        self.assertEqual(start_utc, datetime(2026, 6, 14, 18, 15))
+        self.assertEqual(end_utc, datetime(2026, 6, 15, 18, 15))
 
 
 if __name__ == "__main__":

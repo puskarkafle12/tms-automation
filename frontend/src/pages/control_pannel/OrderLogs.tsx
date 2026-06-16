@@ -4,10 +4,15 @@ import CommonTable from '../../components/table/Table';
 import DialogBox from '../../components/dialog_box/DialogBox';
 import ErrorMessage from '../../components/ErrorMessage';
 import 'react-datepicker/dist/react-datepicker.css';
-import { format } from 'date-fns';
 import DatePicker from 'react-datepicker';
 import { syncMonitoringStatus } from '../../hooks/monitoringSync';
 import { fetchJson } from '../../utils/api';
+import {
+  dateFromNepalDateString,
+  formatNepalDateTime,
+  nepalDateStringFromDate,
+  todayNepalDate,
+} from '../../utils/nepalTime';
 
 type OrderTab = 'logs' | 'scheduled' | 'book' | 'history';
 
@@ -115,9 +120,7 @@ const formatStrategyType = (strategy: unknown, sideValue: unknown): string => {
 };
 
 const formatDateTime = (value: string | null | undefined) => {
-  if (!value) return '';
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+  return formatNepalDateTime(value);
 };
 
 const formatCurrency = (value: number | string | null | undefined) => {
@@ -216,10 +219,29 @@ const TABS: { id: OrderTab; label: string; icon: string }[] = [
   { id: 'history', label: 'History', icon: '🕐' },
 ];
 
-const todayDate = () => format(new Date(), 'yyyy-MM-dd');
+const COMPLETED_STATUS_RANK = new Set([
+  'completed',
+  'complete',
+  'executed',
+  'partially executed',
+  'order_placed',
+  'order placed',
+  'placed',
+]);
+
+const orderTimestamp = (order: any) => {
+  const timestamp = new Date(order?.timestamp || order?.created_at || 0).getTime();
+  return Number.isFinite(timestamp) ? timestamp : 0;
+};
+
+const isCompletedStatus = (status: unknown) => {
+  const normalized = String(status || '').trim().toLowerCase();
+  return COMPLETED_STATUS_RANK.has(normalized);
+};
 
 const GetOrderStatus: React.FC = () => {
-  const [orderedDate, setOrderedDate] = useState<string>(todayDate);
+  const [orderedDate, setOrderedDate] = useState<string>(todayNepalDate);
+  const [selectedClientId, setSelectedClientId] = useState('');
   const [scriptName, setScriptName] = useState('');
   const scriptNameRef = useRef(scriptName);
   useEffect(() => {
@@ -281,7 +303,7 @@ const GetOrderStatus: React.FC = () => {
   }, []);
 
   const handleDateChange = (date: Date | null) => {
-    setOrderedDate(date ? format(date, 'yyyy-MM-dd') : todayDate());
+    setOrderedDate(nepalDateStringFromDate(date));
   };
 
   const clientLabelMap = useMemo(() => {
@@ -295,6 +317,11 @@ const GetOrderStatus: React.FC = () => {
   const getClientLabel = useCallback(
     (clientId: string) => clientLabelMap.get(clientId) || clientId,
     [clientLabelMap],
+  );
+
+  const activeClientIds = useMemo(
+    () => (selectedClientId ? [selectedClientId] : loggedInClientIDs),
+    [loggedInClientIDs, selectedClientId],
   );
 
   const fetchOrderBook = useCallback(async (selectedClientId: string) => {
@@ -317,6 +344,9 @@ const GetOrderStatus: React.FC = () => {
       const filterScript = scriptNameRef.current.trim();
       if (filterScript) {
         params.set('script_name', filterScript);
+      }
+      if (selectedClientId) {
+        params.set('client_id', selectedClientId);
       }
       if (orderedDate) {
         params.set('ordered_date', orderedDate);
@@ -349,7 +379,7 @@ const GetOrderStatus: React.FC = () => {
         }
       }
     },
-    [apiUrl, orderedDate],
+    [apiUrl, orderedDate, selectedClientId],
   );
 
   const fetchOrderHistory = useCallback(async (selectedClientId: string) => {
@@ -412,8 +442,8 @@ const GetOrderStatus: React.FC = () => {
   }, [loadLogsAndScheduled]);
 
   useEffect(() => {
-    void loadAllClientTmsData(loggedInClientIDs);
-  }, [loadAllClientTmsData, loggedInClientIDs]);
+    void loadAllClientTmsData(activeClientIds);
+  }, [activeClientIds, loadAllClientTmsData]);
 
   useEffect(() => {
     if (!hasLoaded) {
@@ -434,7 +464,7 @@ const GetOrderStatus: React.FC = () => {
     setIsLoading(true);
     try {
       await loadLogsAndScheduled({ silent: true });
-      await loadAllClientTmsData(loggedInClientIDs);
+      await loadAllClientTmsData(activeClientIds);
       setSuccessMessage('Data refreshed');
     } catch {
       setErrorMessage('Failed to refresh order data.');
@@ -455,7 +485,7 @@ const GetOrderStatus: React.FC = () => {
       );
       if (response.ok) {
         setSuccessMessage('Order cancelled successfully');
-        await loadAllClientTmsData(loggedInClientIDs);
+        await loadAllClientTmsData(activeClientIds);
       } else {
         setErrorMessage('Failed to cancel order');
       }
@@ -523,41 +553,50 @@ const GetOrderStatus: React.FC = () => {
 
   const orderLogRows = useMemo(
     () =>
-      orderLogs.map((order) => {
-        const side = getOrderSide(order);
-        const strategyLabel = formatStrategyType(order.strategy_type, side);
-        const detailOrder: ScheduledOrderRow = {
-          order_id: order.order_id || 0,
-          client_id: order.client_id || '',
-          script_name: order.script_name || '',
-          price: Number(order.execution_price ?? order.price ?? 0),
-          qty: Number(order.qty || 0),
-          status: order.status || '',
-          order_type: String(order.order_type || side).toLowerCase(),
-          strategy_type: strategyLabel,
-          side,
-          created_at: order.timestamp,
-          execution_price: order.execution_price ?? order.price,
-          execution_reason: order.status,
-        };
-        return {
-          timestamp: formatDateTime(order.timestamp),
-          stock: <StockClientCell symbol={order.script_name} clientLabel={getClientLabel(order.client_id || '')} />,
-          order_type: side,
-          qty: formatScanCount(order.qty),
-          strategy_type: (
-            <button
-              type="button"
-              className={`strategy-chip ${side === 'BUY' ? 'buy' : side === 'SELL' ? 'sell' : ''}`}
-              onClick={() => setStrategyDetailsOrder(detailOrder)}
-            >
-              {strategyLabel}
-            </button>
-          ),
-          status: order.status,
-          price: formatCurrency(order.execution_price ?? order.price),
-        };
-      }),
+      [...orderLogs]
+        .sort((left, right) => {
+          const leftCompleted = isCompletedStatus(left.status);
+          const rightCompleted = isCompletedStatus(right.status);
+          if (leftCompleted !== rightCompleted) {
+            return leftCompleted ? -1 : 1;
+          }
+          return orderTimestamp(right) - orderTimestamp(left);
+        })
+        .map((order) => {
+          const side = getOrderSide(order);
+          const strategyLabel = formatStrategyType(order.strategy_type, side);
+          const detailOrder: ScheduledOrderRow = {
+            order_id: order.order_id || 0,
+            client_id: order.client_id || '',
+            script_name: order.script_name || '',
+            price: Number(order.execution_price ?? order.price ?? 0),
+            qty: Number(order.qty || 0),
+            status: order.status || '',
+            order_type: String(order.order_type || side).toLowerCase(),
+            strategy_type: strategyLabel,
+            side,
+            created_at: order.timestamp,
+            execution_price: order.execution_price ?? order.price,
+            execution_reason: order.status,
+          };
+          return {
+            timestamp: formatDateTime(order.timestamp),
+            stock: <StockClientCell symbol={order.script_name} clientLabel={getClientLabel(order.client_id || '')} />,
+            order_type: side,
+            qty: formatScanCount(order.qty),
+            strategy_type: (
+              <button
+                type="button"
+                className={`strategy-chip ${side === 'BUY' ? 'buy' : side === 'SELL' ? 'sell' : ''}`}
+                onClick={() => setStrategyDetailsOrder(detailOrder)}
+              >
+                {strategyLabel}
+              </button>
+            ),
+            status: order.status,
+            price: formatCurrency(order.execution_price ?? order.price),
+          };
+        }),
     [getClientLabel, orderLogs],
   );
 
@@ -653,6 +692,23 @@ const GetOrderStatus: React.FC = () => {
         <form onSubmit={handleSubmit} className="order-logs-form">
           <div className="order-logs-form-grid">
             <div className="form-group">
+              <label htmlFor="clientFilter">Client</label>
+              <select
+                id="clientFilter"
+                className="select"
+                value={selectedClientId}
+                onChange={(e) => setSelectedClientId(e.target.value)}
+              >
+                <option value="">All clients</option>
+                {clientSessions.map((session) => (
+                  <option key={session.client_id} value={session.client_id}>
+                    {formatClientLabel(session, session.client_id)}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="form-group">
               <label htmlFor="scriptName">Script Name</label>
               <input
                 id="scriptName"
@@ -668,7 +724,7 @@ const GetOrderStatus: React.FC = () => {
               <label htmlFor="orderedDate">Ordered Date</label>
               <DatePicker
                 id="orderedDate"
-                selected={new Date(orderedDate)}
+                selected={dateFromNepalDateString(orderedDate)}
                 onChange={handleDateChange}
                 dateFormat="yyyy-MM-dd"
                 placeholderText="Select a date"

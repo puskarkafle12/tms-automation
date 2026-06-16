@@ -13,6 +13,7 @@ import {
   ScripLotMetadata,
 } from './lotSize';
 import { calculateQuantityFromAmount, getOrderEstimate } from '../../utils/orderEstimate';
+import { currentNepalDateTimeLocal } from '../../utils/nepalTime';
 export type { StrategyPayload, StrategyType } from './strategyValidation';
 
 export const STRATEGY_HELP: Record<StrategyType, { helper: string; button: string }> = {
@@ -169,6 +170,7 @@ const StrategySellForm: React.FC<Props> = ({
   const [expiryTime, setExpiryTime] = useState('');
   const [expiryAction, setExpiryAction] = useState('Cancel strategy');
   const [localError, setLocalError] = useState('');
+  const minNepalExpiryTime = currentNepalDateTimeLocal().slice(0, 16);
   const boardLotSize = useMemo(() => getBoardLotSize(securityDetails), [securityDetails]);
 
   const priceSource = useMemo(() => {
@@ -523,7 +525,7 @@ const StrategySellForm: React.FC<Props> = ({
           <>
             <div className="form-group">
               <label htmlFor="expiryTime">Expiry date/time (Nepal Time)</label>
-              <input id="expiryTime" className="input" type="datetime-local" value={expiryTime} onChange={(e) => setExpiryTime(e.target.value)} />
+              <input id="expiryTime" className="input" type="datetime-local" min={minNepalExpiryTime} value={expiryTime} onChange={(e) => setExpiryTime(e.target.value)} />
             </div>
             <div className="form-group">
               <label htmlFor="expiryAction">Expiry action</label>

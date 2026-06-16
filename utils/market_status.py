@@ -1,4 +1,4 @@
-from datetime import datetime, time
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Dict, Optional
 from zoneinfo import ZoneInfo
 
@@ -40,6 +40,15 @@ def format_nepal_datetime(now: Optional[datetime] = None) -> Dict[str, str]:
         "date": current.strftime("%a, %d %b %Y"),
         "timezone": "Asia/Kathmandu",
     }
+
+
+def nepal_date_utc_bounds(nepal_date: date) -> tuple[datetime, datetime]:
+    start = datetime.combine(nepal_date, time.min, tzinfo=NEPAL_TZ)
+    end = start + timedelta(days=1)
+    return (
+        start.astimezone(timezone.utc).replace(tzinfo=None),
+        end.astimezone(timezone.utc).replace(tzinfo=None),
+    )
 
 
 def parse_session_check_response(payload: Dict[str, Any]) -> Dict[str, Any]:

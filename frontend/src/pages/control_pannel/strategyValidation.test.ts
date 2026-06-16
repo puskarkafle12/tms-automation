@@ -31,6 +31,14 @@ const baseValues = (strategy: StrategyType, side: 'buy' | 'sell' = 'sell'): Stra
 });
 
 describe('validateStrategyForm', () => {
+  beforeEach(() => {
+    jest.useRealTimers();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
   const validCases: Array<[StrategyType, 'buy' | 'sell']> = [
     ['Fixed Price Buy', 'buy'],
     ['Buy Below Price', 'buy'],
@@ -87,6 +95,15 @@ describe('validateStrategyForm', () => {
 
   test('converts time-based expiry from Nepal time to UTC ISO', () => {
     expect(nepalDateTimeLocalToIso('2026-06-15T10:30')).toBe('2026-06-15T04:45:00.000Z');
+  });
+
+  test('validates Time-Based Exit against current Nepal time', () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-06-15T04:45:00.000Z'));
+
+    expect(validateStrategyForm({ ...baseValues('Time-Based Exit'), expiryTime: '2026-06-15T10:31' })).toBe('');
+    expect(validateStrategyForm({ ...baseValues('Time-Based Exit'), expiryTime: '2026-06-15T10:29' })).toBe(
+      'Expiry time must be in the future.',
+    );
   });
 
   test('shows required message for Book Profit + Stop Loss', () => {

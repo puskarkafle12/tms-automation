@@ -1,4 +1,5 @@
 import { normalizeSellQty } from './lotSize';
+import { currentNepalDateTimeLocal } from '../../utils/nepalTime';
 
 export type StrategyType =
   | 'Fixed Price'
@@ -194,7 +195,9 @@ export const validateStrategyForm = (values: StrategyFormValues): string => {
   }
   if (values.strategy === 'Time-Based Exit' || values.strategy === 'Time-Based Buy') {
     if (!values.expiryTime) return 'Expiry date/time is required.';
-    if (parseNepalDateTimeLocalToUtcMs(values.expiryTime) <= Date.now()) {
+    const selectedNepalTime = parseNepalDateTimeLocalToUtcMs(values.expiryTime);
+    const currentNepalTime = parseNepalDateTimeLocalToUtcMs(currentNepalDateTimeLocal());
+    if (selectedNepalTime <= currentNepalTime) {
       return 'Expiry time must be in the future.';
     }
   }

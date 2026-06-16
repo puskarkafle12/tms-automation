@@ -38,7 +38,7 @@ import uvicorn
 import jwt
 from fastapi import FastAPI, Request, HTTPException
 from sqlalchemy.orm import Session
-from datetime import date, time, timedelta, datetime
+from datetime import datetime
 
 from utils.tms_user_loader import load_tms_users_instances
 from utils.market_status import (
@@ -46,6 +46,7 @@ from utils.market_status import (
     get_market_hours_status,
     get_nepal_now,
     is_market_live,
+    nepal_date_utc_bounds,
     outside_market_hours_message,
     parse_session_check_response,
 )
@@ -1039,21 +1040,22 @@ async def get_order_status_logs(
     if script_name:
         query = query.filter(OrderStatusLog.script_name == script_name)
 
-    # Handle date filtering
+    # Treat ordered_date as a Nepal calendar day, then compare against UTC-naive DB timestamps.
     if ordered_date and ordered_date!='null':
         try:
             parsed_date = datetime.strptime(ordered_date, "%Y-%m-%d").date()
+            start_utc, end_utc = nepal_date_utc_bounds(parsed_date)
             query = query.filter(
-                cast(OrderStatusLog.timestamp, DateTime) >= parsed_date)
+                cast(OrderStatusLog.timestamp, DateTime) >= start_utc)
             query = query.filter(
-                cast(OrderStatusLog.timestamp, DateTime) < parsed_date + timedelta(days=1))
+                cast(OrderStatusLog.timestamp, DateTime) < end_utc)
         except ValueError:
             return {"error": "Invalid date format. Please use YYYY-MM-DD."}
     else:
-        today = date.today()
-        query = query.filter(cast(OrderStatusLog.timestamp, DateTime) >= today)
+        start_utc, end_utc = nepal_date_utc_bounds(get_nepal_now().date())
+        query = query.filter(cast(OrderStatusLog.timestamp, DateTime) >= start_utc)
         query = query.filter(
-            cast(OrderStatusLog.timestamp, DateTime) < today + timedelta(days=1))
+            cast(OrderStatusLog.timestamp, DateTime) < end_utc)
 
     order_logs = query.all()
 
