@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import './DpHolding.css';
 import ErrorMessage from '../../components/ErrorMessage';
+import NepseAlphaSymbolLink from '../../components/NepseAlphaSymbolLink';
 import StrategySellForm, { StrategyPayload } from './StrategySellForm';
 import { getBoardLotSize, normalizeSellQty } from './lotSize';
 
@@ -632,8 +633,14 @@ const DPHoldings: React.FC = () => {
                   {visibleHoldings.map((holding, index) => (
                     <tr key={`${holdingSymbol(holding)}-${index}`} style={{ backgroundColor: holding.color }}>
                       <td>
-                        <strong>{formatValue(holding.scrip)}</strong>
-                        <span className="dp-holdings-symbol-name">{holding.symbolName}</span>
+                        <strong>
+                          <NepseAlphaSymbolLink symbol={holdingSymbol(holding)}>
+                            {formatValue(holding.scrip)}
+                          </NepseAlphaSymbolLink>
+                        </strong>
+                        {holding.symbolName && holding.symbolName !== holding.scrip && (
+                          <span className="dp-holdings-symbol-name">{holding.symbolName}</span>
+                        )}
                       </td>
                       {holdingMode === 'combined' && (
                         <td>{(holding as CombinedHolding).clientCount || 1}</td>
@@ -696,7 +703,10 @@ const DPHoldings: React.FC = () => {
           <div className="dp-sell-modal panel" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
             <div className="dp-sell-modal-header">
               <div>
-                <h3>{(sellHolding as CombinedHolding).holders?.length ? 'Combined Sell' : 'Sell'} {holdingSymbol(sellHolding)}</h3>
+                <h3>
+                  {(sellHolding as CombinedHolding).holders?.length ? 'Combined Sell' : 'Sell'}{' '}
+                  <NepseAlphaSymbolLink symbol={holdingSymbol(sellHolding)} />
+                </h3>
                 <p>{sellHolding.symbolName || quote?.security?.securityName || 'DP holding sell order'}</p>
               </div>
               <button type="button" className="dp-sell-close" onClick={closeSellDialog} aria-label="Close">×</button>

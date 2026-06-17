@@ -10,6 +10,7 @@ import {
   ScreenerPreset,
 } from '../../lib/screener/presets';
 import { buildChatGptScreenerPrompt, ScreenerQuerySpec } from '../../lib/screener/chatGptPrompt';
+import { buildNepseAlphaChartUrl } from '../../lib/nepseAlpha';
 
 type FieldType = 'number' | 'text';
 
@@ -96,8 +97,6 @@ interface AiChatMessage {
   query?: string;
   isError?: boolean;
 }
-
-const NEPSE_ALPHA_CHART_URL = 'https://nepsealpha.com/trading/chart';
 
 const parseApiError = (data: unknown, fallback: string): string => {
   if (!data || typeof data !== 'object') {
@@ -497,7 +496,7 @@ const StockScreener: React.FC = () => {
     () => ({
       symbol: (row: Record<string, unknown>) => {
         const sym = String(row.symbol || '').trim().toUpperCase();
-        return sym ? `${NEPSE_ALPHA_CHART_URL}?symbol=${encodeURIComponent(sym)}` : undefined;
+        return buildNepseAlphaChartUrl(sym);
       },
     }),
     [],

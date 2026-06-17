@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import './CheckOrders.css';
 import MonitorOrders from './MonitorOrders';
 import ErrorMessage from '../../components/ErrorMessage';
+import NepseAlphaSymbolLink from '../../components/NepseAlphaSymbolLink';
 import useHotkeys from '@reecelucas/react-use-hotkeys';
 import moment from 'moment-timezone';
 
@@ -297,7 +298,7 @@ const CheckOrders: React.FC = () => {
             {filteredLogs.map((log) => (
               <div key={log.id} className="check-orders-log-card">
                 <div className="check-orders-log-card-header">
-                  <span className="check-orders-log-symbol">{log.script_name}</span>
+                  <NepseAlphaSymbolLink symbol={log.script_name} className="check-orders-log-symbol" />
                   <span className={`badge ${log.order_placed ? 'badge-success' : 'badge-muted'}`}>
                     {log.order_placed ? 'Placed' : 'Watching'}
                   </span>

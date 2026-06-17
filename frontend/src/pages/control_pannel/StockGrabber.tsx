@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import './StockGrabber.css';
 import ErrorMessage from '../../components/ErrorMessage';
+import NepseAlphaSymbolLink from '../../components/NepseAlphaSymbolLink';
 import { GrabberControls } from '../../types/monitoring';
 
 const getApiUrl = () => localStorage.getItem('apiUrl') || window.location.origin;
@@ -754,7 +755,7 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
   return (
     <div className={`sg-monitor ${isRunning ? 'running' : ''} ${connectionStatus}`}>
       <div className="sg-monitor-header">
-        <div className="sg-symbol-chip">{formData.stock_symbol}</div>
+        <NepseAlphaSymbolLink symbol={formData.stock_symbol} className="sg-symbol-chip" />
         <div className="sg-monitor-meta">
           <span className="sg-monitor-client">{formData.client_id}</span>
           <button

@@ -7,20 +7,24 @@ import 'react-datepicker/dist/react-datepicker.css';
 import DatePicker from 'react-datepicker';
 import { syncMonitoringStatus } from '../../hooks/monitoringSync';
 import {
-  addNepalDays,
   dateFromNepalDateString,
   formatNepalDateTime,
   nepalDateStringFromDate,
   offsetNepalDate,
   todayNepalDate,
 } from '../../utils/nepalTime';
+import {
+  FOREVER_FROM_DATE,
+  historyRangeLabel,
+  HistoryRangePreset,
+  resolveHistoryDateRange,
+} from '../../utils/orderHistoryRange';
 import { formatStrategyLabel } from '../../lib/strategies';
 import EditScheduledOrderModal from './EditScheduledOrderModal';
+import NepseAlphaSymbolLink from '../../components/NepseAlphaSymbolLink';
 
 type OrderTab = 'logs' | 'scheduled' | 'book' | 'history';
-type HistoryRangePreset = 'week' | 'month' | 'custom' | 'forever';
 
-const FOREVER_FROM_DATE = '2010-12-01';
 const CACHE_TTL_MS = 20 * 60 * 1000;
 
 const HISTORY_RANGE_OPTIONS: { id: HistoryRangePreset; label: string }[] = [
@@ -29,27 +33,6 @@ const HISTORY_RANGE_OPTIONS: { id: HistoryRangePreset; label: string }[] = [
   { id: 'custom', label: 'Custom' },
   { id: 'forever', label: 'All Time' },
 ];
-
-const resolveHistoryDateRange = (
-  preset: HistoryRangePreset,
-  customFrom: string,
-  customTo: string,
-) => {
-  const today = todayNepalDate();
-  if (preset === 'forever') {
-    return { fromDate: FOREVER_FROM_DATE, toDate: addNepalDays(today, 7) };
-  }
-  if (preset === 'month') {
-    return { fromDate: offsetNepalDate(today, { months: 1 }), toDate: today };
-  }
-  if (preset === 'custom') {
-    return {
-      fromDate: customFrom || offsetNepalDate(today, { days: 7 }),
-      toDate: customTo || today,
-    };
-  }
-  return { fromDate: offsetNepalDate(today, { days: 7 }), toDate: today };
-};
 
 interface ScheduledOrderRow {
   order_id: number;
@@ -108,7 +91,9 @@ const formatClientLabel = (session?: ClientSession | null, fallbackClientId = ''
 
 const StockClientCell: React.FC<{ symbol: string; clientLabel: string }> = ({ symbol, clientLabel }) => (
   <div className="order-log-stock-cell">
-    <strong>{symbol || '-'}</strong>
+    <strong>
+      {symbol ? <NepseAlphaSymbolLink symbol={symbol} /> : '-'}
+    </strong>
     {clientLabel && <span>{clientLabel}</span>}
   </div>
 );
@@ -372,9 +357,9 @@ const GetOrderStatus: React.FC = () => {
   );
 
   const buildHistoryCacheKey = useCallback(
-    (clientIds: string[]) => {
+    (clientIds: string[], preset: HistoryRangePreset = historyRangePreset) => {
       const { fromDate, toDate } = resolveHistoryDateRange(
-        historyRangePreset,
+        preset,
         historyFromDate,
         historyToDate,
       );
@@ -503,8 +488,9 @@ const GetOrderStatus: React.FC = () => {
   );
 
   const loadHistoryData = useCallback(
-    async (force = false) => {
-      const cacheKey = buildHistoryCacheKey(activeClientIds);
+    async (force = false, presetOverride?: HistoryRangePreset) => {
+      const preset = presetOverride ?? historyRangePreset;
+      const cacheKey = buildHistoryCacheKey(activeClientIds, preset);
       const cached = historyCacheRef.current;
 
       if (!force && cached?.key === cacheKey && isCacheFresh(cached.fetchedAt)) {
@@ -522,7 +508,7 @@ const GetOrderStatus: React.FC = () => {
       const requestId = ++historyRequestIdRef.current;
       setIsHistoryLoading(true);
       const { fromDate, toDate } = resolveHistoryDateRange(
-        historyRangePreset,
+        preset,
         historyFromDate,
         historyToDate,
       );
@@ -575,7 +561,6 @@ const GetOrderStatus: React.FC = () => {
       return;
     }
     if (historyRangePreset === 'custom') {
-      void loadHistoryData(false);
       return;
     }
     void loadHistoryData(false);
@@ -629,7 +614,10 @@ const GetOrderStatus: React.FC = () => {
       setHistoryToDate(today);
     } else if (preset === 'forever') {
       setHistoryFromDate(FOREVER_FROM_DATE);
-      setHistoryToDate(addNepalDays(today, 7));
+      setHistoryToDate(today);
+    }
+    if (activeTab === 'history') {
+      void loadHistoryData(true, preset);
     }
   };
 
@@ -790,17 +778,10 @@ const GetOrderStatus: React.FC = () => {
     [getClientLabel],
   );
 
-  const historyDateRangeLabel = useMemo(() => {
-    const { fromDate, toDate } = resolveHistoryDateRange(
-      historyRangePreset,
-      historyFromDate,
-      historyToDate,
-    );
-    if (historyRangePreset === 'forever') {
-      return 'All time';
-    }
-    return `${fromDate} to ${toDate}`;
-  }, [historyFromDate, historyRangePreset, historyToDate]);
+  const historyDateRangeLabel = useMemo(
+    () => historyRangeLabel(historyRangePreset, historyFromDate, historyToDate),
+    [historyFromDate, historyRangePreset, historyToDate],
+  );
 
   const orderBookRows = useMemo(() => decorateTmsRows(orderBook), [decorateTmsRows, orderBook]);
 
@@ -1089,7 +1070,9 @@ const GetOrderStatus: React.FC = () => {
             <div className="strategy-details-header">
               <div>
                 <h3>Strategy Details</h3>
-                <p>{strategyDetailsOrder.script_name}</p>
+                <p>
+                  <NepseAlphaSymbolLink symbol={strategyDetailsOrder.script_name} />
+                </p>
               </div>
               <button type="button" className="strategy-details-close" onClick={() => setStrategyDetailsOrder(null)} aria-label="Close strategy details">
                 ×

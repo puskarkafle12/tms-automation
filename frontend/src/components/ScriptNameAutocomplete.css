@@ -129,13 +129,18 @@
   min-width: 0;
 }
 
-.script-autocomplete-symbol {
+.script-autocomplete-symbol-row {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.script-autocomplete-symbol.nepse-alpha-symbol-link {
   font-size: 0.875rem;
-  font-weight: 700;
   color: var(--color-text);
 }
 
-.script-autocomplete-symbol mark {
+.script-autocomplete-symbol.nepse-alpha-symbol-link mark {
   background: #fde68a;
   color: inherit;
   padding: 0 1px;

@@ -15,6 +15,8 @@ import {
   isCacheValid,
   setCachedScripSuggestions,
 } from './scriptSuggestionCache';
+import { buildNepseAlphaChartUrl } from '../../lib/nepseAlpha';
+import NepseAlphaSymbolLink from '../../components/NepseAlphaSymbolLink';
 
 const getApiUrl = () => localStorage.getItem('apiUrl') || window.location.origin;
 
@@ -699,13 +701,15 @@ const ScheduleOrder: React.FC = () => {
         <div className="schedule-order-chart-panel panel">
           <div className="schedule-order-chart-header">
             <div>
-              <h3 className="panel-title">{chartSymbol} Chart</h3>
+              <h3 className="panel-title">
+                <NepseAlphaSymbolLink symbol={chartSymbol} /> Chart
+              </h3>
             </div>
           </div>
           <div className="schedule-order-chart-box">
             <iframe
               title={`${chartSymbol} NEPSE chart`}
-              src={`https://nepsealpha.com/nepse-chart?symbol=${encodeURIComponent(chartSymbol)}`}
+              src={buildNepseAlphaChartUrl(chartSymbol) || ''}
             />
           </div>
         </div>

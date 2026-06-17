@@ -4,6 +4,7 @@ import type { StrategyFormPrefill } from './strategyValidation';
 import { formatStrategyLabel } from '../../lib/strategies';
 import { isoToNepalDateTimeLocal } from '../../utils/nepalTime';
 import ErrorMessage from '../../components/ErrorMessage';
+import NepseAlphaSymbolLink from '../../components/NepseAlphaSymbolLink';
 import './EditScheduledOrderModal.css';
 
 export interface ScheduledOrderDetail {
@@ -216,7 +217,7 @@ const EditScheduledOrderModal: React.FC<Props> = ({ orderId, apiUrl, onClose, on
             <h3 id="edit-scheduled-order-title">Edit Scheduled Order</h3>
             {order && (
               <p>
-                {order.script_name} · {order.client_id} · #{order.order_id}
+                <NepseAlphaSymbolLink symbol={order.script_name} /> · {order.client_id} · #{order.order_id}
               </p>
             )}
           </div>

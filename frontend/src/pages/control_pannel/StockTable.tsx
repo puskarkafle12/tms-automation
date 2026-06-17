@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import axios from 'axios';
 import CommonTable from '../../components/table/Table';
+import { buildNepseAlphaChartUrl } from '../../lib/nepseAlpha';
 
 interface StockData {
   symbol: string;
@@ -47,6 +48,9 @@ const StockTable: React.FC = () => {
       <CommonTable
         data={stockData}
         columns={['symbol', 'volume', 'ltp', 'percentChange', 'high', 'low', 'open', 'lastTradedVolume', 'lastTradedTime', 'previousClose']}
+        columnLinks={{
+          symbol: (row) => buildNepseAlphaChartUrl(String(row.symbol || '')),
+        }}
       />
     </div>
   );

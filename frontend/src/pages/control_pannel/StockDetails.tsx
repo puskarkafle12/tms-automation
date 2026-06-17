@@ -1,5 +1,6 @@
 import React from 'react';
 import './StockDetails.css';
+import NepseAlphaSymbolLink from '../../components/NepseAlphaSymbolLink';
 
 interface StockDetailsProps {
   stock: {
@@ -96,7 +97,9 @@ const StockDetails: React.FC<StockDetailsProps> = ({
       <div className="stock-details-header">
         <div>
           <span className="stock-details-eyebrow">Market Snapshot</span>
-          <h3 className="stock-details-title">{stock.symbol}</h3>
+          <h3 className="stock-details-title">
+            <NepseAlphaSymbolLink symbol={stock.symbol} />
+          </h3>
         </div>
         <span className={`stock-details-change ${changeTone}`}>
           {percentChange > 0 ? '+' : ''}{percentChange}%

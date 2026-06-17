@@ -289,6 +289,7 @@ class TmsUser:
             'accept': 'application/json, text/plain, */*',
             'accept-language': 'en-US,en;q=0.9',
             'host-session-id': 'TVRJPS1lYWU2MTU0ZS0xODkyLTQxNDEtYTczZS1kMGI1YmM5N2I1YzQ=',
+            'membercode': str(self.broker_no),
             'referer': f'https://tms{self.broker_no}.nepsetms.com.np/tms/me/memberclientorderentry',
             'request-owner': str(request_owner),
             'sec-ch-ua': '"Google Chrome";v="117", "Not;A=Brand";v="8", "Chromium";v="117"',
@@ -723,11 +724,20 @@ class TmsUser:
             return [row for row in payload if isinstance(row, dict)]
         if not isinstance(payload, dict):
             return []
-        for key in ("content", "data", "result", "orderBook", "orders"):
+        for key in ("content", "data", "result", "orderBook", "orders", "tradeBookHistory", "tradeBook"):
             rows = payload.get(key)
             if isinstance(rows, list):
                 return [row for row in rows if isinstance(row, dict)]
         return []
+
+    @staticmethod
+    def _normalize_tradebook_row(row: Dict) -> Dict:
+        normalized = dict(row)
+        symbol = str(normalized.get("symbol") or normalized.get("script_name") or "").strip().upper()
+        if symbol:
+            normalized["symbol"] = symbol
+            normalized.setdefault("script_name", symbol)
+        return normalized
 
     @staticmethod
     def _nested_value(row: Dict, paths: List[List[str]]):
@@ -910,6 +920,7 @@ class TmsUser:
         headers = {
             **self.headers,
             "referer": f"https://tms{self.broker_no}.nepsetms.com.np/tms/me/trade-book-history",
+            "membercode": str(self.broker_no),
         }
         _, payload = await self._authenticated_request(
             "GET",
@@ -940,7 +951,7 @@ class TmsUser:
                 break
         return all_rows
 
-    async def get_tradebook_history(
+    async def _get_tradebook_history_range(
         self,
         from_date: str,
         to_date: str,
@@ -978,7 +989,20 @@ class TmsUser:
                 break
             page_no += 1
 
-        return self._merge_tradebook_pages(pages, page_size, total_pages)
+        merged = self._merge_tradebook_pages(pages, page_size, total_pages)
+        return [self._normalize_tradebook_row(row) for row in merged]
+
+    async def get_tradebook_history(
+        self,
+        from_date: str,
+        to_date: str,
+        page_size: int = 10,
+    ) -> List[Dict]:
+        start = date.fromisoformat(from_date)
+        end = date.fromisoformat(to_date)
+        if start > end:
+            return []
+        return await self._get_tradebook_history_range(from_date, to_date, page_size)
 
     async def cancel_order(self, exchange_order_id):
         json_data = {

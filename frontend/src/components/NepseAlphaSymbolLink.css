@@ -1,0 +1,9 @@
+.nepse-alpha-symbol-link {
+  color: #2563eb;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.nepse-alpha-symbol-link:hover {
+  text-decoration: underline;
+}
