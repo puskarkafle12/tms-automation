@@ -15,6 +15,7 @@ import {
   todayNepalDate,
 } from '../../utils/nepalTime';
 import { formatStrategyLabel } from '../../lib/strategies';
+import EditScheduledOrderModal from './EditScheduledOrderModal';
 
 type OrderTab = 'logs' | 'scheduled' | 'book' | 'history';
 type HistoryRangePreset = 'week' | 'month' | 'custom' | 'forever';
@@ -83,6 +84,11 @@ interface ScheduledOrderRow {
   current_price?: number | null;
   live_status?: string;
   actionRequired?: boolean;
+  editable?: boolean;
+  executed_at?: string | null;
+  partial_legs?: Array<{ id?: string; targetPrice?: number; sellPercent?: number }>;
+  strategy_config?: Record<string, unknown>;
+  security_details?: Record<string, unknown>;
 }
 
 interface ClientSession {
@@ -163,6 +169,25 @@ const formatTradeSide = (value: unknown) => {
 
 const isCacheFresh = (fetchedAt: number | null | undefined) =>
   fetchedAt != null && Date.now() - fetchedAt < CACHE_TTL_MS;
+
+const isScheduledOrderEditable = (order: ScheduledOrderRow) => {
+  if (order.editable === false || order.executed_at) {
+    return false;
+  }
+  const status = String(order.status || '').trim().toLowerCase();
+  return ![
+    'completed',
+    'complete',
+    'executed',
+    'cancelled',
+    'canceled',
+    'failed',
+    'expired',
+    'order_placed',
+    'order placed',
+    'partially executed',
+  ].includes(status);
+};
 
 const formatPercent = (value: number | null | undefined) => {
   if (value == null || Number.isNaN(Number(value))) return '';
@@ -290,6 +315,7 @@ const GetOrderStatus: React.FC = () => {
   const [dialogMessage, setDialogMessage] = useState('');
   const [dialogAction, setDialogAction] = useState<() => void>(() => {});
   const [strategyDetailsOrder, setStrategyDetailsOrder] = useState<ScheduledOrderRow | null>(null);
+  const [editingOrderId, setEditingOrderId] = useState<number | null>(null);
   const [errorMessage, setErrorMessage] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
   const [clientsFetched, setClientsFetched] = useState(false);
@@ -636,6 +662,10 @@ const GetOrderStatus: React.FC = () => {
   };
 
   const handleAction = async (row: any, actionType: string) => {
+    if (actionType === 'Edit') {
+      setEditingOrderId(Number(row.order_id));
+      return;
+    }
     if (actionType === 'Delete') {
       setDialogMessage('Are you sure you want to delete this scheduled order?');
       setDialogAction(() => async () => {
@@ -673,6 +703,7 @@ const GetOrderStatus: React.FC = () => {
         const strategyLabel = formatStrategyType(order.strategy_type, side);
         return {
           ...order,
+          canEdit: isScheduledOrderEditable(order),
           stock: <StockClientCell symbol={order.script_name} clientLabel={getClientLabel(order.client_id)} />,
           order_type: side,
           strategy_type: (
@@ -1074,6 +1105,19 @@ const GetOrderStatus: React.FC = () => {
             </dl>
           </div>
         </div>
+      )}
+
+      {editingOrderId != null && (
+        <EditScheduledOrderModal
+          orderId={editingOrderId}
+          apiUrl={apiUrl}
+          onClose={() => setEditingOrderId(null)}
+          onSaved={() => {
+            setSuccessMessage('Scheduled order updated');
+            coreCacheRef.current = null;
+            void loadCoreData(true);
+          }}
+        />
       )}
     </div>
   );

@@ -110,6 +110,21 @@
   background: #fecaca;
 }
 
+.table-action-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.table-action-edit {
+  background: #e0f2fe;
+  color: #0369a1;
+}
+
+.table-action-edit:hover {
+  background: #bae6fd;
+}
+
 .table-status-live {
   font-variant-numeric: tabular-nums;
   color: var(--color-primary, #2563eb);

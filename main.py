@@ -588,6 +588,27 @@ def _order_status_log_from_order(order: ScheduledOrder, status: Optional[str] = 
     )
 
 
+NON_EDITABLE_SCHEDULED_STATUSES = frozenset({
+    "completed",
+    "complete",
+    "executed",
+    "cancelled",
+    "canceled",
+    "failed",
+    "expired",
+    "order_placed",
+    "order placed",
+    "partially executed",
+})
+
+
+def _is_scheduled_order_editable(order: ScheduledOrder) -> bool:
+    if order.executed_at:
+        return False
+    status = (order.status or "").strip().lower()
+    return status not in NON_EDITABLE_SCHEDULED_STATUSES
+
+
 def _serialize_scheduled_order(order: ScheduledOrder) -> dict:
     return {
         "order_id": order.order_id,
@@ -636,6 +657,10 @@ def _serialize_scheduled_order(order: ScheduledOrder) -> dict:
         "last_checked_at": order.last_checked_at.isoformat() if order.last_checked_at else None,
         "below_stop_loss_check_count": order.below_stop_loss_check_count,
         "consecutive_drop_count": order.consecutive_drop_count,
+        "strategy_config": order.strategy_config,
+        "scan_price_history": order.scan_price_history,
+        "scan_volume_history": order.scan_volume_history,
+        "editable": _is_scheduled_order_editable(order),
         "created_at": order.created_at.isoformat() if order.created_at else None,
         "updated_at": order.updated_at.isoformat() if order.updated_at else None,
         "last_updated": order.last_updated.isoformat() if order.last_updated else None,
@@ -1059,8 +1084,15 @@ async def list_scheduled_orders(db: Session = Depends(get_db)):
     return {"scheduled_orders": [_serialize_scheduled_order(order) for order in orders]}
 
 
-@app.post("/scheduled_orders/")
-async def create_scheduled_order(order_data: OrderCreateRequest, db: Session = Depends(get_db)):
+@app.get("/scheduled_orders/{order_id}")
+async def get_scheduled_order(order_id: int, db: Session = Depends(get_db)):
+    order = db.query(ScheduledOrder).filter(ScheduledOrder.order_id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    return {"order": _serialize_scheduled_order(order)}
+
+
+async def _validate_scheduled_order_payload(order_data: OrderCreateRequest, db: Session) -> None:
     incoming_security_details = order_data.security_details or {}
     order_data.security_details = {
         **incoming_security_details,
@@ -1074,14 +1106,59 @@ async def create_scheduled_order(order_data: OrderCreateRequest, db: Session = D
     user = db.query(User).filter(User.client_id == order_data.client_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    if order_data.order_type.lower() == "sell":
+
+    if order_data.order_type.lower() == "buy":
+        tms_user_instance = await get_cached_tms_user(user)
+        script_high = await _get_script_high(tms_user_instance, order_data.script_name)
+        if script_high is not None:
+            order_price = truncate_to_one_decimal_place(order_data.price)
+            day_high = truncate_to_one_decimal_place(script_high)
+            if order_price > day_high:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Buy price ({order_price}) cannot exceed today's high "
+                        f"({day_high}) for {order_data.script_name}."
+                    ),
+                )
+    elif order_data.order_type.lower() == "sell":
         tms_user_instance = await get_cached_tms_user(user)
         await _validate_sell_lot_against_holdings(order_data, tms_user_instance)
+
+
+@app.post("/scheduled_orders/")
+async def create_scheduled_order(order_data: OrderCreateRequest, db: Session = Depends(get_db)):
+    await _validate_scheduled_order_payload(order_data, db)
     order = ScheduledOrder(order_data)
     db.add(order)
     db.commit()
     db.refresh(order)
     return {"message": "Scheduled order created", "order": _serialize_scheduled_order(order)}
+
+
+@app.put("/scheduled_orders/{order_id}")
+async def update_scheduled_order(order_id: int, order_data: OrderCreateRequest, db: Session = Depends(get_db)):
+    order = db.query(ScheduledOrder).filter(ScheduledOrder.order_id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if not _is_scheduled_order_editable(order):
+        raise HTTPException(status_code=400, detail=f"Order with status '{order.status}' cannot be edited")
+
+    if order_data.client_id and order_data.client_id != order.client_id:
+        raise HTTPException(status_code=400, detail="Cannot change client on an existing scheduled order")
+    if order_data.script_name and order_data.script_name.strip().upper() != (order.script_name or "").strip().upper():
+        raise HTTPException(status_code=400, detail="Cannot change script on an existing scheduled order")
+
+    order_data.client_id = order.client_id
+    order_data.script_name = order.script_name
+    if not order_data.security_details:
+        order_data.security_details = order.security_details or {}
+
+    await _validate_scheduled_order_payload(order_data, db)
+    order.update_from_request(order_data)
+    db.commit()
+    db.refresh(order)
+    return {"message": "Scheduled order updated", "order": _serialize_scheduled_order(order)}
 
 
 @app.delete("/scheduled_orders/")
@@ -1193,6 +1270,10 @@ async def get_order_status_logs(
             "expiry_action": order.expiry_action,
             "max_allowed_slippage_percent": order.max_allowed_slippage_percent,
             "user_allocation": order.user_allocation,
+            "partial_legs": order.partial_legs,
+            "strategy_config": order.strategy_config,
+            "security_details": order.security_details or {},
+            "editable": _is_scheduled_order_editable(order),
             "failed_reason": order.failed_reason,
             "cancelled_reason": order.cancelled_reason,
             "scanning_count": scanning_count,

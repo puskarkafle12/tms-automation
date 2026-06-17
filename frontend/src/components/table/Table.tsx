@@ -59,9 +59,16 @@ const CommonTable: React.FC<CommonTableProps> = ({ data, onAction, columns, empt
       )}
       {onAction && row.hasOwnProperty('order_id') && (
         <td>
-          <button type="button" className="table-action-btn table-action-danger" onClick={() => onAction(row, 'Delete')}>
-            Delete
-          </button>
+          <div className="table-action-group">
+            {row.canEdit !== false && (
+              <button type="button" className="table-action-btn table-action-edit" onClick={() => onAction(row, 'Edit')}>
+                Edit
+              </button>
+            )}
+            <button type="button" className="table-action-btn table-action-danger" onClick={() => onAction(row, 'Delete')}>
+              Delete
+            </button>
+          </div>
         </td>
       )}
     </>

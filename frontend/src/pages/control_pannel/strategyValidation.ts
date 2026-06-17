@@ -5,6 +5,38 @@ import { StrategyType } from '../../lib/strategies';
 export type { StrategyType } from '../../lib/strategies';
 export { BUY_STRATEGIES, SELL_STRATEGIES, formatStrategyLabel } from '../../lib/strategies';
 
+export interface StrategyFormPrefill {
+  strategy?: StrategyType | string;
+  qty?: string;
+  price?: string;
+  stopLossPrice?: string;
+  stopLimitPrice?: string;
+  bookProfitPrice?: string;
+  profitTargetPrice?: string;
+  trailingDropPercent?: string;
+  stableBandPercent?: string;
+  minimumWaitMinutes?: string;
+  consecutiveDropChecks?: string;
+  activationPrice?: string;
+  averagePrice?: string;
+  maxSlippage?: string;
+  firstTarget?: string;
+  firstPercent?: string;
+  secondTarget?: string;
+  secondPercent?: string;
+  expiryTime?: string;
+  expiryAction?: string;
+  minBuyScore?: string;
+  wrappedStrategyType?: string;
+  requireFreshTrade?: boolean;
+  requireVolumeIncrease?: boolean;
+  allowMarketDepthFilter?: boolean;
+  breakEvenTriggerPct?: string;
+  allowSplitEmergencyExit?: boolean;
+  emergencyExecution?: boolean;
+  emergencyConfirmed?: boolean;
+}
+
 export interface StrategyPayload {
   strategy_type: StrategyType | string;
   price: number;

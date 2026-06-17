@@ -101,3 +101,53 @@ class ScheduledOrder(Base):
         self.scan_price_history = order_data.scan_price_history
         self.scan_volume_history = order_data.scan_volume_history
         self.strategy_config = order_data.strategy_config
+
+    def update_from_request(self, order_data: OrderCreateRequest) -> None:
+        """Apply editable strategy fields and reset runtime execution state."""
+        self.security_details = order_data.security_details
+        self.price = order_data.price
+        self.qty = order_data.qty
+        self.order_type = order_data.order_type
+        self.strategy_type = order_data.strategy_type or "Fixed Price"
+        self.side = order_data.side or order_data.order_type
+        self.symbol = order_data.symbol or order_data.script_name
+        self.company_name = order_data.company_name
+        self.remaining_quantity = order_data.remaining_quantity or order_data.qty
+        self.limit_price = order_data.limit_price
+        self.stop_loss_price = order_data.stop_loss_price
+        self.stop_limit_price = order_data.stop_limit_price
+        self.book_profit_price = order_data.book_profit_price
+        self.profit_target_price = order_data.profit_target_price
+        self.trailing_drop_percent = order_data.trailing_drop_percent
+        self.stable_band_percent = order_data.stable_band_percent
+        self.minimum_wait_minutes = order_data.minimum_wait_minutes
+        self.consecutive_drop_checks = order_data.consecutive_drop_checks
+        self.activation_price = order_data.activation_price
+        self.protected_price = order_data.protected_price
+        self.average_buy_price = order_data.average_buy_price
+        self.partial_legs = order_data.partial_legs
+        self.expiry_time = order_data.expiry_time
+        self.expiry_action = order_data.expiry_action
+        self.max_allowed_slippage_percent = order_data.max_allowed_slippage_percent
+        self.emergency_execution = order_data.emergency_execution
+        self.user_allocation = order_data.user_allocation
+        self.scan_price_history = order_data.scan_price_history
+        self.scan_volume_history = order_data.scan_volume_history
+        self.strategy_config = order_data.strategy_config
+        if order_data.status:
+            self.status = order_data.status
+        self.execution_price = None
+        self.execution_price_source = None
+        self.execution_reason = None
+        self.executed_at = None
+        self.executed_legs = order_data.executed_legs
+        self.target_reached = False
+        self.target_reached_at = None
+        self.highest_tracked_price = None
+        self.highest_tracked_at = None
+        self.below_stop_loss_check_count = 0
+        self.consecutive_drop_count = 0
+        self.last_checked_ltp = None
+        self.last_checked_at = None
+        self.failed_reason = None
+        self.cancelled_reason = None

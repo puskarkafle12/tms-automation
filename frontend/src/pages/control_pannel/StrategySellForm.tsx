@@ -6,6 +6,7 @@ import {
   SELL_STRATEGIES,
 } from '../../lib/strategies';
 import {
+  StrategyFormPrefill,
   StrategyPayload,
   StrategyType,
   nepalDateTimeLocalToIso,
@@ -55,6 +56,8 @@ interface Props {
   holdingDays?: number;
   isSubmitting?: boolean;
   submitError?: string;
+  prefill?: StrategyFormPrefill | null;
+  submitButtonLabel?: string;
   onStrategyChange?: (strategy: StrategyType) => void;
   onSubmit: (payload: StrategyPayload) => Promise<void> | void;
 }
@@ -74,6 +77,8 @@ const StrategySellForm: React.FC<Props> = ({
   holdingDays = 400,
   isSubmitting = false,
   submitError,
+  prefill = null,
+  submitButtonLabel,
   onStrategyChange,
   onSubmit,
 }) => {
@@ -113,6 +118,43 @@ const StrategySellForm: React.FC<Props> = ({
   const [localError, setLocalError] = useState('');
   const minNepalExpiryTime = currentNepalDateTimeLocal().slice(0, 16);
   const boardLotSize = useMemo(() => getBoardLotSize(securityDetails), [securityDetails]);
+
+  useEffect(() => {
+    if (!prefill) {
+      return;
+    }
+    if (prefill.strategy) {
+      setStrategy(prefill.strategy as StrategyType);
+    }
+    if (prefill.qty != null) setQty(prefill.qty);
+    if (prefill.price != null) setPrice(prefill.price);
+    if (prefill.stopLossPrice != null) setStopLossPrice(prefill.stopLossPrice);
+    if (prefill.stopLimitPrice != null) setStopLimitPrice(prefill.stopLimitPrice);
+    if (prefill.bookProfitPrice != null) setBookProfitPrice(prefill.bookProfitPrice);
+    if (prefill.profitTargetPrice != null) setProfitTargetPrice(prefill.profitTargetPrice);
+    if (prefill.trailingDropPercent != null) setTrailingDropPercent(prefill.trailingDropPercent);
+    if (prefill.stableBandPercent != null) setStableBandPercent(prefill.stableBandPercent);
+    if (prefill.minimumWaitMinutes != null) setMinimumWaitMinutes(prefill.minimumWaitMinutes);
+    if (prefill.consecutiveDropChecks != null) setConsecutiveDropChecks(prefill.consecutiveDropChecks);
+    if (prefill.activationPrice != null) setActivationPrice(prefill.activationPrice);
+    if (prefill.averagePrice != null) setAveragePrice(prefill.averagePrice);
+    if (prefill.maxSlippage != null) setMaxSlippage(prefill.maxSlippage);
+    if (prefill.firstTarget != null) setFirstTarget(prefill.firstTarget);
+    if (prefill.firstPercent != null) setFirstPercent(prefill.firstPercent);
+    if (prefill.secondTarget != null) setSecondTarget(prefill.secondTarget);
+    if (prefill.secondPercent != null) setSecondPercent(prefill.secondPercent);
+    if (prefill.expiryTime != null) setExpiryTime(prefill.expiryTime);
+    if (prefill.expiryAction != null) setExpiryAction(prefill.expiryAction);
+    if (prefill.minBuyScore != null) setMinBuyScore(prefill.minBuyScore);
+    if (prefill.wrappedStrategyType != null) setWrappedStrategyType(prefill.wrappedStrategyType);
+    if (prefill.requireFreshTrade != null) setRequireFreshTrade(prefill.requireFreshTrade);
+    if (prefill.requireVolumeIncrease != null) setRequireVolumeIncrease(prefill.requireVolumeIncrease);
+    if (prefill.allowMarketDepthFilter != null) setAllowMarketDepthFilter(prefill.allowMarketDepthFilter);
+    if (prefill.breakEvenTriggerPct != null) setBreakEvenTriggerPct(prefill.breakEvenTriggerPct);
+    if (prefill.allowSplitEmergencyExit != null) setAllowSplitEmergencyExit(prefill.allowSplitEmergencyExit);
+    if (prefill.emergencyExecution != null) setEmergencyExecution(prefill.emergencyExecution);
+    if (prefill.emergencyConfirmed != null) setEmergencyConfirmed(prefill.emergencyConfirmed);
+  }, [prefill]);
 
   const priceSource = useMemo(() => {
     const userPrice = toPositiveNumber(price);
@@ -553,7 +595,7 @@ const StrategySellForm: React.FC<Props> = ({
       )}
 
       <button type="submit" className="btn btn-primary strategy-submit" disabled={isSubmitting}>
-        {isSubmitting ? 'Scheduling...' : (STRATEGY_HELP[strategy]?.button || 'Schedule Order')}
+        {isSubmitting ? 'Saving...' : (submitButtonLabel || STRATEGY_HELP[strategy]?.button || 'Schedule Order')}
       </button>
     </form>
   );

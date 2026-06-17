@@ -94,3 +94,15 @@ export const formatNepalDateTime = (value: string | null | undefined) => {
     hour12: true,
   }).format(date);
 };
+
+export const isoToNepalDateTimeLocal = (value: string | null | undefined) => {
+  if (!value) {
+    return '';
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return '';
+  }
+  const parts = nepalDateTimeParts(date);
+  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
+};
