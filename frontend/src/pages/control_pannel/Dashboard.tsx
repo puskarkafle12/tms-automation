@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import ScheduleOrder from './ScheduleOrder';
 import OrderStatus from './OrderLogs';
@@ -16,11 +16,11 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'OrderStatus', label: 'Order Logs', icon: '📋' },
   { id: 'ScheduleOrder', label: 'Schedule Order', icon: '📅' },
   { id: 'DPHoldings', label: 'DP Holdings', icon: '📊' },
-  { id: 'Login', label: 'TMS Login', icon: '🔐' },
+  { id: 'StockScreener', label: 'Stock Screener', icon: '🔎' },
   { id: 'StockGrabber', label: 'Stock Grabber', icon: '⚡' },
   { id: 'StrategyDetails', label: 'Strategy Details', icon: '🧭' },
-  { id: 'StockScreener', label: 'Stock Screener', icon: '🔎' },
   { id: 'StockTable', label: 'Stock Table', icon: '📈' },
+  { id: 'Login', label: 'TMS Login', icon: '🔐' },
 ];
 
 const PAGE_META: Record<string, { title: string; subtitle: string }> = {
@@ -35,36 +35,10 @@ const PAGE_META: Record<string, { title: string; subtitle: string }> = {
   StockGrabber: { title: 'Stock Grabber', subtitle: 'Automated stock monitoring and order placement' },
 };
 
-type TabUsageStats = Record<string, { visits: number; timeMs: number; lastOpenedAt?: number }>;
-
-const TAB_USAGE_KEY = 'dashboard_tab_usage_stats';
-
-const loadTabUsageStats = (): TabUsageStats => {
-  try {
-    const raw = localStorage.getItem(TAB_USAGE_KEY);
-    return raw ? JSON.parse(raw) : {};
-  } catch {
-    return {};
-  }
-};
-
-const saveTabUsageStats = (stats: TabUsageStats) => {
-  localStorage.setItem(TAB_USAGE_KEY, JSON.stringify(stats));
-};
-
-const tabUsageScore = (stats: TabUsageStats, id: string) => {
-  const item = stats[id];
-  if (!item) return 0;
-  return item.visits * 60000 + item.timeMs;
-};
-
 const DashBoardPage: React.FC = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const [activeComponent, setActiveComponent] = useState<string>(() => pathToTab(location.pathname));
-  const [tabUsageStats, setTabUsageStats] = useState<TabUsageStats>(() => loadTabUsageStats());
-  const activeStartedAt = useRef(Date.now());
-  const activeComponentRef = useRef(activeComponent);
   const fetchLoggedInClients = useCallback(async () => {
     try {
       const response = await fetch(`${localStorage.getItem('apiUrl') || ''}/logged_in_clients/`);
@@ -85,76 +59,6 @@ const DashBoardPage: React.FC = () => {
   useEffect(() => {
     setActiveComponent(pathToTab(location.pathname));
   }, [location.pathname]);
-
-  useEffect(() => {
-    const nextActive = activeComponent;
-    const now = Date.now();
-    const previousActive = activeComponentRef.current;
-    const elapsed = Math.max(0, now - activeStartedAt.current);
-
-    setTabUsageStats((prev) => {
-      const next = {
-        ...prev,
-        [previousActive]: {
-          visits: prev[previousActive]?.visits || 0,
-          timeMs: (prev[previousActive]?.timeMs || 0) + elapsed,
-          lastOpenedAt: prev[previousActive]?.lastOpenedAt,
-        },
-        [nextActive]: {
-          visits: (prev[nextActive]?.visits || 0) + 1,
-          timeMs: prev[nextActive]?.timeMs || 0,
-          lastOpenedAt: now,
-        },
-      };
-      saveTabUsageStats(next);
-      return next;
-    });
-
-    activeComponentRef.current = nextActive;
-    activeStartedAt.current = now;
-  }, [activeComponent]);
-
-  useEffect(() => {
-    const saveCurrentTabTime = () => {
-      const now = Date.now();
-      const active = activeComponentRef.current;
-      const elapsed = Math.max(0, now - activeStartedAt.current);
-      const currentStats = loadTabUsageStats();
-      saveTabUsageStats({
-        ...currentStats,
-        [active]: {
-          visits: currentStats[active]?.visits || 0,
-          timeMs: (currentStats[active]?.timeMs || 0) + elapsed,
-          lastOpenedAt: currentStats[active]?.lastOpenedAt,
-        },
-      });
-      activeStartedAt.current = now;
-    };
-
-    window.addEventListener('beforeunload', saveCurrentTabTime);
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'hidden') {
-        saveCurrentTabTime();
-      }
-    };
-
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    return () => {
-      saveCurrentTabTime();
-      window.removeEventListener('beforeunload', saveCurrentTabTime);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-    };
-  }, []);
-
-  const sortedNavItems = useMemo(
-    () =>
-      [...NAV_ITEMS].sort((a, b) => {
-        const scoreDiff = tabUsageScore(tabUsageStats, b.id) - tabUsageScore(tabUsageStats, a.id);
-        if (scoreDiff !== 0) return scoreDiff;
-        return NAV_ITEMS.findIndex((item) => item.id === a.id) - NAV_ITEMS.findIndex((item) => item.id === b.id);
-      }),
-    [tabUsageStats],
-  );
 
   const handleNavigate = (id: string) => {
     const nextPath = TAB_TO_PATH[id];
@@ -200,7 +104,7 @@ const DashBoardPage: React.FC = () => {
     <AppShell
       title={pageMeta.title}
       subtitle={pageMeta.subtitle}
-      navItems={sortedNavItems}
+      navItems={NAV_ITEMS}
       activeId={activeComponent}
       onNavigate={handleNavigate}
     >
