@@ -150,59 +150,127 @@ class TmsUser:
                 finally:
                     db.close()
 
-    async def try_cached_login(self):
+    async def _load_password_from_db(self) -> None:
+        if self.password:
+            return
+        db = get_db_session()
         try:
-            self.login_response, self.broker_no = get_tokens(self.client_id)  # Assumes get_tokens is async-compatible
-            if not self.login_response:
-                raise LoginFailedException("No cached TMS session found")
-            self.tokens = self.login_response['tokens']
-            self.headers = self.get_header(self.login_response['request_owner'], self.tokens)
-            rotation_result = await self.rotate_password_if_expired()
-            self.client_details = await self.get_client_details(
-                self.tokens, self.headers, self.login_response['client_dealer_id']
-            )
+            user = db.query(User).filter(User.client_id == self.client_id).first()
+            if user:
+                self.password = user.password
+                if user.broker_no:
+                    self.broker_no = user.broker_no
+        finally:
+            db.close()
+
+    async def _load_session_from_store(self) -> bool:
+        stored, broker_no = get_tokens(self.client_id)
+        if broker_no:
+            self.broker_no = broker_no
+        if not stored:
+            return False
+
+        tokens = stored.get("tokens") or {}
+        request_owner = stored.get("request_owner")
+        client_dealer_id = stored.get("client_dealer_id")
+        if not tokens or request_owner is None or client_dealer_id is None:
+            return False
+
+        self.login_response = stored
+        self.tokens = tokens
+        self.headers = self.get_header(request_owner, self.tokens)
+        return True
+
+    async def _validate_session(self) -> None:
+        client_dealer_id = (self.login_response or {}).get("client_dealer_id")
+        if not client_dealer_id:
+            raise LoginFailedException("Missing client dealer id in cached session")
+        self.client_details = await self.get_client_details(
+            self.tokens,
+            self.headers,
+            client_dealer_id,
+        )
+        if self.login_response is not None:
             self.login_response["client_details"] = self.client_details
-            if rotation_result.get("rotated"):
-                save_tokens(self.client_id, self.login_response, self.broker_no, update_login_time=False)
-                await self.save_login_info()
-            return {
-                "status": "success",
-                "message": rotation_result["message"]
-                if rotation_result.get("rotated")
-                else "token successfully loaded from the cache file",
-                "password_expiry": self.login_response.get("password_expiry"),
-                "password_rotated": rotation_result.get("rotated", False),
-                "new_password_plain": rotation_result.get("new_password_plain"),
-            }
-        except Exception as e:
+
+    async def _persist_logged_in_session(
+        self,
+        message: str,
+        *,
+        update_login_time: bool = False,
+    ) -> None:
+        if not self.login_response:
+            return
+        self.login_response["tokens"] = dict(self.tokens or {})
+        save_tokens(
+            self.client_id,
+            self.login_response,
+            self.broker_no,
+            update_login_time=update_login_time,
+        )
+        await self.save_login_info()
+
+    def _login_success_payload(
+        self,
+        message: str,
+        rotation_result: Optional[Dict] = None,
+    ) -> Dict:
+        rotation_result = rotation_result or {}
+        return {
+            "status": "success",
+            "message": message,
+            "password_expiry": (self.login_response or {}).get("password_expiry"),
+            "password_rotated": rotation_result.get("rotated", False),
+            "new_password_plain": rotation_result.get("new_password_plain"),
+        }
+
+    async def _full_login_and_persist(self) -> Dict:
+        await self._load_password_from_db()
+        if not self.password:
+            raise LoginFailedException("No TMS password available for login")
+
+        self.login_response = await self.login()
+        self.tokens = self.login_response["tokens"]
+        self.headers = self.get_header(self.login_response["request_owner"], self.tokens)
+        rotation_result = await self.rotate_password_if_expired()
+        await self._validate_session()
+        message = (
+            rotation_result["message"]
+            if rotation_result.get("rotated")
+            else "token refreshed and stored in the database"
+        )
+        await self._persist_logged_in_session(message, update_login_time=True)
+        return self._login_success_payload(message, rotation_result)
+
+    async def try_cached_login(self):
+        await self._load_password_from_db()
+        rotation_result: Dict = {"rotated": False}
+
+        if await self._load_session_from_store():
             try:
-                self.login_response = await self.login()
-                self.tokens = self.login_response['tokens']
-                self.headers = self.get_header(self.login_response['request_owner'], self.tokens)
                 rotation_result = await self.rotate_password_if_expired()
-                self.client_details = await self.get_client_details(
-                    self.tokens, self.headers, self.login_response['client_dealer_id']
+                await self._validate_session()
+                message = (
+                    rotation_result["message"]
+                    if rotation_result.get("rotated")
+                    else "token successfully loaded from the cache file"
                 )
-                self.login_response["client_details"] = self.client_details
-                save_tokens(self.client_id, self.login_response, self.broker_no)
-                await self.save_login_info()
-                if rotation_result.get("rotated"):
-                    message = rotation_result["message"]
-                else:
-                    message = "token refreshed and stored in the database"
-                return {
-                    "status": "success",
-                    "message": message,
-                    "password_expiry": self.login_response.get("password_expiry"),
-                    "password_rotated": rotation_result.get("rotated", False),
-                    "new_password_plain": rotation_result.get("new_password_plain"),
-                }
-            except LoginFailedException:
-                raise
-            except Exception as e:
-                if isinstance(e, LoginFailedException):
-                    raise
-                raise LoginFailedException(f"Unexpected TMS login error: {e}")
+                await self._persist_logged_in_session(message, update_login_time=False)
+                return self._login_success_payload(message, rotation_result)
+            except Exception:
+                pass
+
+            if await self.refresh_auth_token():
+                try:
+                    rotation_result = await self.rotate_password_if_expired()
+                    await self._validate_session()
+                    message = "token refreshed without captcha"
+                    await self._persist_logged_in_session(message, update_login_time=False)
+                    return self._login_success_payload(message, rotation_result)
+                except Exception:
+                    pass
+
+        return await self._full_login_and_persist()
 
     async def get_captcha_id(self, headers):
         await self._ensure_session()
@@ -825,6 +893,91 @@ class TmsUser:
         _, payload = await self._authenticated_request("GET", url, expected_statuses={200})
         return payload
 
+    async def get_tradebook_history_page(
+        self,
+        from_date: str,
+        to_date: str,
+        page_size: int = 10,
+        page_no: int = 1,
+    ):
+        url = (
+            f"https://tms{self.broker_no}.nepsetms.com.np/tmsapi/orderTradeApi/"
+            f"tradebook-history/client/{self.client_details['id']}"
+            f"?fromDate={from_date}&toDate={to_date}&pageSize={page_size}&pageNo={page_no}"
+        )
+        headers = {
+            **self.headers,
+            "referer": f"https://tms{self.broker_no}.nepsetms.com.np/tms/me/trade-book-history",
+        }
+        _, payload = await self._authenticated_request(
+            "GET",
+            url,
+            headers=headers,
+            expected_statuses={200},
+        )
+        return payload
+
+    @staticmethod
+    def _merge_tradebook_pages(
+        pages: List[List[Dict]],
+        page_size: int,
+        total_pages: Optional[int] = None,
+    ) -> List[Dict]:
+        all_rows: List[Dict] = []
+        for page_no, rows in enumerate(pages, start=1):
+            if not rows:
+                break
+            all_rows.extend(rows)
+            # TMS often returns the full result set in one response even when
+            # pageSize is smaller (for example pageSize=10 returning 26 rows).
+            if len(rows) > page_size:
+                break
+            if total_pages is not None and page_no >= int(total_pages):
+                break
+            if len(rows) < page_size:
+                break
+        return all_rows
+
+    async def get_tradebook_history(
+        self,
+        from_date: str,
+        to_date: str,
+        page_size: int = 10,
+    ) -> List[Dict]:
+        pages: List[List[Dict]] = []
+        page_no = 1
+        max_pages = 500
+        total_pages: Optional[int] = None
+
+        while page_no <= max_pages:
+            payload = await self.get_tradebook_history_page(
+                from_date,
+                to_date,
+                page_size=page_size,
+                page_no=page_no,
+            )
+            rows = self._order_book_rows(payload)
+            pages.append(rows)
+            if not rows:
+                break
+
+            if isinstance(payload, dict):
+                total_pages = payload.get("totalPages") or payload.get("total_pages")
+                total_elements = payload.get("totalElements") or payload.get("total_elements")
+                if total_pages is None and total_elements is not None:
+                    total_elements = int(total_elements or 0)
+                    total_pages = max(1, (total_elements + page_size - 1) // page_size)
+
+            if len(rows) > page_size:
+                break
+            if total_pages is not None and page_no >= int(total_pages):
+                break
+            if len(rows) < page_size:
+                break
+            page_no += 1
+
+        return self._merge_tradebook_pages(pages, page_size, total_pages)
+
     async def cancel_order(self, exchange_order_id):
         json_data = {
             'orderBook': None,
@@ -986,6 +1139,44 @@ class TmsUser:
             timeout=self.DEFAULT_TIMEOUT,
         )
 
+    async def refresh_auth_token(self) -> bool:
+        if not self.tokens or not self.headers:
+            return False
+
+        url = f"https://tms{self.broker_no}.nepsetms.com.np/tmsapi/authApi/authenticate/refresh"
+        await self._ensure_session()
+        async with self.session.post(
+            url,
+            headers=self.headers,
+            cookies=self.tokens,
+            json={},
+        ) as response:
+            try:
+                response_json = await response.json(content_type=None)
+            except Exception:
+                return False
+
+            status = str(response_json.get("status", "")).strip()
+            message = str(response_json.get("message", "")).strip()
+            success = response.status in (200, 201) and (
+                status in {"200", "OK", "0"}
+                or "token refreshed" in message.lower()
+            )
+            if not success:
+                return False
+
+            simple_cookie = SimpleCookie(response.cookies)
+            for key, morsel in simple_cookie.items():
+                self.tokens[key] = morsel.value
+
+            if self.tokens.get("XSRF-TOKEN"):
+                self.headers["x-xsrf-token"] = self.tokens["XSRF-TOKEN"]
+
+            if self.login_response:
+                self.login_response["tokens"] = dict(self.tokens)
+                save_tokens(self.client_id, self.login_response, self.broker_no, update_login_time=False)
+            return True
+
     async def _refresh_authentication(self, reason: str = "access token expired") -> None:
         async with self._auth_refresh_lock:
             self.updates.append({
@@ -993,7 +1184,23 @@ class TmsUser:
                 "message": "Session expired — refreshing login token and retrying…",
             })
             self.clear_security_cache(str(self.broker_no))
-            await self.try_cached_login()
+            await self._load_password_from_db()
+
+            if not self.tokens or not self.headers:
+                await self._load_session_from_store()
+
+            if await self.refresh_auth_token():
+                try:
+                    await self._validate_session()
+                    await self._persist_logged_in_session(
+                        "token refreshed without captcha",
+                        update_login_time=False,
+                    )
+                    return
+                except Exception:
+                    pass
+
+            await self._full_login_and_persist()
 
     async def _authenticated_request(
         self,

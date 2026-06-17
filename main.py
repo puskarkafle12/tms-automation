@@ -975,6 +975,24 @@ async def add_order(order_data: OrderCreateRequest, db: Session = Depends(get_db
 @app.get("/logged_in_clients/")
 async def get_logged_in_clients(db: Session = Depends(get_db)):
     try:
+        stale_sessions = (
+            db.query(LoggedInUsers)
+            .filter(LoggedInUsers.status != "logged_in", LoggedInUsers.tokens.isnot(None))
+            .all()
+        )
+        for session in stale_sessions:
+            if not session.tokens:
+                continue
+            user = db.query(User).filter(User.client_id == session.client_id).first()
+            if not user or not user.auto_login:
+                continue
+            try:
+                await get_cached_tms_user(user)
+            except LoginFailedException:
+                continue
+            except Exception:
+                continue
+
         logged_in_users = db.query(LoggedInUsers).filter(
             LoggedInUsers.status == "logged_in").all()
         client_ids = [user.client_id for user in logged_in_users]
@@ -1216,6 +1234,28 @@ async def get_order_history(client_id: str, db: Session = Depends(get_db)):
         tms_user = await get_cached_tms_user(user)
         order_history = await tms_user.get_order_history()  # Await the async call
         return order_history
+    except LoginFailedException as e:
+        await invalidate_cached_tms_user(client_id)
+        raise HTTPException(status_code=401, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/tradebook_history")
+async def get_tradebook_history(
+    client_id: str,
+    from_date: str,
+    to_date: str,
+    db: Session = Depends(get_db),
+):
+    user = db.query(User).filter(User.client_id == client_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    try:
+        tms_user = await get_cached_tms_user(user)
+        history_rows = await tms_user.get_tradebook_history(from_date, to_date)
+        return history_rows
     except LoginFailedException as e:
         await invalidate_cached_tms_user(client_id)
         raise HTTPException(status_code=401, detail=str(e))

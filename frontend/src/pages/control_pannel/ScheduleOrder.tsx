@@ -6,7 +6,8 @@ import ScriptNameAutocomplete, { ScriptOption } from '../../components/ScriptNam
 import ScheduleMonitorBar from '../../components/ScheduleMonitorBar';
 import StrategySellForm, { STRATEGY_HELP } from './StrategySellForm';
 import type { StrategyPayload, StrategyType } from './StrategySellForm';
-import { buildScheduleScriptOptions, mergeUniqueStockDetails } from './scheduleOrderHelpers';
+import { buildScheduleScriptOptions, mergeQuoteIntoStockDetail, mergeUniqueStockDetails } from './scheduleOrderHelpers';
+import { fetchJson } from '../../utils/api';
 import {
   getBuyScripCacheKey,
   getCachedScripSuggestions,
@@ -64,6 +65,7 @@ const ScheduleOrder: React.FC = () => {
   const [holdingLabel, setHoldingLabel] = useState('');
   const [holdingLoading, setHoldingLoading] = useState(false);
   const [holdingError, setHoldingError] = useState('');
+  const [quoteRefreshMs, setQuoteRefreshMs] = useState(5000);
   const quoteRequestId = useRef(0);
   const holdingRequestId = useRef(0);
   const buyScripRequestId = useRef(0);
@@ -358,15 +360,30 @@ const ScheduleOrder: React.FC = () => {
       if (requestId !== quoteRequestId.current) {
         return;
       }
-      setQuote(data?.quote || null);
-      const ltp = Number(data?.quote?.ltp ?? 0);
+      const quoteData = data?.quote || null;
+      setQuote(quoteData);
+      const ltp = Number(quoteData?.ltp ?? 0);
       if (ltp > 0) {
         setLatestLtp(ltp);
-      } else {
-        if (!options?.silent) {
-          setLatestLtp(null);
-          setQuoteError('Latest LTP is not available.');
-        }
+      } else if (!options?.silent) {
+        setLatestLtp(null);
+        setQuoteError('Latest LTP is not available.');
+      }
+
+      if (quoteData) {
+        setSelectedStock((previous: any) => {
+          if (!previous || String(previous.symbol || '').trim().toUpperCase() !== normalizedSymbol) {
+            return previous;
+          }
+          return mergeQuoteIntoStockDetail(previous, quoteData);
+        });
+        setStockDetails((previous: any[]) =>
+          previous.map((stock) =>
+            String(stock.symbol || '').trim().toUpperCase() === normalizedSymbol
+              ? mergeQuoteIntoStockDetail(stock, quoteData)
+              : stock,
+          ),
+        );
       }
     } catch {
       if (requestId === quoteRequestId.current) {
@@ -432,6 +449,16 @@ const ScheduleOrder: React.FC = () => {
   }, [orderType, sellHoldings]);
 
   useEffect(() => {
+    const loadInterval = async () => {
+      const result = await fetchJson<{ monitor_interval: number }>('/get_monitor_interval');
+      if (result.ok && result.data.monitor_interval > 0) {
+        setQuoteRefreshMs(result.data.monitor_interval * 1000);
+      }
+    };
+    void loadInterval();
+  }, []);
+
+  useEffect(() => {
     void loadLatestQuote(clientID, selectedScriptSymbol);
   }, [clientID, selectedScriptSymbol, loadLatestQuote]);
 
@@ -445,9 +472,9 @@ const ScheduleOrder: React.FC = () => {
       if (orderType === 'sell') {
         void loadSellHolding(clientID, normalizedSymbol, { silent: true });
       }
-    }, 10000);
+    }, quoteRefreshMs);
     return () => window.clearInterval(interval);
-  }, [clientID, loadLatestQuote, loadSellHolding, orderType, selectedScriptSymbol]);
+  }, [clientID, loadLatestQuote, loadSellHolding, orderType, quoteRefreshMs, selectedScriptSymbol]);
 
   useEffect(() => {
     void loadSellHolding(clientID, selectedScriptSymbol);

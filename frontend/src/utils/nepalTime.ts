@@ -51,6 +51,32 @@ export const nepalDateStringFromDate = (value: Date | null) => {
   return `${year}-${month}-${day}`;
 };
 
+export const offsetNepalDate = (
+  baseDateStr: string,
+  { days = 0, months = 0 }: { days?: number; months?: number },
+) => {
+  const date = dateFromNepalDateString(baseDateStr);
+  if (!date) {
+    return baseDateStr;
+  }
+  if (months) {
+    date.setMonth(date.getMonth() - months);
+  }
+  if (days) {
+    date.setDate(date.getDate() - days);
+  }
+  return nepalDateStringFromDate(date);
+};
+
+export const addNepalDays = (baseDateStr: string, days: number) => {
+  const date = dateFromNepalDateString(baseDateStr);
+  if (!date) {
+    return baseDateStr;
+  }
+  date.setDate(date.getDate() + days);
+  return nepalDateStringFromDate(date);
+};
+
 export const formatNepalDateTime = (value: string | null | undefined) => {
   if (!value) return '';
   const date = new Date(value);

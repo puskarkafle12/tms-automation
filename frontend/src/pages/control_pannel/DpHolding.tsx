@@ -581,16 +581,16 @@ const DPHoldings: React.FC = () => {
           </div>
           <div className="dp-holdings-stat-card">
             <span className="dp-holdings-stat-label">Prev. Close Value</span>
-            <span className="dp-holdings-stat-value">{formatCurrency(totals.valueAsOfPreviousClosePrice)}</span>
+            <span className="dp-holdings-stat-value">Rs. {formatCurrency(totals.valueAsOfPreviousClosePrice)}</span>
           </div>
           <div className="dp-holdings-stat-card">
             <span className="dp-holdings-stat-label">Current Value (LTP)</span>
-            <span className="dp-holdings-stat-value">{formatCurrency(totals.valueAsOfLTP)}</span>
+            <span className="dp-holdings-stat-value">Rs. {formatCurrency(totals.valueAsOfLTP)}</span>
           </div>
           <div className={`dp-holdings-stat-card ${isProfit ? 'profit' : 'loss'}`}>
             <span className="dp-holdings-stat-label">Total P/L</span>
             <span className={`dp-holdings-stat-value ${isProfit ? 'positive' : 'negative'}`}>
-              {isProfit ? '+' : ''}{formatCurrency(totals.profit)}
+              {isProfit ? '+' : '-'}Rs. {formatCurrency(Math.abs(totals.profit))}
             </span>
           </div>
         </div>
@@ -612,7 +612,7 @@ const DPHoldings: React.FC = () => {
             <p>Fetching DP holdings from TMS...</p>
           </div>
         ) : visibleHoldings.length > 0 ? (
-          <>
+          <div className="dp-holdings-table-shell">
             <div className="common-table-wrap">
               <table className="common-table dp-holdings-table">
                 <thead>
@@ -660,23 +660,23 @@ const DPHoldings: React.FC = () => {
                 </tbody>
               </table>
             </div>
-            <div className={`dp-holdings-totals ${isProfit ? 'profit' : 'loss'}`}>
+            <div className={`dp-holdings-totals ${isProfit ? 'profit' : 'loss'}`} role="row">
               <div className="dp-holdings-total-item">
                 <span className="dp-holdings-total-label">Total Prev. Close</span>
-                <span className="dp-holdings-total-value">{formatCurrency(totals.valueAsOfPreviousClosePrice)}</span>
+                <span className="dp-holdings-total-value">Rs. {formatCurrency(totals.valueAsOfPreviousClosePrice)}</span>
               </div>
               <div className="dp-holdings-total-item">
                 <span className="dp-holdings-total-label">Total LTP Value</span>
-                <span className="dp-holdings-total-value">{formatCurrency(totals.valueAsOfLTP)}</span>
+                <span className="dp-holdings-total-value">Rs. {formatCurrency(totals.valueAsOfLTP)}</span>
               </div>
-              <div className="dp-holdings-total-item">
+              <div className="dp-holdings-total-item dp-holdings-total-item-pl">
                 <span className="dp-holdings-total-label">Net P/L</span>
                 <span className={`dp-holdings-total-value ${isProfit ? 'positive' : 'negative'}`}>
-                  {isProfit ? '+' : ''}{formatCurrency(totals.profit)}
+                  {isProfit ? '+' : ''}Rs. {formatCurrency(Math.abs(totals.profit))}
                 </span>
               </div>
             </div>
-          </>
+          </div>
         ) : (
           <div className="dp-holdings-empty">
             <span style={{ fontSize: '2rem', opacity: 0.5 }} aria-hidden="true">📂</span>

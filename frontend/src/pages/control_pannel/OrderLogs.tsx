@@ -6,15 +6,48 @@ import ErrorMessage from '../../components/ErrorMessage';
 import 'react-datepicker/dist/react-datepicker.css';
 import DatePicker from 'react-datepicker';
 import { syncMonitoringStatus } from '../../hooks/monitoringSync';
-import { fetchJson } from '../../utils/api';
 import {
+  addNepalDays,
   dateFromNepalDateString,
   formatNepalDateTime,
   nepalDateStringFromDate,
+  offsetNepalDate,
   todayNepalDate,
 } from '../../utils/nepalTime';
 
 type OrderTab = 'logs' | 'scheduled' | 'book' | 'history';
+type HistoryRangePreset = 'week' | 'month' | 'custom' | 'forever';
+
+const FOREVER_FROM_DATE = '2010-12-01';
+const CACHE_TTL_MS = 20 * 60 * 1000;
+
+const HISTORY_RANGE_OPTIONS: { id: HistoryRangePreset; label: string }[] = [
+  { id: 'week', label: '1 Week' },
+  { id: 'month', label: '1 Month' },
+  { id: 'custom', label: 'Custom' },
+  { id: 'forever', label: 'All Time' },
+];
+
+const resolveHistoryDateRange = (
+  preset: HistoryRangePreset,
+  customFrom: string,
+  customTo: string,
+) => {
+  const today = todayNepalDate();
+  if (preset === 'forever') {
+    return { fromDate: FOREVER_FROM_DATE, toDate: addNepalDays(today, 7) };
+  }
+  if (preset === 'month') {
+    return { fromDate: offsetNepalDate(today, { months: 1 }), toDate: today };
+  }
+  if (preset === 'custom') {
+    return {
+      fromDate: customFrom || offsetNepalDate(today, { days: 7 }),
+      toDate: customTo || today,
+    };
+  }
+  return { fromDate: offsetNepalDate(today, { days: 7 }), toDate: today };
+};
 
 interface ScheduledOrderRow {
   order_id: number;
@@ -127,6 +160,21 @@ const formatCurrency = (value: number | string | null | undefined) => {
   if (value == null || value === '' || Number.isNaN(Number(value))) return '';
   return `Rs. ${Number(value).toLocaleString('en-NP', { maximumFractionDigits: 2 })}`;
 };
+
+const formatTradeAmount = (value: number | string | null | undefined) => {
+  if (value == null || value === '' || Number.isNaN(Number(value))) return '-';
+  return Number(value).toLocaleString('en-NP', { maximumFractionDigits: 2 });
+};
+
+const formatTradeSide = (value: unknown) => {
+  const side = Number(value);
+  if (side === 1) return 'BUY';
+  if (side === 2) return 'SELL';
+  return value != null && value !== '' ? String(value) : '-';
+};
+
+const isCacheFresh = (fetchedAt: number | null | undefined) =>
+  fetchedAt != null && Date.now() - fetchedAt < CACHE_TTL_MS;
 
 const formatPercent = (value: number | null | undefined) => {
   if (value == null || Number.isNaN(Number(value))) return '';
@@ -249,12 +297,19 @@ const GetOrderStatus: React.FC = () => {
   }, [scriptName]);
   const [orderLogs, setOrderLogs] = useState<any[]>([]);
   const [scheduledOrders, setScheduledOrders] = useState<ScheduledOrderRow[]>([]);
-  const [monitorIntervalMs, setMonitorIntervalMs] = useState(5000);
-  const [monitoringActive, setMonitoringActive] = useState(false);
   const [orderBook, setOrderBook] = useState<any[]>([]);
   const [orderHistory, setOrderHistory] = useState<any[]>([]);
+  const [historyRangePreset, setHistoryRangePreset] = useState<HistoryRangePreset>('week');
+  const [historyFromDate, setHistoryFromDate] = useState(() => offsetNepalDate(todayNepalDate(), { days: 7 }));
+  const [historyToDate, setHistoryToDate] = useState(() => todayNepalDate());
   const [isLoading, setIsLoading] = useState(true);
+  const [isHistoryLoading, setIsHistoryLoading] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [hasLoaded, setHasLoaded] = useState(false);
+  const [historyLoaded, setHistoryLoaded] = useState(false);
+  const coreCacheRef = useRef<number | null>(null);
+  const historyCacheRef = useRef<{ key: string; rows: any[]; fetchedAt: number } | null>(null);
+  const historyRequestIdRef = useRef(0);
   const [loggedInClientIDs, setLoggedInClientIDs] = useState<string[]>([]);
   const [clientSessions, setClientSessions] = useState<ClientSession[]>([]);
   const [activeTab, setActiveTab] = useState<OrderTab>('scheduled');
@@ -264,6 +319,7 @@ const GetOrderStatus: React.FC = () => {
   const [strategyDetailsOrder, setStrategyDetailsOrder] = useState<ScheduledOrderRow | null>(null);
   const [errorMessage, setErrorMessage] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
+  const [clientsFetched, setClientsFetched] = useState(false);
   const apiUrl = localStorage.getItem('apiUrl') || window.location.origin;
 
   const fetchLoggedInClientIDs = useCallback(async () => {
@@ -285,22 +341,14 @@ const GetOrderStatus: React.FC = () => {
       setClientSessions([]);
       setLoggedInClientIDs([]);
       setErrorMessage(`Error fetching logged-in client IDs: ${error.message}`);
+    } finally {
+      setClientsFetched(true);
     }
   }, [apiUrl]);
 
   useEffect(() => {
     fetchLoggedInClientIDs();
   }, [fetchLoggedInClientIDs]);
-
-  useEffect(() => {
-    const loadInterval = async () => {
-      const result = await fetchJson<{ monitor_interval: number }>('/get_monitor_interval');
-      if (result.ok && result.data.monitor_interval > 0) {
-        setMonitorIntervalMs(result.data.monitor_interval * 1000);
-      }
-    };
-    void loadInterval();
-  }, []);
 
   const handleDateChange = (date: Date | null) => {
     setOrderedDate(nepalDateStringFromDate(date));
@@ -322,6 +370,18 @@ const GetOrderStatus: React.FC = () => {
   const activeClientIds = useMemo(
     () => (selectedClientId ? [selectedClientId] : loggedInClientIDs),
     [loggedInClientIDs, selectedClientId],
+  );
+
+  const buildHistoryCacheKey = useCallback(
+    (clientIds: string[]) => {
+      const { fromDate, toDate } = resolveHistoryDateRange(
+        historyRangePreset,
+        historyFromDate,
+        historyToDate,
+      );
+      return `${clientIds.join(',')}|${fromDate}|${toDate}`;
+    },
+    [historyFromDate, historyRangePreset, historyToDate],
   );
 
   const fetchOrderBook = useCallback(async (selectedClientId: string) => {
@@ -364,13 +424,7 @@ const GetOrderStatus: React.FC = () => {
             actionRequired: true,
           })),
         );
-        if (typeof data.monitoring_active === 'boolean') {
-          setMonitoringActive(data.monitoring_active);
-        }
         void syncMonitoringStatus();
-        if (typeof data.monitor_interval === 'number' && data.monitor_interval > 0) {
-          setMonitorIntervalMs(data.monitor_interval * 1000);
-        }
       } else {
         setOrderLogs([]);
         setScheduledOrders([]);
@@ -382,95 +436,208 @@ const GetOrderStatus: React.FC = () => {
     [apiUrl, orderedDate, selectedClientId],
   );
 
-  const fetchOrderHistory = useCallback(async (selectedClientId: string) => {
-    if (!selectedClientId) {
-      return [];
-    }
-    const response = await fetch(`${apiUrl}/order_history?client_id=${selectedClientId}`);
-    if (response.ok) {
+  const fetchTradebookHistory = useCallback(
+    async (selectedClientId: string, fromDate: string, toDate: string) => {
+      if (!selectedClientId) {
+        return [];
+      }
+      const params = new URLSearchParams({
+        client_id: selectedClientId,
+        from_date: fromDate,
+        to_date: toDate,
+      });
+      const response = await fetch(`${apiUrl}/tradebook_history?${params.toString()}`);
+      if (!response.ok) {
+        const detail = await response.text();
+        throw new Error(detail || `Trade history request failed (${response.status})`);
+      }
       const rows = await response.json();
       return Array.isArray(rows)
         ? rows.map((row) => ({ ...row, client_id: selectedClientId }))
         : [];
-    }
-    return [];
-  }, [apiUrl]);
+    },
+    [apiUrl],
+  );
 
-  const loadAllClientTmsData = useCallback(
+  const loadOrderBook = useCallback(
     async (clientIds: string[]) => {
       if (clientIds.length === 0) {
         setOrderBook([]);
-        setOrderHistory([]);
+        return;
+      }
+      const bookResults = await Promise.all(clientIds.map((id) => fetchOrderBook(id).catch(() => [])));
+      setOrderBook(bookResults.flat());
+    },
+    [fetchOrderBook],
+  );
+
+  const loadCoreData = useCallback(
+    async (force = false) => {
+      if (!force && isCacheFresh(coreCacheRef.current) && hasLoaded) {
         return;
       }
 
-      const [bookResults, historyResults] = await Promise.all([
-        Promise.all(clientIds.map((id) => fetchOrderBook(id).catch(() => []))),
-        Promise.all(clientIds.map((id) => fetchOrderHistory(id).catch(() => []))),
-      ]);
-      setOrderBook(bookResults.flat());
-      setOrderHistory(historyResults.flat());
-    },
-    [fetchOrderBook, fetchOrderHistory],
-  );
-
-  const loadLogsAndScheduled = useCallback(
-    async (options?: { silent?: boolean }) => {
-      if (!options?.silent) {
+      const showFullLoading = !hasLoaded;
+      if (showFullLoading) {
         setIsLoading(true);
       }
-      setErrorMessage('');
 
       try {
         await fetchOrderStatusLogs({ silent: true });
+        await loadOrderBook(activeClientIds);
+        coreCacheRef.current = Date.now();
         setHasLoaded(true);
       } catch {
-        if (!options?.silent) {
+        if (!hasLoaded) {
           setErrorMessage('Failed to load order data.');
+        } else {
+          setErrorMessage('Failed to refresh order data.');
         }
+        throw new Error('core load failed');
       } finally {
-        if (!options?.silent) {
+        if (showFullLoading) {
           setIsLoading(false);
         }
       }
     },
-    [fetchOrderStatusLogs],
+    [activeClientIds, fetchOrderStatusLogs, hasLoaded, loadOrderBook],
+  );
+
+  const loadHistoryData = useCallback(
+    async (force = false) => {
+      const cacheKey = buildHistoryCacheKey(activeClientIds);
+      const cached = historyCacheRef.current;
+
+      if (!force && cached?.key === cacheKey && isCacheFresh(cached.fetchedAt)) {
+        setOrderHistory(cached.rows);
+        setHistoryLoaded(true);
+        return;
+      }
+
+      if (activeClientIds.length === 0) {
+        setOrderHistory([]);
+        setHistoryLoaded(true);
+        return;
+      }
+
+      const requestId = ++historyRequestIdRef.current;
+      setIsHistoryLoading(true);
+      const { fromDate, toDate } = resolveHistoryDateRange(
+        historyRangePreset,
+        historyFromDate,
+        historyToDate,
+      );
+
+      try {
+        const historyResults = await Promise.all(
+          activeClientIds.map((id) => fetchTradebookHistory(id, fromDate, toDate)),
+        );
+        if (requestId !== historyRequestIdRef.current) {
+          return;
+        }
+        const rows = historyResults.flat().sort((left, right) => {
+          const leftTime = new Date(left.tradeTime || 0).getTime();
+          const rightTime = new Date(right.tradeTime || 0).getTime();
+          return rightTime - leftTime;
+        });
+        historyCacheRef.current = { key: cacheKey, rows, fetchedAt: Date.now() };
+        setOrderHistory(rows);
+        setHistoryLoaded(true);
+      } catch {
+        if (requestId !== historyRequestIdRef.current) {
+          return;
+        }
+        setErrorMessage('Failed to load trade history.');
+      } finally {
+        if (requestId === historyRequestIdRef.current) {
+          setIsHistoryLoading(false);
+        }
+      }
+    },
+    [
+      activeClientIds,
+      buildHistoryCacheKey,
+      fetchTradebookHistory,
+      historyFromDate,
+      historyRangePreset,
+      historyToDate,
+    ],
   );
 
   useEffect(() => {
-    void loadLogsAndScheduled();
-  }, [loadLogsAndScheduled]);
-
-  useEffect(() => {
-    void loadAllClientTmsData(activeClientIds);
-  }, [activeClientIds, loadAllClientTmsData]);
-
-  useEffect(() => {
-    if (!hasLoaded) {
-      return undefined;
+    if (!clientsFetched) {
+      return;
     }
+    void loadCoreData(false);
+  }, [clientsFetched, loadCoreData]);
 
-    const pollMs = monitoringActive ? 5000 : Math.max(monitorIntervalMs, 5000);
+  useEffect(() => {
+    if (!clientsFetched || activeTab !== 'history') {
+      return;
+    }
+    if (historyRangePreset === 'custom') {
+      void loadHistoryData(false);
+      return;
+    }
+    void loadHistoryData(false);
+  }, [activeTab, clientsFetched, historyRangePreset, loadHistoryData]);
+
+  useEffect(() => {
     const interval = window.setInterval(() => {
-      void fetchOrderStatusLogs({ silent: true });
-    }, pollMs);
-
+      void loadCoreData(true);
+      if (historyCacheRef.current || activeTab === 'history') {
+        void loadHistoryData(true);
+      }
+    }, CACHE_TTL_MS);
     return () => window.clearInterval(interval);
-  }, [fetchOrderStatusLogs, hasLoaded, monitorIntervalMs, monitoringActive]);
+  }, [activeTab, loadCoreData, loadHistoryData]);
 
-  const handleSubmit = async (e?: React.FormEvent) => {
+  const handleRefresh = async (e?: React.FormEvent) => {
     e?.preventDefault();
+    setErrorMessage('');
     setSuccessMessage('');
-    setIsLoading(true);
+    setIsRefreshing(true);
+    coreCacheRef.current = null;
+    historyCacheRef.current = null;
+
     try {
-      await loadLogsAndScheduled({ silent: true });
-      await loadAllClientTmsData(activeClientIds);
+      await loadCoreData(true);
+      if (activeTab === 'history' || historyLoaded) {
+        await loadHistoryData(true);
+      }
       setSuccessMessage('Data refreshed');
     } catch {
       setErrorMessage('Failed to refresh order data.');
     } finally {
-      setIsLoading(false);
+      setIsRefreshing(false);
     }
+  };
+
+  const handleTabChange = (tab: OrderTab) => {
+    setActiveTab(tab);
+  };
+
+  const handleHistoryPresetChange = (preset: HistoryRangePreset) => {
+    historyCacheRef.current = null;
+    historyRequestIdRef.current += 1;
+    setHistoryRangePreset(preset);
+    const today = todayNepalDate();
+    if (preset === 'week') {
+      setHistoryFromDate(offsetNepalDate(today, { days: 7 }));
+      setHistoryToDate(today);
+    } else if (preset === 'month') {
+      setHistoryFromDate(offsetNepalDate(today, { months: 1 }));
+      setHistoryToDate(today);
+    } else if (preset === 'forever') {
+      setHistoryFromDate(FOREVER_FROM_DATE);
+      setHistoryToDate(addNepalDays(today, 7));
+    }
+  };
+
+  const handleHistoryRangeApply = () => {
+    historyCacheRef.current = null;
+    historyRequestIdRef.current += 1;
+    void loadHistoryData(true);
   };
 
   const handleCancelOrder = async (clientId: string, exchangeSecurityID: number) => {
@@ -485,7 +652,8 @@ const GetOrderStatus: React.FC = () => {
       );
       if (response.ok) {
         setSuccessMessage('Order cancelled successfully');
-        await loadAllClientTmsData(activeClientIds);
+        await loadOrderBook(activeClientIds);
+        coreCacheRef.current = Date.now();
       } else {
         setErrorMessage('Failed to cancel order');
       }
@@ -603,7 +771,12 @@ const GetOrderStatus: React.FC = () => {
   const decorateTmsRows = useCallback(
     (rows: any[]) =>
       rows.map((row) => {
-        const symbol = row.symbol || row.script_name || '';
+        const symbol =
+          row.symbol ||
+          row.script_name ||
+          row.securitySymbol ||
+          row.security?.symbol ||
+          '';
         const clientId = row.client_id || '';
         return {
           ...row,
@@ -613,8 +786,37 @@ const GetOrderStatus: React.FC = () => {
     [getClientLabel],
   );
 
+  const historyDateRangeLabel = useMemo(() => {
+    const { fromDate, toDate } = resolveHistoryDateRange(
+      historyRangePreset,
+      historyFromDate,
+      historyToDate,
+    );
+    if (historyRangePreset === 'forever') {
+      return 'All time';
+    }
+    return `${fromDate} to ${toDate}`;
+  }, [historyFromDate, historyRangePreset, historyToDate]);
+
   const orderBookRows = useMemo(() => decorateTmsRows(orderBook), [decorateTmsRows, orderBook]);
-  const orderHistoryRows = useMemo(() => decorateTmsRows(orderHistory), [decorateTmsRows, orderHistory]);
+
+  const orderHistoryRows = useMemo(
+    () =>
+      orderHistory.map((row) => {
+        const symbol = row.symbol || row.script_name || '';
+        const clientId = row.client_id || '';
+        return {
+          tradeTime: row.tradeTime || '-',
+          stock: <StockClientCell symbol={symbol} clientLabel={getClientLabel(clientId)} />,
+          buyOrSell: formatTradeSide(row.buyOrSell),
+          tradePrice: formatTradeAmount(row.tradePrice),
+          tradedQuantity: row.tradedQuantity ?? '-',
+          exchangeOrderId: row.exchangeOrderId || '-',
+          exchangeTradeId: row.exchangeTradeId || '',
+        };
+      }),
+    [getClientLabel, orderHistory],
+  );
 
   const tabData: Record<OrderTab, { count: number; columns: string[]; rows: any[]; empty: string }> = {
     logs: {
@@ -654,18 +856,17 @@ const GetOrderStatus: React.FC = () => {
     },
     history: {
       count: orderHistory.length,
-      columns: [
-        'stock',
-        'buyOrSell',
-        'orderQuantity',
-        'orderPrice',
-        'orderTime',
-        'activeStatus',
-        'totalTradedQuantity',
-        'remainingOrderQuantity',
-      ],
+      columns: getVisibleColumns(
+        orderHistoryRows,
+        ['tradeTime', 'stock', 'buyOrSell', 'tradePrice', 'tradedQuantity', 'exchangeOrderId'],
+        ['exchangeTradeId', 'displayName', 'clientMemberCode'],
+      ),
       rows: orderHistoryRows,
-      empty: hasLoaded ? 'No order history found.' : 'Loading order history...',
+      empty: isHistoryLoading
+        ? 'Loading trade history...'
+        : historyLoaded
+          ? 'No trade history found for the selected date range.'
+          : 'Select the History tab to load trade records.',
     },
   };
 
@@ -678,18 +879,44 @@ const GetOrderStatus: React.FC = () => {
           <div>
             <h2 className="panel-title">Order Logs</h2>
             <p className="panel-subtitle">
-              Combined logs for all clients load automatically. Use filters to narrow results.
+              Scheduled, logs, and order book load on open. History loads in its tab and caches for 20 minutes.
             </p>
           </div>
-          {loggedInClientIDs.length > 0 && (
-            <span className="badge badge-success">{loggedInClientIDs.length} client(s) online</span>
-          )}
+          <div className="order-logs-header-actions">
+            {loggedInClientIDs.length > 0 && (
+              <span className="badge badge-success">{loggedInClientIDs.length} client(s) online</span>
+            )}
+            <button
+              type="button"
+              className={`order-logs-refresh-btn ${isRefreshing ? 'spinning' : ''}`}
+              onClick={() => void handleRefresh()}
+              disabled={isLoading || isRefreshing}
+              aria-label="Refresh order data"
+              title="Refresh all sections"
+            >
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path
+                  d="M21 12a9 9 0 1 1-2.64-6.36"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                />
+                <path
+                  d="M21 3v6h-6"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </button>
+          </div>
         </div>
 
         {successMessage && <ErrorMessage message={successMessage} variant="success" />}
         {errorMessage && <ErrorMessage message={errorMessage} variant="error" />}
 
-        <form onSubmit={handleSubmit} className="order-logs-form">
+        <form onSubmit={handleRefresh} className="order-logs-form">
           <div className="order-logs-form-grid">
             <div className="form-group">
               <label htmlFor="clientFilter">Client</label>
@@ -733,13 +960,6 @@ const GetOrderStatus: React.FC = () => {
                 isClearable
               />
             </div>
-
-            <div className="form-group order-logs-submit-group">
-              <label>&nbsp;</label>
-              <button type="submit" className="btn btn-primary order-logs-submit" disabled={isLoading}>
-                {isLoading ? 'Loading...' : 'Refresh'}
-              </button>
-            </div>
           </div>
         </form>
       </div>
@@ -750,7 +970,7 @@ const GetOrderStatus: React.FC = () => {
             key={tab.id}
             type="button"
             className={`order-logs-stat-card ${activeTab === tab.id ? 'active' : ''}`}
-            onClick={() => setActiveTab(tab.id)}
+            onClick={() => handleTabChange(tab.id)}
           >
             <span className="order-logs-stat-icon">{tab.icon}</span>
             <div>
@@ -766,11 +986,77 @@ const GetOrderStatus: React.FC = () => {
           <h3 className="order-logs-section-title">
             {TABS.find((t) => t.id === activeTab)?.icon}{' '}
             {TABS.find((t) => t.id === activeTab)?.label}
+            {activeTab === 'history' && (
+              <span className="order-logs-section-range">{historyDateRangeLabel}</span>
+            )}
           </h3>
           <span className="badge badge-muted">{current.count} record(s)</span>
         </div>
 
-        {isLoading ? (
+        {activeTab === 'history' && (
+          <div className="order-logs-history-toolbar">
+            <div className="order-logs-history-toolbar-head">
+              <span className="order-logs-history-label">Date range</span>
+              <span className="order-logs-history-range-badge">{historyDateRangeLabel}</span>
+            </div>
+            <div className="order-logs-history-presets">
+              {HISTORY_RANGE_OPTIONS.map((option) => (
+                <button
+                  key={option.id}
+                  type="button"
+                  className={`order-logs-preset-btn ${historyRangePreset === option.id ? 'active' : ''}`}
+                  onClick={() => handleHistoryPresetChange(option.id)}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+            {historyRangePreset === 'custom' && (
+              <div className="order-logs-history-custom">
+                <div className="form-group">
+                  <label htmlFor="historyFromDate">From</label>
+                  <DatePicker
+                    id="historyFromDate"
+                    selected={dateFromNepalDateString(historyFromDate)}
+                    onChange={(date) => setHistoryFromDate(nepalDateStringFromDate(date))}
+                    dateFormat="yyyy-MM-dd"
+                    maxDate={dateFromNepalDateString(historyToDate) || undefined}
+                    className="input order-logs-datepicker"
+                    wrapperClassName="order-logs-datepicker-wrap"
+                  />
+                </div>
+                <div className="form-group">
+                  <label htmlFor="historyToDate">To</label>
+                  <DatePicker
+                    id="historyToDate"
+                    selected={dateFromNepalDateString(historyToDate)}
+                    onChange={(date) => setHistoryToDate(nepalDateStringFromDate(date))}
+                    dateFormat="yyyy-MM-dd"
+                    minDate={dateFromNepalDateString(historyFromDate) || undefined}
+                    maxDate={dateFromNepalDateString(todayNepalDate()) || undefined}
+                    className="input order-logs-datepicker"
+                    wrapperClassName="order-logs-datepicker-wrap"
+                  />
+                </div>
+              </div>
+            )}
+            <div className="order-logs-history-toolbar-actions">
+              <p className="order-logs-history-hint">
+                Cached for 20 minutes. Use Apply or the refresh icon to fetch now.
+              </p>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={handleHistoryRangeApply}
+                disabled={isHistoryLoading}
+              >
+                {isHistoryLoading ? 'Loading...' : 'Apply range'}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {(isLoading && !hasLoaded) || (activeTab === 'history' && isHistoryLoading && !historyLoaded) ? (
           <div className="order-logs-loading">
             <div className="order-logs-spinner" />
             <p>Fetching order data from TMS...</p>
