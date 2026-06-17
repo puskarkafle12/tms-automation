@@ -33,7 +33,11 @@ from schemas.schemas import (
 from utils.base_functions import is_within_time_range, truncate_to_one_decimal_place
 from utils.base_functions import summarize_login_message, get_persisted_collateral
 from utils.lot_size import get_board_lot_size, is_regular_lot_qty, normalize_sell_qty
-from utils.monitor_order import monitor_order_task_func
+from utils.scheduled_monitor_control import (
+    scheduled_monitor_supervisor_loop,
+    start_scheduled_order_monitor,
+    stop_scheduled_order_monitor,
+)
 from utils.market_gate import resolve_market_gate
 from utils.tms import TmsUser
 import uvicorn
@@ -63,7 +67,7 @@ FRONTEND_BUILD_DIR = Path(__file__).resolve().parent / "frontend" / "build"
 
 # Store running tasks and updates
 running_tasks: Dict[str, asyncio.Task] = {}
-check_orders_task: Optional[asyncio.Task] = None
+scheduled_supervisor_task: Optional[asyncio.Task] = None
 running_grabbers: Dict[str, TmsUser] = {}
 stock_grabber_updates: Dict[str, List[Dict]] = {}
 tms_user_cache: Dict[str, TmsUser] = {}
@@ -113,12 +117,23 @@ async def get_cached_tms_user(user: User, *, request_per_sec: float = 5) -> TmsU
 
 @app.on_event("shutdown")
 async def close_cached_tms_users() -> None:
+    global scheduled_supervisor_task
+    if scheduled_supervisor_task is not None and not scheduled_supervisor_task.done():
+        scheduled_supervisor_task.cancel()
+        try:
+            await scheduled_supervisor_task
+        except asyncio.CancelledError:
+            pass
+    scheduled_supervisor_task = None
+    await stop_scheduled_order_monitor()
     for client_id in list(tms_user_cache.keys()):
         await invalidate_cached_tms_user(client_id)
 
 @app.on_event("startup")
 async def ensure_database_indexes() -> None:
+    global scheduled_supervisor_task
     await asyncio.to_thread(ensure_performance_indexes)
+    scheduled_supervisor_task = asyncio.create_task(scheduled_monitor_supervisor_loop())
 
 async def _run_stock_grabber_task(
     tms_user: TmsUser,
@@ -1592,37 +1607,17 @@ async def check_orders_endpoint(db: Session = Depends(get_db)):
     if tms_config.is_running:
         return JSONResponse(status_code=400, content={"message": "Check orders loop is already running."})
 
-    pending_orders = db.query(ScheduledOrder).filter_by(status="pending").all()
-    for order in pending_orders:
-        db.query(OrderLog).filter(
-            OrderLog.client_id == order.client_id,
-            OrderLog.script_name == order.script_name,
-        ).delete(synchronize_session=False)
-    db.commit()
-
-    global check_orders_task
-    from datetime import timezone
-
-    tms_config.is_running = True
-    tms_config.scheduled_started_at = datetime.now(timezone.utc)
-    tms_config.scheduled_phase = "waiting_hours"
-    tms_config.scheduled_status_message = "Armed — waiting for market"
-    check_orders_task = asyncio.create_task(monitor_order_task_func())
+    started = await start_scheduled_order_monitor(reset_logs=True)
+    if not started:
+        return JSONResponse(status_code=400, content={"message": "Check orders loop is already running."})
     return {"message": "Check orders loop started."}
 
 
 @app.get("/stop_check_orders/")
 async def stop_check_orders_endpoint():
-    global check_orders_task
-
-    tms_config.is_running = False
-    tms_config.scheduled_started_at = None
-    tms_config.scheduled_phase = "stopped"
-    tms_config.scheduled_status_message = ""
-    task = check_orders_task
-    if task is not None and not task.done():
-        task.cancel()
-    check_orders_task = None
+    stopped = await stop_scheduled_order_monitor()
+    if not stopped:
+        return {"message": "Check orders loop is not running."}
     return {"message": "Check orders loop stopped."}
 
 

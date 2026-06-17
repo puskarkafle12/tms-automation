@@ -1,5 +1,6 @@
 # config.py
 
+import asyncio
 from datetime import datetime, time
 from typing import Dict, Optional
 
@@ -7,6 +8,7 @@ from typing import Dict, Optional
 start_time = time(hour=9, minute=0)
 end_time = time(hour=15, minute=0)
 is_running = False
+check_orders_task: Optional[asyncio.Task] = None
 monitor_interval = 5
 
 scheduled_started_at: Optional[datetime] = None

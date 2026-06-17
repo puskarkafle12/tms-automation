@@ -1,13 +1,13 @@
-import React, { useEffect, useState } from 'react';
+import React from 'react';
 import './PageMonitorBar.css';
 import { useMonitoring } from '../hooks/useMonitoring';
 import { formatMonitorDuration } from '../utils/formatDuration';
 
 const ScheduleMonitorBar: React.FC = () => {
-  const { state, schedule, startScheduled, stopScheduled } = useMonitoring();
-  const [runtime, setRuntime] = useState('');
+  const { state, schedule } = useMonitoring();
+  const [runtime, setRuntime] = React.useState('');
 
-  useEffect(() => {
+  React.useEffect(() => {
     const updateRuntime = () => {
       setRuntime(formatMonitorDuration(state.scheduledStartedAt));
     };
@@ -24,7 +24,7 @@ const ScheduleMonitorBar: React.FC = () => {
           <h3 className="page-monitor-bar-title">Scheduled Order Monitor</h3>
           <p className="page-monitor-bar-desc">{schedule.description}</p>
           {state.scheduledActive && state.scheduledStartedAt && (
-            <p className="page-monitor-runtime">Armed for {runtime || '<1m'}</p>
+            <p className="page-monitor-runtime">Running for {runtime || '<1m'}</p>
           )}
         </div>
       </div>
@@ -33,24 +33,6 @@ const ScheduleMonitorBar: React.FC = () => {
           <span className="dot" />
           {schedule.badgeLabel}
         </span>
-        <button
-          type="button"
-          className={`page-monitor-btn play ${schedule.canStart ? 'is-enabled' : ''}`}
-          onClick={() => { void startScheduled(); }}
-          disabled={!schedule.canStart}
-          title={state.scheduledActive ? 'Scheduler is armed' : 'Arm scheduler'}
-        >
-          {state.scheduledLoading === 'start' ? '…' : '▶'}
-        </button>
-        <button
-          type="button"
-          className={`page-monitor-btn stop ${schedule.canStop ? 'is-enabled' : 'is-available'}`}
-          onClick={() => { void stopScheduled(); }}
-          disabled={!schedule.canStop}
-          title="Stop scheduler"
-        >
-          {state.scheduledLoading === 'stop' ? '…' : '⏹'}
-        </button>
       </div>
     </div>
   );

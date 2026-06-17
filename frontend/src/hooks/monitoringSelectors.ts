@@ -61,10 +61,10 @@ export const getScheduleDisplay = (input: {
     badgeLabel,
     badgeClass,
     description: input.active
-      ? input.statusMessage || 'Armed — will scan and execute when market is live.'
-      : 'Stopped — press play to arm the scheduler. It waits for market hours and TMS session.',
-    canStart: !input.active && input.loading !== 'start',
-    canStop: input.active && input.loading !== 'stop',
+      ? input.statusMessage || 'Runs automatically during Nepal market hours.'
+      : 'Starts automatically when market opens and a TMS account is logged in.',
+    canStart: false,
+    canStop: false,
   };
 };
 

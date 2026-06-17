@@ -1,10 +1,8 @@
 import React, { useState } from 'react';
 import './MonitoringDashboard.css';
 import ErrorMessage from './ErrorMessage';
-import { syncMonitoringStatus } from '../hooks/monitoringSync';
 import { useMonitoringStore } from '../hooks/useMonitoringStore';
-
-const getApiUrl = () => localStorage.getItem('apiUrl') || window.location.origin;
+import { useMonitoring } from '../hooks/useMonitoring';
 
 export interface GrabberControls {
   start: () => void;
@@ -23,56 +21,10 @@ const MonitoringDashboard: React.FC<MonitoringDashboardProps> = ({
   grabberCanStart = false,
   enableGrabberControls = true,
 }) => {
+  const { schedule } = useMonitoring();
   const { scheduledActive, grabberActiveCount, grabberTotal } = useMonitoringStore();
-  const [scheduledLoading, setScheduledLoading] = useState<'start' | 'stop' | null>(null);
   const [grabberLoading, setGrabberLoading] = useState<'start' | 'stop' | null>(null);
   const [feedback, setFeedback] = useState<{ message: string; variant: 'success' | 'error' } | null>(null);
-
-  const startScheduled = async () => {
-    setScheduledLoading('start');
-    setFeedback(null);
-    try {
-      const response = await fetch(`${getApiUrl()}/check_orders/`, {
-        headers: { accept: 'application/json' },
-      });
-      const data = await response.json().catch(() => ({}));
-      const message = data.message || data.detail || 'Scheduled order monitoring started';
-
-      if (response.ok) {
-        await syncMonitoringStatus();
-        setFeedback({ message, variant: 'success' });
-      } else {
-        setFeedback({ message, variant: 'error' });
-      }
-    } catch {
-      setFeedback({ message: 'Failed to start scheduled order monitoring', variant: 'error' });
-    } finally {
-      setScheduledLoading(null);
-    }
-  };
-
-  const stopScheduled = async () => {
-    setScheduledLoading('stop');
-    setFeedback(null);
-    try {
-      const response = await fetch(`${getApiUrl()}/stop_check_orders/`, {
-        headers: { accept: 'application/json' },
-      });
-      const data = await response.json().catch(() => ({}));
-      const message = data.message || data.detail || 'Scheduled order monitoring stopped';
-
-      if (response.ok) {
-        await syncMonitoringStatus();
-        setFeedback({ message, variant: 'success' });
-      } else {
-        setFeedback({ message, variant: 'error' });
-      }
-    } catch {
-      setFeedback({ message: 'Failed to stop scheduled order monitoring', variant: 'error' });
-    } finally {
-      setScheduledLoading(null);
-    }
-  };
 
   const startGrabbers = () => {
     const controls = getGrabberControls?.() ?? new Map();
@@ -114,7 +66,7 @@ const MonitoringDashboard: React.FC<MonitoringDashboardProps> = ({
         <div className="monitoring-dashboard-header">
           <h2 className="monitoring-dashboard-title">Monitoring Control</h2>
           <p className="monitoring-dashboard-subtitle">
-            Start or stop scheduled order checks and stock grabber scans from one place.
+            Scheduled orders run automatically during market hours. Stock grabbers are started manually.
           </p>
         </div>
 
@@ -125,40 +77,18 @@ const MonitoringDashboard: React.FC<MonitoringDashboardProps> = ({
               <div className="monitoring-card-heading">
                 <h3 className="monitoring-card-title">Scheduled Orders</h3>
                 <p className="monitoring-card-desc">
-                  Watches queued orders and executes when price conditions are met.
+                  Watches queued orders and executes when price conditions are met during market hours.
                 </p>
               </div>
               <span className={`monitoring-status-badge ${scheduledActive ? 'active' : 'idle'}`}>
                 <span className="dot" />
-                {scheduledActive ? 'Active' : 'Stopped'}
+                {schedule.badgeLabel}
               </span>
             </div>
             <div className="monitoring-card-footer">
               <p className="monitoring-card-meta">
-                Status: <strong>{scheduledActive ? 'Monitoring scheduled orders' : 'Not monitoring'}</strong>
+                {schedule.description}
               </p>
-              <div className="monitoring-card-actions">
-                <button
-                  type="button"
-                  className="monitoring-action-btn play"
-                  onClick={startScheduled}
-                  disabled={scheduledActive || scheduledLoading !== null}
-                  title="Start scheduled order monitoring"
-                >
-                  <span className="icon">{scheduledLoading === 'start' ? '…' : '▶'}</span>
-                  Start
-                </button>
-                <button
-                  type="button"
-                  className="monitoring-action-btn stop"
-                  onClick={stopScheduled}
-                  disabled={!scheduledActive || scheduledLoading !== null}
-                  title="Stop scheduled order monitoring"
-                >
-                  <span className="icon">{scheduledLoading === 'stop' ? '…' : '⏹'}</span>
-                  Stop
-                </button>
-              </div>
             </div>
           </div>
 

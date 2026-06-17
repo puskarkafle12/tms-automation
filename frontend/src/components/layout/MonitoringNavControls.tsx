@@ -7,8 +7,6 @@ const MonitoringNavControls: React.FC = () => {
     state,
     schedule,
     grabber,
-    startScheduled,
-    stopScheduled,
     startGrabbers,
     stopGrabbers,
   } = useMonitoring();
@@ -29,28 +27,6 @@ const MonitoringNavControls: React.FC = () => {
             <span className="monitoring-nav-chip-dot" />
             {schedule.navLabel}
           </span>
-        </div>
-        <div className="monitoring-nav-chip-actions">
-          <button
-            type="button"
-            className={`monitoring-nav-btn play ${schedule.canStart ? 'is-enabled' : ''}`}
-            onClick={() => { void startScheduled(); }}
-            disabled={!schedule.canStart}
-            title="Start scheduled order monitoring"
-            aria-label="Start scheduled order monitoring"
-          >
-            {state.scheduledLoading === 'start' ? '…' : '▶'}
-          </button>
-          <button
-            type="button"
-            className={`monitoring-nav-btn stop ${schedule.canStop ? 'is-enabled' : ''}`}
-            onClick={() => { void stopScheduled(); }}
-            disabled={!schedule.canStop}
-            title="Stop scheduled order monitoring"
-            aria-label="Stop scheduled order monitoring"
-          >
-            {state.scheduledLoading === 'stop' ? '…' : '⏹'}
-          </button>
         </div>
       </div>
 

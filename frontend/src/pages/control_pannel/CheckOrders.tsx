@@ -1,8 +1,8 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import './CheckOrders.css';
-import MonitorOrders from './MonitorOrders';
 import ErrorMessage from '../../components/ErrorMessage';
 import NepseAlphaSymbolLink from '../../components/NepseAlphaSymbolLink';
+import { useMonitoring } from '../../hooks/useMonitoring';
 import useHotkeys from '@reecelucas/react-use-hotkeys';
 import moment from 'moment-timezone';
 
@@ -20,6 +20,7 @@ interface OrderLog {
 const getApiUrl = () => localStorage.getItem('apiUrl') || window.location.origin;
 
 const CheckOrders: React.FC = () => {
+  const { schedule } = useMonitoring();
   const [logs, setLogs] = useState<OrderLog[]>([]);
   const [refreshInterval, setRefreshInterval] = useState<number>(5000);
   const [showSettings, setShowSettings] = useState(false);
@@ -250,12 +251,9 @@ const CheckOrders: React.FC = () => {
           </div>
         </div>
 
-        <MonitorOrders
-          onStatusChange={(message, variant) => {
-            setStatusMessage(message);
-            setStatusVariant(variant);
-          }}
-        />
+        <p className="check-orders-auto-scheduler" role="status">
+          Scheduled order monitor: <strong>{schedule.badgeLabel}</strong>. {schedule.description}
+        </p>
 
         <div className="check-orders-filters">
           <div className="form-group">
