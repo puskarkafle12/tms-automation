@@ -32,6 +32,8 @@ def ensure_performance_indexes():
     statements = [
         "CREATE INDEX IF NOT EXISTS ix_logged_in_users_status_last_updated ON logged_in_users (status, last_updated)",
         "ALTER TABLE logged_in_users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMP",
+        "ALTER TABLE logged_in_users ADD COLUMN IF NOT EXISTS collateral JSON",
+        "ALTER TABLE logged_in_users ADD COLUMN IF NOT EXISTS collateral_updated_at TIMESTAMP",
         "CREATE INDEX IF NOT EXISTS ix_scheduled_orders_status_client_script ON scheduled_orders (status, client_id, script_name)",
         "ALTER TABLE scheduled_orders ADD COLUMN IF NOT EXISTS strategy_type VARCHAR DEFAULT 'Fixed Price'",
         "ALTER TABLE scheduled_orders ADD COLUMN IF NOT EXISTS side VARCHAR",

@@ -190,10 +190,48 @@ def get_tokens(client_id):
     try:
         user = db.query(LoggedInUsers).filter_by(client_id=client_id).first()
         if user:
-            return user.tokens,user.broker_no
-        return None
+            return user.tokens, user.broker_no
+        return None, None
     except SQLAlchemyError as e:
         print(f"Failed to get tokens: {e}")
+        return None, None
+    finally:
+        db.close()
+
+
+def save_collateral(client_id: str, collateral: dict) -> bool:
+    db = get_db_session()
+    try:
+        session = db.query(LoggedInUsers).filter_by(client_id=client_id).first()
+        if not session:
+            session = LoggedInUsers(
+                client_id=client_id,
+                tokens={},
+                broker_no="",
+                status="logged_in",
+            )
+            db.add(session)
+        session.collateral = collateral
+        session.collateral_updated_at = datetime.now(timezone.utc)
+        db.commit()
+        return True
+    except Exception as e:
+        print(f"Failed to save collateral: {e}")
+        db.rollback()
+        return False
+    finally:
+        db.close()
+
+
+def get_persisted_collateral(client_id: str):
+    db = get_db_session()
+    try:
+        session = db.query(LoggedInUsers).filter_by(client_id=client_id).first()
+        if session and session.collateral:
+            return session.collateral
+        return None
+    except SQLAlchemyError as e:
+        print(f"Failed to get collateral: {e}")
         return None
     finally:
         db.close()

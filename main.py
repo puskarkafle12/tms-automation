@@ -31,7 +31,7 @@ from schemas.schemas import (
     UserLogin,
 )
 from utils.base_functions import is_within_time_range, truncate_to_one_decimal_place
-from utils.base_functions import summarize_login_message
+from utils.base_functions import summarize_login_message, get_persisted_collateral
 from utils.lot_size import get_board_lot_size, is_regular_lot_qty, normalize_sell_qty
 from utils.monitor_order import monitor_order_task_func
 from utils.market_gate import resolve_market_gate
@@ -509,16 +509,30 @@ def _serialize_tms_account(user: User, session: Optional[LoggedInUsers]) -> dict
         "last_updated": session_updated_at,
         "last_login_at": last_login_at,
         "session_updated_at": session_updated_at,
-        "collateral": None,
+        "collateral": session.collateral if session and session.collateral else None,
         "collateral_error": None,
     }
 
 
-async def _attach_tms_account_collateral(account: dict, user: Optional[User]) -> None:
+def _resolve_account_collateral(client_id: str, session: Optional[LoggedInUsers]) -> Optional[dict]:
+    collateral = TmsUser.get_cached_collateral_for_client(client_id)
+    if collateral:
+        return collateral
+    if session and session.collateral:
+        return session.collateral
+    return get_persisted_collateral(client_id)
+
+
+async def _attach_tms_account_collateral(
+    account: dict,
+    user: Optional[User],
+    session: Optional[LoggedInUsers] = None,
+) -> None:
     if not user:
         return
-    account["collateral"] = TmsUser.get_cached_collateral_for_client(user.client_id)
-    account["collateral_error"] = None if account["collateral"] else "Collateral cache empty or expired"
+    collateral = _resolve_account_collateral(user.client_id, session)
+    account["collateral"] = collateral
+    account["collateral_error"] = None if collateral else "Collateral not loaded"
 
 
 async def _refresh_tms_account_collateral(user: User) -> dict:
@@ -787,12 +801,16 @@ async def list_tms_accounts(db: Session = Depends(get_db)):
                 "last_updated": session.last_updated.isoformat() if session.last_updated else None,
                 "last_login_at": session.last_login_at.isoformat() if session.last_login_at else None,
                 "session_updated_at": session.last_updated.isoformat() if session.last_updated else None,
-                "collateral": None,
-                "collateral_error": None,
+                "collateral": session.collateral,
+                "collateral_error": None if session.collateral else "Collateral not loaded",
             })
 
     await asyncio.gather(*[
-        _attach_tms_account_collateral(account, user_by_client_id.get(account["client_id"]))
+        _attach_tms_account_collateral(
+            account,
+            user_by_client_id.get(account["client_id"]),
+            sessions.get(account["client_id"]),
+        )
         for account in accounts
     ])
     accounts.sort(key=lambda account: account["client_id"])
@@ -882,6 +900,10 @@ async def login_tms_account(client_id: str, db: Session = Depends(get_db)):
     try:
         await invalidate_cached_tms_user(client_id)
         tms_instance = await get_cached_tms_user(user, request_per_sec=5)
+        try:
+            await tms_instance.get_client_collateral(force_refresh=True)
+        except Exception:
+            pass
         login_status = {
             "status": "success",
             "message": "token loaded and session cached",

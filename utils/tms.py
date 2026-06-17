@@ -19,6 +19,7 @@ from utils.base_functions import (
     is_stock_grabber_stop_reached,
     log_time,
     logout_user,
+    save_collateral,
     save_tokens,
     summarize_login_message,
 )
@@ -876,6 +877,7 @@ class TmsUser:
         cache_key = self._collateral_cache_key()
         if cache_key:
             self._collateral_cache[cache_key] = (monotonic_time.monotonic(), collateral)
+            save_collateral(cache_key, collateral)
         return collateral
 
     async def refresh_client_collateral(self) -> Optional[Dict]:

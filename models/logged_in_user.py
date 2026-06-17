@@ -11,6 +11,8 @@ class LoggedInUsers(Base):
     broker_no = Column(String)
     status = Column(String)
     message = Column(String)
+    collateral = Column(JSON, nullable=True)
+    collateral_updated_at = Column(DateTime, nullable=True)
 
     __table_args__ = (
         Index("ix_logged_in_users_status_last_updated", "status", "last_updated"),

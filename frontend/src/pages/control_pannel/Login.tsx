@@ -365,9 +365,24 @@ const Login: React.FC = () => {
         }
       }
 
+      let failedLogins = 0;
+      for (const item of parsed.users) {
+        try {
+          await loginTmsAccount(item.user.client_id);
+        } catch {
+          failedLogins += 1;
+        }
+      }
+
       setSuccessMessage('TMS data imported successfully');
       if (failedScheduledOrders > 0) {
         setErrorMessage('Some scheduled orders could not be imported');
+      }
+      if (failedLogins > 0) {
+        setErrorMessage((prev) => {
+          const loginNote = `${failedLogins} account(s) could not log in automatically`;
+          return prev ? `${prev}. ${loginNote}` : loginNote;
+        });
       }
       setImportOpen(false);
       resetImportState();
