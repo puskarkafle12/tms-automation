@@ -9,6 +9,7 @@ import {
   SCREENER_QUERY_GUIDE,
   ScreenerPreset,
 } from '../../lib/screener/presets';
+import { buildChatGptScreenerPrompt } from '../../lib/screener/chatGptPrompt';
 
 type FieldType = 'number' | 'text';
 
@@ -88,6 +89,8 @@ const DEFAULT_QUERY = SCREENER_PRESETS[0].query;
 
 type InputMode = 'builder' | 'query';
 
+const NEPSE_ALPHA_CHART_URL = 'https://nepsealpha.com/trading/chart';
+
 const StockScreener: React.FC = () => {
   const [fields, setFields] = useState<ScreenerField[]>([]);
   const [inputMode, setInputMode] = useState<InputMode>('builder');
@@ -111,6 +114,8 @@ const StockScreener: React.FC = () => {
     () => SCREENER_PRESETS.find((preset) => preset.id === activePresetId) || null,
     [activePresetId],
   );
+
+  const chatGptPrompt = useMemo(() => buildChatGptScreenerPrompt(fields), [fields]);
 
   useEffect(() => {
     const loadFields = async () => {
@@ -306,6 +311,16 @@ const StockScreener: React.FC = () => {
     return merged.filter((column, index) => merged.indexOf(column) === index);
   }, [rankBy]);
 
+  const symbolColumnLinks = useMemo(
+    () => ({
+      symbol: (row: Record<string, unknown>) => {
+        const sym = String(row.symbol || '').trim().toUpperCase();
+        return sym ? `${NEPSE_ALPHA_CHART_URL}?symbol=${encodeURIComponent(sym)}` : undefined;
+      },
+    }),
+    [],
+  );
+
   return (
     <div className="stock-screener-page">
       <section className="stock-screener-hero card">
@@ -386,6 +401,39 @@ const StockScreener: React.FC = () => {
 
         {inputMode === 'query' ? (
           <>
+            <div className="stock-screener-ai-prompt-panel">
+              <div className="stock-screener-prompt-header">
+                <div>
+                  <h4>ChatGPT / AI assistant prompt</h4>
+                  <p className="stock-screener-ai-prompt-desc">
+                    Copy this into ChatGPT (or any AI). It lists every filterable stock field,
+                    operators, syntax rules, and examples so the AI can write a valid screener query for you.
+                  </p>
+                </div>
+                <div className="stock-screener-prompt-actions">
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    onClick={() => void copyText(chatGptPrompt, 'ChatGPT prompt')}
+                  >
+                    Copy prompt for ChatGPT
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => void copyText(SCREENER_QUERY_GUIDE, 'Syntax guide')}
+                  >
+                    Copy short syntax only
+                  </button>
+                </div>
+              </div>
+              {copyMessage && !activePreset && <p className="stock-screener-copy-msg">{copyMessage}</p>}
+              <details className="stock-screener-ai-prompt-details">
+                <summary>Preview full AI prompt ({fields.length} fields documented)</summary>
+                <pre className="stock-screener-prompt-body stock-screener-ai-prompt-preview">{chatGptPrompt}</pre>
+              </details>
+            </div>
+
             {activePreset && (
               <div className="stock-screener-prompt-panel">
                 <div className="stock-screener-prompt-header">
@@ -564,7 +612,7 @@ const StockScreener: React.FC = () => {
         {results.length === 0 && !loading ? (
           <p className="stock-screener-empty">Pick a quick screen or run a custom query to see ranked stocks.</p>
         ) : (
-          <CommonTable data={results} columns={displayColumns} />
+          <CommonTable data={results} columns={displayColumns} columnLinks={symbolColumnLinks} />
         )}
       </section>
     </div>

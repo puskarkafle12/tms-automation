@@ -207,25 +207,27 @@ Customize: Add one_year_yield >= 0 to avoid declining names.
 ${QUERY_SYNTAX_GUIDE}`,
   },
   {
-    id: 'relative-strength',
-    title: 'Strong Relative Strength',
-    subtitle: 'Outperforming peers on price strength',
-    query: `WHERE technical_price_relative_strength >= 70
-  AND one_year_yield >= 0
-ORDER BY technical_price_relative_strength DESC
+    id: 'top-volatile',
+    title: 'Top Volatile Stocks',
+    subtitle: 'Highest 50D volatility with active beta',
+    query: `WHERE volatility_50d >= 4
+  AND beta_3_month >= 1.2
+  AND technical_price_relative_strength >= 0
+ORDER BY volatility_50d DESC
 LIMIT 25`,
-    prompt: `Screen: Strong Relative Strength (Top 25)
+    prompt: `Screen: Top Volatile Stocks (Top 25)
 
 What it looks for:
-Stocks showing strong price performance relative to the sector/market.
+High-volatility names with above-market beta and non-negative relative strength.
 
 Filters:
-- Price relative strength >= 70%
-- 1 year yield >= 0 (not in sustained decline)
+- volatility_50d >= 4
+- beta_3_month >= 1.2
+- technical_price_relative_strength >= 0
 
-Rank: technical_price_relative_strength DESC
+Rank: volatility_50d DESC (most volatile first)
 
-Customize: Combine with technical_macd = 'Bullish' for momentum + strength.
+Customize: Raise volatility_50d (e.g. >= 10) or beta (>= 1.5) for extreme movers only.
 
 ${QUERY_SYNTAX_GUIDE}`,
   },

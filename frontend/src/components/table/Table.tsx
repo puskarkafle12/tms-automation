@@ -11,6 +11,7 @@ interface CommonTableProps {
   onAction?: (row: TableRow, actionType: string) => void;
   columns?: string[];
   emptyMessage?: string;
+  columnLinks?: Record<string, (row: TableRow) => string | undefined>;
 }
 
 const formatColumnLabel = (column: string) =>
@@ -20,7 +21,7 @@ const formatColumnLabel = (column: string) =>
     .replace(/\b\w/g, (char) => char.toUpperCase())
     .trim();
 
-const CommonTable: React.FC<CommonTableProps> = ({ data, onAction, columns, emptyMessage }) => {
+const CommonTable: React.FC<CommonTableProps> = ({ data, onAction, columns, emptyMessage, columnLinks }) => {
   const [sortConfig, setSortConfig] = useState<{ key: string; direction: 'asc' | 'desc' } | null>(null);
 
   // Sort data based on the sort configuration
@@ -77,6 +78,19 @@ const CommonTable: React.FC<CommonTableProps> = ({ data, onAction, columns, empt
     return value == null || value === '' ? '-' : value;
   };
 
+  const renderCell = (row: TableRow, column: string) => {
+    const value = row[column];
+    const href = columnLinks?.[column]?.(row);
+    if (href && value != null && value !== '') {
+      return (
+        <a className="common-table-link" href={href} target="_blank" rel="noopener noreferrer">
+          {String(value)}
+        </a>
+      );
+    }
+    return formatValue(value);
+  };
+
   return (
     <div className="common-table-wrap">
       {data.length === 0 ? (
@@ -107,7 +121,7 @@ const CommonTable: React.FC<CommonTableProps> = ({ data, onAction, columns, empt
                     key={colIndex}
                     className={column === 'status' && row.liveStatus ? 'table-status-live' : undefined}
                   >
-                    {formatValue(row[column])}
+                    {renderCell(row, column)}
                   </td>
                 ))}
                 {onAction && renderActions(row)}

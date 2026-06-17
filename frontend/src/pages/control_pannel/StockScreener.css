@@ -124,6 +124,38 @@
   line-height: 1.35;
 }
 
+.stock-screener-ai-prompt-panel {
+  margin-bottom: 1rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.stock-screener-ai-prompt-desc {
+  margin: 0.35rem 0 0;
+  font-size: 0.82rem;
+  color: var(--color-text-muted);
+  max-width: 720px;
+  line-height: 1.45;
+}
+
+.stock-screener-ai-prompt-details {
+  margin-top: 0.75rem;
+}
+
+.stock-screener-ai-prompt-details summary {
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: #475569;
+}
+
+.stock-screener-ai-prompt-preview {
+  margin-top: 0.65rem;
+  max-height: 320px;
+}
+
 .stock-screener-prompt-panel {
   margin-bottom: 1.25rem;
   padding: 0.9rem 1rem;
