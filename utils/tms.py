@@ -4,7 +4,7 @@ from datetime import date, datetime, time
 from http.cookies import SimpleCookie
 import json
 import time as monotonic_time
-from typing import Dict, List, Optional
+from typing import Dict, Iterator, List, Optional, Tuple
 import aiohttp
 from database import get_db_session
 from exceptions.login_exceptions import LoginFailedException
@@ -27,6 +27,9 @@ from utils.base_functions import (
 class TmsUser:
     DEFAULT_TIMEOUT = aiohttp.ClientTimeout(total=12, connect=4, sock_read=8)
     QUOTE_TIMEOUT = aiohttp.ClientTimeout(total=3, connect=1, sock_read=2)
+    TRADEBOOK_TIMEOUT = aiohttp.ClientTimeout(total=90, connect=10, sock_read=60)
+    TRADEBOOK_CHUNK_DAYS = 366
+    TRADEBOOK_MAX_CONCURRENT_CHUNKS = 4
     _security_cache: Dict[str, tuple[float, List[Dict]]] = {}
     _security_cache_ttl = 300.0
     _collateral_cache: Dict[str, tuple[float, Dict]] = {}
@@ -740,6 +743,36 @@ class TmsUser:
         return normalized
 
     @staticmethod
+    def _iter_yearly_date_ranges(start: date, end: date) -> Iterator[Tuple[str, str]]:
+        current = start
+        while current <= end:
+            year_end = date(current.year, 12, 31)
+            chunk_end = min(year_end, end)
+            yield current.isoformat(), chunk_end.isoformat()
+            if chunk_end >= end:
+                break
+            current = date(chunk_end.year + 1, 1, 1)
+
+    @staticmethod
+    def _dedupe_tradebook_rows(rows: List[Dict]) -> List[Dict]:
+        seen: set = set()
+        unique: List[Dict] = []
+        for row in rows:
+            row_id = row.get("id")
+            key = row_id if row_id is not None else (
+                f"{row.get('exchangeTradeId')}:{row.get('exchangeOrderId')}"
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(row)
+        return unique
+
+    @staticmethod
+    def _tradebook_row_sort_key(row: Dict) -> str:
+        return str(row.get("tradeTime") or row.get("trade_time") or "")
+
+    @staticmethod
     def _nested_value(row: Dict, paths: List[List[str]]):
         for path in paths:
             current = row
@@ -922,13 +955,26 @@ class TmsUser:
             "referer": f"https://tms{self.broker_no}.nepsetms.com.np/tms/me/trade-book-history",
             "membercode": str(self.broker_no),
         }
-        _, payload = await self._authenticated_request(
-            "GET",
-            url,
-            headers=headers,
-            expected_statuses={200},
-        )
-        return payload
+        last_error: Optional[Exception] = None
+        for attempt in range(2):
+            try:
+                _, payload = await self._authenticated_request(
+                    "GET",
+                    url,
+                    headers=headers,
+                    expected_statuses={200},
+                    timeout=self.TRADEBOOK_TIMEOUT,
+                )
+                return payload
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                last_error = exc
+                if attempt == 0:
+                    await self._recreate_session()
+                    continue
+                raise
+        if last_error:
+            raise last_error
+        raise RuntimeError("tradebook history request failed")
 
     @staticmethod
     def _merge_tradebook_pages(
@@ -1002,6 +1048,29 @@ class TmsUser:
         end = date.fromisoformat(to_date)
         if start > end:
             return []
+
+        if (end - start).days > self.TRADEBOOK_CHUNK_DAYS:
+            chunks = list(self._iter_yearly_date_ranges(start, end))
+            semaphore = asyncio.Semaphore(self.TRADEBOOK_MAX_CONCURRENT_CHUNKS)
+
+            async def fetch_chunk(chunk_from: str, chunk_to: str) -> List[Dict]:
+                async with semaphore:
+                    return await self._get_tradebook_history_range(
+                        chunk_from,
+                        chunk_to,
+                        page_size,
+                    )
+
+            chunk_results = await asyncio.gather(
+                *[fetch_chunk(chunk_from, chunk_to) for chunk_from, chunk_to in chunks]
+            )
+            merged: List[Dict] = []
+            for rows in chunk_results:
+                merged.extend(rows)
+            merged = self._dedupe_tradebook_rows(merged)
+            merged.sort(key=self._tradebook_row_sort_key, reverse=True)
+            return merged
+
         return await self._get_tradebook_history_range(from_date, to_date, page_size)
 
     async def cancel_order(self, exchange_order_id):
