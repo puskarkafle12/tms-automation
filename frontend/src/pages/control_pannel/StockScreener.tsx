@@ -9,7 +9,7 @@ import {
   SCREENER_QUERY_GUIDE,
   ScreenerPreset,
 } from '../../lib/screener/presets';
-import { buildChatGptScreenerPrompt } from '../../lib/screener/chatGptPrompt';
+import { buildChatGptScreenerPrompt, ScreenerQuerySpec } from '../../lib/screener/chatGptPrompt';
 
 type FieldType = 'number' | 'text';
 
@@ -87,9 +87,44 @@ const RESULT_COLUMNS = [
 
 const DEFAULT_QUERY = SCREENER_PRESETS[0].query;
 
-type InputMode = 'builder' | 'query';
+type InputMode = 'builder' | 'query' | 'ai';
+
+interface AiChatMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  query?: string;
+  isError?: boolean;
+}
 
 const NEPSE_ALPHA_CHART_URL = 'https://nepsealpha.com/trading/chart';
+
+const parseApiError = (data: unknown, fallback: string): string => {
+  if (!data || typeof data !== 'object') {
+    return fallback;
+  }
+  const detail = (data as { detail?: unknown }).detail;
+  if (typeof detail === 'string') {
+    return detail;
+  }
+  if (detail && typeof detail === 'object' && 'message' in detail) {
+    return String((detail as { message: unknown }).message);
+  }
+  if (Array.isArray(detail)) {
+    return detail
+      .map((item) => {
+        if (typeof item === 'string') {
+          return item;
+        }
+        if (item && typeof item === 'object' && 'msg' in item) {
+          return String((item as { msg: unknown }).msg);
+        }
+        return JSON.stringify(item);
+      })
+      .join(' ');
+  }
+  return fallback;
+};
 
 const StockScreener: React.FC = () => {
   const [fields, setFields] = useState<ScreenerField[]>([]);
@@ -110,7 +145,13 @@ const StockScreener: React.FC = () => {
   const [results, setResults] = useState<ScreenerResult[]>([]);
   const [stats, setStats] = useState<ScreenerStats | null>(null);
   const [cacheTtl, setCacheTtl] = useState(300);
+  const [querySpec, setQuerySpec] = useState<ScreenerQuerySpec | null>(null);
   const [presetGuideOpen, setPresetGuideOpen] = useState(false);
+  const [hasRun, setHasRun] = useState(false);
+  const [aiInput, setAiInput] = useState('');
+  const [aiMessages, setAiMessages] = useState<AiChatMessage[]>([]);
+  const [aiSummary, setAiSummary] = useState('');
+  const [generatedQuery, setGeneratedQuery] = useState('');
   const resultsRef = useRef<HTMLElement | null>(null);
 
   const activePreset = useMemo(
@@ -118,14 +159,19 @@ const StockScreener: React.FC = () => {
     [activePresetId],
   );
 
-  const chatGptPrompt = useMemo(() => buildChatGptScreenerPrompt(fields), [fields]);
+  const chatGptPrompt = useMemo(() => buildChatGptScreenerPrompt(fields, querySpec), [fields, querySpec]);
 
   useEffect(() => {
     const loadFields = async () => {
-      const response = await fetchJson<{ fields: ScreenerField[]; cache_ttl_seconds: number }>('/stock_screener/fields');
+      const response = await fetchJson<{
+        fields: ScreenerField[];
+        cache_ttl_seconds: number;
+        query_spec?: ScreenerQuerySpec;
+      }>('/stock_screener/fields');
       if (response.ok) {
         setFields(response.data.fields || []);
         setCacheTtl(response.data.cache_ttl_seconds || 300);
+        setQuerySpec(response.data.query_spec || null);
       }
     };
     void loadFields();
@@ -226,6 +272,114 @@ const StockScreener: React.FC = () => {
     }
   };
 
+  const runAiScreener = async (messageOverride?: string) => {
+    if (!clientId) {
+      setError('Select a logged-in TMS client to scan the full symbol universe.');
+      return;
+    }
+
+    const userMessage = (messageOverride ?? aiInput).trim();
+    if (!userMessage) {
+      setError('Describe what you want to screen for.');
+      return;
+    }
+
+    const userMsg: AiChatMessage = {
+      id: `${Date.now()}-user`,
+      role: 'user',
+      content: userMessage,
+    };
+    setAiMessages((prev) => [...prev, userMsg]);
+    setAiInput('');
+    setLoading(true);
+    setLoadingLabel('AI is building query and screening stocks…');
+    setError('');
+    setResults([]);
+    setStats(null);
+    setAiSummary('');
+    setGeneratedQuery('');
+    setHasRun(false);
+
+    let completedScreen = false;
+    try {
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), 300000);
+      const response = await fetch(`${getApiUrl()}/stock_screener/ai_screen`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          client_id: clientId,
+          message: userMessage,
+          force_refresh: forceRefresh,
+        }),
+        signal: controller.signal,
+      });
+      window.clearTimeout(timeoutId);
+
+      const data = await response.json();
+      if (!response.ok) {
+        const detail = data?.detail;
+        const generated = detail && typeof detail === 'object' && 'generated_query' in detail
+          ? String((detail as { generated_query?: string }).generated_query || '')
+          : '';
+        if (generated) {
+          setGeneratedQuery(generated);
+          setQueryText(generated);
+        }
+        throw new Error(parseApiError(data, 'AI screener request failed'));
+      }
+
+      const query = String(data.generated_query || '');
+      const summary = String(data.ai_summary || 'Query generated and screened successfully.');
+      setGeneratedQuery(query);
+      setQueryText(query);
+      setAiSummary(summary);
+      if (data.parsed_query?.rank_by) {
+        setRankBy(data.parsed_query.rank_by);
+      }
+      if (data.parsed_query?.rank_direction) {
+        setRankDirection(data.parsed_query.rank_direction);
+      }
+      if (data.parsed_query?.limit) {
+        setLimit(String(data.parsed_query.limit));
+      }
+
+      setAiMessages((prev) => [
+        ...prev,
+        {
+          id: `${Date.now()}-assistant`,
+          role: 'assistant',
+          content: summary,
+          query,
+        },
+      ]);
+      setResults(data.results || []);
+      setStats(data.stats || null);
+      completedScreen = true;
+      setHasRun(true);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'AI screener request failed';
+      setError(message);
+      setAiMessages((prev) => [
+        ...prev,
+        {
+          id: `${Date.now()}-assistant-error`,
+          role: 'assistant',
+          content: message,
+          isError: true,
+        },
+      ]);
+      completedScreen = true;
+      setHasRun(true);
+    } finally {
+      setLoading(false);
+      setLoadingLabel('');
+      if (completedScreen) {
+        resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }
+  };
+
   const runScreener = async (options?: {
     queryOverride?: string;
     useBuilder?: boolean;
@@ -256,6 +410,7 @@ const StockScreener: React.FC = () => {
       resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
 
+    let completedScreen = false;
     const payload = useQueryMode
       ? {
           client_id: clientId,
@@ -284,7 +439,7 @@ const StockScreener: React.FC = () => {
 
       const data = await response.json();
       if (!response.ok) {
-        throw new Error(typeof data.detail === 'string' ? data.detail : 'Stock screener request failed');
+        throw new Error(parseApiError(data, 'Stock screener request failed'));
       }
 
       if (data.parsed_query?.rank_by) {
@@ -299,12 +454,19 @@ const StockScreener: React.FC = () => {
 
       setResults(data.results || []);
       setStats(data.stats || null);
+      completedScreen = true;
+      setHasRun(true);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Stock screener request failed';
       setError(message);
+      setHasRun(true);
+      completedScreen = true;
     } finally {
       setLoading(false);
       setLoadingLabel('');
+      if (completedScreen) {
+        resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
     }
   };
 
@@ -402,25 +564,6 @@ const StockScreener: React.FC = () => {
           </div>
         </div>
 
-        <section ref={resultsRef} className="stock-screener-results stock-screener-results-inline">
-          <h3>
-            Top Ranked Results
-            {activePreset ? ` — ${activePreset.title}` : ''}
-          </h3>
-          {loading ? (
-            <div className="stock-screener-loading" role="status" aria-live="polite">
-              <div className="stock-screener-progress-track">
-                <div className="stock-screener-progress-bar" />
-              </div>
-              <p>{loadingLabel || 'Screening stocks with Nepse Alpha…'}</p>
-            </div>
-          ) : results.length === 0 ? (
-            <p className="stock-screener-empty">Pick a quick screen or run a custom query to see ranked stocks.</p>
-          ) : (
-            <CommonTable data={results} columns={displayColumns} columnLinks={symbolColumnLinks} />
-          )}
-        </section>
-
         <div className="stock-screener-mode-tabs">
           <button
             type="button"
@@ -436,17 +579,72 @@ const StockScreener: React.FC = () => {
           >
             SQL-like Query
           </button>
+          <button
+            type="button"
+            className={inputMode === 'ai' ? 'active' : ''}
+            onClick={() => setInputMode('ai')}
+          >
+            Talk to AI
+          </button>
         </div>
 
-        {inputMode === 'query' ? (
+        {inputMode === 'ai' ? (
+          <div className="stock-screener-ai-chat-panel">
+            <p className="stock-screener-ai-chat-desc">
+              Describe your screen in plain English. Nemotron builds a strict query on the server
+              (validated against live field keys), runs it, and shows results below.
+            </p>
+            {aiMessages.length > 0 && (
+              <div className="stock-screener-ai-chat-log" aria-live="polite">
+                {aiMessages.map((message) => (
+                  <div
+                    key={message.id}
+                    className={`stock-screener-ai-chat-message ${message.role}${message.isError ? ' error' : ''}`}
+                  >
+                    <span className="stock-screener-ai-chat-role">
+                      {message.role === 'user' ? 'You' : 'AI'}
+                    </span>
+                    <p className="stock-screener-ai-chat-text">{message.content}</p>
+                    {message.query && (
+                      <pre className="stock-screener-ai-chat-query">{message.query}</pre>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+            <label htmlFor="screener-ai-input">What do you want to screen?</label>
+            <textarea
+              id="screener-ai-input"
+              className="stock-screener-query-input"
+              rows={4}
+              value={aiInput}
+              onChange={(e) => setAiInput(e.target.value)}
+              placeholder="e.g. Show top 25 stocks with RSI between 30 and 45, PE under 30, and bullish MACD, ranked by alpha"
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                  e.preventDefault();
+                  void runAiScreener();
+                }
+              }}
+            />
+            <p className="stock-screener-query-help">
+              Press <kbd>Ctrl</kbd>+<kbd>Enter</kbd> or use the button below. Only columns from the live Nepse Alpha API are allowed.
+            </p>
+            <label className="stock-screener-checkbox">
+              <input type="checkbox" checked={forceRefresh} onChange={(e) => setForceRefresh(e.target.checked)} />
+              Bypass cache
+            </label>
+          </div>
+        ) : inputMode === 'query' ? (
           <>
             <div className="stock-screener-ai-prompt-panel">
               <div className="stock-screener-prompt-header">
                 <div>
                   <h4>ChatGPT / AI assistant prompt</h4>
                   <p className="stock-screener-ai-prompt-desc">
-                    Copy this into ChatGPT (or any AI). It lists every filterable stock field,
-                    operators, syntax rules, and examples so the AI can write a valid screener query for you.
+                    Copy this into ChatGPT (or any AI). It embeds the live field catalog from
+                    <code> /stock_screener/fields</code> — every column key, label, type, operator, and alias.
+                    The AI must return <code>STATUS: ERROR</code> if you ask for a column that is not in the API.
                   </p>
                 </div>
                 <div className="stock-screener-prompt-actions">
@@ -643,13 +841,64 @@ const StockScreener: React.FC = () => {
             type="button"
             className="btn-primary"
             disabled={loading}
-            onClick={() => void runScreener()}
+            onClick={() => {
+              if (inputMode === 'ai') {
+                void runAiScreener();
+                return;
+              }
+              void runScreener();
+            }}
           >
-            {loading ? 'Screening…' : inputMode === 'query' ? 'Run Query' : 'Run Screener'}
+            {loading
+              ? 'Screening…'
+              : inputMode === 'ai'
+                ? 'Ask AI & Screen'
+                : inputMode === 'query'
+                  ? 'Run Query'
+                  : 'Run Screener'}
           </button>
         </div>
 
-        {error && <ErrorMessage message={error} />}
+        {error && !hasRun && <ErrorMessage message={error} variant="error" persistent />}
+
+        {(loading || hasRun) && (
+          <section ref={resultsRef} className="stock-screener-results stock-screener-results-below-run">
+            <h3>
+              Top Ranked Results
+              {activePreset ? ` — ${activePreset.title}` : ''}
+            </h3>
+            {inputMode === 'ai' && generatedQuery && (
+              <div className="stock-screener-generated-query">
+                <span className="stock-screener-prompt-query-label">AI-generated query (strictly validated)</span>
+                {aiSummary && <p className="stock-screener-ai-summary">{aiSummary}</p>}
+                <pre>{generatedQuery}</pre>
+              </div>
+            )}
+            {loading ? (
+              <div className="stock-screener-loading" role="status" aria-live="polite">
+                <div className="stock-screener-progress-track">
+                  <div className="stock-screener-progress-bar" />
+                </div>
+                <p>{loadingLabel || 'Screening stocks with Nepse Alpha…'}</p>
+              </div>
+            ) : error && hasRun ? (
+              <div className="stock-screener-result-message">
+                <ErrorMessage message={error} variant="error" persistent />
+              </div>
+            ) : results.length === 0 ? (
+              <div className="stock-screener-result-message" role="status">
+                <p className="stock-screener-no-records">No records found</p>
+                <p className="stock-screener-empty-meta">
+                  {stats
+                    ? `Scanned ${stats.requested} symbols · ${stats.loaded} loaded · ${stats.matched} matched your filters`
+                    : 'No stocks matched your filters. Try relaxing conditions or pick another quick screen.'}
+                </p>
+              </div>
+            ) : (
+              <CommonTable data={results} columns={displayColumns} columnLinks={symbolColumnLinks} />
+            )}
+          </section>
+        )}
       </section>
     </div>
   );

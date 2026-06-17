@@ -5,14 +5,11 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from utils.external_data_sources.nepse_alpha.screener import FIELD_CATALOG
+from utils.external_data_sources.nepse_alpha.screener import VALID_FILTER_KEYS, build_field_aliases
 from utils.strategies.helpers import safe_number
 
-VALID_FIELDS = {item["key"] for item in FIELD_CATALOG}
-FIELD_ALIASES = {item["key"].lower(): item["key"] for item in FIELD_CATALOG}
-for item in FIELD_CATALOG:
-    label = re.sub(r"[^a-z0-9]+", "_", item["label"].lower()).strip("_")
-    FIELD_ALIASES.setdefault(label, item["key"])
+VALID_FIELDS = VALID_FILTER_KEYS
+FIELD_ALIASES = build_field_aliases()
 
 
 class ScreenerQueryError(ValueError):

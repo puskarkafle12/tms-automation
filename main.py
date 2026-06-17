@@ -24,6 +24,7 @@ from schemas.schemas import (
     LoginRequest,
     OrderCreateRequest,
     StockGrabberRequest,
+    StockScreenerAiRequest,
     StockScreenerRequest,
     TmsAccountCreate,
     TmsAccountUpdate,
@@ -52,8 +53,9 @@ from utils.market_status import (
     parse_session_check_response,
 )
 import config.tms_config as tms_config
+from utils.external_data_sources.nepse_alpha.ai_query import ScreenerAiError, generate_and_validate_screener_query
 from utils.external_data_sources.nepse_alpha.query_parser import ScreenerQueryError, parse_screener_query
-from utils.external_data_sources.nepse_alpha.screener import get_field_catalog, run_stock_screener
+from utils.external_data_sources.nepse_alpha.screener import get_field_catalog, get_screener_query_spec, run_stock_screener
 
 app = FastAPI(debug=True)
 SECRET_KEY = "your_secret_key_here"
@@ -1361,7 +1363,35 @@ async def get_script_details(client_id: str, db: Session = Depends(get_db)):
 
 @app.get("/stock_screener/fields")
 async def stock_screener_fields():
-    return {"fields": get_field_catalog(), "cache_ttl_seconds": 300}
+    return {
+        "fields": get_field_catalog(),
+        "cache_ttl_seconds": 300,
+        "query_spec": get_screener_query_spec(),
+    }
+
+
+async def _resolve_screener_symbols(client_id: Optional[str], symbols: Optional[List[str]], db: Session) -> List[str]:
+    resolved = [symbol.strip().upper() for symbol in (symbols or []) if symbol and symbol.strip()]
+
+    if client_id:
+        user = db.query(User).filter(User.client_id == client_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        try:
+            tms_user = await get_cached_tms_user(user)
+            securities = await tms_user.get_securities()
+            resolved = sorted({
+                str(item.get("symbol") or "").strip().upper()
+                for item in securities
+                if str(item.get("symbol") or "").strip()
+            })
+        except LoginFailedException as e:
+            await invalidate_cached_tms_user(client_id)
+            raise HTTPException(status_code=401, detail=str(e)) from e
+
+    if not resolved:
+        raise HTTPException(status_code=400, detail="Provide client_id or a non-empty symbols list")
+    return resolved
 
 
 @app.post("/stock_screener/parse")
@@ -1377,26 +1407,7 @@ async def stock_screener_parse(body: StockScreenerRequest):
 
 @app.post("/stock_screener/screen")
 async def stock_screener_screen(body: StockScreenerRequest, db: Session = Depends(get_db)):
-    symbols = [symbol.strip().upper() for symbol in (body.symbols or []) if symbol and symbol.strip()]
-
-    if body.client_id:
-        user = db.query(User).filter(User.client_id == body.client_id).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-        try:
-            tms_user = await get_cached_tms_user(user)
-            securities = await tms_user.get_securities()
-            symbols = sorted({
-                str(item.get("symbol") or "").strip().upper()
-                for item in securities
-                if str(item.get("symbol") or "").strip()
-            })
-        except LoginFailedException as e:
-            await invalidate_cached_tms_user(body.client_id)
-            raise HTTPException(status_code=401, detail=str(e))
-
-    if not symbols:
-        raise HTTPException(status_code=400, detail="Provide client_id or a non-empty symbols list")
+    symbols = await _resolve_screener_symbols(body.client_id, body.symbols, db)
 
     filters = [item.model_dump() for item in body.filters]
     rank_by = body.rank_by
@@ -1428,6 +1439,48 @@ async def stock_screener_screen(body: StockScreenerRequest, db: Session = Depend
 
     if parsed_query:
         payload["parsed_query"] = parsed_query
+    return payload
+
+
+@app.post("/stock_screener/ai_screen")
+async def stock_screener_ai_screen(body: StockScreenerAiRequest, db: Session = Depends(get_db)):
+    message = (body.message or "").strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="Message is required")
+
+    symbols = await _resolve_screener_symbols(body.client_id, body.symbols, db)
+
+    try:
+        ai_payload = await asyncio.to_thread(generate_and_validate_screener_query, message)
+    except ScreenerAiError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": str(exc),
+                "ai_status": exc.status,
+                "generated_query": exc.generated_query,
+            },
+        ) from exc
+
+    parsed_query = ai_payload["parsed_query"]
+    try:
+        payload = await run_stock_screener(
+            symbols,
+            parsed_query["filters"],
+            rank_by=parsed_query["rank_by"],
+            rank_direction=parsed_query["rank_direction"],
+            limit=parsed_query["limit"],
+            force_refresh=body.force_refresh,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    payload.update({
+        "ai_status": ai_payload["ai_status"],
+        "ai_summary": ai_payload["ai_summary"],
+        "generated_query": ai_payload["generated_query"],
+        "parsed_query": parsed_query,
+    })
     return payload
 
 

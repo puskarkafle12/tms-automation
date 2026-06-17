@@ -222,8 +222,102 @@
   letter-spacing: 0.04em;
 }
 
+.stock-screener-ai-chat-panel {
+  display: grid;
+  gap: 0.65rem;
+  margin-bottom: 0.5rem;
+}
+
+.stock-screener-ai-chat-desc {
+  margin: 0;
+  font-size: 0.88rem;
+  color: var(--color-text-muted);
+}
+
+.stock-screener-ai-chat-log {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  max-height: 280px;
+  overflow-y: auto;
+  padding: 0.75rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.stock-screener-ai-chat-message {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.stock-screener-ai-chat-message.user .stock-screener-ai-chat-text {
+  background: #e0f2fe;
+}
+
+.stock-screener-ai-chat-message.assistant .stock-screener-ai-chat-text {
+  background: #fff;
+}
+
+.stock-screener-ai-chat-message.error .stock-screener-ai-chat-text {
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+.stock-screener-ai-chat-role {
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted);
+}
+
+.stock-screener-ai-chat-text {
+  margin: 0;
+  padding: 0.55rem 0.7rem;
+  border-radius: 8px;
+  font-size: 0.88rem;
+  white-space: pre-wrap;
+}
+
+.stock-screener-ai-chat-query {
+  margin: 0;
+  padding: 0.55rem 0.7rem;
+  border-radius: 8px;
+  background: #0f172a;
+  color: #e2e8f0;
+  font-size: 0.78rem;
+  overflow-x: auto;
+}
+
+.stock-screener-generated-query {
+  margin-bottom: 0.85rem;
+  padding: 0.75rem;
+  border: 1px solid #dbeafe;
+  border-radius: 10px;
+  background: #f8fbff;
+}
+
+.stock-screener-generated-query pre {
+  margin: 0.35rem 0 0;
+  padding: 0.65rem;
+  border-radius: 8px;
+  background: #0f172a;
+  color: #e2e8f0;
+  font-size: 0.78rem;
+  overflow-x: auto;
+}
+
+.stock-screener-ai-summary {
+  margin: 0.35rem 0 0;
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+  white-space: pre-wrap;
+}
+
 .stock-screener-mode-tabs {
   display: inline-flex;
+  flex-wrap: wrap;
   gap: 0.35rem;
   margin-bottom: 1rem;
   padding: 0.25rem;
@@ -292,7 +386,8 @@
 
 .stock-screener-results {
   padding: 1rem 0 0.25rem;
-  margin-bottom: 1rem;
+  margin-top: 1rem;
+  margin-bottom: 0.25rem;
   border-top: 1px solid #e2e8f0;
 }
 
@@ -301,6 +396,7 @@
   font-size: 1rem;
 }
 
+.stock-screener-results-below-run,
 .stock-screener-results-inline {
   scroll-margin-top: 1rem;
 }
@@ -343,11 +439,30 @@
 .stock-screener-actions {
   display: flex;
   justify-content: flex-start;
+  margin-top: 0.25rem;
 }
 
 .stock-screener-empty {
   margin: 0.5rem 0 0;
   color: var(--color-text-muted);
+}
+
+.stock-screener-result-message {
+  padding: 0.5rem 0 1rem;
+}
+
+.stock-screener-no-records {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 800;
+  color: #0f172a;
+}
+
+.stock-screener-empty-meta {
+  margin: 0.45rem 0 0;
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+  line-height: 1.45;
 }
 
 .stock-screener-loading {

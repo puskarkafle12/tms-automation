@@ -154,10 +154,102 @@ FIELD_CATALOG: List[Dict[str, Any]] = [
 NUMERIC_OPERATORS = ["gt", "gte", "lt", "lte", "eq", "neq", "between"]
 TEXT_OPERATORS = ["eq", "neq", "contains", "in"]
 
+# Colloquial names users/AI may use — mapped only when the canonical key exists in FIELD_CATALOG.
+COLLOQUIAL_FIELD_ALIASES: Dict[str, str] = {
+    "pe": "fundamental_pe_ttm",
+    "pe_ratio": "fundamental_pe_ttm",
+    "pbv": "fundamental_pbv",
+    "pb_ratio": "fundamental_pbv",
+    "roe": "fundamental_roe_ttm",
+    "roa": "fundamental_roa_ttm",
+    "rsi": "technical_rsi_14",
+    "mfi": "technical_mfi_14",
+    "macd": "technical_macd",
+    "beta": "beta_3_month",
+    "sharpe": "sharpe_ratio_annualized",
+    "sharpe_ratio": "sharpe_ratio_annualized",
+    "alpha": "alpha_annualized",
+    "volatility": "volatility_50d",
+    "ltp_price": "ltp",
+    "price": "ltp",
+    "dividend_yield": "fundamental_dividend_yield",
+    "debt_equity": "fundamental_debt_to_equity",
+    "peg": "fundamental_peg_3_5_yrs",
+}
+
+VALID_FILTER_KEYS = {item["key"] for item in FIELD_CATALOG}
+NON_FILTERABLE_RESULT_COLUMNS = ["rank", "symbol", "cached", "fetched_at"]
+
+# Finance terms that are NOT available in the Nepse Alpha screener API (reject if user asks).
+UNSUPPORTED_USER_TERMS = [
+    "market_cap",
+    "marketcap",
+    "market capitalization",
+    "sector",
+    "sector_high",
+    "sector_low",
+    "eps",
+    "earnings_per_share",
+    "company_name",
+    "name",
+    "ticker",
+    "volume",
+    "turnover",
+    "open",
+    "high",
+    "low",
+    "close",
+    "ohlc",
+    "news",
+    "float",
+    "shares_outstanding",
+]
+
+
+def build_field_aliases() -> Dict[str, str]:
+    """Lowercase alias -> canonical field key (used by query parser and AI prompt)."""
+    aliases: Dict[str, str] = {}
+    for item in FIELD_CATALOG:
+        key = item["key"]
+        aliases[key.lower()] = key
+        label = re.sub(r"[^a-z0-9]+", "_", item["label"].lower()).strip("_")
+        if label:
+            aliases.setdefault(label, key)
+    for alias, key in COLLOQUIAL_FIELD_ALIASES.items():
+        if key in VALID_FILTER_KEYS:
+            aliases.setdefault(alias.lower(), key)
+    return aliases
+
 
 def get_field_catalog() -> List[Dict[str, Any]]:
     catalog = [dict(item, operators=NUMERIC_OPERATORS if item["type"] == "number" else TEXT_OPERATORS) for item in FIELD_CATALOG]
     return catalog
+
+
+def get_screener_query_spec() -> Dict[str, Any]:
+    """Metadata for SQL-like query UI and ChatGPT prompt generation."""
+    catalog = get_field_catalog()
+    keys = [item["key"] for item in catalog]
+    alias_map = build_field_aliases()
+    aliases_by_key: Dict[str, List[str]] = {key: [] for key in keys}
+    for alias, canonical in sorted(alias_map.items()):
+        if canonical in aliases_by_key and alias != canonical.lower():
+            aliases_by_key[canonical].append(alias)
+
+    return {
+        "allowed_filter_keys": keys,
+        "result_columns": ["rank", "symbol", *keys],
+        "non_filterable_columns": list(NON_FILTERABLE_RESULT_COLUMNS),
+        "unsupported_user_terms": list(UNSUPPORTED_USER_TERMS),
+        "numeric_operators": list(NUMERIC_OPERATORS),
+        "text_operators": list(TEXT_OPERATORS),
+        "field_aliases": aliases_by_key,
+        "alias_map": alias_map,
+        "limit_default": 25,
+        "limit_max": 500,
+        "default_rank_by": "alpha_annualized",
+        "default_rank_direction": "desc",
+    }
 
 
 def _coerce_filter_value(raw: Any) -> Any:

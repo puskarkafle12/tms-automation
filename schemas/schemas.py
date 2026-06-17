@@ -91,3 +91,10 @@ class StockScreenerRequest(BaseModel):
     rank_direction: str = "desc"
     limit: int = 50
     force_refresh: bool = False
+
+
+class StockScreenerAiRequest(BaseModel):
+    client_id: Optional[str] = None
+    symbols: Optional[List[str]] = None
+    message: str
+    force_refresh: bool = False

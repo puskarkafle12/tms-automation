@@ -31,6 +31,17 @@ class TestNepseAlphaScreener(unittest.TestCase):
         pe = next(item for item in catalog if item["key"] == "fundamental_pe_ttm")
         self.assertIn("gte", pe["operators"])
 
+    def test_query_spec_matches_catalog(self):
+        from utils.external_data_sources.nepse_alpha.screener import get_screener_query_spec
+
+        catalog = get_field_catalog()
+        spec = get_screener_query_spec()
+        catalog_keys = {item["key"] for item in catalog}
+        self.assertEqual(set(spec["allowed_filter_keys"]), catalog_keys)
+        self.assertIn("fundamental_pe_ttm", spec["alias_map"]["pe"])
+        self.assertIn("symbol", spec["non_filterable_columns"])
+        self.assertIn("market_cap", spec["unsupported_user_terms"])
+
     def test_numeric_filter_match(self):
         self.assertTrue(record_matches_filters(self.record, [{"field": "beta_3_month", "operator": "gte", "value": 1.0}]))
         self.assertFalse(record_matches_filters(self.record, [{"field": "beta_3_month", "operator": "gt", "value": 2.0}]))
