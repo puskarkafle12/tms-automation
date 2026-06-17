@@ -14,6 +14,7 @@ import {
   offsetNepalDate,
   todayNepalDate,
 } from '../../utils/nepalTime';
+import { formatStrategyLabel } from '../../lib/strategies';
 
 type OrderTab = 'logs' | 'scheduled' | 'book' | 'history';
 type HistoryRangePreset = 'week' | 'month' | 'custom' | 'forever';
@@ -128,13 +129,6 @@ const getVisibleColumns = (rows: any[], baseColumns: string[], optionalColumns: 
   ...optionalColumns.filter((column) => rows.some((row) => isRealValue(row[column]))),
 ];
 
-const toTitleCase = (value: string) =>
-  value
-    .replace(/_/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .replace(/\b\w/g, (char) => char.toUpperCase());
-
 const getOrderSide = (order: Partial<ScheduledOrderRow> | any): 'BUY' | 'SELL' | 'UNKNOWN' => {
   const side = String(order.side || order.order_type || '').toUpperCase();
   if (side === 'BUY' || side === 'SELL') return side;
@@ -142,14 +136,8 @@ const getOrderSide = (order: Partial<ScheduledOrderRow> | any): 'BUY' | 'SELL' |
 };
 
 const formatStrategyType = (strategy: unknown, sideValue: unknown): string => {
-  const side = String(sideValue || '').toUpperCase();
-  const raw = String(strategy || '').trim();
-  if (!raw || raw === 'Fixed Price') {
-    if (side === 'BUY') return 'Fixed Price Buy';
-    if (side === 'SELL') return 'Fixed Price Sell';
-    return 'Fixed Price';
-  }
-  return toTitleCase(raw);
+  const side = String(sideValue || '').toLowerCase();
+  return formatStrategyLabel(String(strategy || ''), side);
 };
 
 const formatDateTime = (value: string | null | undefined) => {
@@ -205,51 +193,36 @@ const getStrategyDetails = (order: ScheduledOrderRow) => {
     addDetail(details, 'Buy Price', order.price, formatCurrency);
   } else if (strategy === 'Fixed Price Sell') {
     addDetail(details, 'Sell Price', order.price, formatCurrency);
-  } else if (strategy === 'Buy Below Price' || strategy === 'Dip Buy') {
+  } else if (strategy === 'Smart Pullback Buy' || strategy === 'Confirmed Breakout Buy') {
     addDetail(details, 'Trigger Buy Price', order.price, formatCurrency);
-  } else if (strategy === 'Breakout Buy') {
-    addDetail(details, 'Breakout Trigger Price', order.price, formatCurrency);
-    addDetail(details, 'Confirmation Checks', order.consecutive_drop_checks);
+  } else if (strategy === 'Quality Pullback Recovery Buy' || strategy === 'Mean Reversion Bounce Buy' || strategy === 'Order Book Strength Buy') {
+    addDetail(details, 'Reference Price', order.price, formatCurrency);
+    addDetail(details, 'Min Buy Score', (order as any).strategy_config?.min_buy_score);
   } else if (strategy === 'Time-Based Buy') {
     addDetail(details, 'Buy Price', order.price, formatCurrency);
+    addDetail(details, 'Wrapped Strategy', (order as any).strategy_config?.wrapped_strategy_type);
     addDetail(details, 'Expiry Time', order.expiry_time, formatDateTime);
     addDetail(details, 'Expiry Action', order.expiry_action);
-  } else if (strategy === 'Fast Stop Loss') {
+  } else if (strategy === 'Capital Protection Sell') {
     addDetail(details, 'Stop Loss Price', order.stop_loss_price, formatCurrency);
+    addDetail(details, 'Average Buy Price', order.average_buy_price, formatCurrency);
+    addDetail(details, 'Break-even Trigger %', (order as any).strategy_config?.break_even_trigger_pct, formatPercent);
     addDetail(details, 'Max Allowed Slippage', order.max_allowed_slippage_percent, formatPercent);
-    addDetail(details, 'Execution Rule', 'Use Top Buy if available, otherwise latest LTP.');
-  } else if (strategy === 'Stop Limit Sell') {
-    addDetail(details, 'Stop Trigger', order.stop_loss_price, formatCurrency);
-    addDetail(details, 'Minimum Sell Price', order.stop_limit_price, formatCurrency);
-  } else if (strategy === 'Trailing Stop Loss') {
+  } else if (strategy === 'Trailing Runner Sell') {
     addDetail(details, 'Activation Price', order.activation_price, formatCurrency);
     addDetail(details, 'Highest Tracked Price', order.highest_tracked_price, formatCurrency);
     addDetail(details, 'Trailing Drop', order.trailing_drop_percent, formatPercent);
-  } else if (strategy === 'Smart Profit Booking') {
+  } else if (strategy === 'Profit Ladder Sell') {
     addDetail(details, 'Profit Target', order.profit_target_price, formatCurrency);
     addDetail(details, 'Highest Tracked Price', order.highest_tracked_price, formatCurrency);
-    addDetail(details, 'Minimum Wait Time', order.minimum_wait_minutes ? `${order.minimum_wait_minutes} minutes` : '');
     addDetail(details, 'Trailing Drop', order.trailing_drop_percent, formatPercent);
-    addDetail(details, 'Stable Band', order.stable_band_percent, formatPercent);
-    addDetail(details, 'Target Reached At', order.target_reached_at, formatDateTime);
-  } else if (strategy === 'Book Profit + Stop Loss') {
-    addDetail(details, 'Book Profit Target', order.book_profit_price, formatCurrency);
-    addDetail(details, 'Stop Loss Price', order.stop_loss_price, formatCurrency);
-    addDetail(details, 'Highest Tracked Price', order.highest_tracked_price, formatCurrency);
-  } else if (strategy === 'Partial Profit Booking') {
-    addDetail(details, 'Highest Tracked Price', order.highest_tracked_price, formatCurrency);
-    addDetail(details, 'Trailing Drop', order.trailing_drop_percent, formatPercent);
-  } else if (strategy === 'Break-Even Protection') {
-    addDetail(details, 'Average Buy Price', order.average_buy_price, formatCurrency);
-    addDetail(details, 'Activation Price', order.activation_price, formatCurrency);
-    addDetail(details, 'Highest Tracked Price', order.highest_tracked_price, formatCurrency);
-    addDetail(details, 'Trailing Drop', order.trailing_drop_percent, formatPercent);
+  } else if (strategy === 'Technical Weakness Sell') {
+    addDetail(details, 'Execution Rule', 'Sell when Nepse Alpha technicals and live price both weaken.');
   } else if (strategy === 'Time-Based Exit') {
-    addDetail(details, 'Target Price', order.profit_target_price, formatCurrency);
     addDetail(details, 'Stop Loss Price', order.stop_loss_price, formatCurrency);
     addDetail(details, 'Expiry Time', order.expiry_time, formatDateTime);
     addDetail(details, 'Expiry Action', order.expiry_action);
-  } else if (strategy === 'Emergency Exit') {
+  } else if (strategy === 'Emergency Exit by Top Buyer') {
     addDetail(details, 'Execution Rule', 'Sell immediately using Top Buy if available.');
     addDetail(details, 'Max Allowed Slippage', order.max_allowed_slippage_percent, formatPercent);
   }

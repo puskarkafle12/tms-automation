@@ -24,6 +24,7 @@ from schemas.schemas import (
     LoginRequest,
     OrderCreateRequest,
     StockGrabberRequest,
+    StockScreenerRequest,
     TmsAccountCreate,
     TmsAccountUpdate,
     UserLogin,
@@ -51,6 +52,8 @@ from utils.market_status import (
     parse_session_check_response,
 )
 import config.tms_config as tms_config
+from utils.external_data_sources.nepse_alpha.query_parser import ScreenerQueryError, parse_screener_query
+from utils.external_data_sources.nepse_alpha.screener import get_field_catalog, run_stock_screener
 
 app = FastAPI(debug=True)
 SECRET_KEY = "your_secret_key_here"
@@ -638,7 +641,11 @@ def _serialize_scheduled_order(order: ScheduledOrder) -> dict:
 
 
 def _validate_strategy_order(order_data: OrderCreateRequest) -> None:
+    from utils.strategies.aliases import canonical_strategy_name
+
     strategy = (order_data.strategy_type or "Fixed Price").strip()
+    canonical = canonical_strategy_name(strategy, order_data.order_type or "buy")
+    side = (order_data.order_type or "buy").lower()
     security_details = order_data.security_details or {}
     odd_lot_allowed = bool(security_details.get("odd_lot_allowed") or security_details.get("oddLotAllowed"))
     lot_size = get_board_lot_size(security_details)
@@ -656,30 +663,32 @@ def _validate_strategy_order(order_data: OrderCreateRequest) -> None:
                 status_code=400,
                 detail=f"Amount is not enough to buy minimum board lot of {lot_size} kitta.",
             )
-        if strategy in {"Fixed Price", "Fixed Price Buy", "Buy Below Price", "Breakout Buy", "Dip Buy"} and order_data.price <= 0:
+        buy_needs_price = {
+            "Fixed Price Buy",
+            "Smart Pullback Buy",
+            "Confirmed Breakout Buy",
+            "Buy Below Price",
+            "Dip Buy",
+            "Breakout Buy",
+        }
+        if canonical in buy_needs_price and order_data.price <= 0:
             raise HTTPException(status_code=400, detail="Buy trigger price must be greater than zero.")
-        if strategy == "Time-Based Buy" and not order_data.expiry_time:
+        if canonical == "Time-Based Buy" and not order_data.expiry_time:
             raise HTTPException(status_code=400, detail="Expiry time is required.")
     if order_data.order_type.lower() == "sell":
-        if strategy in {"Fixed Price", "Fixed Price Sell"} and order_data.price <= 0:
+        if canonical == "Fixed Price Sell" and order_data.price <= 0:
             raise HTTPException(status_code=400, detail="Sell price must be greater than zero.")
-        if strategy == "Fast Stop Loss" and not order_data.stop_loss_price:
-            raise HTTPException(status_code=400, detail="Stop-loss trigger price is required.")
+        if canonical == "Capital Protection Sell" and not order_data.stop_loss_price and not order_data.average_buy_price:
+            raise HTTPException(status_code=400, detail="Stop-loss trigger or average buy price is required.")
         if strategy == "Stop Limit Sell" and (not order_data.stop_loss_price or not order_data.stop_limit_price):
             raise HTTPException(status_code=400, detail="Stop trigger and limit price are required.")
-        if strategy == "Trailing Stop Loss" and (order_data.trailing_drop_percent or 0) <= 0:
+        if canonical == "Trailing Runner Sell" and (order_data.trailing_drop_percent or 0) <= 0:
             raise HTTPException(status_code=400, detail="Trailing drop percent must be greater than zero.")
-        if strategy == "Smart Profit Booking" and not order_data.profit_target_price:
-            raise HTTPException(status_code=400, detail="Profit target price is required.")
-        if strategy == "Book Profit + Stop Loss" and (not order_data.book_profit_price or not order_data.stop_loss_price):
-            raise HTTPException(status_code=400, detail="Book profit and stop-loss trigger prices are required.")
-        if strategy == "Partial Profit Booking" and not order_data.partial_legs:
-            raise HTTPException(status_code=400, detail="Partial profit legs are required.")
-        if strategy == "Break-Even Protection" and not order_data.average_buy_price:
-            raise HTTPException(status_code=400, detail="Average buy price is required.")
-        if strategy == "Time-Based Exit" and not order_data.expiry_time:
+        if canonical == "Profit Ladder Sell" and not order_data.partial_legs and not order_data.profit_target_price:
+            raise HTTPException(status_code=400, detail="Profit ladder targets are required.")
+        if canonical == "Time-Based Exit" and not order_data.expiry_time:
             raise HTTPException(status_code=400, detail="Expiry time is required.")
-        if strategy == "Emergency Exit" and not order_data.emergency_execution:
+        if canonical == "Emergency Exit by Top Buyer" and not order_data.emergency_execution:
             raise HTTPException(status_code=400, detail="Emergency exit requires confirmation.")
 
 
@@ -1348,6 +1357,78 @@ async def get_script_details(client_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=401, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/stock_screener/fields")
+async def stock_screener_fields():
+    return {"fields": get_field_catalog(), "cache_ttl_seconds": 300}
+
+
+@app.post("/stock_screener/parse")
+async def stock_screener_parse(body: StockScreenerRequest):
+    if not body.query or not body.query.strip():
+        raise HTTPException(status_code=400, detail="Query text is required")
+    try:
+        parsed = parse_screener_query(body.query)
+    except ScreenerQueryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return parsed
+
+
+@app.post("/stock_screener/screen")
+async def stock_screener_screen(body: StockScreenerRequest, db: Session = Depends(get_db)):
+    symbols = [symbol.strip().upper() for symbol in (body.symbols or []) if symbol and symbol.strip()]
+
+    if body.client_id:
+        user = db.query(User).filter(User.client_id == body.client_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        try:
+            tms_user = await get_cached_tms_user(user)
+            securities = await tms_user.get_securities()
+            symbols = sorted({
+                str(item.get("symbol") or "").strip().upper()
+                for item in securities
+                if str(item.get("symbol") or "").strip()
+            })
+        except LoginFailedException as e:
+            await invalidate_cached_tms_user(body.client_id)
+            raise HTTPException(status_code=401, detail=str(e))
+
+    if not symbols:
+        raise HTTPException(status_code=400, detail="Provide client_id or a non-empty symbols list")
+
+    filters = [item.model_dump() for item in body.filters]
+    rank_by = body.rank_by
+    rank_direction = body.rank_direction
+    limit = body.limit
+    parsed_query = None
+
+    if body.query and body.query.strip():
+        try:
+            parsed_query = parse_screener_query(body.query)
+        except ScreenerQueryError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        filters = parsed_query["filters"]
+        rank_by = parsed_query["rank_by"]
+        rank_direction = parsed_query["rank_direction"]
+        limit = parsed_query["limit"]
+
+    try:
+        payload = await run_stock_screener(
+            symbols,
+            filters,
+            rank_by=rank_by,
+            rank_direction=rank_direction,
+            limit=limit,
+            force_refresh=body.force_refresh,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    if parsed_query:
+        payload["parsed_query"] = parsed_query
+    return payload
 
 
 @app.get("/check_orders/")

@@ -1,6 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import './StrategySellForm.css';
 import {
+  BUY_STRATEGIES,
+  DEFAULT_SMART_STRATEGY,
+  SELL_STRATEGIES,
+} from '../../lib/strategies';
+import {
   StrategyPayload,
   StrategyType,
   nepalDateTimeLocalToIso,
@@ -16,95 +21,24 @@ import { calculateQuantityFromAmount, getOrderEstimate } from '../../utils/order
 import { currentNepalDateTimeLocal } from '../../utils/nepalTime';
 export type { StrategyPayload, StrategyType } from './strategyValidation';
 
-export const STRATEGY_HELP: Record<StrategyType, { helper: string; button: string }> = {
-  'Fixed Price': {
-    helper: '',
-    button: 'Schedule Sell Order',
-  },
-  'Fixed Price Buy': {
-    helper: '',
-    button: 'Schedule Buy Order',
-  },
-  'Buy Below Price': {
-    helper: 'Buy when price falls to or below your trigger.',
-    button: 'Schedule Buy Below',
-  },
-  'Breakout Buy': {
-    helper: 'Buy when price reaches your breakout trigger.',
-    button: 'Schedule Breakout Buy',
-  },
-  'Dip Buy': {
-    helper: 'Buy when price dips to your selected trigger.',
-    button: 'Schedule Dip Buy',
-  },
-  'Time-Based Buy': {
-    helper: 'Keep the buy strategy active until your selected expiry time.',
-    button: 'Schedule Time-Based Buy',
-  },
-  'Fixed Price Sell': {
-    helper: '',
-    button: 'Schedule Sell Order',
-  },
-  'Fast Stop Loss': {
-    helper: 'Sell quickly if price falls below your trigger.',
-    button: 'Schedule Stop Loss',
-  },
-  'Stop Limit Sell': {
-    helper: 'Protect minimum sell price, but order may not execute.',
-    button: 'Schedule Stop Limit',
-  },
-  'Trailing Stop Loss': {
-    helper: 'Track higher price and sell after a pullback.',
-    button: 'Schedule Trailing Stop',
-  },
-  'Smart Profit Booking': {
-    helper: 'Wait at least 5 minutes after target, track highest price, sell on confirmed drop.',
-    button: 'Schedule Profit Booking',
-  },
-  'Book Profit + Stop Loss': {
-    helper: 'Profit target and stop-loss in one strategy. Only one side executes.',
-    button: 'Schedule Strategy Order',
-  },
-  'Partial Profit Booking': {
-    helper: 'Sell in parts and keep remaining quantity running.',
-    button: 'Schedule Partial Profit Strategy',
-  },
-  'Break-Even Protection': {
-    helper: 'After profit starts, protect your original capital.',
-    button: 'Schedule Break-Even Protection',
-  },
-  'Time-Based Exit': {
-    helper: 'Cancel or exit if strategy does not trigger by selected time.',
-    button: 'Schedule Time Exit',
-  },
-  'Emergency Exit': {
-    helper: 'Sell quickly using best buyer price.',
-    button: 'Confirm Emergency Exit',
-  },
+export const STRATEGY_HELP: Record<string, { helper: string; button: string }> = {
+  'Fixed Price Buy': { helper: '', button: 'Schedule Buy Order' },
+  'Quality Pullback Recovery Buy': { helper: 'Buy quality stocks after pullback recovery with score filter.', button: 'Schedule Quality Recovery Buy' },
+  'Confirmed Breakout Buy': { helper: 'Buy when price breaks high with rising scans and volume.', button: 'Schedule Breakout Buy' },
+  'Smart Pullback Buy': { helper: 'Buy after a controlled pullback starts recovering.', button: 'Schedule Smart Pullback Buy' },
+  'Mean Reversion Bounce Buy': { helper: 'Buy mean-reverting setups after bounce confirmation.', button: 'Schedule Mean Reversion Buy' },
+  'Order Book Strength Buy': { helper: 'Buy when top-of-book buy pressure is strong.', button: 'Schedule Order Book Buy' },
+  'Time-Based Buy': { helper: 'Wrap a buy strategy with an expiry time.', button: 'Schedule Time-Based Buy' },
+  'Fixed Price Sell': { helper: '', button: 'Schedule Sell Order' },
+  'Capital Protection Sell': { helper: 'Stop-loss and break-even protection combined.', button: 'Schedule Capital Protection' },
+  'Profit Ladder Sell': { helper: 'Sell partial quantity at target levels.', button: 'Schedule Profit Ladder' },
+  'Trailing Runner Sell': { helper: 'Trail remaining quantity after profit ladder.', button: 'Schedule Trailing Runner' },
+  'Technical Weakness Sell': { helper: 'Exit on technical and live price weakness.', button: 'Schedule Weakness Exit' },
+  'Emergency Exit by Top Buyer': { helper: 'Sell quickly using best buyer price.', button: 'Confirm Emergency Exit' },
+  'Time-Based Exit': { helper: 'Cancel or exit if strategy does not trigger by selected time.', button: 'Schedule Time Exit' },
 };
 
-export const BUY_STRATEGIES: StrategyType[] = [
-  'Fixed Price Buy',
-  'Buy Below Price',
-  'Breakout Buy',
-  'Dip Buy',
-  'Time-Based Buy',
-];
-
-export const SELL_STRATEGIES: StrategyType[] = [
-  'Fixed Price Sell',
-  'Fast Stop Loss',
-  'Stop Limit Sell',
-  'Trailing Stop Loss',
-  'Smart Profit Booking',
-  'Book Profit + Stop Loss',
-  'Partial Profit Booking',
-  'Break-Even Protection',
-  'Time-Based Exit',
-  'Emergency Exit',
-];
-
-export const STRATEGIES = [...BUY_STRATEGIES, ...SELL_STRATEGIES];
+export { BUY_STRATEGIES, SELL_STRATEGIES };
 
 interface Props {
   scriptName?: string;
@@ -154,7 +88,7 @@ const StrategySellForm: React.FC<Props> = ({
   const [stopLimitPrice, setStopLimitPrice] = useState('');
   const [bookProfitPrice, setBookProfitPrice] = useState('');
   const [profitTargetPrice, setProfitTargetPrice] = useState('');
-  const [trailingDropPercent, setTrailingDropPercent] = useState('0.75');
+  const [trailingDropPercent, setTrailingDropPercent] = useState('3');
   const [stableBandPercent, setStableBandPercent] = useState('0.20');
   const [minimumWaitMinutes, setMinimumWaitMinutes] = useState('5');
   const [consecutiveDropChecks, setConsecutiveDropChecks] = useState('2');
@@ -169,6 +103,13 @@ const StrategySellForm: React.FC<Props> = ({
   const [secondPercent, setSecondPercent] = useState('30');
   const [expiryTime, setExpiryTime] = useState('');
   const [expiryAction, setExpiryAction] = useState('Cancel strategy');
+  const [minBuyScore, setMinBuyScore] = useState('65');
+  const [wrappedStrategyType, setWrappedStrategyType] = useState('Quality Pullback Recovery Buy');
+  const [requireFreshTrade, setRequireFreshTrade] = useState(false);
+  const [requireVolumeIncrease, setRequireVolumeIncrease] = useState(false);
+  const [allowMarketDepthFilter, setAllowMarketDepthFilter] = useState(true);
+  const [breakEvenTriggerPct, setBreakEvenTriggerPct] = useState('3');
+  const [allowSplitEmergencyExit, setAllowSplitEmergencyExit] = useState(false);
   const [localError, setLocalError] = useState('');
   const minNepalExpiryTime = currentNepalDateTimeLocal().slice(0, 16);
   const boardLotSize = useMemo(() => getBoardLotSize(securityDetails), [securityDetails]);
@@ -280,6 +221,13 @@ const StrategySellForm: React.FC<Props> = ({
       boardLotSize,
       oddLotAllowed,
       investmentAmount,
+      minBuyScore,
+      wrappedStrategyType,
+      requireFreshTrade,
+      requireVolumeIncrease,
+      allowMarketDepthFilter,
+      breakEvenTriggerPct,
+      allowSplitEmergencyExit,
     });
   }, [
     availableQty,
@@ -305,7 +253,31 @@ const StrategySellForm: React.FC<Props> = ({
     stopLossPrice,
     strategy,
     trailingDropPercent,
+    minBuyScore,
+    wrappedStrategyType,
   ]);
+
+  const applySmartPreset = () => {
+    const preset = DEFAULT_SMART_STRATEGY.strategy_config;
+    if (side === 'buy') {
+      setStrategy(DEFAULT_SMART_STRATEGY.buy);
+      setMinBuyScore(String(preset.min_buy_score));
+      setRequireFreshTrade(true);
+      setRequireVolumeIncrease(true);
+    } else {
+      setStrategy(DEFAULT_SMART_STRATEGY.sell);
+      setStopLossPrice('');
+      setTrailingDropPercent(String(preset.trailing_stop_pct));
+      setBreakEvenTriggerPct(String(preset.break_even_trigger_pct));
+      setFirstPercent(String(preset.target1_sell_pct));
+      setSecondPercent(String(preset.target2_sell_pct));
+      if (averageBuyPrice) {
+        const entry = Number(averageBuyPrice);
+        setFirstTarget(String((entry * (1 + preset.target1_pct / 100)).toFixed(2)));
+        setSecondTarget(String((entry * (1 + preset.target2_pct / 100)).toFixed(2)));
+      }
+    }
+  };
 
   useEffect(() => {
     if (quantityMode === 'amount') {
@@ -326,43 +298,47 @@ const StrategySellForm: React.FC<Props> = ({
       strategy_type: strategy,
       price: fallbackPrice,
       qty: parsedQty,
-      status: strategy === 'Fixed Price' || strategy === 'Fixed Price Buy' || strategy === 'Fixed Price Sell' ? 'pending' : 'Waiting',
+      status: strategy === 'Fixed Price Buy' || strategy === 'Fixed Price Sell' ? 'pending' : 'Waiting',
       max_allowed_slippage_percent: Number(maxSlippage) || 1,
-      emergency_execution: emergencyExecution || strategy === 'Emergency Exit',
+      emergency_execution: emergencyExecution || strategy === 'Emergency Exit by Top Buyer',
       odd_lot_allowed: oddLotAllowed,
+      strategy_config: {
+        min_buy_score: Number(minBuyScore) || 65,
+        wrapped_strategy_type: wrappedStrategyType,
+        require_fresh_trade: requireFreshTrade,
+        require_volume_increase: requireVolumeIncrease,
+        allow_market_depth_filter: allowMarketDepthFilter,
+        break_even_trigger_pct: Number(breakEvenTriggerPct) || 3,
+        trailing_stop_pct: Number(trailingDropPercent) || 3,
+        target1_sell_pct: Number(firstPercent) || 30,
+        target2_sell_pct: Number(secondPercent) || 30,
+        allow_split_emergency_exit: allowSplitEmergencyExit,
+      },
     };
-    if (strategy === 'Fast Stop Loss' || strategy === 'Stop Limit Sell' || strategy === 'Book Profit + Stop Loss') {
-      payload.stop_loss_price = Number(stopLossPrice);
+    if (strategy === 'Capital Protection Sell' || strategy === 'Time-Based Exit') {
+      payload.stop_loss_price = Number(stopLossPrice) || undefined;
+      payload.average_buy_price = Number(averagePrice) || averageBuyPrice || undefined;
     }
-    if (strategy === 'Stop Limit Sell') payload.stop_limit_price = Number(stopLimitPrice);
-    if (strategy === 'Trailing Stop Loss') {
+    if (strategy === 'Trailing Runner Sell') {
       payload.trailing_drop_percent = Number(trailingDropPercent);
       if (activationPrice) payload.activation_price = Number(activationPrice);
     }
-    if (strategy === 'Smart Profit Booking') payload.profit_target_price = Number(profitTargetPrice);
-    if (strategy === 'Book Profit + Stop Loss') payload.book_profit_price = Number(bookProfitPrice);
-    if (strategy === 'Smart Profit Booking' || strategy === 'Book Profit + Stop Loss') {
-      payload.trailing_drop_percent = Number(trailingDropPercent);
-      payload.stable_band_percent = Number(stableBandPercent);
-      payload.minimum_wait_minutes = Math.max(5, Number(minimumWaitMinutes) || 5);
-      payload.consecutive_drop_checks = Number(consecutiveDropChecks) || 2;
-    }
-    if (strategy === 'Partial Profit Booking') {
+    if (strategy === 'Profit Ladder Sell') {
       payload.trailing_drop_percent = Number(trailingDropPercent);
       payload.partial_legs = [
         { id: 'first', targetPrice: Number(firstTarget), sellPercent: Number(firstPercent) },
         { id: 'second', targetPrice: Number(secondTarget), sellPercent: Number(secondPercent) },
       ];
     }
-    if (strategy === 'Break-Even Protection') {
-      payload.average_buy_price = Number(averagePrice);
-      payload.trailing_drop_percent = Number(trailingDropPercent);
-    }
     if (strategy === 'Time-Based Exit' || strategy === 'Time-Based Buy') {
-      payload.profit_target_price = Number(profitTargetPrice || bookProfitPrice || price || 0);
-      payload.stop_loss_price = Number(stopLossPrice || 0);
       payload.expiry_time = nepalDateTimeLocalToIso(expiryTime);
       payload.expiry_action = expiryAction;
+      if (strategy === 'Time-Based Buy') {
+        payload.strategy_config = {
+          ...payload.strategy_config,
+          wrapped_strategy_type: wrappedStrategyType,
+        };
+      }
     }
     await onSubmit(payload);
   };
@@ -398,6 +374,9 @@ const StrategySellForm: React.FC<Props> = ({
             {strategies.map((item) => <option key={item} value={item}>{item}</option>)}
           </select>
         </div>
+        <button type="button" className="btn btn-secondary btn-sm" onClick={applySmartPreset}>
+          Use Default Smart Strategy
+        </button>
       </div>
 
       {(localError || submitError) && <p className="strategy-error" role="alert">{localError || submitError}</p>}
@@ -437,65 +416,51 @@ const StrategySellForm: React.FC<Props> = ({
             </div>
           )}
         </div>
-        {(strategy === 'Fixed Price' || strategy === 'Fixed Price Buy' || strategy === 'Fixed Price Sell' || strategy === 'Buy Below Price' || strategy === 'Breakout Buy' || strategy === 'Dip Buy') && (
+        {(strategy === 'Fixed Price Buy' || strategy === 'Fixed Price Sell' || strategy === 'Smart Pullback Buy' || strategy === 'Confirmed Breakout Buy') && (
           <div className="form-group">
             <label htmlFor="strategyPrice">{side === 'buy' ? 'Buy trigger price' : 'Sell price'}</label>
             <input id="strategyPrice" className="input" type="number" min="0" step="0.1" value={price} onChange={(e) => setPrice(e.target.value)} />
           </div>
         )}
-        {(strategy === 'Fast Stop Loss' || strategy === 'Stop Limit Sell' || strategy === 'Book Profit + Stop Loss' || strategy === 'Time-Based Exit') && (
-          <div className="form-group">
-            <label htmlFor="stopLossPrice">Stop-loss trigger</label>
-            <input id="stopLossPrice" className="input" type="number" min="0" step="0.1" value={stopLossPrice} onChange={(e) => setStopLossPrice(e.target.value)} />
-          </div>
-        )}
-        {strategy === 'Stop Limit Sell' && (
-          <div className="form-group">
-            <label htmlFor="stopLimitPrice">Minimum sell price</label>
-            <input id="stopLimitPrice" className="input" type="number" min="0" step="0.1" value={stopLimitPrice} onChange={(e) => setStopLimitPrice(e.target.value)} />
-          </div>
-        )}
-        {(strategy === 'Smart Profit Booking' || strategy === 'Time-Based Exit') && (
-          <div className="form-group">
-            <label htmlFor="profitTargetPrice">Profit target</label>
-            <input id="profitTargetPrice" className="input" type="number" min="0" step="0.1" value={profitTargetPrice} onChange={(e) => setProfitTargetPrice(e.target.value)} />
-          </div>
-        )}
-        {strategy === 'Book Profit + Stop Loss' && (
-          <div className="form-group">
-            <label htmlFor="bookProfitPrice">Book profit trigger</label>
-            <input id="bookProfitPrice" className="input" type="number" min="0" step="0.1" value={bookProfitPrice} onChange={(e) => setBookProfitPrice(e.target.value)} />
-          </div>
-        )}
-        {(strategy === 'Trailing Stop Loss' || strategy === 'Smart Profit Booking' || strategy === 'Book Profit + Stop Loss' || strategy === 'Partial Profit Booking' || strategy === 'Break-Even Protection') && (
-          <div className="form-group">
-            <label htmlFor="trailingDropPercent">Trailing drop %</label>
-            <input id="trailingDropPercent" className="input" type="number" min="0.1" step="0.05" value={trailingDropPercent} onChange={(e) => setTrailingDropPercent(e.target.value)} />
-          </div>
-        )}
-        {strategy === 'Trailing Stop Loss' && (
-          <div className="form-group">
-            <label htmlFor="activationPrice">Activation price</label>
-            <input id="activationPrice" className="input" type="number" min="0" step="0.1" value={activationPrice} onChange={(e) => setActivationPrice(e.target.value)} placeholder="Optional" />
-          </div>
-        )}
-        {(strategy === 'Smart Profit Booking' || strategy === 'Book Profit + Stop Loss') && (
+        {(strategy === 'Quality Pullback Recovery Buy' || strategy === 'Mean Reversion Bounce Buy' || strategy === 'Order Book Strength Buy') && (
           <>
             <div className="form-group">
-              <label htmlFor="minimumWaitMinutes">Minimum wait minutes</label>
-              <input id="minimumWaitMinutes" className="input" type="number" min="5" value={minimumWaitMinutes} onChange={(e) => setMinimumWaitMinutes(e.target.value)} />
+              <label htmlFor="minBuyScore">Min buy score</label>
+              <input id="minBuyScore" className="input" type="number" min="0" max="100" value={minBuyScore} onChange={(e) => setMinBuyScore(e.target.value)} />
+            </div>
+            <label className="strategy-checkbox">
+              <input type="checkbox" checked={requireFreshTrade} onChange={(e) => setRequireFreshTrade(e.target.checked)} />
+              Require fresh trade data
+            </label>
+            <label className="strategy-checkbox">
+              <input type="checkbox" checked={requireVolumeIncrease} onChange={(e) => setRequireVolumeIncrease(e.target.checked)} />
+              Require volume increase
+            </label>
+            {strategy === 'Order Book Strength Buy' && (
+              <label className="strategy-checkbox">
+                <input type="checkbox" checked={allowMarketDepthFilter} onChange={(e) => setAllowMarketDepthFilter(e.target.checked)} />
+                Allow market depth filter
+              </label>
+            )}
+          </>
+        )}
+        {(strategy === 'Capital Protection Sell' || strategy === 'Time-Based Exit') && (
+          <>
+            <div className="form-group">
+              <label htmlFor="stopLossPrice">Stop-loss trigger</label>
+              <input id="stopLossPrice" className="input" type="number" min="0" step="0.1" value={stopLossPrice} onChange={(e) => setStopLossPrice(e.target.value)} />
             </div>
             <div className="form-group">
-              <label htmlFor="stableBandPercent">Stable band %</label>
-              <input id="stableBandPercent" className="input" type="number" min="0" step="0.05" value={stableBandPercent} onChange={(e) => setStableBandPercent(e.target.value)} />
+              <label htmlFor="averageBuyPrice">Average buy price</label>
+              <input id="averageBuyPrice" className="input" type="number" min="0" step="0.1" value={averagePrice} onChange={(e) => setAveragePrice(e.target.value)} />
             </div>
             <div className="form-group">
-              <label htmlFor="consecutiveDropChecks">Drop checks</label>
-              <input id="consecutiveDropChecks" className="input" type="number" min="1" value={consecutiveDropChecks} onChange={(e) => setConsecutiveDropChecks(e.target.value)} />
+              <label htmlFor="breakEvenTriggerPct">Break-even trigger %</label>
+              <input id="breakEvenTriggerPct" className="input" type="number" min="0" step="0.1" value={breakEvenTriggerPct} onChange={(e) => setBreakEvenTriggerPct(e.target.value)} />
             </div>
           </>
         )}
-        {strategy === 'Partial Profit Booking' && (
+        {strategy === 'Profit Ladder Sell' && (
           <>
             <div className="form-group">
               <label htmlFor="firstTarget">First target</label>
@@ -515,10 +480,26 @@ const StrategySellForm: React.FC<Props> = ({
             </div>
           </>
         )}
-        {strategy === 'Break-Even Protection' && (
+        {strategy === 'Trailing Runner Sell' && (
+          <>
+            <div className="form-group">
+              <label htmlFor="trailingDropPercent">Trailing stop %</label>
+              <input id="trailingDropPercent" className="input" type="number" min="0.1" step="0.05" value={trailingDropPercent} onChange={(e) => setTrailingDropPercent(e.target.value)} />
+            </div>
+            <div className="form-group">
+              <label htmlFor="activationPrice">Activation price</label>
+              <input id="activationPrice" className="input" type="number" min="0" step="0.1" value={activationPrice} onChange={(e) => setActivationPrice(e.target.value)} placeholder="Optional" />
+            </div>
+          </>
+        )}
+        {strategy === 'Time-Based Buy' && (
           <div className="form-group">
-            <label htmlFor="averageBuyPrice">Average buy price</label>
-            <input id="averageBuyPrice" className="input" type="number" min="0" step="0.1" value={averagePrice} onChange={(e) => setAveragePrice(e.target.value)} />
+            <label htmlFor="wrappedStrategyType">Wrapped buy strategy</label>
+            <select id="wrappedStrategyType" className="select" value={wrappedStrategyType} onChange={(e) => setWrappedStrategyType(e.target.value)}>
+              {BUY_STRATEGIES.filter((item) => item !== 'Time-Based Buy').map((item) => (
+                <option key={item} value={item}>{item}</option>
+              ))}
+            </select>
           </div>
         )}
         {(strategy === 'Time-Based Exit' || strategy === 'Time-Based Buy') && (
@@ -537,7 +518,7 @@ const StrategySellForm: React.FC<Props> = ({
             </div>
           </>
         )}
-        {(strategy === 'Fast Stop Loss' || strategy === 'Book Profit + Stop Loss' || strategy === 'Emergency Exit') && (
+        {(strategy === 'Capital Protection Sell' || strategy === 'Emergency Exit by Top Buyer') && (
           <div className="form-group">
             <label htmlFor="maxSlippage">Max slippage %</label>
             <input id="maxSlippage" className="input" type="number" min="0" step="0.1" value={maxSlippage} onChange={(e) => setMaxSlippage(e.target.value)} />
@@ -558,15 +539,21 @@ const StrategySellForm: React.FC<Props> = ({
         </button>
       )}
 
-      {(strategy === 'Fast Stop Loss' || strategy === 'Emergency Exit') && (
+      {(strategy === 'Capital Protection Sell' || strategy === 'Emergency Exit by Top Buyer') && (
         <label className="strategy-checkbox">
-          <input type="checkbox" checked={strategy === 'Emergency Exit' ? emergencyConfirmed : emergencyExecution} onChange={(e) => strategy === 'Emergency Exit' ? setEmergencyConfirmed(e.target.checked) : setEmergencyExecution(e.target.checked)} />
-          {strategy === 'Emergency Exit' ? 'I confirm emergency exit risk.' : 'Allow emergency execution if slippage is high.'}
+          <input type="checkbox" checked={strategy === 'Emergency Exit by Top Buyer' ? emergencyConfirmed : emergencyExecution} onChange={(e) => strategy === 'Emergency Exit by Top Buyer' ? setEmergencyConfirmed(e.target.checked) : setEmergencyExecution(e.target.checked)} />
+          {strategy === 'Emergency Exit by Top Buyer' ? 'I confirm emergency exit risk.' : 'Allow emergency execution if slippage is high.'}
+        </label>
+      )}
+      {strategy === 'Emergency Exit by Top Buyer' && (
+        <label className="strategy-checkbox">
+          <input type="checkbox" checked={allowSplitEmergencyExit} onChange={(e) => setAllowSplitEmergencyExit(e.target.checked)} />
+          Allow split emergency exit across buyer levels
         </label>
       )}
 
       <button type="submit" className="btn btn-primary strategy-submit" disabled={isSubmitting}>
-        {isSubmitting ? 'Scheduling...' : STRATEGY_HELP[strategy].button}
+        {isSubmitting ? 'Scheduling...' : (STRATEGY_HELP[strategy]?.button || 'Schedule Order')}
       </button>
     </form>
   );

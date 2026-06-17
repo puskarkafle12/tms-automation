@@ -118,7 +118,7 @@ const ScheduleOrder: React.FC = () => {
     orderType === 'buy' ? buyScriptRefreshMessage : sellScriptRefreshMessage;
   const chartSymbol = scriptName.trim().toUpperCase();
   const selectedStrategyDescription =
-    selectedStrategy === 'Fixed Price Buy' || selectedStrategy === 'Fixed Price Sell' || selectedStrategy === 'Fixed Price'
+    selectedStrategy === 'Fixed Price Buy' || selectedStrategy === 'Fixed Price Sell'
       ? ''
       : STRATEGY_HELP[selectedStrategy]?.helper || '';
 

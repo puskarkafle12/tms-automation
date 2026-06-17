@@ -52,6 +52,9 @@ class ScheduledOrder(Base):
     below_stop_loss_check_count = Column(Integer, default=0)
     consecutive_drop_count = Column(Integer, default=0)
     runner_lock_id = Column(String)
+    scan_price_history = Column(JSON)
+    scan_volume_history = Column(JSON)
+    strategy_config = Column(JSON)
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
     last_updated = Column(DateTime, default=func.now(), onupdate=func.now())
@@ -95,3 +98,6 @@ class ScheduledOrder(Base):
         self.max_allowed_slippage_percent = order_data.max_allowed_slippage_percent
         self.emergency_execution = order_data.emergency_execution
         self.user_allocation = order_data.user_allocation
+        self.scan_price_history = order_data.scan_price_history
+        self.scan_volume_history = order_data.scan_volume_history
+        self.strategy_config = order_data.strategy_config

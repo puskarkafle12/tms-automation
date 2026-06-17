@@ -1,26 +1,12 @@
 import { normalizeSellQty } from './lotSize';
 import { currentNepalDateTimeLocal } from '../../utils/nepalTime';
+import { StrategyType } from '../../lib/strategies';
 
-export type StrategyType =
-  | 'Fixed Price'
-  | 'Fixed Price Buy'
-  | 'Buy Below Price'
-  | 'Breakout Buy'
-  | 'Dip Buy'
-  | 'Time-Based Buy'
-  | 'Fixed Price Sell'
-  | 'Fast Stop Loss'
-  | 'Stop Limit Sell'
-  | 'Trailing Stop Loss'
-  | 'Smart Profit Booking'
-  | 'Book Profit + Stop Loss'
-  | 'Partial Profit Booking'
-  | 'Break-Even Protection'
-  | 'Time-Based Exit'
-  | 'Emergency Exit';
+export type { StrategyType } from '../../lib/strategies';
+export { BUY_STRATEGIES, SELL_STRATEGIES, formatStrategyLabel } from '../../lib/strategies';
 
 export interface StrategyPayload {
-  strategy_type: StrategyType;
+  strategy_type: StrategyType | string;
   price: number;
   qty: number;
   status: string;
@@ -41,10 +27,11 @@ export interface StrategyPayload {
   max_allowed_slippage_percent?: number;
   emergency_execution?: boolean;
   odd_lot_allowed?: boolean;
+  strategy_config?: Record<string, unknown>;
 }
 
 export interface StrategyFormValues {
-  strategy: StrategyType;
+  strategy: StrategyType | string;
   side: 'buy' | 'sell';
   qty: string;
   price: string;
@@ -67,6 +54,13 @@ export interface StrategyFormValues {
   boardLotSize?: number;
   oddLotAllowed?: boolean;
   investmentAmount?: string;
+  minBuyScore?: string;
+  wrappedStrategyType?: string;
+  requireFreshTrade?: boolean;
+  requireVolumeIncrease?: boolean;
+  allowMarketDepthFilter?: boolean;
+  breakEvenTriggerPct?: string;
+  allowSplitEmergencyExit?: boolean;
 }
 
 export const toPositiveNumber = (value: string) => {
@@ -109,6 +103,7 @@ export const validateStrategyForm = (values: StrategyFormValues): string => {
   const parsedQty = Number.parseInt(values.qty, 10);
   const ltp = Number(values.currentLtp || 0);
   const lotSize = Math.max(1, Number(values.boardLotSize || 10));
+  const strategy = values.strategy;
 
   if (!parsedQty || parsedQty <= 0) {
     if (values.side === 'buy' && values.investmentAmount) {
@@ -135,50 +130,27 @@ export const validateStrategyForm = (values: StrategyFormValues): string => {
     }
   }
   if (
-    (values.strategy === 'Fixed Price' ||
-      values.strategy === 'Fixed Price Buy' ||
-      values.strategy === 'Fixed Price Sell') &&
+    (strategy === 'Fixed Price Buy' || strategy === 'Fixed Price Sell') &&
     !toPositiveNumber(values.price)
   ) {
     return values.side === 'buy' ? 'Buy price is required.' : 'Sell price is required.';
   }
   if (
-    (values.strategy === 'Buy Below Price' ||
-      values.strategy === 'Dip Buy' ||
-      values.strategy === 'Breakout Buy') &&
+    (strategy === 'Smart Pullback Buy' || strategy === 'Confirmed Breakout Buy') &&
     !toPositiveNumber(values.price)
   ) {
     return 'Trigger price is required.';
   }
-  if (values.strategy === 'Fast Stop Loss') {
+  if (strategy === 'Capital Protection Sell') {
     const stop = toPositiveNumber(values.stopLossPrice);
-    if (!stop) return 'Stop-loss trigger price is required.';
-    if (ltp > 0 && stop >= ltp) return 'Stop-loss price must be below current LTP.';
+    const avg = toPositiveNumber(values.averagePrice);
+    if (!stop && !avg) return 'Stop-loss trigger or average buy price is required.';
+    if (stop && ltp > 0 && stop >= ltp) return 'Stop-loss price must be below current LTP.';
   }
-  if (values.strategy === 'Stop Limit Sell') {
-    const stop = toPositiveNumber(values.stopLossPrice);
-    const limit = toPositiveNumber(values.stopLimitPrice);
-    if (!stop || !limit) return 'Stop trigger and limit price are required.';
-    if (ltp > 0 && stop >= ltp) return 'Stop trigger must be below current LTP.';
-    if (limit > stop) return 'Limit price must be at or below stop trigger.';
-  }
-  if (values.strategy === 'Trailing Stop Loss' && !toPositiveNumber(values.trailingDropPercent)) {
+  if (strategy === 'Trailing Runner Sell' && !toPositiveNumber(values.trailingDropPercent)) {
     return 'Trailing drop percent must be greater than zero.';
   }
-  if (values.strategy === 'Smart Profit Booking') {
-    const target = toPositiveNumber(values.profitTargetPrice);
-    if (!target) return 'Profit target price is required.';
-    if (ltp > 0 && target <= ltp) return 'Profit target must be above current LTP.';
-    if (Number(values.minimumWaitMinutes) < 5) return 'Minimum wait must be at least 5 minutes.';
-  }
-  if (values.strategy === 'Book Profit + Stop Loss') {
-    const target = toPositiveNumber(values.bookProfitPrice);
-    const stop = toPositiveNumber(values.stopLossPrice);
-    if (!target || !stop) return 'Book profit and stop-loss prices are required.';
-    if (ltp > 0 && target <= ltp) return 'Book profit price must be above current LTP.';
-    if (ltp > 0 && stop >= ltp) return 'Stop-loss price must be below current LTP.';
-  }
-  if (values.strategy === 'Partial Profit Booking') {
+  if (strategy === 'Profit Ladder Sell') {
     const target1 = toPositiveNumber(values.firstTarget);
     const target2 = toPositiveNumber(values.secondTarget);
     const percent1 = Number(values.firstPercent);
@@ -190,10 +162,7 @@ export const validateStrategyForm = (values: StrategyFormValues): string => {
       return 'Sell percentages must be valid and total 100% or less.';
     }
   }
-  if (values.strategy === 'Break-Even Protection' && !toPositiveNumber(values.averagePrice)) {
-    return 'Average buy price is required.';
-  }
-  if (values.strategy === 'Time-Based Exit' || values.strategy === 'Time-Based Buy') {
+  if (strategy === 'Time-Based Exit' || strategy === 'Time-Based Buy') {
     if (!values.expiryTime) return 'Expiry date/time is required.';
     const selectedNepalTime = parseNepalDateTimeLocalToUtcMs(values.expiryTime);
     const currentNepalTime = parseNepalDateTimeLocalToUtcMs(currentNepalDateTimeLocal());
@@ -201,7 +170,7 @@ export const validateStrategyForm = (values: StrategyFormValues): string => {
       return 'Expiry time must be in the future.';
     }
   }
-  if (values.strategy === 'Emergency Exit' && !values.emergencyConfirmed) {
+  if (strategy === 'Emergency Exit by Top Buyer' && !values.emergencyConfirmed) {
     return 'Confirm emergency exit risk before submitting.';
   }
   return '';

@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import StrategySellForm from './StrategySellForm';
 
 describe('StrategySellForm', () => {
-  test('Schedule Strategy Order click shows missing-field error for Book Profit + Stop Loss', async () => {
+  test('Schedule Strategy Order click shows missing-field error for Profit Ladder Sell', async () => {
     const onSubmit = jest.fn();
     render(
       <StrategySellForm
@@ -17,13 +17,13 @@ describe('StrategySellForm', () => {
     );
 
     await act(async () => {
-      userEvent.selectOptions(screen.getByLabelText('Strategy'), 'Book Profit + Stop Loss');
+      userEvent.selectOptions(screen.getByLabelText('Strategy'), 'Profit Ladder Sell');
     });
     await act(async () => {
-      userEvent.click(screen.getByRole('button', { name: 'Schedule Strategy Order' }));
+      userEvent.click(screen.getByRole('button', { name: 'Schedule Profit Ladder' }));
     });
 
-    expect(await screen.findByRole('alert')).toHaveTextContent('Book profit and stop-loss prices are required.');
+    expect(await screen.findByRole('alert')).toHaveTextContent('Both target prices are required.');
     expect(onSubmit).not.toHaveBeenCalled();
   });
 

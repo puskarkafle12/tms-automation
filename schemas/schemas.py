@@ -2,7 +2,7 @@
 
 from pydantic import BaseModel
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Union
 class OrderCreateRequest(BaseModel):
     client_id: str
     security_details: Dict={}
@@ -36,6 +36,9 @@ class OrderCreateRequest(BaseModel):
     emergency_execution: Optional[bool] = False
     user_allocation: Optional[Any] = None
     odd_lot_allowed: Optional[bool] = False
+    scan_price_history: Optional[Any] = None
+    scan_volume_history: Optional[Any] = None
+    strategy_config: Optional[Any] = None
 
 class LoginRequest(BaseModel):
     username: str
@@ -71,3 +74,20 @@ class TmsAccountUpdate(BaseModel):
     broker_no: Optional[str] = None
     password: Optional[str] = None
     auto_login: Optional[bool] = None
+
+
+class ScreenerFilter(BaseModel):
+    field: str
+    operator: str = "gte"
+    value: Union[float, int, str, List[Any]]
+
+
+class StockScreenerRequest(BaseModel):
+    client_id: Optional[str] = None
+    symbols: Optional[List[str]] = None
+    filters: List[ScreenerFilter] = []
+    query: Optional[str] = None
+    rank_by: Optional[str] = None
+    rank_direction: str = "desc"
+    limit: int = 50
+    force_refresh: bool = False

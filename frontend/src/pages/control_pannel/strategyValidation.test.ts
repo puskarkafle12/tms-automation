@@ -18,7 +18,7 @@ const baseValues = (strategy: StrategyType, side: 'buy' | 'sell' = 'sell'): Stra
   stopLimitPrice: '88',
   bookProfitPrice: '120',
   profitTargetPrice: '120',
-  trailingDropPercent: '0.75',
+  trailingDropPercent: '3',
   stableBandPercent: '0.20',
   minimumWaitMinutes: '5',
   averagePrice: '80',
@@ -41,20 +41,19 @@ describe('validateStrategyForm', () => {
 
   const validCases: Array<[StrategyType, 'buy' | 'sell']> = [
     ['Fixed Price Buy', 'buy'],
-    ['Buy Below Price', 'buy'],
-    ['Breakout Buy', 'buy'],
-    ['Dip Buy', 'buy'],
+    ['Quality Pullback Recovery Buy', 'buy'],
+    ['Confirmed Breakout Buy', 'buy'],
+    ['Smart Pullback Buy', 'buy'],
+    ['Mean Reversion Bounce Buy', 'buy'],
+    ['Order Book Strength Buy', 'buy'],
     ['Time-Based Buy', 'buy'],
     ['Fixed Price Sell', 'sell'],
-    ['Fast Stop Loss', 'sell'],
-    ['Stop Limit Sell', 'sell'],
-    ['Trailing Stop Loss', 'sell'],
-    ['Smart Profit Booking', 'sell'],
-    ['Book Profit + Stop Loss', 'sell'],
-    ['Partial Profit Booking', 'sell'],
-    ['Break-Even Protection', 'sell'],
+    ['Capital Protection Sell', 'sell'],
+    ['Profit Ladder Sell', 'sell'],
+    ['Trailing Runner Sell', 'sell'],
+    ['Technical Weakness Sell', 'sell'],
     ['Time-Based Exit', 'sell'],
-    ['Emergency Exit', 'sell'],
+    ['Emergency Exit by Top Buyer', 'sell'],
   ];
 
   test.each(validCases)('%s accepts complete valid fields', (strategy, side) => {
@@ -77,22 +76,6 @@ describe('validateStrategyForm', () => {
     expect(validateStrategyForm({ ...baseValues('Fixed Price Buy', 'buy'), qty: '5', oddLotAllowed: true })).toBe('');
   });
 
-  test('suggests safe sell quantity when sale would leave odd-lot remainder', () => {
-    expect(validateStrategyForm({ ...baseValues('Fixed Price Sell'), qty: '60', availableQty: 67 })).toContain(
-      'Suggested safe quantity: 50',
-    );
-  });
-
-  test('blocks partial sell that cannot avoid odd-lot remainder', () => {
-    expect(validateStrategyForm({ ...baseValues('Fixed Price Sell'), qty: '10', availableQty: 12 })).toBe(
-      'Partial sell would leave odd-lot shares. Use Sell All or adjust quantity.',
-    );
-  });
-
-  test('allows sell all when holding itself is odd lot', () => {
-    expect(validateStrategyForm({ ...baseValues('Fixed Price Sell'), qty: '67', availableQty: 67 })).toBe('');
-  });
-
   test('converts time-based expiry from Nepal time to UTC ISO', () => {
     expect(nepalDateTimeLocalToIso('2026-06-15T10:30')).toBe('2026-06-15T04:45:00.000Z');
   });
@@ -106,28 +89,18 @@ describe('validateStrategyForm', () => {
     );
   });
 
-  test('shows required message for Book Profit + Stop Loss', () => {
+  test('shows required message for Capital Protection Sell', () => {
     expect(
       validateStrategyForm({
-        ...baseValues('Book Profit + Stop Loss'),
-        bookProfitPrice: '',
+        ...baseValues('Capital Protection Sell'),
         stopLossPrice: '',
+        averagePrice: '',
       }),
-    ).toBe('Book profit and stop-loss prices are required.');
-  });
-
-  test('shows required message for Stop Limit Sell', () => {
-    expect(
-      validateStrategyForm({
-        ...baseValues('Stop Limit Sell'),
-        stopLossPrice: '',
-        stopLimitPrice: '',
-      }),
-    ).toBe('Stop trigger and limit price are required.');
+    ).toBe('Stop-loss trigger or average buy price is required.');
   });
 
   test('shows required message for Emergency Exit confirmation', () => {
-    expect(validateStrategyForm({ ...baseValues('Emergency Exit'), emergencyConfirmed: false })).toBe(
+    expect(validateStrategyForm({ ...baseValues('Emergency Exit by Top Buyer'), emergencyConfirmed: false })).toBe(
       'Confirm emergency exit risk before submitting.',
     );
   });

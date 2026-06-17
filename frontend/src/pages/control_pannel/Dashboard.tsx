@@ -7,6 +7,7 @@ import './Dashboard.css';
 import DPHoldings from './DpHolding';
 import StockTable from './StockTable';
 import StockGrabberPage from './StockGrabberPage';
+import StockScreener from './StockScreener';
 import StrategyDetails from './StrategyDetails';
 import AppShell, { NavItem } from '../../components/layout/AppShell';
 import { pathToTab, TAB_TO_PATH } from '../../routes/control_pannel/dashboardPaths';
@@ -18,6 +19,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'Login', label: 'TMS Login', icon: '🔐' },
   { id: 'StockGrabber', label: 'Stock Grabber', icon: '⚡' },
   { id: 'StrategyDetails', label: 'Strategy Details', icon: '🧭' },
+  { id: 'StockScreener', label: 'Stock Screener', icon: '🔎' },
   { id: 'StockTable', label: 'Stock Table', icon: '📈' },
 ];
 
@@ -29,6 +31,7 @@ const PAGE_META: Record<string, { title: string; subtitle: string }> = {
   CheckOrders: { title: 'Check Orders', subtitle: 'Monitor and verify pending orders' },
   DPHoldings: { title: 'DP Holdings', subtitle: 'Depository participant holdings overview' },
   StockTable: { title: 'Stock Table', subtitle: 'Live market data and stock quotes' },
+  StockScreener: { title: 'Stock Screener', subtitle: 'Filter and rank stocks using Nepse Alpha signals' },
   StockGrabber: { title: 'Stock Grabber', subtitle: 'Automated stock monitoring and order placement' },
 };
 
@@ -186,6 +189,8 @@ const DashBoardPage: React.FC = () => {
         return <StockTable />;
       case 'StockGrabber':
         return <StockGrabberPage />;
+      case 'StockScreener':
+        return <StockScreener />;
       default:
         return <OrderStatus />;
     }
