@@ -1,11 +1,36 @@
+# syntax=docker/dockerfile:1.7
+
+# --- Frontend (cached when package-lock unchanged) ---
 FROM node:20-bookworm AS frontend-build
 
 WORKDIR /frontend
 COPY frontend/package*.json ./
-RUN npm ci
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
+    npm ci
 COPY frontend/ ./
 RUN npm run build
 
+# --- Python deps (cached when requirements-* unchanged; no Postgres/apt noise) ---
+FROM python:3.11-bookworm AS python-deps
+
+ENV VIRTUAL_ENV=/opt/venv \
+    PATH="/opt/venv/bin:$PATH" \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=0
+
+RUN python -m venv "$VIRTUAL_ENV" \
+    && pip install --upgrade pip setuptools wheel
+
+WORKDIR /deps
+COPY requirements-heavy.txt requirements.txt ./
+
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    pip install -r requirements-heavy.txt -r requirements.txt
+
+ARG DEPS_VERSION=unknown
+LABEL org.opencontainers.image.deps-version=$DEPS_VERSION
+
+# --- Final all-in-one image ---
 FROM postgres:16-bookworm
 
 ENV PYTHONUNBUFFERED=1 \
@@ -24,18 +49,22 @@ ENV PYTHONUNBUFFERED=1 \
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        build-essential \
+        ca-certificates \
         curl \
         libglib2.0-0 \
         libgl1 \
-        libpq-dev \
+        libpq5 \
         nginx \
         python3 \
-        python3-dev \
-        python3-venv \
-    && python3 -m venv "$VIRTUAL_ENV" \
     && mkdir -p /root/.EasyOCR/model /root/.EasyOCR/user_network \
     && rm -rf /var/lib/apt/lists/*
+
+COPY --from=python-deps /opt/venv /opt/venv
+
+# Venv was created on python:3.11-bookworm; point its interpreter at this image's Python.
+RUN mkdir -p /usr/local/bin \
+    && ln -sf /usr/bin/python3 /usr/local/bin/python \
+    && ln -sf /usr/bin/python3 /usr/local/bin/python3.11
 
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
@@ -50,14 +79,9 @@ RUN set -eux; \
     ngrok version
 
 WORKDIR /app
-COPY requirements.txt ./
-RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
 
 COPY . /app
 COPY --from=frontend-build /frontend/build /app/frontend/build
-COPY docker-entrypoint-all-in-one.sh /app/docker-entrypoint-all-in-one.sh
-COPY scripts/show-public-url.sh /app/scripts/show-public-url.sh
 COPY nginx-tms-automation.conf /etc/nginx/conf.d/tms-automation.conf
 RUN chmod +x /app/docker-entrypoint-all-in-one.sh /app/scripts/show-public-url.sh \
     && sed -i 's/\r$//' /app/docker-entrypoint-all-in-one.sh /app/scripts/show-public-url.sh
@@ -67,10 +91,12 @@ RUN rm -f /etc/nginx/sites-enabled/default \
 ARG GIT_COMMIT=unknown
 ARG SOURCE_VERSION=unknown
 ARG BUILD_DATE=unknown
+ARG DEPS_VERSION=unknown
 
 LABEL org.opencontainers.image.revision=$GIT_COMMIT \
       org.opencontainers.image.source-version=$SOURCE_VERSION \
-      org.opencontainers.image.created=$BUILD_DATE
+      org.opencontainers.image.created=$BUILD_DATE \
+      org.opencontainers.image.deps-version=$DEPS_VERSION
 
 ENV APP_GIT_COMMIT=$GIT_COMMIT \
     APP_SOURCE_VERSION=$SOURCE_VERSION

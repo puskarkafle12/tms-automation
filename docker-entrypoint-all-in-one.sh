@@ -115,7 +115,7 @@ GRANT ALL PRIVILEGES ON DATABASE ${DB_NAME} TO ${DB_USER};
 SQL
 
 echo "Creating application tables and default frontend login..."
-python scripts/init_local_db.py
+/opt/venv/bin/python scripts/init_local_db.py
 
 echo "Starting Nginx reverse proxy on http://0.0.0.0:80"
 nginx

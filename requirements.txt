@@ -1,11 +1,10 @@
-easyocr==1.7.1
-# psycopg2==2.9.9
+# Local install: pip install -r requirements-heavy.txt -r requirements.txt
+# Heavy deps are installed from requirements-heavy.txt in Docker for better layer caching.
 fastapi==0.110.0
 uvicorn==0.28.0
 requests==2.31.0
 curl_cffi==0.13.0
 alembic==1.13.1
-pandas==2.2.1
 bs4==0.0.2
 psycopg2-binary==2.9.9
 websockets==12.0

@@ -21,7 +21,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE_NAME = "tms-automation"
 COMPOSE_IMAGE_TAG = "all-in-one"
+DEPS_IMAGE_TAG = "python-deps"
 SOURCE_LABEL = "org.opencontainers.image.source-version"
+DEPS_VERSION_LABEL = "org.opencontainers.image.deps-version"
 EXCLUDED_DIRS = {
     ".git",
     ".venv",
@@ -33,8 +35,36 @@ EXCLUDED_DIRS = {
 }
 EXCLUDED_SUFFIXES = {".pyc", ".zip"}
 
+# Only hash files that affect the Docker image. Doc/test-only edits should not force rebuilds.
+DOCKER_FINGERPRINT_PREFIXES = (
+    "Dockerfile",
+    ".dockerignore",
+    "docker-compose.yml",
+    "docker-entrypoint-all-in-one.sh",
+    "nginx-tms-automation.conf",
+    "requirements.txt",
+    "requirements-heavy.txt",
+    "main.py",
+    "database.py",
+    "websocket.py",
+    "models/",
+    "schemas/",
+    "utils/",
+    "config/",
+    "exceptions/",
+    "initialize_project/",
+    "alembic/",
+    "scripts/init_local_db.py",
+    "scripts/show-public-url.sh",
+    "frontend/package.json",
+    "frontend/package-lock.json",
+    "frontend/tsconfig.json",
+    "frontend/public/",
+    "frontend/src/",
+)
 
-def run(command: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
+
+def run(command: list[str], *, check: bool = True, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     printable = " ".join(command)
     print(f"\n$ {printable}", flush=True)
     return subprocess.run(
@@ -42,6 +72,7 @@ def run(command: list[str], *, check: bool = True) -> subprocess.CompletedProces
         cwd=ROOT,
         check=check,
         text=True,
+        env=env,
     )
 
 
@@ -119,8 +150,16 @@ def should_include(path: Path) -> bool:
     return path.is_file()
 
 
+def affects_docker_image(path: Path) -> bool:
+    relative = path.relative_to(ROOT).as_posix()
+    for prefix in DOCKER_FINGERPRINT_PREFIXES:
+        if relative == prefix or relative.startswith(prefix):
+            return should_include(path)
+    return False
+
+
 def source_files() -> list[Path]:
-    return sorted(path for path in ROOT.rglob("*") if should_include(path))
+    return sorted(path for path in ROOT.rglob("*") if affects_docker_image(path))
 
 
 def source_fingerprint() -> str:
@@ -128,6 +167,21 @@ def source_fingerprint() -> str:
     for path in source_files():
         relative = path.relative_to(ROOT).as_posix()
         digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        digest.update(b"\0")
+    return digest.hexdigest()[:16]
+
+
+def deps_fingerprint() -> str:
+    digest = hashlib.sha256()
+    for name in ("requirements-heavy.txt", "requirements.txt", "Dockerfile"):
+        path = ROOT / name
+        if not path.is_file():
+            continue
+        digest.update(name.encode("utf-8"))
         digest.update(b"\0")
         with path.open("rb") as handle:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
@@ -246,45 +300,85 @@ def main() -> int:
     commit = current_commit()
     fingerprint = source_fingerprint()
     source_id = f"{commit}-{fingerprint}"
+    deps_id = deps_fingerprint()
     compose_tag = f"{IMAGE_NAME}:{COMPOSE_IMAGE_TAG}"
+    deps_tag = f"{IMAGE_NAME}:{DEPS_IMAGE_TAG}"
     build_date = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
 
     existing_source = image_label(compose_tag, SOURCE_LABEL)
+    existing_deps = image_label(deps_tag, DEPS_VERSION_LABEL)
     build_needed = args.force_build or args.no_cache or existing_source != source_id
+    deps_build_needed = args.force_build or args.no_cache or existing_deps != deps_id
 
     print("\nSource context:")
     print(f"  commit:      {commit}")
     print(f"  fingerprint: {fingerprint}")
     print(f"  source id:   {source_id}")
+    print(f"  deps id:     {deps_id}")
     if dirty_status():
         print("  mode:        current files include uncommitted changes")
     else:
         print("  mode:        clean commit checkout")
 
-    if build_needed:
+    if build_needed or deps_build_needed:
         sys.stdout.flush()
-        build_command = [
-            "docker",
-            "build",
-            "--build-arg",
-            f"GIT_COMMIT={commit}",
-            "--build-arg",
-            f"SOURCE_VERSION={source_id}",
-            "--build-arg",
-            f"BUILD_DATE={build_date}",
-            "-t",
-            compose_tag,
-        ]
-        if args.no_cache:
-            build_command.append("--no-cache")
-        build_command.append(str(ROOT))
-        run(build_command)
-    else:
-        print(f"\nImage {compose_tag} already matches current files; skipping build.")
+        build_env = os.environ.copy()
+        build_env.setdefault("DOCKER_BUILDKIT", "1")
 
-    if image_exists(compose_tag):
+        if deps_build_needed:
+            print(f"\nBuilding Python deps image ({deps_tag})...")
+            deps_command = [
+                "docker",
+                "build",
+                "--target",
+                "python-deps",
+                "--build-arg",
+                f"DEPS_VERSION={deps_id}",
+                "-t",
+                deps_tag,
+            ]
+            if image_exists(deps_tag) and not args.no_cache:
+                deps_command.extend(["--cache-from", deps_tag])
+            if args.no_cache:
+                deps_command.append("--no-cache")
+            deps_command.append(str(ROOT))
+            run(deps_command, env=build_env)
+        else:
+            print(f"\nPython deps image {deps_tag} already matches; skipping deps build.")
+
+        if build_needed:
+            print(f"\nBuilding application image ({compose_tag})...")
+            build_command = [
+                "docker",
+                "build",
+                "--build-arg",
+                f"GIT_COMMIT={commit}",
+                "--build-arg",
+                f"SOURCE_VERSION={source_id}",
+                "--build-arg",
+                f"BUILD_DATE={build_date}",
+                "--build-arg",
+                f"DEPS_VERSION={deps_id}",
+                "-t",
+                compose_tag,
+            ]
+            if image_exists(deps_tag) and not args.no_cache:
+                build_command.extend(["--cache-from", deps_tag])
+            if args.no_cache:
+                build_command.append("--no-cache")
+            build_command.append(str(ROOT))
+            run(build_command, env=build_env)
+        else:
+            print(f"\nImage {compose_tag} already matches current files; skipping app build.")
+    else:
+        print(f"\nImages already match current files; skipping build.")
+
+    if image_exists(compose_tag) or image_exists(deps_tag):
         print("\nAvailable image tags:")
-        print(f"  {compose_tag}")
+        if image_exists(deps_tag):
+            print(f"  {deps_tag}")
+        if image_exists(compose_tag):
+            print(f"  {compose_tag}")
 
     if not args.no_run:
         running_image = running_container_image()
@@ -297,7 +391,7 @@ def main() -> int:
                 print("Database volume is preserved; not removing Docker volumes.")
                 remove_container_preserving_volumes("tms-automation")
             run([*compose, "up", "-d", "--no-build", "--force-recreate"])
-            cleanup_old_app_images({compose_tag})
+            cleanup_old_app_images({compose_tag, deps_tag})
         else:
             print("\nContainer already runs the matching source image; leaving it running.")
         print("\nApp:")

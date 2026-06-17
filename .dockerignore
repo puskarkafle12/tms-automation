@@ -1,13 +1,31 @@
 .git
+.gitignore
 .venv
 __pycache__/
 *.pyc
 .pytest_cache/
 .mypy_cache/
 .DS_Store
+.cache/
+.env
+.env.*
+!.env.example
 
+# Frontend — installed/built in the node stage
 frontend/node_modules/
 frontend/build/
 
+# Local data / archives (not needed in the image)
 data/*.csv
 *.zip
+
+# Docs and tests do not affect the runtime image
+*.md
+!frontend/README.md
+unit_tests/
+agent-transcripts/
+
+# IDE / tooling
+.cursor/
+.vscode/
+*.log

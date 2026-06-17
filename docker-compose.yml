@@ -1,6 +1,8 @@
 services:
   tms-automation:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     image: tms-automation:all-in-one
     container_name: tms-automation
     restart: unless-stopped
