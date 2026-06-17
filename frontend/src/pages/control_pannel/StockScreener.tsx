@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import './StockScreener.css';
 import ErrorMessage from '../../components/ErrorMessage';
 import CommonTable from '../../components/table/Table';
@@ -105,10 +105,13 @@ const StockScreener: React.FC = () => {
   const [limit, setLimit] = useState('25');
   const [forceRefresh, setForceRefresh] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [loadingLabel, setLoadingLabel] = useState('');
   const [error, setError] = useState('');
   const [results, setResults] = useState<ScreenerResult[]>([]);
   const [stats, setStats] = useState<ScreenerStats | null>(null);
   const [cacheTtl, setCacheTtl] = useState(300);
+  const [presetGuideOpen, setPresetGuideOpen] = useState(false);
+  const resultsRef = useRef<HTMLElement | null>(null);
 
   const activePreset = useMemo(
     () => SCREENER_PRESETS.find((preset) => preset.id === activePresetId) || null,
@@ -223,14 +226,20 @@ const StockScreener: React.FC = () => {
     }
   };
 
-  const runScreener = async (options?: { queryOverride?: string; useBuilder?: boolean }) => {
+  const runScreener = async (options?: {
+    queryOverride?: string;
+    useBuilder?: boolean;
+    fromPreset?: boolean;
+    loadingMessage?: string;
+  }) => {
     if (!clientId) {
       setError('Select a logged-in TMS client to scan the full symbol universe.');
       return;
     }
 
-    const useQueryMode = options?.useBuilder ? false : inputMode === 'query';
-    const query = options?.queryOverride ?? queryText;
+    const presetQuery = options?.queryOverride;
+    const useQueryMode = Boolean(presetQuery) || (!options?.useBuilder && inputMode === 'query');
+    const query = presetQuery ?? queryText;
 
     if (useQueryMode && !query.trim()) {
       setError('Enter a SQL-like screener query.');
@@ -238,9 +247,14 @@ const StockScreener: React.FC = () => {
     }
 
     setLoading(true);
+    setLoadingLabel(options?.loadingMessage || (options?.fromPreset ? 'Screening stocks…' : 'Running screener…'));
     setError('');
     setResults([]);
     setStats(null);
+
+    if (options?.fromPreset) {
+      resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
 
     const payload = useQueryMode
       ? {
@@ -290,19 +304,25 @@ const StockScreener: React.FC = () => {
       setError(message);
     } finally {
       setLoading(false);
+      setLoadingLabel('');
     }
   };
 
   const applyPreset = (preset: ScreenerPreset) => {
     setActivePresetId(preset.id);
-    setInputMode('query');
+    setPresetGuideOpen(false);
     setQueryText(preset.query);
-    void runScreener({ queryOverride: preset.query });
+    void runScreener({
+      queryOverride: preset.query,
+      fromPreset: true,
+      loadingMessage: `Screening: ${preset.title}…`,
+    });
   };
 
   const handleQueryChange = (value: string) => {
     setQueryText(value);
     setActivePresetId(null);
+    setPresetGuideOpen(false);
   };
 
   const displayColumns = useMemo(() => {
@@ -382,6 +402,25 @@ const StockScreener: React.FC = () => {
           </div>
         </div>
 
+        <section ref={resultsRef} className="stock-screener-results stock-screener-results-inline">
+          <h3>
+            Top Ranked Results
+            {activePreset ? ` — ${activePreset.title}` : ''}
+          </h3>
+          {loading ? (
+            <div className="stock-screener-loading" role="status" aria-live="polite">
+              <div className="stock-screener-progress-track">
+                <div className="stock-screener-progress-bar" />
+              </div>
+              <p>{loadingLabel || 'Screening stocks with Nepse Alpha…'}</p>
+            </div>
+          ) : results.length === 0 ? (
+            <p className="stock-screener-empty">Pick a quick screen or run a custom query to see ranked stocks.</p>
+          ) : (
+            <CommonTable data={results} columns={displayColumns} columnLinks={symbolColumnLinks} />
+          )}
+        </section>
+
         <div className="stock-screener-mode-tabs">
           <button
             type="button"
@@ -434,7 +473,7 @@ const StockScreener: React.FC = () => {
               </details>
             </div>
 
-            {activePreset && (
+            {activePreset && presetGuideOpen && (
               <div className="stock-screener-prompt-panel">
                 <div className="stock-screener-prompt-header">
                   <h4>{activePreset.title} — query guide</h4>
@@ -472,6 +511,15 @@ const StockScreener: React.FC = () => {
             )}
           <div className="stock-screener-query-panel">
             <label htmlFor="screener-query">Manual query (edit shortcut or write your own)</label>
+            {activePreset && !presetGuideOpen && (
+              <button
+                type="button"
+                className="btn-secondary stock-screener-view-query-btn"
+                onClick={() => setPresetGuideOpen(true)}
+              >
+                View query guide for {activePreset.title}
+              </button>
+            )}
             <textarea
               id="screener-query"
               className="stock-screener-query-input"
@@ -602,18 +650,6 @@ const StockScreener: React.FC = () => {
         </div>
 
         {error && <ErrorMessage message={error} />}
-      </section>
-
-      <section className="stock-screener-results card">
-        <h3>
-          Top Ranked Results
-          {activePreset ? ` — ${activePreset.title}` : ''}
-        </h3>
-        {results.length === 0 && !loading ? (
-          <p className="stock-screener-empty">Pick a quick screen or run a custom query to see ranked stocks.</p>
-        ) : (
-          <CommonTable data={results} columns={displayColumns} columnLinks={symbolColumnLinks} />
-        )}
       </section>
     </div>
   );
