@@ -82,6 +82,14 @@ def ensure_performance_indexes():
         "CREATE INDEX IF NOT EXISTS ix_scheduled_orders_strategy_status ON scheduled_orders (strategy_type, status)",
         "CREATE INDEX IF NOT EXISTS ix_order_logs_client_script ON order_logs (client_id, script_name)",
         "CREATE INDEX IF NOT EXISTS ix_order_status_logs_timestamp_client_script ON order_status_logs (timestamp, client_id, script_name)",
+        "ALTER TABLE order_status_logs ADD COLUMN IF NOT EXISTS strategy_type VARCHAR",
+        "ALTER TABLE order_status_logs ADD COLUMN IF NOT EXISTS requested_price FLOAT",
+        "ALTER TABLE order_status_logs ADD COLUMN IF NOT EXISTS execution_price FLOAT",
+        "ALTER TABLE order_status_logs ADD COLUMN IF NOT EXISTS execution_price_source VARCHAR",
+        "ALTER TABLE order_status_logs ADD COLUMN IF NOT EXISTS execution_reason VARCHAR",
+        "ALTER TABLE order_status_logs ADD COLUMN IF NOT EXISTS stop_loss_price FLOAT",
+        "ALTER TABLE order_status_logs ADD COLUMN IF NOT EXISTS average_buy_price FLOAT",
+        "ALTER TABLE order_status_logs ADD COLUMN IF NOT EXISTS max_allowed_slippage_percent FLOAT",
     ]
     with engine.begin() as connection:
         for statement in statements:

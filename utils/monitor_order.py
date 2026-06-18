@@ -8,6 +8,9 @@ from typing import Dict, Optional, Type
 from database import SessionLocal
 from models.logged_in_user import LoggedInUsers
 from models.order_status_log import OrderStatusLog
+from utils.order_status_log_serializer import status_log_from_scheduled_order
+from utils.strategies.aliases import canonical_strategy_name
+from utils.strategies.execution_price import sell_price_exceeds_slippage
 from models.scheduled_order import ScheduledOrder
 from utils.base_functions import truncate_to_one_decimal_place
 from utils.lot_size import get_board_lot_size, is_regular_lot_qty, normalize_sell_qty, round_down_to_board_lot
@@ -44,6 +47,7 @@ ACTIVE_STATUSES = {
     "Drop detected",
     "Stop-loss triggered",
     "Partially executed",
+    "WatchingRecovery",
 }
 
 
@@ -164,16 +168,36 @@ def _load_monitor_cycle_data():
 
 
 def _status_log_from_order(order: ScheduledOrder) -> OrderStatusLog:
-    return OrderStatusLog(
-        order_id=order.order_id,
-        client_id=order.client_id,
-        security_details=order.security_details,
-        script_name=order.script_name,
-        qty=order.qty,
-        status=order.status,
-        price=order.price,
-        order_type=order.order_type,
+    return status_log_from_scheduled_order(order)
+
+
+async def _handle_recovery_watch(
+    db_order: ScheduledOrder,
+    tms_user: TmsUser,
+    current_price: float,
+) -> bool:
+    """Cancel a freshly placed stop-loss sell if price recovers above the stop."""
+    stop_price = float(db_order.stop_loss_price or 0)
+    if stop_price <= 0 or current_price <= stop_price * 1.005:
+        return False
+
+    exchange_ids = {
+        item.strip()
+        for item in str(db_order.runner_lock_id or "").split(",")
+        if item.strip()
+    }
+    if not exchange_ids:
+        exchange_ids = await tms_user.get_open_order_ids_for_symbol(db_order.script_name)
+
+    if not exchange_ids:
+        return False
+
+    await tms_user.cancel_open_orders_for_symbol(db_order.script_name, exchange_ids)
+    db_order.status = "Cancelled"
+    db_order.cancelled_reason = (
+        f"Sell cancelled after recovery: LTP {current_price:.2f} moved back above stop {stop_price:.2f}"
     )
+    return True
 
 
 def _top_level_price(quote: Optional[dict], side: str) -> tuple[Optional[float], str]:
@@ -424,6 +448,24 @@ async def monitor_order_task_func():
                             continue
 
                         current_price = float(snapshot.current_price)
+
+                        if db_order.status == "WatchingRecovery":
+                            recovered = await _handle_recovery_watch(db_order, tms_users_instances[order.client_id], current_price)
+                            if recovered:
+                                await store_or_update_logs(
+                                    db,
+                                    order.client_id,
+                                    order.script_name,
+                                    count_dict[key],
+                                    current_price,
+                                    False,
+                                    db_order.cancelled_reason or "Recovery cancel",
+                                    commit=False,
+                                )
+                                db.add(_status_log_from_order(db_order))
+                                db.delete(db_order)
+                            continue
+
                         decision, strategy_log = _evaluate_strategy(db_order, current_price, snapshot.quote)
                         if strategy_log:
                             await store_or_update_logs(
@@ -516,7 +558,36 @@ async def monitor_order_task_func():
                                     executed_legs = list(db_order.executed_legs or [])
                                     executed_legs.append(decision["leg_id"])
                                     db_order.executed_legs = executed_legs
-                                db_order.status = "Executed" if db_order.remaining_quantity <= 0 else "Partially executed"
+                                canonical = canonical_strategy_name(
+                                    db_order.strategy_type or "",
+                                    db_order.order_type or "sell",
+                                )
+                                reference_price = float(db_order.stop_loss_price or db_order.price or 0)
+                                if (
+                                    db_order.order_type.lower() == "sell"
+                                    and reference_price > 0
+                                    and sell_price_exceeds_slippage(
+                                        requested_price=reference_price,
+                                        execution_price=target_price,
+                                        max_slippage_percent=float(db_order.max_allowed_slippage_percent or 1.0),
+                                    )
+                                ):
+                                    open_ids = await tms_user.get_open_order_ids_for_symbol(db_order.script_name)
+                                    if open_ids:
+                                        await tms_user.cancel_open_orders_for_symbol(db_order.script_name, open_ids)
+                                    db_order.status = "Blocked by slippage"
+                                    db_order.failed_reason = (
+                                        f"Sell blocked: limit {target_price} exceeded allowed slippage from {reference_price}"
+                                    )
+                                elif canonical == "Capital Protection Sell" and db_order.remaining_quantity <= 0:
+                                    open_ids = await tms_user.get_open_order_ids_for_symbol(db_order.script_name)
+                                    if open_ids:
+                                        db_order.status = "WatchingRecovery"
+                                        db_order.runner_lock_id = ",".join(sorted(open_ids))
+                                    else:
+                                        db_order.status = "Executed"
+                                else:
+                                    db_order.status = "Executed" if db_order.remaining_quantity <= 0 else "Partially executed"
                                 await store_or_update_logs(
                                     db,
                                     order.client_id,
@@ -541,9 +612,11 @@ async def monitor_order_task_func():
                                     commit=False,
                                 )
 
-                            if db_order.status in {"Executed", "Failed"}:
+                            if db_order.status in {"Executed", "Failed", "Cancelled", "Blocked by slippage"}:
                                 db.add(_status_log_from_order(db_order))
                                 db.delete(db_order)
+                            elif db_order.status == "WatchingRecovery":
+                                pass
                     db.commit()
                 finally:
                     db.close()

@@ -10,8 +10,9 @@ set -euo pipefail
 : "${FRONTEND_SEED_PASSWORD:=admin}"
 : "${NGROK_AUTHTOKEN:=}"
 : "${NGROK_DOMAIN:=}"
+: "${ENVIRONMENT:=env}"
 
-export DB_USER DB_PASSWORD DB_HOST DB_NAME FRONTEND_SEED_USER FRONTEND_SEED_PASSWORD
+export DB_USER DB_PASSWORD DB_HOST DB_NAME FRONTEND_SEED_USER FRONTEND_SEED_PASSWORD ENVIRONMENT
 
 PUBLIC_URL_FILE=/tmp/public-url.txt
 TUNNEL_LOG=/tmp/tunnel.log
@@ -43,7 +44,14 @@ wait_for_ngrok_url() {
     fi
     sleep 1
   done
+  if [ -n "${NGROK_DOMAIN:-}" ]; then
+    domain="${NGROK_DOMAIN#https://}"
+    domain="${domain#http://}"
+    print_public_url_banner "https://$domain" "Configured ngrok domain."
+    return 0
+  fi
   echo "ngrok started — run: docker exec tms-automation cat /tmp/public-url.txt"
+  return 1
 }
 
 start_ngrok_tunnel() {
@@ -120,7 +128,12 @@ echo "Creating application tables and default frontend login..."
 echo "Starting Nginx reverse proxy on http://0.0.0.0:80"
 nginx
 
-start_ngrok_tunnel || true
+if [ "$ENVIRONMENT" = "production" ] || [ "$ENVIRONMENT" = "prod" ]; then
+  start_ngrok_tunnel || true
+else
+  echo "ENVIRONMENT=$ENVIRONMENT — ngrok disabled (local/env mode)."
+  print_public_url_banner "http://localhost:3000" "Open this URL on your machine. Set ENVIRONMENT=prod in .env to enable ngrok."
+fi
 
 echo "Starting TMS Automation backend on http://127.0.0.1:8000"
 echo "Local app: http://localhost:3000"

@@ -1,6 +1,5 @@
 import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
 import './ScriptNameAutocomplete.css';
-import NepseAlphaSymbolLink from './NepseAlphaSymbolLink';
 
 export interface ScriptOption {
   symbol: string;
@@ -191,13 +190,9 @@ const ScriptNameAutocomplete: React.FC<ScriptNameAutocompleteProps> = ({
                       >
                         <div className="script-autocomplete-option-main">
                           <div className="script-autocomplete-symbol-row">
-                            <NepseAlphaSymbolLink
-                              symbol={option.symbol}
-                              className="script-autocomplete-symbol"
-                              stopPropagation
-                            >
+                            <span className="script-autocomplete-symbol">
                               {highlightMatch(option.symbol, value)}
-                            </NepseAlphaSymbolLink>
+                            </span>
                           </div>
                           <span className="script-autocomplete-meta">NEPSE script</span>
                         </div>

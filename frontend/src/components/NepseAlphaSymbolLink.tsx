@@ -24,6 +24,7 @@ const NepseAlphaSymbolLink: React.FC<NepseAlphaSymbolLinkProps> = ({
 
   const handleClick = (event: React.MouseEvent<HTMLAnchorElement>) => {
     if (stopPropagation) {
+      event.preventDefault();
       event.stopPropagation();
     }
   };

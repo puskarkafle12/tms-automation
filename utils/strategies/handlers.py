@@ -36,12 +36,36 @@ def _no_trade(reason_code: str, reason: str, score: Optional[float] = None) -> S
     return StrategyDecision("NO_TRADE", reason_code, reason, score=score, tracking_status="No trade")
 
 
-def _sell_execution_price(snapshot: MarketSnapshot, fallback: float) -> Tuple[float, str]:
-    if snapshot.top_buy_orders:
-        best = max(snapshot.top_buy_orders, key=lambda item: item.price)
-        if best.price > 0:
-            return best.price, "Top Buy"
-    return fallback, "LTP fallback"
+from utils.strategies.execution_price import resolve_sell_limit_price
+
+
+def _sell_execution_price(
+    snapshot: MarketSnapshot,
+    fallback: float,
+    *,
+    max_slippage_percent: float = 1.0,
+    reference_price: Optional[float] = None,
+) -> Tuple[float, str]:
+    return resolve_sell_limit_price(
+        snapshot,
+        fallback,
+        max_slippage_percent=max_slippage_percent,
+        reference_price=reference_price,
+    )
+
+
+def _capital_protection_sell_price(
+    ctx: OrderContext,
+    snapshot: MarketSnapshot,
+    *,
+    reference_price: float,
+) -> Tuple[float, str]:
+    return _sell_execution_price(
+        snapshot,
+        snapshot.ltp,
+        max_slippage_percent=ctx.max_allowed_slippage_percent,
+        reference_price=reference_price,
+    )
 
 
 def evaluate_fixed_price_buy(ctx: OrderContext, snapshot: MarketSnapshot, memory: ScannerMemory, details: ScriptDetails) -> StrategyDecision:
@@ -206,15 +230,24 @@ def evaluate_capital_protection_sell(ctx: OrderContext, snapshot: MarketSnapshot
 
     stop_pct = ctx.config.stop_loss_pct
     break_even_pct = ctx.config.break_even_trigger_pct
+    trailing_pct = float(ctx.trailing_drop_percent or ctx.config.trailing_stop_pct or 3.0)
     initial_stop = ctx.stop_loss_price if ctx.stop_loss_price else entry * (1 - stop_pct / 100.0)
     break_even_trigger = entry * (1 + break_even_pct / 100.0)
 
-    stop_price = entry if ctx.config.break_even_armed or (ctx.target_reached and snapshot.ltp >= break_even_trigger) else initial_stop
-    mutate: Dict[str, object] = {}
+    peak = max(
+        float(ctx.highest_tracked_price or entry or snapshot.ltp or 0),
+        float(snapshot.ltp or 0),
+    )
+    trailing_stop = peak * (1 - trailing_pct / 100.0)
+    stop_price = max(float(initial_stop or 0), trailing_stop)
+
+    mutate: Dict[str, object] = {"highest_tracked_price": peak}
     if snapshot.ltp >= break_even_trigger:
         ctx.config.break_even_armed = True
-        stop_price = entry
+        stop_price = max(stop_price, float(entry))
         mutate["break_even_armed"] = True
+    elif ctx.config.break_even_armed:
+        stop_price = max(stop_price, float(entry))
 
     if ctx.legacy_alias == "Stop Limit Sell" and ctx.stop_loss_price and snapshot.ltp <= ctx.stop_loss_price:
         limit = ctx.stop_limit_price or ctx.target_price
@@ -227,13 +260,31 @@ def evaluate_capital_protection_sell(ctx: OrderContext, snapshot: MarketSnapshot
         sharp_drop = ctx.last_checked_ltp is not None and snapshot.ltp <= ctx.last_checked_ltp * 0.99
         mutate = {"below_stop_loss_check_count": count}
         if fast_fall or sharp_drop or count >= 2:
-            price, source = _sell_execution_price(snapshot, snapshot.ltp)
+            price, source = _capital_protection_sell_price(ctx, snapshot, reference_price=ctx.stop_loss_price)
             return StrategyDecision("EXECUTE", "SELL_TRIGGERED_CAPITAL_PROTECTION", "SELL_TRIGGERED_CAPITAL_PROTECTION: fast stop-loss triggered", price=price, source=source, mutate=mutate)
         return StrategyDecision("TRACK", "SELL_TRACK_STOP_LOSS", "Stop-loss triggered, confirming", tracking_status="Stop-loss triggered", mutate=mutate)
 
     if snapshot.ltp <= stop_price:
-        price, source = _sell_execution_price(snapshot, snapshot.ltp)
-        return StrategyDecision("EXECUTE", "SELL_TRIGGERED_CAPITAL_PROTECTION", f"SELL_TRIGGERED_CAPITAL_PROTECTION: LTP {snapshot.ltp:.2f} <= stop {stop_price:.2f}", price=price, source=source, mutate=mutate)
+        count = ctx.below_stop_loss_check_count + 1
+        mutate = {"below_stop_loss_check_count": count}
+        if count < 2:
+            return StrategyDecision(
+                "TRACK",
+                "SELL_TRACK_STOP_LOSS",
+                f"Stop-loss triggered at {snapshot.ltp:.2f}, confirming ({count}/2)",
+                tracking_status="Stop-loss triggered",
+                mutate=mutate,
+            )
+        price, source = _capital_protection_sell_price(ctx, snapshot, reference_price=stop_price)
+        mutate["below_stop_loss_check_count"] = 0
+        return StrategyDecision(
+            "EXECUTE",
+            "SELL_TRIGGERED_CAPITAL_PROTECTION",
+            f"SELL_TRIGGERED_CAPITAL_PROTECTION: LTP {snapshot.ltp:.2f} <= stop {stop_price:.2f}",
+            price=price,
+            source=source,
+            mutate=mutate,
+        )
 
     mutate["below_stop_loss_check_count"] = 0
     return StrategyDecision("TRACK", "SELL_TRACK_CAPITAL_PROTECTION", "Capital protection monitoring", tracking_status="Monitoring", mutate=mutate)

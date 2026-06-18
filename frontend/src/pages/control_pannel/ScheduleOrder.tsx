@@ -607,7 +607,7 @@ const ScheduleOrder: React.FC = () => {
                   id="scheduleScriptName"
                   value={scriptName}
                   options={scriptOptions}
-                  placeholder={orderType === 'sell' ? 'Search owned holding' : 'Type to search — e.g. CREST'}
+                  placeholder={orderType === 'sell' ? 'Search holding' : 'Search e.g. CREST'}
                   disabled={!clientID || (activeScriptLoading && !hasActiveScriptCache)}
                   required
                   maxResults={Math.max(scriptOptions.length, 10)}

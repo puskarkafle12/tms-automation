@@ -309,6 +309,23 @@
   font-size: 0.75rem;
   font-weight: 700;
   cursor: pointer;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.1rem;
+  text-align: left;
+}
+
+.strategy-chip-label {
+  line-height: 1.2;
+}
+
+.strategy-chip-action {
+  font-size: 0.65rem;
+  font-weight: 600;
+  opacity: 0.75;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
 }
 
 .common-table .strategy-chip.buy,
@@ -344,6 +361,14 @@
   border-radius: var(--radius-md);
   border: 1px solid var(--color-border);
   box-shadow: var(--shadow-lg);
+}
+
+.strategy-catalog-modal {
+  width: min(640px, 100%);
+}
+
+.strategy-details-footer {
+  padding: 0 1rem 1rem;
 }
 
 .strategy-details-header {
@@ -482,4 +507,30 @@
   .order-logs-filters-header {
     flex-direction: column;
   }
+}
+
+.order-logs-trade-book {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.order-logs-trade-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.order-logs-trade-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.order-logs-trade-section-header h4 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--color-text);
 }

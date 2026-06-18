@@ -125,6 +125,28 @@ const parseApiError = (data: unknown, fallback: string): string => {
   return fallback;
 };
 
+const readJsonResponse = async (
+  response: Response,
+): Promise<{ data: unknown; rawText: string }> => {
+  const rawText = await response.text();
+  if (!rawText.trim()) {
+    return { data: {}, rawText };
+  }
+  try {
+    return { data: JSON.parse(rawText) as unknown, rawText };
+  } catch {
+    return { data: null, rawText };
+  }
+};
+
+const formatNonJsonResponse = (rawText: string, fallback: string): string => {
+  if (rawText.startsWith('Traceback')) {
+    return 'Server error while calling AI. Check NVIDIA_API_KEY and server logs.';
+  }
+  const trimmed = rawText.trim();
+  return trimmed ? trimmed.slice(0, 400) : fallback;
+};
+
 const StockScreener: React.FC = () => {
   const [fields, setFields] = useState<ScreenerField[]>([]);
   const [inputMode, setInputMode] = useState<InputMode>('builder');
@@ -315,9 +337,12 @@ const StockScreener: React.FC = () => {
       });
       window.clearTimeout(timeoutId);
 
-      const data = await response.json();
+      const { data, rawText } = await readJsonResponse(response);
+      if (data === null) {
+        throw new Error(formatNonJsonResponse(rawText, 'Invalid server response'));
+      }
       if (!response.ok) {
-        const detail = data?.detail;
+        const detail = (data as { detail?: unknown })?.detail;
         const generated = detail && typeof detail === 'object' && 'generated_query' in detail
           ? String((detail as { generated_query?: string }).generated_query || '')
           : '';
@@ -328,19 +353,19 @@ const StockScreener: React.FC = () => {
         throw new Error(parseApiError(data, 'AI screener request failed'));
       }
 
-      const query = String(data.generated_query || '');
-      const summary = String(data.ai_summary || 'Query generated and screened successfully.');
+      const query = String((data as { generated_query?: string }).generated_query || '');
+      const summary = String((data as { ai_summary?: string }).ai_summary || 'Query generated and screened successfully.');
       setGeneratedQuery(query);
       setQueryText(query);
       setAiSummary(summary);
-      if (data.parsed_query?.rank_by) {
-        setRankBy(data.parsed_query.rank_by);
+      if ((data as { parsed_query?: { rank_by?: string } }).parsed_query?.rank_by) {
+        setRankBy((data as { parsed_query: { rank_by: string } }).parsed_query.rank_by);
       }
-      if (data.parsed_query?.rank_direction) {
-        setRankDirection(data.parsed_query.rank_direction);
+      if ((data as { parsed_query?: { rank_direction?: 'asc' | 'desc' } }).parsed_query?.rank_direction) {
+        setRankDirection((data as { parsed_query: { rank_direction: 'asc' | 'desc' } }).parsed_query.rank_direction);
       }
-      if (data.parsed_query?.limit) {
-        setLimit(String(data.parsed_query.limit));
+      if ((data as { parsed_query?: { limit?: number } }).parsed_query?.limit) {
+        setLimit(String((data as { parsed_query: { limit: number } }).parsed_query.limit));
       }
 
       setAiMessages((prev) => [
@@ -352,8 +377,8 @@ const StockScreener: React.FC = () => {
           query,
         },
       ]);
-      setResults(data.results || []);
-      setStats(data.stats || null);
+      setResults((data as { results?: ScreenerResult[] }).results || []);
+      setStats((data as { stats?: ScreenerStats | null }).stats || null);
       completedScreen = true;
       setHasRun(true);
     } catch (err) {
@@ -590,7 +615,7 @@ const StockScreener: React.FC = () => {
         {inputMode === 'ai' ? (
           <div className="stock-screener-ai-chat-panel">
             <p className="stock-screener-ai-chat-desc">
-              Describe your screen in plain English. Nemotron builds a strict query on the server
+              Describe your screen in plain English. DeepSeek builds a strict query on the server
               (validated against live field keys), runs it, and shows results below.
             </p>
             {aiMessages.length > 0 && (

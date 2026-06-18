@@ -18,6 +18,7 @@ services:
       DB_NAME: stock
       FRONTEND_SEED_USER: admin
       FRONTEND_SEED_PASSWORD: admin
+      ENVIRONMENT: ${ENVIRONMENT:-env}
       TUNNEL_PROVIDER: ngrok
       NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:-}
       NGROK_DOMAIN: ${NGROK_DOMAIN:-}

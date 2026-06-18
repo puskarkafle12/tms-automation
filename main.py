@@ -33,6 +33,7 @@ from schemas.schemas import (
 from utils.base_functions import is_within_time_range, truncate_to_one_decimal_place
 from utils.base_functions import summarize_login_message, get_persisted_collateral
 from utils.lot_size import get_board_lot_size, is_regular_lot_qty, normalize_sell_qty
+from utils.order_status_log_serializer import serialize_order_status_log, status_log_from_scheduled_order
 from utils.scheduled_monitor_control import (
     get_scheduler_display_status,
     scheduled_monitor_supervisor_loop,
@@ -58,7 +59,7 @@ from utils.market_status import (
     parse_session_check_response,
 )
 import config.tms_config as tms_config
-from utils.external_data_sources.nepse_alpha.ai_query import ScreenerAiError, generate_and_validate_screener_query
+from utils.external_data_sources.nepse_alpha.ai_query import ScreenerAiError, execute_ai_screener_with_retries
 from utils.external_data_sources.nepse_alpha.query_parser import ScreenerQueryError, parse_screener_query
 from utils.external_data_sources.nepse_alpha.screener import get_field_catalog, get_screener_query_spec, run_stock_screener
 
@@ -606,16 +607,7 @@ def _compute_scheduled_live_status(
 
 
 def _order_status_log_from_order(order: ScheduledOrder, status: Optional[str] = None) -> OrderStatusLog:
-    return OrderStatusLog(
-        order_id=order.order_id,
-        client_id=order.client_id,
-        security_details=order.security_details,
-        script_name=order.script_name,
-        qty=order.qty,
-        status=status or order.status,
-        price=order.price,
-        order_type=order.order_type,
-    )
+    return status_log_from_scheduled_order(order, status=status)
 
 
 NON_EDITABLE_SCHEDULED_STATUSES = frozenset({
@@ -1325,7 +1317,7 @@ async def get_order_status_logs(
         })
 
     combined_results = {
-        "order_logs": [log.__dict__ for log in order_logs],
+        "order_logs": [serialize_order_status_log(log) for log in order_logs],
         "scheduled_orders": scheduled_payload,
         "monitoring_active": tms_config.is_running,
         "monitor_phase": monitor_phase,
@@ -1451,8 +1443,25 @@ async def get_order_book(client_id: str, db: Session = Depends(get_db)):
 
         tms_user_instance = await get_cached_tms_user(user)
 
-        order_book = await tms_user_instance.get_order_book()  # Await the async call
+        order_book = await tms_user_instance.get_normalized_order_book()
         return order_book
+
+    except LoginFailedException as e:
+        await invalidate_cached_tms_user(client_id)
+        raise HTTPException(status_code=401, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/get_daily_order_book")
+async def get_daily_order_book(client_id: str, db: Session = Depends(get_db)):
+    try:
+        user = db.query(User).filter(User.client_id == client_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        tms_user_instance = await get_cached_tms_user(user)
+        return await tms_user_instance.get_normalized_daily_order_book()
 
     except LoginFailedException as e:
         await invalidate_cached_tms_user(client_id)
@@ -1569,8 +1578,18 @@ async def stock_screener_ai_screen(body: StockScreenerAiRequest, db: Session = D
 
     symbols = await _resolve_screener_symbols(body.client_id, body.symbols, db)
 
+    async def _run(parsed_query: dict) -> dict:
+        return await run_stock_screener(
+            symbols,
+            parsed_query["filters"],
+            rank_by=parsed_query["rank_by"],
+            rank_direction=parsed_query["rank_direction"],
+            limit=parsed_query["limit"],
+            force_refresh=body.force_refresh,
+        )
+
     try:
-        ai_payload = await asyncio.to_thread(generate_and_validate_screener_query, message)
+        payload = await execute_ai_screener_with_retries(message, _run)
     except ScreenerAiError as exc:
         raise HTTPException(
             status_code=422,
@@ -1580,26 +1599,12 @@ async def stock_screener_ai_screen(body: StockScreenerAiRequest, db: Session = D
                 "generated_query": exc.generated_query,
             },
         ) from exc
-
-    parsed_query = ai_payload["parsed_query"]
-    try:
-        payload = await run_stock_screener(
-            symbols,
-            parsed_query["filters"],
-            rank_by=parsed_query["rank_by"],
-            rank_direction=parsed_query["rank_direction"],
-            limit=parsed_query["limit"],
-            force_refresh=body.force_refresh,
-        )
+    except HTTPException:
+        raise
     except Exception as exc:
+        logging.exception("AI screener failed for message=%r", message[:120])
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    payload.update({
-        "ai_status": ai_payload["ai_status"],
-        "ai_summary": ai_payload["ai_summary"],
-        "generated_query": ai_payload["generated_query"],
-        "parsed_query": parsed_query,
-    })
     return payload
 
 

@@ -2,7 +2,6 @@ import React, { useEffect, useMemo, useState } from 'react';
 import './StrategySellForm.css';
 import {
   BUY_STRATEGIES,
-  DEFAULT_SMART_STRATEGY,
   SELL_STRATEGIES,
 } from '../../lib/strategies';
 import {
@@ -20,6 +19,7 @@ import {
 } from './lotSize';
 import { calculateQuantityFromAmount, getOrderEstimate } from '../../utils/orderEstimate';
 import { currentNepalDateTimeLocal } from '../../utils/nepalTime';
+import StrategyCatalogModal from '../../components/StrategyCatalogModal';
 export type { StrategyPayload, StrategyType } from './strategyValidation';
 
 export const STRATEGY_HELP: Record<string, { helper: string; button: string }> = {
@@ -84,6 +84,7 @@ const StrategySellForm: React.FC<Props> = ({
 }) => {
   const strategies = side === 'buy' ? BUY_STRATEGIES : SELL_STRATEGIES;
   const [strategy, setStrategy] = useState<StrategyType>(side === 'buy' ? 'Fixed Price Buy' : 'Fixed Price Sell');
+  const [strategyGuideOpen, setStrategyGuideOpen] = useState(false);
   const [qty, setQty] = useState(initialQty);
   const [price, setPrice] = useState(initialPrice);
   const [quantityMode, setQuantityMode] = useState<'quantity' | 'amount'>('quantity');
@@ -299,28 +300,6 @@ const StrategySellForm: React.FC<Props> = ({
     wrappedStrategyType,
   ]);
 
-  const applySmartPreset = () => {
-    const preset = DEFAULT_SMART_STRATEGY.strategy_config;
-    if (side === 'buy') {
-      setStrategy(DEFAULT_SMART_STRATEGY.buy);
-      setMinBuyScore(String(preset.min_buy_score));
-      setRequireFreshTrade(true);
-      setRequireVolumeIncrease(true);
-    } else {
-      setStrategy(DEFAULT_SMART_STRATEGY.sell);
-      setStopLossPrice('');
-      setTrailingDropPercent(String(preset.trailing_stop_pct));
-      setBreakEvenTriggerPct(String(preset.break_even_trigger_pct));
-      setFirstPercent(String(preset.target1_sell_pct));
-      setSecondPercent(String(preset.target2_sell_pct));
-      if (averageBuyPrice) {
-        const entry = Number(averageBuyPrice);
-        setFirstTarget(String((entry * (1 + preset.target1_pct / 100)).toFixed(2)));
-        setSecondTarget(String((entry * (1 + preset.target2_pct / 100)).toFixed(2)));
-      }
-    }
-  };
-
   useEffect(() => {
     if (quantityMode === 'amount') {
       setQty(amountPlan.quantity > 0 ? String(amountPlan.quantity) : '');
@@ -360,6 +339,7 @@ const StrategySellForm: React.FC<Props> = ({
     if (strategy === 'Capital Protection Sell' || strategy === 'Time-Based Exit') {
       payload.stop_loss_price = Number(stopLossPrice) || undefined;
       payload.average_buy_price = Number(averagePrice) || averageBuyPrice || undefined;
+      payload.trailing_drop_percent = Number(trailingDropPercent) || undefined;
     }
     if (strategy === 'Trailing Runner Sell') {
       payload.trailing_drop_percent = Number(trailingDropPercent);
@@ -412,51 +392,94 @@ const StrategySellForm: React.FC<Props> = ({
         {sideControl}
         <div className="form-group strategy-field">
           <label htmlFor="strategyType">Strategy</label>
-          <select id="strategyType" className="select" value={strategy} onChange={(e) => handleStrategyChange(e.target.value as StrategyType)}>
-            {strategies.map((item) => <option key={item} value={item}>{item}</option>)}
-          </select>
+          <div className="strategy-select-wrap">
+            <select id="strategyType" className="select" value={strategy} onChange={(e) => handleStrategyChange(e.target.value as StrategyType)}>
+              {strategies.map((item) => <option key={item} value={item}>{item}</option>)}
+            </select>
+            <button
+              type="button"
+              className="strategy-details-icon-btn"
+              onClick={() => setStrategyGuideOpen(true)}
+              aria-label="Strategy details"
+              title="Strategy details"
+            >
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="1.75" />
+                <path d="M12 11v5" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+                <circle cx="12" cy="8" r="1" fill="currentColor" />
+              </svg>
+            </button>
+          </div>
         </div>
-        <button type="button" className="btn btn-secondary btn-sm" onClick={applySmartPreset}>
-          Use Default Smart Strategy
-        </button>
       </div>
 
       {(localError || submitError) && <p className="strategy-error" role="alert">{localError || submitError}</p>}
 
       <div className="strategy-grid">
-        <div className="form-group">
-          <label htmlFor="strategyQty">Quantity</label>
-          {(side === 'buy' || side === 'sell') && (
-            <div className="strategy-mode-toggle" role="group" aria-label="Quantity input mode">
-              <button type="button" className={quantityMode === 'quantity' ? 'active' : ''} onClick={() => setQuantityMode('quantity')}>
-                Qty
-              </button>
-              <button type="button" className={quantityMode === 'amount' ? 'active' : ''} onClick={() => setQuantityMode('amount')}>
-                NPR Amount
-              </button>
-            </div>
-          )}
-          {quantityMode === 'amount' ? (
-            <input
-              id="strategyInvestmentAmount"
-              className="input"
-              type="number"
-              min="0"
-              step="0.01"
-              value={investmentAmount}
-              onChange={(e) => setInvestmentAmount(e.target.value)}
-              placeholder={side === 'buy' ? 'Investment amount in NPR' : 'Desired sell amount in NPR'}
-            />
-          ) : (
-            <div className="strategy-qty-row">
-              <input id="strategyQty" className="input" type="number" min="1" max={availableQty || undefined} value={qty} onChange={(e) => setQty(e.target.value)} />
-              {side === 'sell' && availableQty && availableQty > 0 && (
-                <button type="button" className="btn btn-secondary btn-sm" onClick={useMaxQty}>
-                  Max
-                </button>
-              )}
-            </div>
-          )}
+        <div className="form-group strategy-qty-field">
+          <div className="strategy-qty-header">
+            <label htmlFor={quantityMode === 'amount' ? 'strategyInvestmentAmount' : 'strategyQty'}>
+              {quantityMode === 'amount' ? 'Amount' : 'Quantity'}
+            </label>
+            {(side === 'buy' || side === 'sell') && (
+              <div className="strategy-qty-mode" role="radiogroup" aria-label="Quantity or NPR amount">
+                <label className={`strategy-qty-mode-option ${quantityMode === 'quantity' ? 'active' : ''}`}>
+                  <input
+                    type="radio"
+                    name="strategyQtyMode"
+                    value="quantity"
+                    checked={quantityMode === 'quantity'}
+                    onChange={() => setQuantityMode('quantity')}
+                  />
+                  Qty
+                </label>
+                <label className={`strategy-qty-mode-option ${quantityMode === 'amount' ? 'active' : ''}`}>
+                  <input
+                    type="radio"
+                    name="strategyQtyMode"
+                    value="amount"
+                    checked={quantityMode === 'amount'}
+                    onChange={() => setQuantityMode('amount')}
+                  />
+                  NPR
+                </label>
+              </div>
+            )}
+          </div>
+          <div className="strategy-qty-input-row">
+            {quantityMode === 'amount' ? (
+              <input
+                id="strategyInvestmentAmount"
+                className="input"
+                type="number"
+                min="0"
+                step="0.01"
+                value={investmentAmount}
+                onChange={(e) => setInvestmentAmount(e.target.value)}
+                placeholder={side === 'buy' ? 'NPR to invest' : 'NPR sell value'}
+                aria-label="Amount in NPR"
+              />
+            ) : (
+              <>
+                <input
+                  id="strategyQty"
+                  className="input"
+                  type="number"
+                  min="1"
+                  max={availableQty || undefined}
+                  value={qty}
+                  onChange={(e) => setQty(e.target.value)}
+                  placeholder="Kitta"
+                  aria-label="Quantity in kitta"
+                />
+                {side === 'sell' && availableQty && availableQty > 0 && (
+                  <button type="button" className="btn btn-secondary btn-sm strategy-max-btn" onClick={useMaxQty}>
+                    Max
+                  </button>
+                )}
+              </>
+            )}
+          </div>
         </div>
         {(strategy === 'Fixed Price Buy' || strategy === 'Fixed Price Sell' || strategy === 'Smart Pullback Buy' || strategy === 'Confirmed Breakout Buy') && (
           <div className="form-group">
@@ -597,6 +620,14 @@ const StrategySellForm: React.FC<Props> = ({
       <button type="submit" className="btn btn-primary strategy-submit" disabled={isSubmitting}>
         {isSubmitting ? 'Saving...' : (submitButtonLabel || STRATEGY_HELP[strategy]?.button || 'Schedule Order')}
       </button>
+
+      {strategyGuideOpen && (
+        <StrategyCatalogModal
+          strategyName={strategy}
+          side={side}
+          onClose={() => setStrategyGuideOpen(false)}
+        />
+      )}
     </form>
   );
 };

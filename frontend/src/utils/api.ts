@@ -1,14 +1,32 @@
-export const getDefaultApiUrl = (): string => {
-  const { origin, port, hostname } = window.location;
-  if (port === '3000' && (hostname === 'localhost' || hostname === '127.0.0.1')) {
-    return 'http://localhost:8000';
+/** Same-origin API URL — nginx (Docker) or CRA proxy (npm start) forwards to the backend. */
+export const getDefaultApiUrl = (): string => window.location.origin.replace(/\/$/, '');
+
+export const isLocalAppOrigin = (): boolean => {
+  const { hostname } = window.location;
+  return hostname === 'localhost' || hostname === '127.0.0.1';
+};
+
+/** Reset apiUrl when it points at ngrok or a bare backend port while the UI is local. */
+export const shouldResetStoredApiUrl = (stored: string | null | undefined): boolean => {
+  const trimmed = stored?.trim();
+  if (!trimmed) {
+    return true;
   }
-  return origin;
+  if (!isLocalAppOrigin()) {
+    return false;
+  }
+  if (/ngrok/i.test(trimmed)) {
+    return true;
+  }
+  if (/^https?:\/\/(localhost|127\.0\.0\.1):8000\/?$/i.test(trimmed)) {
+    return true;
+  }
+  return false;
 };
 
 export const getApiUrl = (): string => {
   const stored = localStorage.getItem('apiUrl')?.trim();
-  if (stored) {
+  if (stored && !shouldResetStoredApiUrl(stored)) {
     return stored.replace(/\/$/, '');
   }
   return getDefaultApiUrl();
@@ -55,4 +73,4 @@ export async function fetchJson<T>(
     const message = err instanceof Error ? err.message : 'Network error';
     return { ok: false, error: message };
   }
-}
+};

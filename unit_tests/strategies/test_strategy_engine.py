@@ -163,6 +163,51 @@ class TestSellStrategies(unittest.TestCase):
         decision = evaluate_fixed_price_sell(_ctx(side="sell", canonical_strategy="Fixed Price Sell", target_price=220), _snapshot(ltp=220), ScannerMemory(), _details())
         self.assertEqual(decision.action, "EXECUTE")
 
+    def test_capital_protection_trailing_stop_ratchet_moves_up(self):
+        ctx = _ctx(
+            side="sell",
+            canonical_strategy="Capital Protection Sell",
+            average_buy_price=400,
+            target_price=400,
+            stop_loss_price=385,
+            highest_tracked_price=420,
+            config=StrategyConfig(trailing_stop_pct=3),
+        )
+        decision = evaluate_capital_protection_sell(ctx, _snapshot(ltp=408), ScannerMemory(), _details())
+        self.assertEqual(decision.action, "TRACK")
+        self.assertEqual(decision.mutate.get("highest_tracked_price"), 420)
+
+        decision = evaluate_capital_protection_sell(
+            _ctx(
+                side="sell",
+                canonical_strategy="Capital Protection Sell",
+                average_buy_price=400,
+                target_price=400,
+                stop_loss_price=385,
+                highest_tracked_price=420,
+                below_stop_loss_check_count=1,
+                config=StrategyConfig(trailing_stop_pct=3),
+            ),
+            _snapshot(ltp=407),
+            ScannerMemory(),
+            _details(),
+        )
+        self.assertEqual(decision.action, "EXECUTE")
+        self.assertLessEqual(decision.price, 407)
+
+    def test_capital_protection_sell_confirms_before_execute(self):
+        ctx = _ctx(
+            side="sell",
+            canonical_strategy="Capital Protection Sell",
+            average_buy_price=200,
+            target_price=200,
+            config=StrategyConfig(stop_loss_pct=3),
+            below_stop_loss_check_count=0,
+        )
+        decision = evaluate_capital_protection_sell(ctx, _snapshot(ltp=193), ScannerMemory(), _details())
+        self.assertEqual(decision.action, "TRACK")
+        self.assertEqual(decision.reason_code, "SELL_TRACK_STOP_LOSS")
+
     def test_capital_protection_sell_triggers_stop(self):
         ctx = _ctx(
             side="sell",
@@ -170,10 +215,12 @@ class TestSellStrategies(unittest.TestCase):
             average_buy_price=200,
             target_price=200,
             config=StrategyConfig(stop_loss_pct=3),
+            below_stop_loss_check_count=1,
         )
         decision = evaluate_capital_protection_sell(ctx, _snapshot(ltp=193), ScannerMemory(), _details())
         self.assertEqual(decision.action, "EXECUTE")
         self.assertEqual(decision.reason_code, "SELL_TRIGGERED_CAPITAL_PROTECTION")
+        self.assertLessEqual(decision.price, 193)
 
     def test_capital_protection_fast_stop_loss_legacy(self):
         ctx = _ctx(

@@ -9,7 +9,17 @@
 
 .script-autocomplete-input {
   width: 100%;
-  padding-right: 2.25rem;
+  min-width: 0;
+  padding-right: 2.35rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.script-autocomplete-input::placeholder {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .script-autocomplete-chevron {
@@ -135,12 +145,12 @@
   min-width: 0;
 }
 
-.script-autocomplete-symbol.nepse-alpha-symbol-link {
+.script-autocomplete-symbol {
   font-size: 0.875rem;
   color: var(--color-text);
 }
 
-.script-autocomplete-symbol.nepse-alpha-symbol-link mark {
+.script-autocomplete-symbol mark {
   background: #fde68a;
   color: inherit;
   padding: 0 1px;

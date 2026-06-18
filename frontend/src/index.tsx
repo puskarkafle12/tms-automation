@@ -3,11 +3,11 @@ import ReactDOM from 'react-dom/client';
 import './index.css';
 import App from './App';
 import reportWebVitals from './reportWebVitals';
-import { getDefaultApiUrl } from './utils/api';
+import { getDefaultApiUrl, shouldResetStoredApiUrl } from './utils/api';
 import './hooks/monitoringStore';
 
-const savedApiUrl = localStorage.getItem('apiUrl')?.trim();
-if (!savedApiUrl || /^https?:\/\/(localhost|127\.0\.0\.1):3000\/?$/.test(savedApiUrl)) {
+const savedApiUrl = localStorage.getItem('apiUrl');
+if (shouldResetStoredApiUrl(savedApiUrl)) {
   localStorage.setItem('apiUrl', getDefaultApiUrl());
 }
 

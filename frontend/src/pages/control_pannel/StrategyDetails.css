@@ -228,6 +228,137 @@
   line-height: 1.45;
 }
 
+.strategy-details-disclaimer {
+  margin-top: 0.65rem !important;
+  font-size: 0.8rem !important;
+  font-style: italic;
+}
+
+.strategy-inner-toggle {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: #fff;
+  overflow: hidden;
+}
+
+.strategy-inner-toggle[open] {
+  background: #fafbfc;
+}
+
+.strategy-inner-toggle summary {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.55rem 0.7rem;
+  cursor: pointer;
+  list-style: none;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+.strategy-inner-toggle summary::-webkit-details-marker {
+  display: none;
+}
+
+.strategy-inner-chevron {
+  display: inline-flex;
+  width: 1.1rem;
+  height: 1.1rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  background: var(--color-bg);
+  color: var(--color-text-muted);
+  font-size: 1rem;
+  font-weight: 800;
+  transition: transform 0.15s;
+}
+
+.strategy-inner-toggle[open] .strategy-inner-chevron {
+  transform: rotate(90deg);
+}
+
+.strategy-inner-body {
+  padding: 0 0.7rem 0.7rem 1.85rem;
+  color: var(--color-text-muted);
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+
+.strategy-inner-body ol,
+.strategy-behavior-list {
+  margin: 0;
+  padding-left: 1.15rem;
+}
+
+.strategy-inner-body li + li,
+.strategy-behavior-list li + li {
+  margin-top: 0.25rem;
+}
+
+.strategy-on-execute {
+  margin: 0 0 0.5rem;
+  padding: 0.55rem 0.65rem;
+  border-left: 3px solid #3b82f6;
+  background: #eff6ff;
+  border-radius: 0 6px 6px 0;
+  color: #1e3a8a;
+  font-size: 0.84rem;
+}
+
+.strategy-scenario-table-wrap {
+  overflow-x: auto;
+  margin: 0 -0.2rem;
+}
+
+.strategy-scenario-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+
+.strategy-scenario-table th,
+.strategy-scenario-table td {
+  border: 1px solid var(--color-border);
+  padding: 0.45rem 0.55rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.strategy-scenario-table th {
+  background: #f1f5f9;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.strategy-action-chip {
+  display: inline-block;
+  padding: 0.12rem 0.4rem;
+  border-radius: 4px;
+  background: #e2e8f0;
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: #334155;
+}
+
+.strategy-guide-flat .strategy-toggle-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  padding: 0 1rem 1rem;
+  grid-template-columns: 1fr;
+}
+
+.strategy-guide-modal .strategy-details-header {
+  padding: 1rem 1rem 0;
+}
+
+.strategy-detail-overview {
+  grid-column: 1 / -1;
+}
+
 @media (max-width: 760px) {
   .strategy-details-section-header,
   .strategy-toggle summary {

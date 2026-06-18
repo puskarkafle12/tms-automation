@@ -51,6 +51,26 @@ describe('StrategySellForm', () => {
     }));
   });
 
+  test('Show details opens strategy guide modal', async () => {
+    render(
+      <StrategySellForm
+        side="sell"
+        currentLtp={100}
+        availableQty={100}
+        initialQty="10"
+        initialPrice="100"
+        onSubmit={jest.fn()}
+      />,
+    );
+
+    await act(async () => {
+      userEvent.click(screen.getByRole('button', { name: 'Strategy details' }));
+    });
+
+    expect(screen.getByRole('dialog')).toHaveTextContent('Fixed Price Sell');
+    expect(screen.getByRole('dialog')).toHaveTextContent('Tested scenarios');
+  });
+
   test('keeps typed strategy fields when market/client props refresh', async () => {
     const onSubmit = jest.fn();
     const { rerender } = render(
@@ -65,8 +85,8 @@ describe('StrategySellForm', () => {
     );
 
     await act(async () => {
-      userEvent.clear(screen.getByLabelText('Quantity'));
-      userEvent.type(screen.getByLabelText('Quantity'), '25');
+      userEvent.clear(screen.getByLabelText('Quantity in kitta'));
+      userEvent.type(screen.getByLabelText('Quantity in kitta'), '25');
     });
 
     rerender(
@@ -80,6 +100,6 @@ describe('StrategySellForm', () => {
       />,
     );
 
-    expect(screen.getByLabelText('Quantity')).toHaveValue(25);
+    expect(screen.getByLabelText('Quantity in kitta')).toHaveValue(25);
   });
 });

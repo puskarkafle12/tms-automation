@@ -722,6 +722,40 @@ class TmsUser:
         return payload
 
     @staticmethod
+    def _normalize_order_book_row(row: Dict) -> Dict:
+        order_book = row.get("orderBook") if isinstance(row.get("orderBook"), dict) else {}
+        extensions = order_book.get("orderBookExtensions") if isinstance(order_book.get("orderBookExtensions"), list) else []
+        extension = extensions[0] if extensions and isinstance(extensions[0], dict) else {}
+
+        symbol = TmsUser._order_book_symbol(row)
+        exchange_order_id = TmsUser._order_book_exchange_order_id(row)
+
+        return {
+            **row,
+            "symbol": symbol,
+            "script_name": symbol,
+            "buyOrSell": row.get("buyOrSell") or order_book.get("buyOrSell"),
+            "orderQuantity": row.get("orderQuantity") or extension.get("orderQuantity"),
+            "orderPrice": row.get("orderPrice") or extension.get("orderPrice"),
+            "orderTime": row.get("orderTime") or row.get("orderPlacedTime") or order_book.get("orderTime"),
+            "activeStatus": row.get("activeStatus") or order_book.get("activeStatus"),
+            "displayActiveStatus": row.get("displayActiveStatus") or row.get("activeStatus") or order_book.get("activeStatus"),
+            "totalTradedQuantity": row.get("totalTradedQuantity") or extension.get("totalTradedQuantity"),
+            "remainingOrderQuantity": row.get("remainingOrderQuantity") or extension.get("remainingOrderQuantity"),
+            "exchangeOrderId": exchange_order_id,
+        }
+
+    async def get_normalized_order_book(self) -> List[Dict]:
+        payload = await self.get_order_book()
+        return [self._normalize_order_book_row(row) for row in self._order_book_rows(payload)]
+
+    async def get_normalized_daily_order_book(self) -> List[Dict]:
+        payload = await self.get_order_history()
+        rows = [self._normalize_order_book_row(row) for row in self._order_book_rows(payload)]
+        rows.sort(key=lambda row: str(row.get("orderTime") or ""), reverse=True)
+        return rows
+
+    @staticmethod
     def _order_book_rows(payload) -> List[Dict]:
         if isinstance(payload, list):
             return [row for row in payload if isinstance(row, dict)]

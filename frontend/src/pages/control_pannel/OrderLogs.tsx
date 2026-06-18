@@ -22,10 +22,14 @@ import {
 import { formatStrategyLabel } from '../../lib/strategies';
 import EditScheduledOrderModal from './EditScheduledOrderModal';
 import NepseAlphaSymbolLink from '../../components/NepseAlphaSymbolLink';
+import StrategyCatalogModal from '../../components/StrategyCatalogModal';
 
 type OrderTab = 'logs' | 'scheduled' | 'book' | 'history';
 
 const CACHE_TTL_MS = 20 * 60 * 1000;
+const CORE_CACHE_STORAGE_KEY = 'tms-order-logs-core-v1';
+const TRADE_BOOK_CACHE_STORAGE_KEY = 'tms-order-logs-trade-book-v1';
+const HISTORY_CACHE_STORAGE_KEY = 'tms-order-logs-history-v1';
 
 const HISTORY_RANGE_OPTIONS: { id: HistoryRangePreset; label: string }[] = [
   { id: 'week', label: '1 Week' },
@@ -60,6 +64,7 @@ interface ScheduledOrderRow {
   execution_price?: number | null;
   execution_price_source?: string | null;
   execution_reason?: string | null;
+  requested_price?: number | null;
   expiry_time?: string | null;
   expiry_action?: string | null;
   max_allowed_slippage_percent?: number | null;
@@ -155,6 +160,8 @@ const formatTradeSide = (value: unknown) => {
 const isCacheFresh = (fetchedAt: number | null | undefined) =>
   fetchedAt != null && Date.now() - fetchedAt < CACHE_TTL_MS;
 
+const tradeBookClientKey = (clientIds: string[]) => [...clientIds].sort().join(',');
+
 const isScheduledOrderEditable = (order: ScheduledOrderRow) => {
   if (order.editable === false || order.executed_at) {
     return false;
@@ -214,7 +221,10 @@ const getStrategyDetails = (order: ScheduledOrderRow) => {
     addDetail(details, 'Expiry Time', order.expiry_time, formatDateTime);
     addDetail(details, 'Expiry Action', order.expiry_action);
   } else if (strategy === 'Capital Protection Sell') {
+    addDetail(details, 'Scheduled Price', order.requested_price ?? order.price, formatCurrency);
     addDetail(details, 'Stop Loss Price', order.stop_loss_price, formatCurrency);
+    addDetail(details, 'Highest Tracked Price', order.highest_tracked_price, formatCurrency);
+    addDetail(details, 'Trailing Stop %', order.trailing_drop_percent, formatPercent);
     addDetail(details, 'Average Buy Price', order.average_buy_price, formatCurrency);
     addDetail(details, 'Break-even Trigger %', (order as any).strategy_config?.break_even_trigger_pct, formatPercent);
     addDetail(details, 'Max Allowed Slippage', order.max_allowed_slippage_percent, formatPercent);
@@ -246,8 +256,30 @@ const getStrategyDetails = (order: ScheduledOrderRow) => {
 const TABS: { id: OrderTab; label: string; icon: string }[] = [
   { id: 'scheduled', label: 'Scheduled', icon: '📅' },
   { id: 'logs', label: 'Order Logs', icon: '📋' },
-  { id: 'book', label: 'Order Book', icon: '📖' },
+  { id: 'book', label: 'Trade Book', icon: '📖' },
   { id: 'history', label: 'History', icon: '🕐' },
+];
+
+const OPEN_TRADE_COLUMNS = [
+  'stock',
+  'buyOrSell',
+  'orderQuantity',
+  'orderPrice',
+  'orderTime',
+  'activeStatus',
+  'remainingOrderQuantity',
+  'exchangeOrderId',
+];
+
+const DAILY_TRADE_COLUMNS = [
+  'stock',
+  'buyOrSell',
+  'orderQuantity',
+  'orderPrice',
+  'orderTime',
+  'activeStatus',
+  'totalTradedQuantity',
+  'exchangeOrderId',
 ];
 
 const COMPLETED_STATUS_RANK = new Set([
@@ -281,16 +313,20 @@ const GetOrderStatus: React.FC = () => {
   const [orderLogs, setOrderLogs] = useState<any[]>([]);
   const [scheduledOrders, setScheduledOrders] = useState<ScheduledOrderRow[]>([]);
   const [orderBook, setOrderBook] = useState<any[]>([]);
+  const [dailyOrderBook, setDailyOrderBook] = useState<any[]>([]);
   const [orderHistory, setOrderHistory] = useState<any[]>([]);
   const [historyRangePreset, setHistoryRangePreset] = useState<HistoryRangePreset>('week');
   const [historyFromDate, setHistoryFromDate] = useState(() => offsetNepalDate(todayNepalDate(), { days: 7 }));
   const [historyToDate, setHistoryToDate] = useState(() => todayNepalDate());
   const [isLoading, setIsLoading] = useState(true);
   const [isHistoryLoading, setIsHistoryLoading] = useState(false);
+  const [isTradeBookLoading, setIsTradeBookLoading] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [hasLoaded, setHasLoaded] = useState(false);
+  const [tradeBookLoaded, setTradeBookLoaded] = useState(false);
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const coreCacheRef = useRef<number | null>(null);
+  const tradeBookCacheRef = useRef<{ clientKey: string; fetchedAt: number } | null>(null);
   const historyCacheRef = useRef<{ key: string; rows: any[]; fetchedAt: number } | null>(null);
   const historyRequestIdRef = useRef(0);
   const [loggedInClientIDs, setLoggedInClientIDs] = useState<string[]>([]);
@@ -300,6 +336,7 @@ const GetOrderStatus: React.FC = () => {
   const [dialogMessage, setDialogMessage] = useState('');
   const [dialogAction, setDialogAction] = useState<() => void>(() => {});
   const [strategyDetailsOrder, setStrategyDetailsOrder] = useState<ScheduledOrderRow | null>(null);
+  const [strategyCatalogGuide, setStrategyCatalogGuide] = useState<{ name: string; side: 'buy' | 'sell' } | null>(null);
   const [editingOrderId, setEditingOrderId] = useState<number | null>(null);
   const [errorMessage, setErrorMessage] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
@@ -382,6 +419,20 @@ const GetOrderStatus: React.FC = () => {
     return [];
   }, [apiUrl]);
 
+  const fetchDailyOrderBook = useCallback(async (selectedClientId: string) => {
+    if (!selectedClientId) {
+      return [];
+    }
+    const response = await fetch(`${apiUrl}/get_daily_order_book?client_id=${selectedClientId}`);
+    if (response.ok) {
+      const rows = await response.json();
+      return Array.isArray(rows)
+        ? rows.map((row) => ({ ...row, client_id: selectedClientId }))
+        : [];
+    }
+    return [];
+  }, [apiUrl]);
+
   const fetchOrderStatusLogs = useCallback(
     async (options?: { silent?: boolean }) => {
       const params = new URLSearchParams();
@@ -401,21 +452,22 @@ const GetOrderStatus: React.FC = () => {
       });
       if (response.ok) {
         const data = await response.json();
-        setOrderLogs(data.order_logs || []);
-        setScheduledOrders(
-          (data.scheduled_orders || []).map((order: ScheduledOrderRow) => ({
-            ...order,
-            actionRequired: true,
-          })),
-        );
+        const nextOrderLogs = data.order_logs || [];
+        const nextScheduledOrders = (data.scheduled_orders || []).map((order: ScheduledOrderRow) => ({
+          ...order,
+          actionRequired: true,
+        }));
+        setOrderLogs(nextOrderLogs);
+        setScheduledOrders(nextScheduledOrders);
         void syncMonitoringStatus();
-      } else {
-        setOrderLogs([]);
-        setScheduledOrders([]);
-        if (!options?.silent) {
-          throw new Error('Failed to fetch order logs');
-        }
+        return { orderLogs: nextOrderLogs, scheduledOrders: nextScheduledOrders };
       }
+      setOrderLogs([]);
+      setScheduledOrders([]);
+      if (!options?.silent) {
+        throw new Error('Failed to fetch order logs');
+      }
+      return { orderLogs: [], scheduledOrders: [] };
     },
     [apiUrl, orderedDate, selectedClientId],
   );
@@ -443,48 +495,241 @@ const GetOrderStatus: React.FC = () => {
     [apiUrl],
   );
 
-  const loadOrderBook = useCallback(
-    async (clientIds: string[]) => {
+  const persistTradeBookCache = useCallback((open: any[], daily: any[], clientIds: string[]) => {
+    try {
+      sessionStorage.setItem(
+        TRADE_BOOK_CACHE_STORAGE_KEY,
+        JSON.stringify({
+          open,
+          daily,
+          clientKey: tradeBookClientKey(clientIds),
+          fetchedAt: Date.now(),
+        }),
+      );
+    } catch {
+      // Ignore storage quota or private-mode errors.
+    }
+  }, []);
+
+  const persistHistoryCache = useCallback((payload: { key: string; rows: any[] }) => {
+    try {
+      sessionStorage.setItem(
+        HISTORY_CACHE_STORAGE_KEY,
+        JSON.stringify({ ...payload, fetchedAt: Date.now() }),
+      );
+    } catch {
+      // Ignore storage quota or private-mode errors.
+    }
+  }, []);
+
+  const loadTradeBooks = useCallback(
+    async (clientIds: string[], force = false) => {
+      const clientKey = tradeBookClientKey(clientIds);
+      const cached = tradeBookCacheRef.current;
+      if (
+        !force
+        && tradeBookLoaded
+        && cached?.clientKey === clientKey
+        && isCacheFresh(cached.fetchedAt)
+      ) {
+        return { open: orderBook, daily: dailyOrderBook };
+      }
+
       if (clientIds.length === 0) {
         setOrderBook([]);
+        setDailyOrderBook([]);
+        setTradeBookLoaded(true);
+        tradeBookCacheRef.current = { clientKey, fetchedAt: Date.now() };
+        persistTradeBookCache([], [], clientIds);
+        return { open: [], daily: [] };
+      }
+
+      setIsTradeBookLoading(true);
+      try {
+        const pairs = await Promise.all(
+          clientIds.map(async (id) => {
+            const [open, daily] = await Promise.all([
+              fetchOrderBook(id).catch(() => []),
+              fetchDailyOrderBook(id).catch(() => []),
+            ]);
+            return { open, daily };
+          }),
+        );
+        const open = pairs.flatMap((pair) => pair.open);
+        const daily = pairs
+          .flatMap((pair) => pair.daily)
+          .sort((left, right) => {
+            const leftTime = new Date(left.orderTime || 0).getTime();
+            const rightTime = new Date(right.orderTime || 0).getTime();
+            return rightTime - leftTime;
+          });
+
+        setOrderBook(open);
+        setDailyOrderBook(daily);
+        setTradeBookLoaded(true);
+        tradeBookCacheRef.current = { clientKey, fetchedAt: Date.now() };
+        persistTradeBookCache(open, daily, clientIds);
+        return { open, daily };
+      } finally {
+        setIsTradeBookLoading(false);
+      }
+    },
+    [
+      dailyOrderBook,
+      fetchDailyOrderBook,
+      fetchOrderBook,
+      orderBook,
+      persistTradeBookCache,
+      tradeBookLoaded,
+    ],
+  );
+
+  const persistCoreCache = useCallback((payload: {
+    orderLogs: any[];
+    scheduledOrders: ScheduledOrderRow[];
+  }) => {
+    try {
+      sessionStorage.setItem(
+        CORE_CACHE_STORAGE_KEY,
+        JSON.stringify({ ...payload, fetchedAt: Date.now() }),
+      );
+    } catch {
+      // Ignore storage quota or private-mode errors.
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem(TRADE_BOOK_CACHE_STORAGE_KEY);
+      if (!raw) {
         return;
       }
-      const bookResults = await Promise.all(clientIds.map((id) => fetchOrderBook(id).catch(() => [])));
-      setOrderBook(bookResults.flat());
-    },
-    [fetchOrderBook],
-  );
+      const cached = JSON.parse(raw) as {
+        fetchedAt?: number;
+        clientKey?: string;
+        open?: any[];
+        daily?: any[];
+      };
+      if (!isCacheFresh(cached.fetchedAt)) {
+        return;
+      }
+      setOrderBook(cached.open || []);
+      setDailyOrderBook(cached.daily || []);
+      tradeBookCacheRef.current = {
+        clientKey: cached.clientKey || '',
+        fetchedAt: cached.fetchedAt || Date.now(),
+      };
+      setTradeBookLoaded(true);
+    } catch {
+      // Ignore malformed cache payloads.
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem(HISTORY_CACHE_STORAGE_KEY);
+      if (!raw) {
+        return;
+      }
+      const cached = JSON.parse(raw) as {
+        fetchedAt?: number;
+        key?: string;
+        rows?: any[];
+      };
+      if (!isCacheFresh(cached.fetchedAt) || !cached.key) {
+        return;
+      }
+      historyCacheRef.current = {
+        key: cached.key,
+        rows: cached.rows || [],
+        fetchedAt: cached.fetchedAt || Date.now(),
+      };
+      setOrderHistory(cached.rows || []);
+      setHistoryLoaded(true);
+    } catch {
+      // Ignore malformed cache payloads.
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem(CORE_CACHE_STORAGE_KEY);
+      if (!raw) {
+        return;
+      }
+      const cached = JSON.parse(raw) as {
+        fetchedAt?: number;
+        orderLogs?: any[];
+        scheduledOrders?: ScheduledOrderRow[];
+      };
+      if (!isCacheFresh(cached.fetchedAt)) {
+        return;
+      }
+      setOrderLogs(cached.orderLogs || []);
+      setScheduledOrders(cached.scheduledOrders || []);
+      coreCacheRef.current = cached.fetchedAt || Date.now();
+      setHasLoaded(true);
+      setIsLoading(false);
+    } catch {
+      // Ignore malformed cache payloads.
+    }
+  }, []);
 
   const loadCoreData = useCallback(
     async (force = false) => {
       if (!force && isCacheFresh(coreCacheRef.current) && hasLoaded) {
+        setIsLoading(false);
         return;
       }
 
-      const showFullLoading = !hasLoaded;
-      if (showFullLoading) {
+      const hasVisibleData = orderLogs.length > 0 || scheduledOrders.length > 0;
+      const showBlockingLoader = !hasLoaded && !hasVisibleData;
+      if (showBlockingLoader) {
         setIsLoading(true);
       }
 
       try {
-        await fetchOrderStatusLogs({ silent: true });
-        await loadOrderBook(activeClientIds);
+        const logsResult = await Promise.allSettled([
+          fetchOrderStatusLogs({ silent: true }),
+        ]).then((results) => results[0]);
+
+        const nextOrderLogs = logsResult.status === 'fulfilled'
+          ? logsResult.value.orderLogs
+          : orderLogs;
+        const nextScheduledOrders = logsResult.status === 'fulfilled'
+          ? logsResult.value.scheduledOrders
+          : scheduledOrders;
+
+        if (logsResult.status === 'rejected' && !hasVisibleData) {
+          throw logsResult.reason;
+        }
+
         coreCacheRef.current = Date.now();
         setHasLoaded(true);
+        persistCoreCache({
+          orderLogs: nextOrderLogs,
+          scheduledOrders: nextScheduledOrders,
+        });
       } catch {
-        if (!hasLoaded) {
+        if (!hasLoaded && !hasVisibleData) {
           setErrorMessage('Failed to load order data.');
         } else {
           setErrorMessage('Failed to refresh order data.');
         }
         throw new Error('core load failed');
       } finally {
-        if (showFullLoading) {
+        if (showBlockingLoader) {
           setIsLoading(false);
         }
       }
     },
-    [activeClientIds, fetchOrderStatusLogs, hasLoaded, loadOrderBook],
+    [
+      fetchOrderStatusLogs,
+      hasLoaded,
+      orderLogs,
+      persistCoreCache,
+      scheduledOrders,
+    ],
   );
 
   const loadHistoryData = useCallback(
@@ -528,6 +773,7 @@ const GetOrderStatus: React.FC = () => {
         historyCacheRef.current = { key: cacheKey, rows, fetchedAt: Date.now() };
         setOrderHistory(rows);
         setHistoryLoaded(true);
+        persistHistoryCache({ key: cacheKey, rows });
       } catch {
         if (requestId !== historyRequestIdRef.current) {
           return;
@@ -546,6 +792,7 @@ const GetOrderStatus: React.FC = () => {
       historyFromDate,
       historyRangePreset,
       historyToDate,
+      persistHistoryCache,
     ],
   );
 
@@ -554,27 +801,29 @@ const GetOrderStatus: React.FC = () => {
       return;
     }
     void loadCoreData(false);
-  }, [clientsFetched, loadCoreData]);
-
-  useEffect(() => {
-    if (!clientsFetched || activeTab !== 'history') {
-      return;
+    void loadTradeBooks(activeClientIds, false);
+    if (historyRangePreset !== 'custom') {
+      void loadHistoryData(false);
     }
-    if (historyRangePreset === 'custom') {
-      return;
-    }
-    void loadHistoryData(false);
-  }, [activeTab, clientsFetched, historyRangePreset, loadHistoryData]);
+  }, [
+    activeClientIds,
+    clientsFetched,
+    historyRangePreset,
+    loadCoreData,
+    loadHistoryData,
+    loadTradeBooks,
+  ]);
 
   useEffect(() => {
     const interval = window.setInterval(() => {
       void loadCoreData(true);
-      if (historyCacheRef.current || activeTab === 'history') {
+      void loadTradeBooks(activeClientIds, true);
+      if (historyRangePreset !== 'custom') {
         void loadHistoryData(true);
       }
     }, CACHE_TTL_MS);
     return () => window.clearInterval(interval);
-  }, [activeTab, loadCoreData, loadHistoryData]);
+  }, [activeClientIds, historyRangePreset, loadCoreData, loadHistoryData, loadTradeBooks]);
 
   const handleRefresh = async (e?: React.FormEvent) => {
     e?.preventDefault();
@@ -583,10 +832,19 @@ const GetOrderStatus: React.FC = () => {
     setIsRefreshing(true);
     coreCacheRef.current = null;
     historyCacheRef.current = null;
+    tradeBookCacheRef.current = null;
+    try {
+      sessionStorage.removeItem(CORE_CACHE_STORAGE_KEY);
+      sessionStorage.removeItem(TRADE_BOOK_CACHE_STORAGE_KEY);
+      sessionStorage.removeItem(HISTORY_CACHE_STORAGE_KEY);
+    } catch {
+      // Ignore storage errors.
+    }
 
     try {
       await loadCoreData(true);
-      if (activeTab === 'history' || historyLoaded) {
+      await loadTradeBooks(activeClientIds, true);
+      if (historyRangePreset !== 'custom') {
         await loadHistoryData(true);
       }
       setSuccessMessage('Data refreshed');
@@ -604,6 +862,11 @@ const GetOrderStatus: React.FC = () => {
   const handleHistoryPresetChange = (preset: HistoryRangePreset) => {
     historyCacheRef.current = null;
     historyRequestIdRef.current += 1;
+    try {
+      sessionStorage.removeItem(HISTORY_CACHE_STORAGE_KEY);
+    } catch {
+      // Ignore storage errors.
+    }
     setHistoryRangePreset(preset);
     const today = todayNepalDate();
     if (preset === 'week') {
@@ -616,7 +879,7 @@ const GetOrderStatus: React.FC = () => {
       setHistoryFromDate(FOREVER_FROM_DATE);
       setHistoryToDate(today);
     }
-    if (activeTab === 'history') {
+    if (preset !== 'custom') {
       void loadHistoryData(true, preset);
     }
   };
@@ -624,6 +887,11 @@ const GetOrderStatus: React.FC = () => {
   const handleHistoryRangeApply = () => {
     historyCacheRef.current = null;
     historyRequestIdRef.current += 1;
+    try {
+      sessionStorage.removeItem(HISTORY_CACHE_STORAGE_KEY);
+    } catch {
+      // Ignore storage errors.
+    }
     void loadHistoryData(true);
   };
 
@@ -639,8 +907,8 @@ const GetOrderStatus: React.FC = () => {
       );
       if (response.ok) {
         setSuccessMessage('Order cancelled successfully');
-        await loadOrderBook(activeClientIds);
-        coreCacheRef.current = Date.now();
+        tradeBookCacheRef.current = null;
+        await loadTradeBooks(activeClientIds, true);
       } else {
         setErrorMessage('Failed to cancel order');
       }
@@ -699,8 +967,11 @@ const GetOrderStatus: React.FC = () => {
               type="button"
               className={`strategy-chip ${side === 'BUY' ? 'buy' : side === 'SELL' ? 'sell' : ''}`}
               onClick={() => setStrategyDetailsOrder(order)}
+              title="Show details"
+              aria-label={`Show details for ${strategyLabel}`}
             >
-              {strategyLabel}
+              <span className="strategy-chip-label">{strategyLabel}</span>
+              <span className="strategy-chip-action">Show details</span>
             </button>
           ),
           created_at: formatDateTime(order.created_at || order.target_reached_at || ''),
@@ -729,15 +1000,22 @@ const GetOrderStatus: React.FC = () => {
             order_id: order.order_id || 0,
             client_id: order.client_id || '',
             script_name: order.script_name || '',
-            price: Number(order.execution_price ?? order.price ?? 0),
+            price: Number(order.requested_price ?? order.price ?? 0),
             qty: Number(order.qty || 0),
             status: order.status || '',
             order_type: String(order.order_type || side).toLowerCase(),
-            strategy_type: strategyLabel,
+            strategy_type: order.strategy_type || strategyLabel,
             side,
             created_at: order.timestamp,
+            requested_price: order.requested_price ?? order.price,
+            stop_loss_price: order.stop_loss_price,
+            average_buy_price: order.average_buy_price,
+            highest_tracked_price: order.highest_tracked_price,
+            trailing_drop_percent: order.trailing_drop_percent,
+            max_allowed_slippage_percent: order.max_allowed_slippage_percent,
             execution_price: order.execution_price ?? order.price,
-            execution_reason: order.status,
+            execution_price_source: order.execution_price_source,
+            execution_reason: order.execution_reason || order.status,
           };
           return {
             timestamp: formatDateTime(order.timestamp),
@@ -749,8 +1027,11 @@ const GetOrderStatus: React.FC = () => {
                 type="button"
                 className={`strategy-chip ${side === 'BUY' ? 'buy' : side === 'SELL' ? 'sell' : ''}`}
                 onClick={() => setStrategyDetailsOrder(detailOrder)}
+                title="Show details"
+                aria-label={`Show details for ${strategyLabel}`}
               >
-                {strategyLabel}
+                <span className="strategy-chip-label">{strategyLabel}</span>
+                <span className="strategy-chip-action">Show details</span>
               </button>
             ),
             status: order.status,
@@ -783,7 +1064,21 @@ const GetOrderStatus: React.FC = () => {
     [historyFromDate, historyRangePreset, historyToDate],
   );
 
-  const orderBookRows = useMemo(() => decorateTmsRows(orderBook), [decorateTmsRows, orderBook]);
+  const formatTradeBookRows = useCallback(
+    (rows: any[]) =>
+      decorateTmsRows(rows).map((row) => ({
+        ...row,
+        buyOrSell: formatTradeSide(row.buyOrSell),
+        orderPrice: formatCurrency(row.orderPrice),
+        activeStatus: row.displayActiveStatus || row.activeStatus || '-',
+      })),
+    [decorateTmsRows],
+  );
+
+  const openTradeRows = useMemo(() => formatTradeBookRows(orderBook), [formatTradeBookRows, orderBook]);
+  const dailyTradeRows = useMemo(() => formatTradeBookRows(dailyOrderBook), [dailyOrderBook, formatTradeBookRows]);
+
+  const tradeBookCount = orderBook.length + dailyOrderBook.length;
 
   const orderHistoryRows = useMemo(
     () =>
@@ -825,19 +1120,12 @@ const GetOrderStatus: React.FC = () => {
         : 'Loading scheduled orders...',
     },
     book: {
-      count: orderBook.length,
-      columns: [
-        'stock',
-        'buyOrSell',
-        'orderQuantity',
-        'orderPrice',
-        'orderTime',
-        'activeStatus',
-        'totalTradedQuantity',
-        'remainingOrderQuantity',
-      ],
-      rows: orderBookRows,
-      empty: hasLoaded ? 'No open orders in the order book.' : 'Loading order book...',
+      count: tradeBookCount,
+      columns: OPEN_TRADE_COLUMNS,
+      rows: openTradeRows,
+      empty: tradeBookLoaded
+        ? 'No open or daily orders found for the selected client(s).'
+        : 'Loading trade book from TMS...',
     },
     history: {
       count: orderHistory.length,
@@ -847,11 +1135,9 @@ const GetOrderStatus: React.FC = () => {
         ['exchangeTradeId', 'displayName', 'clientMemberCode'],
       ),
       rows: orderHistoryRows,
-      empty: isHistoryLoading
+      empty: isHistoryLoading || !historyLoaded
         ? 'Loading trade history...'
-        : historyLoaded
-          ? 'No trade history found for the selected date range.'
-          : 'Select the History tab to load trade records.',
+        : 'No trade history found for the selected date range.',
     },
   };
 
@@ -864,7 +1150,7 @@ const GetOrderStatus: React.FC = () => {
           <div>
             <h2 className="panel-title">Order Logs</h2>
             <p className="panel-subtitle">
-              Scheduled, logs, and order book load on open. History loads in its tab and caches for 20 minutes.
+              All sections load on open and stay cached in your browser for 20 minutes. Use Refresh to fetch now.
             </p>
           </div>
           <div className="order-logs-header-actions">
@@ -875,7 +1161,7 @@ const GetOrderStatus: React.FC = () => {
               type="button"
               className={`order-logs-refresh-btn ${isRefreshing ? 'spinning' : ''}`}
               onClick={() => void handleRefresh()}
-              disabled={isLoading || isRefreshing}
+              disabled={isRefreshing}
               aria-label="Refresh order data"
               title="Refresh all sections"
             >
@@ -1041,15 +1327,43 @@ const GetOrderStatus: React.FC = () => {
           </div>
         )}
 
-        {(isLoading && !hasLoaded) || (activeTab === 'history' && isHistoryLoading && !historyLoaded) ? (
+        {(isLoading && !hasLoaded && orderLogs.length === 0 && scheduledOrders.length === 0)
+          || (activeTab === 'history' && isHistoryLoading && !historyLoaded && orderHistory.length === 0)
+          || (activeTab === 'book' && isTradeBookLoading && !tradeBookLoaded && openTradeRows.length === 0 && dailyTradeRows.length === 0) ? (
           <div className="order-logs-loading">
             <div className="order-logs-spinner" />
             <p>Fetching order data from TMS...</p>
           </div>
+        ) : activeTab === 'book' ? (
+          <div className="order-logs-trade-book">
+            <section className="order-logs-trade-section">
+              <div className="order-logs-trade-section-header">
+                <h4>Open Trades</h4>
+                <span className="badge badge-muted">{openTradeRows.length} record(s)</span>
+              </div>
+              <CommonTable
+                data={openTradeRows}
+                onAction={handleAction}
+                columns={OPEN_TRADE_COLUMNS}
+                emptyMessage={tradeBookLoaded ? 'No open orders.' : 'Loading open trades...'}
+              />
+            </section>
+            <section className="order-logs-trade-section">
+              <div className="order-logs-trade-section-header">
+                <h4>Daily Order Book</h4>
+                <span className="badge badge-muted">{dailyTradeRows.length} record(s)</span>
+              </div>
+              <CommonTable
+                data={dailyTradeRows}
+                columns={DAILY_TRADE_COLUMNS}
+                emptyMessage={tradeBookLoaded ? 'No completed, cancelled, or rejected orders today.' : 'Loading daily orders...'}
+              />
+            </section>
+          </div>
         ) : (
           <CommonTable
             data={current.rows}
-            onAction={activeTab === 'scheduled' || activeTab === 'book' ? handleAction : undefined}
+            onAction={activeTab === 'scheduled' ? handleAction : undefined}
             columns={current.columns}
             emptyMessage={current.empty}
           />
@@ -1086,8 +1400,31 @@ const GetOrderStatus: React.FC = () => {
                 </div>
               ))}
             </dl>
+            <div className="strategy-details-footer">
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => {
+                  const side = getOrderSide(strategyDetailsOrder) === 'BUY' ? 'buy' : 'sell';
+                  setStrategyCatalogGuide({
+                    name: strategyDetailsOrder.strategy_type || formatStrategyLabel(strategyDetailsOrder.strategy_type || '', side),
+                    side,
+                  });
+                }}
+              >
+                Strategy behaviour guide
+              </button>
+            </div>
           </div>
         </div>
+      )}
+
+      {strategyCatalogGuide && (
+        <StrategyCatalogModal
+          strategyName={strategyCatalogGuide.name}
+          side={strategyCatalogGuide.side}
+          onClose={() => setStrategyCatalogGuide(null)}
+        />
       )}
 
       {editingOrderId != null && (
