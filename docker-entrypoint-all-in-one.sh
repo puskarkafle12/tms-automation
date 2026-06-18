@@ -10,7 +10,7 @@ set -euo pipefail
 : "${FRONTEND_SEED_PASSWORD:=admin}"
 : "${NGROK_AUTHTOKEN:=}"
 : "${NGROK_DOMAIN:=}"
-: "${ENVIRONMENT:=env}"
+: "${ENVIRONMENT:=test}"
 
 export DB_USER DB_PASSWORD DB_HOST DB_NAME FRONTEND_SEED_USER FRONTEND_SEED_PASSWORD ENVIRONMENT
 
@@ -131,7 +131,7 @@ nginx
 if [ "$ENVIRONMENT" = "production" ] || [ "$ENVIRONMENT" = "prod" ]; then
   start_ngrok_tunnel || true
 else
-  echo "ENVIRONMENT=$ENVIRONMENT — ngrok disabled (local/env mode)."
+  echo "ENVIRONMENT=$ENVIRONMENT — ngrok disabled (local/test mode)."
   print_public_url_banner "http://localhost:3000" "Open this URL on your machine. Set ENVIRONMENT=prod in .env to enable ngrok."
 fi
 

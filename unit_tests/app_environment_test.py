@@ -12,7 +12,7 @@ class TestAppEnvironment(unittest.TestCase):
     def test_public_app_url_local_in_testing(self):
         original = app_environment.ENVIRONMENT
         try:
-            app_environment.ENVIRONMENT = "env"
+            app_environment.ENVIRONMENT = "test"
             self.assertEqual(app_environment.public_app_url(), "http://localhost:3000")
         finally:
             app_environment.ENVIRONMENT = original

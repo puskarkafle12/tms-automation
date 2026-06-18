@@ -18,9 +18,9 @@ def _load_dotenv() -> None:
 
 _load_dotenv()
 
-# env (default): local only — no ngrok tunnel
+# test (default): local only — no ngrok tunnel
 # prod: enable ngrok public URL in Docker
-ENVIRONMENT = (os.getenv("ENVIRONMENT") or "env").strip().lower()
+ENVIRONMENT = (os.getenv("ENVIRONMENT") or "test").strip().lower()
 
 
 def is_production() -> bool:

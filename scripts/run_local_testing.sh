@@ -10,7 +10,7 @@ if [ -f .env ]; then
   set +a
 fi
 
-export ENVIRONMENT="${ENVIRONMENT:-env}"
+export ENVIRONMENT="${ENVIRONMENT:-test}"
 
 if [ -d .venv ]; then
   PY=".venv/bin/python"
