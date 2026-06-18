@@ -34,6 +34,7 @@ from utils.base_functions import is_within_time_range, truncate_to_one_decimal_p
 from utils.base_functions import summarize_login_message, get_persisted_collateral
 from utils.lot_size import get_board_lot_size, is_regular_lot_qty, normalize_sell_qty
 from utils.scheduled_monitor_control import (
+    get_scheduler_display_status,
     scheduled_monitor_supervisor_loop,
     start_scheduled_order_monitor,
     stop_scheduled_order_monitor,
@@ -1624,7 +1625,7 @@ async def stop_check_orders_endpoint():
 @app.get("/monitoring-status/")
 async def monitoring_status():
     hours = get_market_hours_status(get_nepal_now())
-    monitor_phase = tms_config.scheduled_phase if tms_config.is_running else "stopped"
+    scheduler = get_scheduler_display_status()
     grabbers = []
     scanning_count = 0
     for session_id, tms_user in running_grabbers.items():
@@ -1644,10 +1645,7 @@ async def monitoring_status():
         })
 
     return {
-        "scheduled_orders_active": tms_config.is_running,
-        "scheduled_scanning": tms_config.is_running and monitor_phase == "active",
-        "scheduled_phase": monitor_phase,
-        "scheduled_status_message": tms_config.scheduled_status_message,
+        **scheduler,
         "scheduled_started_at": (
             tms_config.scheduled_started_at.isoformat()
             if tms_config.scheduled_started_at

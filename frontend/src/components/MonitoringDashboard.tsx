@@ -80,7 +80,7 @@ const MonitoringDashboard: React.FC<MonitoringDashboardProps> = ({
                   Watches queued orders and executes when price conditions are met during market hours.
                 </p>
               </div>
-              <span className={`monitoring-status-badge ${scheduledActive ? 'active' : 'idle'}`}>
+              <span className={`monitoring-status-badge ${schedule.badgeClass}`}>
                 <span className="dot" />
                 {schedule.badgeLabel}
               </span>

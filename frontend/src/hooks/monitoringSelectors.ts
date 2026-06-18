@@ -26,17 +26,20 @@ const SCHEDULE_PHASE_LABELS: Record<string, string> = {
   armed: 'Armed',
 };
 
+export const isScheduleAutoWaiting = (phase: MonitorPhase | string): boolean =>
+  phase === 'waiting_hours' || phase === 'waiting_session';
+
 export const getScheduleNavLabel = (active: boolean, phase: MonitorPhase | string): string => {
-  if (!active) {
-    return 'stopped';
-  }
   if (phase === 'active') {
     return 'scanning';
   }
-  if (phase === 'waiting_hours' || phase === 'waiting_session') {
+  if (isScheduleAutoWaiting(phase)) {
     return 'waiting';
   }
-  return 'armed';
+  if (active || phase === 'armed') {
+    return 'armed';
+  }
+  return 'stopped';
 };
 
 export const getScheduleDisplay = (input: {
@@ -47,22 +50,30 @@ export const getScheduleDisplay = (input: {
   loading: 'start' | 'stop' | null;
 }): ScheduleDisplay => {
   const navLabel = getScheduleNavLabel(input.active, input.phase);
-  const badgeLabel = input.active
-    ? (SCHEDULE_PHASE_LABELS[input.phase] || 'Armed')
+  const autoWaiting = isScheduleAutoWaiting(input.phase);
+  const showAsLive = input.active || autoWaiting || input.phase === 'armed';
+  const badgeLabel = showAsLive
+    ? (SCHEDULE_PHASE_LABELS[input.phase] || 'Waiting')
     : 'Stopped';
   const badgeClass: ScheduleDisplay['badgeClass'] = input.scanning
     ? 'active'
-    : input.active
-      ? 'waiting'
+    : showAsLive
+      ? (input.phase === 'active' ? 'active' : 'waiting')
       : 'idle';
+
+  const defaultDescription = autoWaiting
+    ? (input.phase === 'waiting_session'
+      ? 'Log in to a TMS account — the monitor starts automatically during market hours.'
+      : 'Waiting for Nepal market to open — the monitor will start automatically.')
+    : 'Starts automatically when market opens and a TMS account is logged in.';
 
   return {
     navLabel,
     badgeLabel,
     badgeClass,
-    description: input.active
-      ? input.statusMessage || 'Runs automatically during Nepal market hours.'
-      : 'Starts automatically when market opens and a TMS account is logged in.',
+    description: input.statusMessage || (input.active
+      ? 'Runs automatically during Nepal market hours.'
+      : defaultDescription),
     canStart: false,
     canStop: false,
   };

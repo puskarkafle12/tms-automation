@@ -17,7 +17,7 @@ const ScheduleMonitorBar: React.FC = () => {
   }, [state.scheduledStartedAt]);
 
   return (
-    <div className={`page-monitor-bar scheduled ${state.scheduledActive ? 'active' : ''}`}>
+    <div className={`page-monitor-bar scheduled ${schedule.badgeClass !== 'idle' ? schedule.badgeClass : ''}`}>
       <div className="page-monitor-bar-info">
         <span className="page-monitor-bar-icon" aria-hidden="true">📅</span>
         <div>

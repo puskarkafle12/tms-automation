@@ -36,6 +36,49 @@ def should_auto_run_scheduler() -> bool:
     return bool(hours["market_hours_open"] and has_logged_in_tms_users())
 
 
+def get_scheduler_display_status() -> dict:
+    """UI-facing scheduler state. Auto mode shows waiting, not stopped, outside market hours."""
+    if tms_config.is_running:
+        phase = tms_config.scheduled_phase or "armed"
+        return {
+            "scheduled_orders_active": True,
+            "scheduled_scanning": phase == "active",
+            "scheduled_phase": phase,
+            "scheduled_status_message": (
+                tms_config.scheduled_status_message or "Monitoring scheduled orders"
+            ),
+            "scheduled_auto_mode": True,
+        }
+
+    hours = get_market_hours_status(get_nepal_now())
+    market_open = bool(hours["market_hours_open"])
+    logged_in = has_logged_in_tms_users()
+
+    if not market_open:
+        return {
+            "scheduled_orders_active": False,
+            "scheduled_scanning": False,
+            "scheduled_phase": "waiting_hours",
+            "scheduled_status_message": "Auto — waiting for market to open",
+            "scheduled_auto_mode": True,
+        }
+    if not logged_in:
+        return {
+            "scheduled_orders_active": False,
+            "scheduled_scanning": False,
+            "scheduled_phase": "waiting_session",
+            "scheduled_status_message": "Auto — log in to a TMS account",
+            "scheduled_auto_mode": True,
+        }
+    return {
+        "scheduled_orders_active": False,
+        "scheduled_scanning": False,
+        "scheduled_phase": "armed",
+        "scheduled_status_message": "Auto — starting monitor…",
+        "scheduled_auto_mode": True,
+    }
+
+
 async def start_scheduled_order_monitor(*, reset_logs: bool = False) -> bool:
     if tms_config.is_running:
         return False

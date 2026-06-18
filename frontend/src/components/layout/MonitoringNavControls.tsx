@@ -19,7 +19,7 @@ const MonitoringNavControls: React.FC = () => {
         </span>
       )}
 
-      <div className={`monitoring-nav-chip scheduled ${state.scheduledActive ? (schedule.badgeClass === 'active' ? 'active' : 'waiting') : ''}`}>
+      <div className={`monitoring-nav-chip scheduled ${schedule.badgeClass !== 'idle' ? schedule.badgeClass : ''}`}>
         <span className="monitoring-nav-chip-icon" aria-hidden="true">📅</span>
         <div className="monitoring-nav-chip-body">
           <span className="monitoring-nav-chip-label">Schedule</span>
