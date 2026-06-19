@@ -173,7 +173,7 @@ class TestSellStrategies(unittest.TestCase):
             highest_tracked_price=420,
             config=StrategyConfig(trailing_stop_pct=3),
         )
-        decision = evaluate_capital_protection_sell(ctx, _snapshot(ltp=408), ScannerMemory(), _details())
+        decision = evaluate_capital_protection_sell(ctx, _snapshot(ltp=408, high=421, low=419, prev_close=400), ScannerMemory(), _details())
         self.assertEqual(decision.action, "TRACK")
         self.assertEqual(decision.mutate.get("highest_tracked_price"), 420)
 
@@ -188,7 +188,7 @@ class TestSellStrategies(unittest.TestCase):
                 below_stop_loss_check_count=1,
                 config=StrategyConfig(trailing_stop_pct=3),
             ),
-            _snapshot(ltp=407),
+            _snapshot(ltp=407, high=421, low=419, prev_close=400),
             ScannerMemory(),
             _details(),
         )
