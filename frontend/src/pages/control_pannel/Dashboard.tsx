@@ -12,6 +12,8 @@ import StrategyDetails from './StrategyDetails';
 import AppShell, { NavItem } from '../../components/layout/AppShell';
 import { pathToTab, TAB_TO_PATH } from '../../routes/control_pannel/dashboardPaths';
 
+const EDIS_URL = 'https://bulk-ipo.onrender.com/#edis';
+
 const NAV_ITEMS: NavItem[] = [
   { id: 'OrderStatus', label: 'Order Logs', icon: '📋' },
   { id: 'ScheduleOrder', label: 'Schedule Order', icon: '📅' },
@@ -20,6 +22,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'StockGrabber', label: 'Stock Grabber', icon: '⚡' },
   { id: 'StrategyDetails', label: 'Strategy Details', icon: '🧭' },
   { id: 'StockTable', label: 'Stock Table', icon: '📈' },
+  { id: 'EDIS', label: 'EDIS', icon: '📝' },
   { id: 'Login', label: 'TMS Login', icon: '🔐' },
 ];
 
@@ -61,6 +64,11 @@ const DashBoardPage: React.FC = () => {
   }, [location.pathname]);
 
   const handleNavigate = (id: string) => {
+    if (id === 'EDIS') {
+      window.open(EDIS_URL, '_blank', 'noopener,noreferrer');
+      return;
+    }
+
     const nextPath = TAB_TO_PATH[id];
     if (!nextPath) {
       setActiveComponent(id);

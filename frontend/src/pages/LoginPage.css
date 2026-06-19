@@ -59,60 +59,6 @@
   margin: 0;
 }
 
-.login-page-tabs {
-  display: flex;
-  gap: 0.5rem;
-  margin-bottom: 1.25rem;
-  padding: 0.25rem;
-  border-radius: 10px;
-  background: var(--color-bg);
-  border: 1px solid var(--color-border);
-}
-
-.login-page-tab {
-  flex: 1;
-  border: none;
-  background: transparent;
-  color: var(--color-text-muted);
-  font-size: 0.875rem;
-  font-weight: 600;
-  padding: 0.625rem 0.75rem;
-  border-radius: 8px;
-  cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
-}
-
-.login-page-tab:hover {
-  color: var(--color-text);
-  background: rgba(255, 255, 255, 0.04);
-}
-
-.login-page-tab.active {
-  color: var(--color-text);
-  background: var(--color-surface);
-  box-shadow: var(--shadow-sm);
-}
-
-.login-page-edis {
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-  padding-top: 0.25rem;
-}
-
-.login-page-edis-desc {
-  margin: 0;
-  font-size: 0.875rem;
-  color: var(--color-text-muted);
-  line-height: 1.5;
-}
-
-.login-page-edis-link {
-  width: 100%;
-  text-align: center;
-  text-decoration: none;
-}
-
 .login-page-form {
   margin-top: 0.5rem;
 }

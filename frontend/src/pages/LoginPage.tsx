@@ -7,16 +7,11 @@ import { extractApiErrorMessage } from '../utils/apiError';
 import Settings from './Settings';
 import useHotkeys from '@reecelucas/react-use-hotkeys';
 
-const EDIS_URL = 'https://bulk-ipo.onrender.com/#edis';
-
-type LoginTab = 'signin' | 'edis';
-
 const LoginPage: React.FC = () => {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
-  const [activeTab, setActiveTab] = useState<LoginTab>('signin');
   const navigate = useNavigate();
 
   useHotkeys('shift+s', () => {
@@ -46,32 +41,6 @@ const LoginPage: React.FC = () => {
           </div>
         </div>
 
-        <div className="login-page-tabs" role="tablist" aria-label="Login options">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === 'signin'}
-            className={`login-page-tab ${activeTab === 'signin' ? 'active' : ''}`}
-            onClick={() => setActiveTab('signin')}
-          >
-            Sign In
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === 'edis'}
-            className={`login-page-tab ${activeTab === 'edis' ? 'active' : ''}`}
-            onClick={() => {
-              setActiveTab('edis');
-              window.open(EDIS_URL, '_blank', 'noopener,noreferrer');
-            }}
-          >
-            EDIS
-          </button>
-        </div>
-
-        {activeTab === 'signin' ? (
-          <>
         {error && <ErrorMessage message={error} variant="error" />}
         <form onSubmit={handleSubmit} className="login-page-form">
           <div className="form-group">
@@ -105,23 +74,7 @@ const LoginPage: React.FC = () => {
           </button>
         </form>
         <p className="login-page-hint">Press <kbd>Shift+S</kbd> to open API settings</p>
-          </>
-        ) : (
-          <div className="login-page-edis">
-            <p className="login-page-edis-desc">
-              EDIS opens in a new browser tab. If it did not open, use the button below.
-            </p>
-            <a
-              href={EDIS_URL}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="btn btn-primary login-page-edis-link"
-            >
-              Open EDIS Portal
-            </a>
-          </div>
-        )}
-        {showSettings && activeTab === 'signin' && (
+        {showSettings && (
           <div className="login-page-settings">
             <Settings />
           </div>
