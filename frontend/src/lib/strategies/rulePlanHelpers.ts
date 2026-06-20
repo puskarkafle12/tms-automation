@@ -21,6 +21,38 @@ export function customQueryStrategyForSide(side: 'buy' | 'sell'): 'Custom Query 
   return side === 'buy' ? 'Custom Query Buy' : 'Custom Query Sell';
 }
 
+export function buildSchedulePreflightKey(params: {
+  queryText: string;
+  side: 'buy' | 'sell';
+  strategyType: string;
+  clientId?: string;
+  formSymbol?: string;
+}): string {
+  return JSON.stringify({
+    query: params.queryText.trim(),
+    side: params.side,
+    strategyType: params.strategyType,
+    clientId: params.clientId || '',
+    formSymbol: params.formSymbol || '',
+  });
+}
+
+export function isSchedulePreflightKeyCurrent(
+  schedulePreflightKey: string,
+  params: {
+    queryText: string;
+    side: 'buy' | 'sell';
+    strategyType: string;
+    clientId?: string;
+    formSymbol?: string;
+  },
+): boolean {
+  if (!schedulePreflightKey.trim()) {
+    return false;
+  }
+  return schedulePreflightKey === buildSchedulePreflightKey(params);
+}
+
 export function holdingsMapFromRows(
   rows: Array<{ scrip?: string; symbolName?: string; symbol?: string; currentBalance?: number | string }>,
 ): Record<string, number> {
@@ -100,11 +132,25 @@ export function formatOrderQuantityDisplay(order: {
   strategy_config?: Record<string, unknown>;
 }): string {
   const config = (order.strategy_config || {}) as Record<string, unknown>;
+  const snapshot = config.schedule_preview_snapshot as
+    | { estimated_quantity_display?: string | null; estimated_quantity?: number | null }
+    | undefined;
+  if (snapshot?.estimated_quantity_display && snapshot.estimated_quantity_display !== '—') {
+    if (snapshot.estimated_quantity_display !== 'Unavailable') {
+      return snapshot.estimated_quantity_display.replace(/,/g, '');
+    }
+  }
+  if (snapshot?.estimated_quantity && Number(snapshot.estimated_quantity) > 0) {
+    return String(Math.floor(Number(snapshot.estimated_quantity)));
+  }
   const audit = config.execution_quantity_audit as
     | { resolved_execution_quantity?: number }
     | undefined;
   if (audit?.resolved_execution_quantity && audit.resolved_execution_quantity > 0) {
     return String(audit.resolved_execution_quantity);
+  }
+  if (Number(order.qty) > 0) {
+    return String(Math.floor(Number(order.qty)));
   }
   const dynamicLabel = extractOrderQuantityLabel(
     config.compiled_plan as Record<string, unknown> | undefined,
@@ -193,6 +239,19 @@ export interface PlanValidationSnapshot {
   status?: string;
   errors?: Array<{ code?: string; message?: string }>;
   warnings?: Array<{ code?: string; message?: string }>;
+  preview?: Array<{
+    symbol?: string;
+    trigger?: {
+      estimated_price?: number | null;
+      estimated_price_display?: string | null;
+    };
+  }>;
+  schedule_preview_snapshots_by_symbol?: Record<string, {
+    estimated_trigger_price?: number | null;
+    estimated_trigger_price_display?: string | null;
+    estimated_quantity?: number | null;
+    estimated_quantity_display?: string | null;
+  }>;
 }
 
 const BLOCKING_VALIDATION_CODES = new Set([
@@ -228,6 +287,106 @@ export function isSchedulePreflightReady(
   schedulePreflight?: { ready?: boolean } | null,
 ): boolean {
   return Boolean(schedulePreflight?.ready);
+}
+
+function snapshotTriggerReady(snapshot?: {
+  estimated_trigger_price?: number | null;
+  estimated_trigger_price_display?: string | null;
+} | null): boolean {
+  if (!snapshot) {
+    return false;
+  }
+  const price = snapshot.estimated_trigger_price;
+  if (price != null && Number(price) > 0) {
+    return true;
+  }
+  const display = String(snapshot.estimated_trigger_price_display || '').trim();
+  return display !== '' && display !== '—' && display !== 'Unavailable';
+}
+
+function previewRowTriggerReady(row?: {
+  trigger?: {
+    estimated_price?: number | null;
+    estimated_price_display?: string | null;
+  };
+} | null): boolean {
+  if (!row?.trigger) {
+    return false;
+  }
+  const price = row.trigger.estimated_price;
+  if (price != null && Number(price) > 0) {
+    return true;
+  }
+  const display = String(row.trigger.estimated_price_display || '').trim();
+  return display !== '' && display !== '—' && display !== 'Unavailable';
+}
+
+function symbolPreviewTriggerReady(
+  symbol: string,
+  snapshots: Record<string, {
+    estimated_trigger_price?: number | null;
+    estimated_trigger_price_display?: string | null;
+  }> | undefined,
+  previewBySymbol: Map<string, {
+    trigger?: {
+      estimated_price?: number | null;
+      estimated_price_display?: string | null;
+    };
+  }>,
+): boolean {
+  const normalized = symbol.trim().toUpperCase();
+  if (snapshotTriggerReady(snapshots?.[normalized])) {
+    return true;
+  }
+  return previewRowTriggerReady(previewBySymbol.get(normalized));
+}
+
+export function describeSchedulePreviewBlockReason(
+  validation: PlanValidationSnapshot | null | undefined,
+  compiledPlan?: Record<string, unknown>,
+): string | null {
+  if (!validation?.valid || !compiledPlan) {
+    return 'Wait for strategy validation to finish.';
+  }
+  const symbols = extractSymbolsFromCompiledPlan(compiledPlan);
+  if (!symbols.length) {
+    return 'Rule plan must include at least one symbol.';
+  }
+  const snapshots = validation.schedule_preview_snapshots_by_symbol;
+  const previewBySymbol = new Map(
+    (validation.preview || []).map((row) => [String(row.symbol || '').trim().toUpperCase(), row]),
+  );
+  const missingSymbols = symbols.filter(
+    (symbol) => !symbolPreviewTriggerReady(symbol, snapshots, previewBySymbol),
+  );
+  if (!missingSymbols.length) {
+    return null;
+  }
+  if (missingSymbols.length === 1) {
+    return `Est. trigger price is still loading for ${missingSymbols[0]}. Wait for preview to finish.`;
+  }
+  if (missingSymbols.length <= 4) {
+    return `Est. trigger prices are still loading for ${missingSymbols.join(', ')}. Wait for preview to finish.`;
+  }
+  return `Est. trigger prices are still loading for ${missingSymbols.length} symbols. Wait for preview to finish.`;
+}
+
+export function isSchedulePreviewReady(
+  validation: PlanValidationSnapshot | null | undefined,
+  compiledPlan?: Record<string, unknown>,
+): boolean {
+  if (!validation?.valid || !compiledPlan) {
+    return false;
+  }
+  const symbols = extractSymbolsFromCompiledPlan(compiledPlan);
+  if (!symbols.length) {
+    return false;
+  }
+  const snapshots = validation.schedule_preview_snapshots_by_symbol;
+  const previewBySymbol = new Map(
+    (validation.preview || []).map((row) => [String(row.symbol || '').trim().toUpperCase(), row]),
+  );
+  return symbols.every((symbol) => symbolPreviewTriggerReady(symbol, snapshots, previewBySymbol));
 }
 
 export function isQueryValidationReady(

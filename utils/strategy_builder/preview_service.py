@@ -227,9 +227,10 @@ async def _preview_symbol(
     reference_store: Optional[ReferenceStore] = None,
     holdings_by_symbol: Optional[Dict[str, int]] = None,
     holding_retrieval_failed: bool = False,
+    force_refresh: bool = False,
 ) -> Dict[str, Any]:
     try:
-        details = await asyncio.to_thread(get_script_details, symbol, force_refresh=False)
+        details = await asyncio.to_thread(get_script_details, symbol, force_refresh=force_refresh)
         quote = await _fetch_preview_quote(client_id, symbol, db)
         snapshot = normalize_tms_quote(symbol, quote or {"ltp": _preview_ltp(details, quote)})
         normalized = build_symbol_snapshot_from_parts(symbol, snapshot, details)

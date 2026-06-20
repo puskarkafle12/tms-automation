@@ -8,7 +8,8 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from utils.external_data_sources.nepse_alpha.client import get_nepse_alpha_signals_async
-from utils.strategies.helpers import safe_number
+from utils.strategies.helpers import parse_nepse_stat_number, safe_number
+from utils.external_data_sources.nepse_alpha.stats_parsing import extract_week_range_from_stats
 
 SCREENER_CACHE_TTL_SECONDS = 5 * 60
 _MAX_CONCURRENT_FETCHES = 6
@@ -35,13 +36,7 @@ def _parse_sma_status(value: Optional[str]) -> Optional[str]:
 
 
 def _parse_stat_number(raw: Any) -> Optional[float]:
-    if raw is None:
-        return None
-    text = str(raw).strip()
-    if not text:
-        return None
-    text = re.sub(r"^(npr\.?|rs\.?)\s*", "", text, flags=re.IGNORECASE)
-    return safe_number(text)
+    return parse_nepse_stat_number(raw)
 
 
 def _week_range_parts(raw: Optional[str]) -> Tuple[Optional[float], Optional[float]]:
@@ -61,7 +56,7 @@ def flatten_nepse_alpha_for_screener(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Convert parsed Nepse Alpha payload into a flat filterable record."""
     symbol = str(payload.get("symbol") or "").upper()
     stats = payload.get("statistical_performance") or {}
-    week_high, week_low = _week_range_parts(stats.get("52_weeks_high_low") or stats.get("52_week_high_low"))
+    week_high, week_low = extract_week_range_from_stats(stats)
 
     record: Dict[str, Any] = {
         "symbol": symbol,

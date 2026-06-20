@@ -14,7 +14,7 @@ MAX_SCAN_INTERVAL_SECONDS = 86400
 MIN_MAX_DATA_AGE_SECONDS = 5
 MAX_MAX_DATA_AGE_SECONDS = 3600
 MIN_MONITOR_TICK_SECONDS = 1
-MAX_MONITOR_TICK_SECONDS = 5
+MAX_MONITOR_TICK_SECONDS = 3600
 MIN_NEPSE_ALPHA_INTERVAL_SECONDS = 60
 MAX_NEPSE_ALPHA_INTERVAL_SECONDS = 3600
 MIN_MAX_PRICE_FETCH_CONCURRENCY = 1
@@ -27,7 +27,7 @@ DEFAULTS: Dict[str, Any] = {
     "default_execution_mode": "live",
     "enable_scan_staggering": True,
     "nepse_alpha_interval_seconds": 1800,
-    "monitor_tick_seconds": 1,
+    "monitor_tick_seconds": 5,
     "max_price_fetch_concurrency": 5,
 }
 
@@ -54,7 +54,7 @@ def _clamp_max_data_age(value: Any) -> Optional[int]:
     return max(MIN_MAX_DATA_AGE_SECONDS, min(MAX_MAX_DATA_AGE_SECONDS, parsed))
 
 
-def _clamp_monitor_tick(value: Any, fallback: int = 1) -> int:
+def _clamp_monitor_tick(value: Any, fallback: int = 5) -> int:
     try:
         parsed = int(value)
     except (TypeError, ValueError):

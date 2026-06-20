@@ -271,6 +271,33 @@
   font-weight: 800;
 }
 
+.strategy-submit:not(.strategy-submit-ready) {
+  background: #d8dee4;
+  color: #8b949e;
+  cursor: pointer;
+  box-shadow: none;
+  opacity: 1;
+}
+
+.strategy-submit:not(.strategy-submit-ready):hover {
+  background: #d0d7de;
+  color: #6e7781;
+}
+
+.strategy-submit:disabled {
+  cursor: wait;
+  opacity: 0.92;
+}
+
+.strategy-submit-ready:not(:disabled) {
+  background: var(--color-primary);
+  color: #fff;
+}
+
+.strategy-submit-ready:not(:disabled):hover {
+  background: var(--color-primary-hover);
+}
+
 .strategy-submit-progress {
   margin: 0.35rem 0 0;
   color: #57606a;
@@ -279,6 +306,11 @@
 
 .strategy-submit-progress-muted {
   color: #8b949e;
+}
+
+.strategy-submit-progress-ready {
+  color: #166534;
+  font-weight: 600;
 }
 
 .strategy-submit-status {

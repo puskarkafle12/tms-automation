@@ -748,7 +748,7 @@ const ScheduleOrder: React.FC = () => {
       setIsSubmitting(true);
       setSubmitProgress(
         canReusePreflight
-          ? `Placing ${eligibleSymbols.length} order(s)…`
+          ? `Scheduling ${eligibleSymbols.length} order(s)…`
           : `Preparing ${eligibleSymbols.length} symbol(s) for scheduling…`,
       );
       try {
@@ -772,6 +772,7 @@ const ScheduleOrder: React.FC = () => {
             security_details_by_symbol: Object.fromEntries(
               eligibleSymbols.map((symbol) => [symbol, resolveSecurityDetails(symbol)]),
             ),
+            holdings_by_symbol: orderType === 'sell' ? holdingsBySymbol : undefined,
             skip_preflight: canReusePreflight,
           }),
         }, batchTimeoutMs);

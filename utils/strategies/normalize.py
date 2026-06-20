@@ -4,12 +4,33 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
-from utils.external_data_sources.nepse_alpha import get_nepse_alpha_signals
+from utils.external_data_sources.nepse_alpha.stats_parsing import (
+    extract_price_stat_from_stats,
+    extract_week_range_from_stats,
+)
 from utils.strategies.helpers import safe_number
 from utils.strategies.types import MarketSnapshot, OrderBookLevel, ScriptDetails
 
 _DETAILS_CACHE: Dict[str, Dict[str, Any]] = {}
 _DETAILS_TTL_SECONDS = 30 * 60
+_DETAILS_FAILURE_TTL_SECONDS = 90
+_DETAILS_PARTIAL_TTL_SECONDS = 20
+_DETAILS_FETCH_ATTEMPTS = 4
+
+
+def script_details_missing_week_range(details: ScriptDetails) -> bool:
+    return details.fifty_two_week_high is None or details.fifty_two_week_low is None
+
+
+def script_details_missing_key_stats(details: ScriptDetails) -> bool:
+    return (
+        script_details_missing_week_range(details)
+        or details.all_time_high is None
+        or details.all_time_low is None
+    )
+
+
+from utils.external_data_sources.nepse_alpha import get_nepse_alpha_signals
 
 
 def _parse_sma_status(value: Optional[str]) -> Optional[str]:
@@ -32,22 +53,6 @@ def _find_signal_value(rows: List[Dict[str, Any]], *needles: str) -> Optional[st
             if row.get("signal"):
                 return str(row["signal"])
     return None
-
-
-def _parse_week_range(raw: Any) -> tuple[Optional[float], Optional[float]]:
-    if raw is None:
-        return None, None
-    text = str(raw).strip()
-    if not text:
-        return None, None
-    numbers = re.findall(r"\d[\d,]*(?:\.\d+)?", text)
-    values = [safe_number(item) for item in numbers]
-    values = [item for item in values if item is not None]
-    if len(values) >= 2:
-        return float(values[0]), float(values[1])
-    if len(values) == 1:
-        return float(values[0]), None
-    return None, None
 
 
 def normalize_tms_quote(symbol: str, quote: Optional[Dict[str, Any]]) -> MarketSnapshot:
@@ -121,16 +126,20 @@ def normalize_nepse_alpha_payload(payload: Dict[str, Any]) -> ScriptDetails:
         available=True,
     )
 
-    week_range = stats.get("52_weeks_high_low") or stats.get("52_week_high_low")
-    details.fifty_two_week_high, details.fifty_two_week_low = _parse_week_range(week_range)
+    details.fifty_two_week_high, details.fifty_two_week_low = extract_week_range_from_stats(stats)
 
-    details.all_time_high = safe_number(stats.get("all_time_high"))
-    details.all_time_low = safe_number(stats.get("all_time_low"))
-    details.reference_ltp = safe_number(stats.get("ltp"))
+    details.all_time_high = extract_price_stat_from_stats(stats, "all_time_high")
+    details.all_time_low = extract_price_stat_from_stats(stats, "all_time_low")
+    details.reference_ltp = extract_price_stat_from_stats(stats, "ltp")
     return details
 
 
-_DETAILS_FAILURE_TTL_SECONDS = 90
+def _cache_ttl_for_details(details: ScriptDetails) -> int:
+    if not details.available:
+        return _DETAILS_FAILURE_TTL_SECONDS
+    if script_details_missing_key_stats(details):
+        return _DETAILS_PARTIAL_TTL_SECONDS
+    return _DETAILS_TTL_SECONDS
 
 
 def _cached_script_details(symbol: str, *, force_refresh: bool = False) -> tuple[ScriptDetails, bool]:
@@ -146,7 +155,7 @@ def _cached_script_details(symbol: str, *, force_refresh: bool = False) -> tuple
 
     last_error: Optional[str] = None
     details = ScriptDetails(available=False, fetch_error=None)
-    for attempt in range(2):
+    for attempt in range(_DETAILS_FETCH_ATTEMPTS):
         try:
             payload = get_nepse_alpha_signals(
                 normalized,
@@ -154,12 +163,13 @@ def _cached_script_details(symbol: str, *, force_refresh: bool = False) -> tuple
             )
             details = normalize_nepse_alpha_payload(payload)
             last_error = None
-            break
+            if not script_details_missing_key_stats(details) or attempt >= _DETAILS_FETCH_ATTEMPTS - 1:
+                break
         except Exception as exc:
             last_error = str(exc)
             details = ScriptDetails(available=False, fetch_error=last_error)
 
-    ttl = _DETAILS_TTL_SECONDS if details.available else _DETAILS_FAILURE_TTL_SECONDS
+    ttl = _cache_ttl_for_details(details)
     _DETAILS_CACHE[normalized] = {
         "details": details,
         "expires_at": now + ttl,

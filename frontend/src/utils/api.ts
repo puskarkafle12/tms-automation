@@ -42,21 +42,38 @@ const buildUrl = (path: string): string => {
 
 export type FetchJsonResult<T> =
   | { ok: true; data: T; status: number }
-  | { ok: false; error: string; status?: number };
+  | { ok: false; error: string; status?: number; cancelled?: boolean };
 
 export async function fetchJson<T>(
   path: string,
   init?: RequestInit,
   timeoutMs = 10000,
 ): Promise<FetchJsonResult<T>> {
-  try {
-    const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+  const externalSignal = init?.signal;
+  let timedOut = false;
+  const timeoutController = new AbortController();
+  const onExternalAbort = () => timeoutController.abort();
 
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      timeoutController.abort();
+    } else {
+      externalSignal.addEventListener('abort', onExternalAbort);
+    }
+  }
+
+  const timeoutId = window.setTimeout(() => {
+    timedOut = true;
+    timeoutController.abort();
+  }, timeoutMs);
+
+  const { signal: _ignored, ...restInit } = init || {};
+
+  try {
     const response = await Promise.resolve().then(() =>
       fetch(buildUrl(path), {
-        ...init,
-        signal: controller.signal,
+        ...restInit,
+        signal: timeoutController.signal,
         cache: 'no-store',
       }),
     );
@@ -96,7 +113,11 @@ export async function fetchJson<T>(
     const data = (await response.json()) as T;
     return { ok: true, data, status: response.status };
   } catch (err) {
+    window.clearTimeout(timeoutId);
     if (err instanceof Error && err.name === 'AbortError') {
+      if (externalSignal?.aborted && !timedOut) {
+        return { ok: false, error: '', cancelled: true };
+      }
       const seconds = Math.round(timeoutMs / 1000);
       return {
         ok: false,
@@ -106,6 +127,9 @@ export async function fetchJson<T>(
     }
     const message = err instanceof Error ? err.message : 'Network error';
     if (/aborted|abort/i.test(message)) {
+      if (externalSignal?.aborted && !timedOut) {
+        return { ok: false, error: '', cancelled: true };
+      }
       const seconds = Math.round(timeoutMs / 1000);
       return {
         ok: false,
@@ -114,5 +138,7 @@ export async function fetchJson<T>(
       };
     }
     return { ok: false, error: message };
+  } finally {
+    externalSignal?.removeEventListener('abort', onExternalAbort);
   }
 };

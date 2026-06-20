@@ -24,6 +24,17 @@ def safe_number(value: Any) -> Optional[float]:
         return None
 
 
+def parse_nepse_stat_number(raw: Any) -> Optional[float]:
+    """Parse Nepse Alpha stat cells like ``NPR. 422`` without treating them as ``0.422``."""
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    text = re.sub(r"^(npr\.?|rs\.?)\s*", "", text, flags=re.IGNORECASE)
+    return safe_number(text)
+
+
 def percent_change(from_value: float, to_value: float) -> float:
     if not from_value:
         return 0.0

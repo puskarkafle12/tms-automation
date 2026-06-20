@@ -185,3 +185,44 @@ export async function deleteScheduledOrdersById(
   );
   return { deletedIds, failedIds };
 }
+
+export async function deleteScheduledBatchById(
+  apiUrl: string,
+  batchId: string,
+): Promise<{ ok: boolean; deletedCount: number; deletedIds: number[]; error?: string }> {
+  try {
+    const response = await fetch(
+      `${apiUrl}/scheduled_orders/batch/${encodeURIComponent(batchId)}`,
+      { method: 'DELETE' },
+    );
+    if (!response.ok) {
+      let error = `HTTP ${response.status}`;
+      try {
+        const body = await response.json() as { detail?: unknown };
+        error = formatApiErrorDetail(body.detail, error);
+      } catch {
+        // keep generic message
+      }
+      return { ok: false, deletedCount: 0, deletedIds: [], error };
+    }
+    const body = await response.json() as {
+      deleted_count?: number;
+      deleted_order_ids?: number[];
+    };
+    const deletedIds = Array.isArray(body.deleted_order_ids)
+      ? body.deleted_order_ids.filter((value): value is number => Number.isFinite(value))
+      : [];
+    return {
+      ok: true,
+      deletedCount: Number(body.deleted_count) || deletedIds.length,
+      deletedIds,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      deletedCount: 0,
+      deletedIds: [],
+      error: err instanceof Error ? err.message : 'Network error',
+    };
+  }
+}

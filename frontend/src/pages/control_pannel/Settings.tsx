@@ -25,6 +25,15 @@ import {
 
 type SaveState = 'idle' | 'saving' | 'saved' | 'error';
 
+const SCAN_INTERVAL_SLIDER_MAX_SECONDS = 3600;
+
+const clampSettingValue = (value: number, min: number, max: number) => {
+  if (!Number.isFinite(value)) {
+    return min;
+  }
+  return Math.max(min, Math.min(max, Math.round(value)));
+};
+
 interface SettingFieldProps {
   label: string;
   hint: string;
@@ -33,6 +42,9 @@ interface SettingFieldProps {
   max: number;
   step?: number;
   unit: string;
+  sliderMax?: number;
+  showSlider?: boolean;
+  inputHint?: string;
   onChange: (value: number) => void;
 }
 
@@ -44,38 +56,54 @@ const SettingField: React.FC<SettingFieldProps> = ({
   max,
   step = 1,
   unit,
+  sliderMax,
+  showSlider = true,
+  inputHint,
   onChange,
-}) => (
-  <div className="settings-field">
-    <div className="settings-field-head">
-      <div>
-        <label className="settings-field-label">{label}</label>
-        <p className="settings-field-hint">{hint}</p>
+}) => {
+  const effectiveSliderMax = sliderMax ?? max;
+  const sliderValue = clampSettingValue(value, min, effectiveSliderMax);
+
+  return (
+    <div className="settings-field">
+      <div className="settings-field-head">
+        <div>
+          <label className="settings-field-label">{label}</label>
+          <p className="settings-field-hint">{hint}</p>
+        </div>
+        <div className="settings-field-value">
+          <input
+            type="number"
+            min={min}
+            max={max}
+            step={step}
+            value={value}
+            onChange={(event) => onChange(clampSettingValue(Number(event.target.value), min, max))}
+            className="settings-number-input"
+          />
+          <span>{unit}</span>
+        </div>
       </div>
-      <div className="settings-field-value">
-        <input
-          type="number"
-          min={min}
-          max={max}
-          step={step}
-          value={value}
-          onChange={(event) => onChange(Number(event.target.value))}
-          className="settings-number-input"
-        />
-        <span>{unit}</span>
-      </div>
+      {inputHint ? <p className="settings-field-input-hint">{inputHint}</p> : null}
+      {showSlider ? (
+        <div className="settings-field-slider-wrap">
+          <input
+            type="range"
+            min={min}
+            max={effectiveSliderMax}
+            step={step}
+            value={sliderValue}
+            onChange={(event) => onChange(clampSettingValue(Number(event.target.value), min, effectiveSliderMax))}
+            className="settings-range"
+          />
+          <span className="settings-range-label">
+            Slider: {min}–{effectiveSliderMax} {unit}
+          </span>
+        </div>
+      ) : null}
     </div>
-    <input
-      type="range"
-      min={min}
-      max={max}
-      step={step}
-      value={value}
-      onChange={(event) => onChange(Number(event.target.value))}
-      className="settings-range"
-    />
-  </div>
-);
+  );
+};
 
 const Settings: React.FC = () => {
   const [serverSettings, setServerSettings] = useState<PortalSettings | null>(null);
@@ -106,10 +134,10 @@ const Settings: React.FC = () => {
     void loadSettings();
   }, [loadSettings]);
 
-  const scanLimits = limits?.monitor_interval_seconds || { min: 3, max: 300 };
+  const scanLimits = limits?.monitor_interval_seconds || { min: 3, max: 86400 };
   const maxAgeLimits = limits?.default_max_data_age_seconds || { min: 5, max: 3600 };
   const nepseLimits = limits?.nepse_alpha_interval_seconds || { min: 60, max: 3600 };
-  const tickLimits = limits?.monitor_tick_seconds || { min: 1, max: 5 };
+  const tickLimits = limits?.monitor_tick_seconds || { min: 1, max: 3600 };
   const concurrencyLimits = limits?.max_price_fetch_concurrency || { min: 1, max: 20 };
 
   const effectiveScanLabel = useMemo(() => {
@@ -165,7 +193,7 @@ const Settings: React.FC = () => {
       default_execution_mode: 'live',
       enable_scan_staggering: true,
       nepse_alpha_interval_seconds: 1800,
-      monitor_tick_seconds: 1,
+      monitor_tick_seconds: 5,
       max_price_fetch_concurrency: 5,
     });
     setUseMaxDataAge(false);
@@ -227,6 +255,8 @@ const Settings: React.FC = () => {
           value={serverSettings.monitor_interval_seconds}
           min={scanLimits.min}
           max={scanLimits.max}
+          sliderMax={Math.min(SCAN_INTERVAL_SLIDER_MAX_SECONDS, scanLimits.max)}
+          inputHint={`Type up to ${scanLimits.max} sec for slower schedules. Slider covers up to 1 hour.`}
           unit="sec"
           onChange={(value) => updateServer({ monitor_interval_seconds: value })}
         />

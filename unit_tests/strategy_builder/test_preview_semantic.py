@@ -33,12 +33,37 @@ RULE "Buy" FOR SYMBOL "API" {
 }
 """
 
+ATL_BUY_QUERY = """STRATEGY_VERSION 1
+SIDE BUY
+RULE "Buy At All Time Low" FOR SYMBOL "PCBL" {
+    WHEN ltp <= all_time_low
+    ORDER QUANTITY 10
+    CONFIRM TRUE_FOR 2 SCANS
+    TRIGGER LEVEL
+    EXECUTE ONCE PER SYMBOL
+}
+"""
+
 RSI_QUERY = """STRATEGY_VERSION 1
 SIDE BUY
 RULE "RSI" FOR SYMBOL "API" {
     WHEN technical_rsi_14 <= 30
     ORDER QUANTITY 100
     EXECUTE ONCE
+}
+"""
+
+
+REFERENCE_ELIGIBILITY_QUERY = """STRATEGY_VERSION 1
+SIDE BUY
+RULE "Bulk One Percent Pullback" FOR SYMBOL IN ("NABIL", "EBL") {
+    ELIGIBILITY ltp <= REFERENCE(field=ltp) * 0.99
+    SIGNAL technical_rsi_14 BETWEEN 20 AND 60
+    REQUIRE volume > 0
+    ORDER QUANTITY 10
+    CONFIRM TRUE_FOR 2 SCANS
+    TRIGGER LEVEL
+    EXECUTE ONCE PER SYMBOL
 }
 """
 
@@ -89,6 +114,32 @@ class PreviewBuilderTest(unittest.TestCase):
         self.assertTrue(trigger.is_exact_price)
         self.assertEqual(trigger.estimated_price, 500.0)
 
+    def test_ltp_at_all_time_low_uses_resolved_price_field(self):
+        plan = parse_strategy_query(ATL_BUY_QUERY)
+        rule = plan.rules[0]
+        flat = {"ltp": 670.0, "all_time_low": 288.2, "all_time_high": 1372.0}
+        history = TargetHistory()
+        evaluation = evaluate_rule(rule, "PCBL", flat, history, trigger_on_cross=False)
+        trigger = build_trigger_preview(rule, flat, evaluation)
+        self.assertIn("All Time Low", trigger.strategy_text)
+        self.assertNotIn("{'type'", trigger.strategy_text)
+        self.assertAlmostEqual(trigger.estimated_price or 0, 288.2, places=1)
+        self.assertTrue(trigger.is_exact_price)
+        self.assertIn("288.2", trigger.target_display or "")
+        preview = build_rule_preview(
+            rule=rule,
+            symbol="PCBL",
+            plan_side="BUY",
+            flat=flat,
+            evaluation=evaluation,
+            history=history,
+            status_label="Waiting",
+            live_ltp=670.0,
+            reference_ltp=None,
+        )
+        self.assertIn("670", preview.reason or "")
+        self.assertIn("288", preview.reason or "")
+
     def test_rsi_has_no_price_estimate(self):
         plan = parse_strategy_query(RSI_QUERY)
         rule = plan.rules[0]
@@ -98,6 +149,37 @@ class PreviewBuilderTest(unittest.TestCase):
         trigger = build_trigger_preview(rule, flat, evaluation)
         self.assertIsNone(trigger.estimated_price)
         self.assertIn("RSI", trigger.strategy_text)
+
+    def test_eligibility_reference_price_used_when_signal_is_non_price(self):
+        from utils.strategy_builder.reference_store import ReferenceRow, ReferenceStore
+
+        plan = parse_strategy_query(REFERENCE_ELIGIBILITY_QUERY)
+        rule = plan.rules[0]
+        flat = {"ltp": 500.0, "technical_rsi_14": 42.0, "volume": 1000}
+        history = TargetHistory()
+        store = ReferenceStore.from_rows(
+            [
+                ReferenceRow(
+                    rule_name="Bulk One Percent Pullback",
+                    symbol="NABIL",
+                    field_key="ltp",
+                    field_type="decimal",
+                    numeric_value=500.0,
+                )
+            ]
+        )
+        evaluation = evaluate_rule(
+            rule,
+            "NABIL",
+            flat,
+            history,
+            trigger_on_cross=False,
+            reference_store=store,
+        )
+        trigger = build_trigger_preview(rule, flat, evaluation)
+        self.assertAlmostEqual(trigger.estimated_price or 0, 495.0, places=2)
+        self.assertTrue(trigger.is_exact_price)
+        self.assertIn("Gate:", trigger.strategy_text)
 
     def test_percent_of_holding_quantity_preview_not_final(self):
         plan = parse_strategy_query(SELL_52W_QUERY)

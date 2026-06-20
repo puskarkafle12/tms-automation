@@ -145,6 +145,7 @@ class TestNepseAlphaParser(unittest.TestCase):
         cases = [
             ("NPR. 1,200.50 - NPR. 800.25", 1200.50, 800.25),
             ("NPR.530.29/NPR.429.63", 530.29, 429.63),
+            ("NPR.1,033.28/NPR.635.00", 1033.28, 635.00),
         ]
         for raw_range, expected_high, expected_low in cases:
             with self.subTest(raw_range=raw_range):

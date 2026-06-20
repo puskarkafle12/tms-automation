@@ -19,8 +19,16 @@ interface CommonTableProps {
   onToggleAll?: (selected: boolean, rowIds: Array<string | number>) => void;
 }
 
+const COLUMN_LABEL_OVERRIDES: Record<string, string> = {
+  trigger_price: 'Est. Trigger',
+  order_type: 'Side',
+  created_at: 'Created',
+  strategy_type: 'Strategy',
+};
+
 const formatColumnLabel = (column: string) =>
-  column
+  COLUMN_LABEL_OVERRIDES[column]
+  || column
     .replace(/([A-Z])/g, ' $1')
     .replace(/_/g, ' ')
     .replace(/\b\w/g, (char) => char.toUpperCase())

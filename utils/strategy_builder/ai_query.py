@@ -201,6 +201,11 @@ async def execute_strategy_query_ai_with_retries(
     form_symbol: Optional[str] = None,
     strategy_type: Optional[str] = None,
     max_retries: int = MAX_AI_STRATEGY_RETRIES,
+    client_id: Optional[str] = None,
+    db=None,
+    holdings_by_symbol: Optional[Dict[str, int]] = None,
+    known_symbols: Optional[List[str]] = None,
+    require_schedule_preflight: bool = True,
 ) -> Dict[str, Any]:
     original = (user_message or "").strip()
     if not original:
@@ -233,6 +238,57 @@ async def execute_strategy_query_ai_with_retries(
                 strategy_type=strategy_type,
                 conversation=conversation.copy() if conversation else None,
             )
+            generated_query = payload["generated_query"]
+            if db is not None:
+                from utils.strategy_builder.strategy_ai_preview import build_strategy_preview_validation
+
+                preview_payload = await build_strategy_preview_validation(
+                    query_text=generated_query,
+                    compiled_plan=payload.get("compiled_plan"),
+                    strategy_type=strategy_type,
+                    form_symbol=form_symbol,
+                    client_id=client_id,
+                    db=db,
+                    holdings_by_symbol=holdings_by_symbol,
+                    known_symbols=known_symbols,
+                    include_schedule_preflight=require_schedule_preflight,
+                )
+                if not preview_payload.get("valid"):
+                    first_error = (preview_payload.get("errors") or [{}])[0]
+                    message = first_error.get("message") or preview_payload.get("message") or "Preview validation failed."
+                    raise StrategyQueryAiError(
+                        f"AI query failed live preview validation: {message}",
+                        status=str(preview_payload.get("status") or "preview_error"),
+                        raw_response=payload.get("ai_raw_response", ""),
+                        generated_query=generated_query,
+                    )
+                preflight = preview_payload.get("schedule_preflight") or {}
+                if require_schedule_preflight and not preflight.get("ready"):
+                    preflight_errors = preflight.get("errors") or []
+                    detail = (
+                        preflight_errors[0].get("message")
+                        if preflight_errors and isinstance(preflight_errors[0], dict)
+                        else preflight.get("message") or "Schedule preflight failed."
+                    )
+                    raise StrategyQueryAiError(
+                        f"AI query failed schedule preflight: {detail}",
+                        status=str(preflight.get("status") or "preflight_error"),
+                        raw_response=payload.get("ai_raw_response", ""),
+                        generated_query=generated_query,
+                    )
+                payload.update(
+                    {
+                        "valid": True,
+                        "errors": preview_payload.get("errors") or [],
+                        "warnings": preview_payload.get("warnings") or [],
+                        "suggestions": preview_payload.get("suggestions") or [],
+                        "preview": preview_payload.get("preview") or [],
+                        "schedule_preflight": preflight,
+                        "status": preview_payload.get("status"),
+                        "message": preview_payload.get("message"),
+                    }
+                )
+
             summary = payload["ai_summary"]
             if attempt > 1:
                 summary = (

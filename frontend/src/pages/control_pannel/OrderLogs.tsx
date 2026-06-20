@@ -29,12 +29,21 @@ import {
   REFRESH_SCHEDULED_ORDERS_KEY,
   SCHEDULED_ORDERS_CHANGED_EVENT,
   deleteScheduledOrdersById,
+  deleteScheduledBatchById,
   notifyScheduledOrdersChanged,
   resolveScheduledOrderIdsForBulkDelete,
   type ScheduledBulkDeleteMode,
 } from './scheduleOrderHelpers';
-import { extractSymbolsFromCompiledPlan, formatOrderQuantityDisplay, getDisplayQtyForOrder } from '../../lib/strategies/rulePlanHelpers';
-import { formatShortRelativeTime } from '../../utils/relativeTime';
+import { formatOrderQuantityDisplay, getDisplayQtyForOrder } from '../../lib/strategies/rulePlanHelpers';
+import { buildStrategyDetailLayout } from '../../lib/strategies/orderStrategyDetails';
+import {
+  formatScheduledQuantitySummary,
+  formatScheduledTriggerPrice,
+} from '../../lib/strategies/scheduledOrderDisplay';
+import {
+  groupScheduledOrdersByBatch,
+  type ScheduledBatchGroup,
+} from '../../lib/strategies/scheduledBatchGroups';
 import { fetchServerTime, serverUtcToMs } from '../../api/time.api';
 import type { ApiTimeValue } from '../../utils/nepalTime';
 import {
@@ -265,174 +274,6 @@ const formatPercent = (value: number | null | undefined) => {
   return `${value}%`;
 };
 
-const addDetail = (items: Array<{ label: string; value: string }>, label: string, value: unknown, formatter?: (value: any) => string) => {
-  if (!isRealValue(value)) return;
-  const formatted = formatter ? formatter(value) : String(value);
-  if (isRealValue(formatted)) {
-    items.push({ label, value: formatted });
-  }
-};
-
-const addLiveMonitoringDetails = (
-  details: Array<{ label: string; value: string }>,
-  order: ScheduledOrderRow,
-  now = Date.now(),
-) => {
-  addDetail(details, 'Monitor Phase', order.monitor_phase);
-  addDetail(
-    details,
-    'Monitor Running',
-    order.monitoring_active === true ? 'Yes' : order.monitoring_active === false ? 'No' : undefined,
-  );
-  addDetail(details, 'Live Status', formatLiveScanStatus(order));
-  addDetail(
-    details,
-    'Scanning Active',
-    order.is_scanning ? 'Yes' : order.is_scanning === false ? 'No' : undefined,
-  );
-  addDetail(details, 'Status Detail', order.display_error);
-  addDetail(details, 'TMS Price Scans', order.tms_scan_count ?? order.scanning_count, formatScanCount);
-  addDetail(details, 'Nepse Alpha Scans', order.nepse_alpha_scan_count, formatScanCount);
-  addDetail(
-    details,
-    'Nepse Alpha Source',
-    order.nepse_alpha_last_source
-      ? `${String(order.nepse_alpha_last_source).toUpperCase()}${order.nepse_alpha_last_fetched_at ? ' · refreshed' : ''}`
-      : undefined,
-  );
-  addDetail(details, 'Live LTP', order.current_price ?? order.last_checked_ltp, formatCurrency);
-  if (order.last_scan_at) {
-    const absolute = formatDateTime(order.last_scan_at);
-    const relative = formatShortRelativeTime(order.last_scan_at, now ?? undefined);
-    details.push({
-      label: 'Last Scan',
-      value: relative ? `${absolute} (${relative})` : absolute,
-    });
-  }
-  addDetail(details, 'Last Monitor Log', order.last_monitor_message);
-  if (order.monitor_logs) {
-    const recentLogs = order.monitor_logs
-      .split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .slice(-12)
-      .join('\n');
-    if (recentLogs) {
-      details.push({ label: 'Recent Monitor Logs', value: recentLogs });
-    }
-  }
-};
-
-const getStrategyDetails = (order: ScheduledOrderRow, now: number | null = null) => {
-  const side = getOrderSide(order);
-  const strategy = formatStrategyType(order.strategy_type, side);
-  const details: Array<{ label: string; value: string }> = [];
-
-  addDetail(details, 'Strategy', strategy);
-  addDetail(details, 'Side', side);
-  addDetail(details, 'Stock', order.script_name);
-  addDetail(details, 'Quantity', formatOrderQuantityDisplay(order));
-  addDetail(details, 'Status', order.status);
-  addDetail(details, 'Created At', order.created_at, formatDateTime);
-
-  if (strategy === 'Fixed Price Buy') {
-    addDetail(details, 'Buy Price', order.price, formatCurrency);
-  } else if (strategy === 'Fixed Price Sell') {
-    addDetail(details, 'Sell Price', order.price, formatCurrency);
-  } else if (strategy === 'Smart Pullback Buy' || strategy === 'Confirmed Breakout Buy') {
-    addDetail(details, 'Trigger Buy Price', order.price, formatCurrency);
-  } else if (strategy === 'Quality Pullback Recovery Buy' || strategy === 'Mean Reversion Bounce Buy' || strategy === 'Order Book Strength Buy') {
-    addDetail(details, 'Reference Price', order.price, formatCurrency);
-    addDetail(details, 'Min Buy Score', (order as any).strategy_config?.min_buy_score);
-  } else if (strategy === 'Time-Based Buy') {
-    addDetail(details, 'Buy Price', order.price, formatCurrency);
-    addDetail(details, 'Wrapped Strategy', (order as any).strategy_config?.wrapped_strategy_type);
-    addDetail(details, 'Expiry Time', order.expiry_time, formatDateTime);
-    addDetail(details, 'Expiry Action', order.expiry_action);
-  } else if (strategy === 'Capital Protection Sell') {
-    addDetail(details, 'Scheduled Price', order.requested_price ?? order.price, formatCurrency);
-    addDetail(details, 'Stop Loss Price', order.stop_loss_price, formatCurrency);
-    addDetail(details, 'Highest Tracked Price', order.highest_tracked_price, formatCurrency);
-    addDetail(details, 'Trailing Stop %', order.trailing_drop_percent, formatPercent);
-    addDetail(details, 'Average Buy Price', order.average_buy_price, formatCurrency);
-    addDetail(details, 'Break-even Trigger %', (order as any).strategy_config?.break_even_trigger_pct, formatPercent);
-    addDetail(details, 'Max Allowed Slippage', order.max_allowed_slippage_percent, formatPercent);
-  } else if (strategy === 'Trailing Runner Sell') {
-    addDetail(details, 'Activation Price', order.activation_price, formatCurrency);
-    addDetail(details, 'Highest Tracked Price', order.highest_tracked_price, formatCurrency);
-    addDetail(details, 'Trailing Drop', order.trailing_drop_percent, formatPercent);
-  } else if (strategy === 'Profit Ladder Sell') {
-    addDetail(details, 'Profit Target', order.profit_target_price, formatCurrency);
-    addDetail(details, 'Highest Tracked Price', order.highest_tracked_price, formatCurrency);
-    addDetail(details, 'Trailing Drop', order.trailing_drop_percent, formatPercent);
-  } else if (strategy === 'Technical Weakness Sell') {
-    addDetail(details, 'Execution Rule', 'Sell when Nepse Alpha technicals and live price both weaken.');
-  } else if (strategy === 'Time-Based Exit') {
-    addDetail(details, 'Stop Loss Price', order.stop_loss_price, formatCurrency);
-    addDetail(details, 'Expiry Time', order.expiry_time, formatDateTime);
-    addDetail(details, 'Expiry Action', order.expiry_action);
-  } else if (strategy === 'Emergency Exit by Top Buyer') {
-    addDetail(details, 'Execution Rule', 'Sell immediately using Top Buy if available.');
-    addDetail(details, 'Max Allowed Slippage', order.max_allowed_slippage_percent, formatPercent);
-  } else if (
-    strategy === 'Technical Buy'
-    || strategy === 'Technical Sell'
-    || strategy === 'Custom Query Buy'
-    || strategy === 'Custom Query Sell'
-  ) {
-    const config = (order.strategy_config || {}) as Record<string, unknown>;
-    const compiledPlan = config.compiled_plan as Record<string, unknown> | undefined;
-    const symbols = extractSymbolsFromCompiledPlan(compiledPlan);
-    const isCustomQuery = strategy === 'Custom Query Buy' || strategy === 'Custom Query Sell';
-    if (!isCustomQuery) {
-      addDetail(details, 'Reference Price', order.price, formatCurrency);
-    }
-    addDetail(details, 'Plan Symbols', symbols.length ? symbols.join(', ') : order.script_name);
-    addDetail(details, 'Execution Mode', config.execution_mode || 'live');
-    addDetail(details, 'Max Allowed Slippage', order.max_allowed_slippage_percent, formatPercent);
-    const baseline = config.schedule_baseline as Record<string, unknown> | undefined;
-    if (baseline || order.reference_ltp != null) {
-      addDetail(details, 'Reference LTP', order.reference_ltp ?? baseline?.reference_ltp, formatCurrency);
-      addDetail(details, 'Trigger Price', order.trigger_price ?? baseline?.trigger_price, formatCurrency);
-      addDetail(
-        details,
-        'Drop %',
-        order.drop_percent ?? baseline?.drop_percent,
-        (value) => (value == null ? '-' : `${value}%`),
-      );
-      addDetail(
-        details,
-        'Reference Captured At',
-        order.reference_ltp_captured_at ?? baseline?.reference_ltp_captured_at,
-        formatDateTime,
-      );
-    }
-    if (Array.isArray(config.fixed_symbols) && config.fixed_symbols.length) {
-      addDetail(details, 'Fixed Symbols', (config.fixed_symbols as string[]).join(', '));
-    }
-    if (order.expiry_time) {
-      addDetail(details, 'Expiry Time', order.expiry_time, formatDateTime);
-      addDetail(details, 'Expiry Action', order.expiry_action || 'CANCEL');
-    }
-    if (typeof config.query_text === 'string' && config.query_text.trim()) {
-      details.push({ label: 'Strategy Query', value: config.query_text.trim() });
-    }
-    if (order.failed_reason) {
-      addDetail(details, 'Failed Reason', order.failed_reason);
-    }
-    if (order.cancelled_reason) {
-      addDetail(details, 'Cancelled Reason', order.cancelled_reason);
-    }
-  }
-
-  addLiveMonitoringDetails(details, order, now ?? undefined);
-
-  addDetail(details, 'Execution Price', order.execution_price, formatCurrency);
-  addDetail(details, 'Execution Price Source', order.execution_price_source);
-  addDetail(details, 'Execution Reason', order.execution_reason);
-  return details;
-};
-
 const TABS: { id: OrderTab; label: string; icon: string }[] = [
   { id: 'scheduled', label: 'Scheduled', icon: '📅' },
   { id: 'book', label: 'Trade Book', icon: '📖' },
@@ -537,6 +378,7 @@ const GetOrderStatus: React.FC = () => {
   const [isBulkDeleting, setIsBulkDeleting] = useState(false);
   const [isBulkCancellingTrades, setIsBulkCancellingTrades] = useState(false);
   const [strategyDetailsOrderId, setStrategyDetailsOrderId] = useState<number | null>(null);
+  const [strategyDetailsExpanded, setStrategyDetailsExpanded] = useState(false);
   const [strategyDetailsFallback, setStrategyDetailsFallback] = useState<ScheduledOrderRow | null>(null);
   const [strategyDetailsNow, setStrategyDetailsNow] = useState<number | null>(null);
   const [strategyCatalogGuide, setStrategyCatalogGuide] = useState<{ name: string; side: 'buy' | 'sell' } | null>(null);
@@ -651,11 +493,13 @@ const GetOrderStatus: React.FC = () => {
     setStrategyDetailsOrderId(order.order_id);
     setStrategyDetailsFallback(order);
     setStrategyDetailsNow(Date.now());
+    setStrategyDetailsExpanded(false);
   }, []);
 
   const closeStrategyDetails = useCallback(() => {
     setStrategyDetailsOrderId(null);
     setStrategyDetailsFallback(null);
+    setStrategyDetailsExpanded(false);
   }, []);
 
   const strategyDetailsOrder = useMemo(() => {
@@ -665,6 +509,22 @@ const GetOrderStatus: React.FC = () => {
     return scheduledOrders.find((order) => order.order_id === strategyDetailsOrderId)
       ?? strategyDetailsFallback;
   }, [scheduledOrders, strategyDetailsFallback, strategyDetailsOrderId]);
+
+  const strategyDetailLayout = useMemo(() => {
+    if (!strategyDetailsOrder) {
+      return null;
+    }
+    return buildStrategyDetailLayout(strategyDetailsOrder, {
+      formatStrategyType,
+      getOrderSide: (order) => getOrderSide(order as ScheduledOrderRow),
+      formatCurrency,
+      formatDateTime: (value) => formatDateTime(value as ApiTimeValue),
+      formatPercent,
+      formatLiveScanStatus: (order) => formatLiveScanStatus(order as ScheduledOrderRow),
+      formatScanCount,
+      now: strategyDetailsNow,
+    });
+  }, [strategyDetailsNow, strategyDetailsOrder]);
 
   const activeClientIds = useMemo(
     () => (selectedClientId ? [selectedClientId] : loggedInClientIDs),
@@ -1461,6 +1321,46 @@ const GetOrderStatus: React.FC = () => {
     setDialogVisible(true);
   }, [runBulkDeleteScheduledOrders, scheduledOrders, selectedScheduledIds]);
 
+  const confirmDeleteScheduledBatch = useCallback((batch: ScheduledBatchGroup<ScheduledOrderRow>) => {
+    if (!batch.orders.length) {
+      setErrorMessage('This batch has no scheduled orders to delete.');
+      return;
+    }
+    setDialogMessage(
+      `Delete all ${batch.orders.length} scheduled order(s) in batch "${batch.label}"?`,
+    );
+    setDialogAction(() => () => {
+      void (async () => {
+        setIsBulkDeleting(true);
+        setErrorMessage('');
+        setSuccessMessage('');
+        try {
+          const result = await deleteScheduledBatchById(apiUrl, batch.batchId);
+          if (!result.ok) {
+            setErrorMessage(result.error || 'Failed to delete scheduled batch.');
+            return;
+          }
+          setScheduledOrders((prev) => prev.filter(
+            (order) => !result.deletedIds.includes(order.order_id),
+          ));
+          setSelectedScheduledIds((prev) => {
+            const next = new Set(prev);
+            result.deletedIds.forEach((orderId) => next.delete(orderId));
+            return next;
+          });
+          notifyScheduledOrdersChanged();
+          setSuccessMessage(`Deleted batch "${batch.label}" (${result.deletedCount} order(s)).`);
+        } catch {
+          setErrorMessage('Error deleting scheduled batch.');
+        } finally {
+          setIsBulkDeleting(false);
+          setDialogVisible(false);
+        }
+      })();
+    });
+    setDialogVisible(true);
+  }, [apiUrl]);
+
   const handleAction = async (row: any, actionType: string) => {
     if (actionType === 'Edit') {
       setEditingOrderId(Number(row.order_id));
@@ -1509,36 +1409,48 @@ const GetOrderStatus: React.FC = () => {
     }
   };
 
+  const mapScheduledOrderToRow = useCallback((order: ScheduledOrderRow) => {
+    const side = getOrderSide(order);
+    const strategyLabel = formatStrategyType(order.strategy_type, side);
+    return {
+      ...order,
+      canEdit: isScheduledOrderEditable(order),
+      stock: <StockClientCell symbol={order.script_name} clientLabel={getClientLabel(order.client_id)} />,
+      order_type: side,
+      trigger_price: formatScheduledTriggerPrice(order),
+      strategy_type: (
+        <button
+          type="button"
+          className={`strategy-chip ${side === 'BUY' ? 'buy' : side === 'SELL' ? 'sell' : ''}`}
+          onClick={() => openStrategyDetails(order)}
+          title="Show details"
+          aria-label={`Show details for ${strategyLabel}`}
+        >
+          <span className="strategy-chip-label">{strategyLabel}</span>
+          <span className="strategy-chip-action">Show details</span>
+        </button>
+      ),
+      created_at: formatDateTime(order.created_at || order.target_reached_at || ''),
+      qty: formatScheduledQuantitySummary(order),
+      status: <ScheduledOrderStatusCell order={order} />,
+    };
+  }, [getClientLabel, openStrategyDetails]);
+
   const scheduledRows = useMemo(
-    () =>
-      scheduledOrders.map((order) => {
-        const side = getOrderSide(order);
-        const strategyLabel = formatStrategyType(order.strategy_type, side);
-        return {
-          ...order,
-          canEdit: isScheduledOrderEditable(order),
-          stock: <StockClientCell symbol={order.script_name} clientLabel={getClientLabel(order.client_id)} />,
-          order_type: side,
-          trigger_price: order.trigger_price ?? '-',
-          strategy_type: (
-            <button
-              type="button"
-              className={`strategy-chip ${side === 'BUY' ? 'buy' : side === 'SELL' ? 'sell' : ''}`}
-              onClick={() => openStrategyDetails(order)}
-              title="Show details"
-              aria-label={`Show details for ${strategyLabel}`}
-            >
-              <span className="strategy-chip-label">{strategyLabel}</span>
-              <span className="strategy-chip-action">Show details</span>
-            </button>
-          ),
-          created_at: formatDateTime(order.created_at || order.target_reached_at || ''),
-          qty: formatOrderQuantityDisplay(order),
-          status: <ScheduledOrderStatusCell order={order} />,
-        };
-      }),
-    [getClientLabel, openStrategyDetails, scheduledOrders],
+    () => scheduledOrders.map(mapScheduledOrderToRow),
+    [mapScheduledOrderToRow, scheduledOrders],
   );
+
+  const scheduledBatchLayout = useMemo(() => {
+    const { batches, standalone } = groupScheduledOrdersByBatch(scheduledOrders);
+    return {
+      batches: batches.map((batch) => ({
+        ...batch,
+        rows: batch.orders.map(mapScheduledOrderToRow),
+      })),
+      standaloneRows: standalone.map(mapScheduledOrderToRow),
+    };
+  }, [mapScheduledOrderToRow, scheduledOrders]);
 
   const orderLogRows = useMemo(
     () =>
@@ -1700,6 +1612,7 @@ const GetOrderStatus: React.FC = () => {
   };
 
   const current = tabData[activeTab];
+  const scheduledColumns = ['stock', 'order_type', 'qty', 'trigger_price', 'strategy_type', 'status', 'created_at'];
 
   return (
     <div className="order-logs-page">
@@ -2045,17 +1958,73 @@ const GetOrderStatus: React.FC = () => {
               />
             </section>
           </div>
+        ) : activeTab === 'scheduled' ? (
+          scheduledOrders.length === 0 ? (
+            <div className="order-logs-empty-state">{current.empty}</div>
+          ) : (
+            <div className="order-logs-scheduled-sections">
+              {scheduledBatchLayout.batches.map((batch) => (
+                <section key={batch.batchId} className="order-logs-scheduled-batch">
+                  <div className="order-logs-scheduled-batch-header">
+                    <div className="order-logs-scheduled-batch-copy">
+                      <h4 className="order-logs-scheduled-batch-title">{batch.label}</h4>
+                      <p className="order-logs-scheduled-batch-meta">
+                        {batch.orders.length} scheduled
+                        {batch.symbolCount > batch.orders.length ? ` of ${batch.symbolCount}` : ''}
+                        {batch.createdAt ? ` · ${formatDateTime(batch.createdAt)}` : ''}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn-danger btn-sm"
+                      disabled={isBulkDeleting}
+                      onClick={() => confirmDeleteScheduledBatch(batch)}
+                    >
+                      Delete batch
+                    </button>
+                  </div>
+                  <CommonTable
+                    data={batch.rows}
+                    onAction={handleAction}
+                    columns={scheduledColumns}
+                    selectable
+                    selectedRowIds={selectedScheduledIds}
+                    rowIdKey="order_id"
+                    onToggleRow={handleToggleScheduledRow}
+                    onToggleAll={handleToggleAllScheduledRows}
+                  />
+                </section>
+              ))}
+              {scheduledBatchLayout.standaloneRows.length > 0 ? (
+                <section className="order-logs-scheduled-batch order-logs-scheduled-batch-standalone">
+                  {scheduledBatchLayout.batches.length > 0 ? (
+                    <div className="order-logs-scheduled-batch-header">
+                      <div className="order-logs-scheduled-batch-copy">
+                        <h4 className="order-logs-scheduled-batch-title">Individual orders</h4>
+                        <p className="order-logs-scheduled-batch-meta">Orders not part of a custom-query batch</p>
+                      </div>
+                    </div>
+                  ) : null}
+                  <CommonTable
+                    data={scheduledBatchLayout.standaloneRows}
+                    onAction={handleAction}
+                    columns={scheduledColumns}
+                    selectable
+                    selectedRowIds={selectedScheduledIds}
+                    rowIdKey="order_id"
+                    onToggleRow={handleToggleScheduledRow}
+                    onToggleAll={handleToggleAllScheduledRows}
+                  />
+                </section>
+              ) : null}
+            </div>
+          )
         ) : (
           <CommonTable
             data={current.rows}
-            onAction={activeTab === 'scheduled' ? handleAction : undefined}
+            onAction={undefined}
             columns={current.columns}
             emptyMessage={current.empty}
-            selectable={activeTab === 'scheduled'}
-            selectedRowIds={selectedScheduledIds}
-            rowIdKey="order_id"
-            onToggleRow={handleToggleScheduledRow}
-            onToggleAll={handleToggleAllScheduledRows}
           />
         )}
       </div>
@@ -2068,9 +2037,9 @@ const GetOrderStatus: React.FC = () => {
         />
       )}
 
-      {strategyDetailsOrder && (
+      {strategyDetailsOrder && strategyDetailLayout && (
         <div className="strategy-details-backdrop" role="presentation" onClick={closeStrategyDetails}>
-          <div className="strategy-details-modal" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+          <div className="strategy-details-modal strategy-details-modal-rich" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
             <div className="strategy-details-header">
               <div>
                 <h3>Strategy Details</h3>
@@ -2082,20 +2051,58 @@ const GetOrderStatus: React.FC = () => {
                 ×
               </button>
             </div>
-            <dl className="strategy-details-list">
-              {getStrategyDetails(strategyDetailsOrder, strategyDetailsNow).map((item) => (
-                <div key={item.label} className="strategy-details-row">
-                  <dt>{item.label}</dt>
-                  <dd>
-                    {item.label === 'Strategy Query' ? (
-                      <pre className="strategy-details-query">{item.value}</pre>
-                    ) : (
-                      item.value
-                    )}
-                  </dd>
+
+            <div className="strategy-details-headline">
+              {strategyDetailLayout.headline.map((item) => (
+                <div key={item.label} className="strategy-details-headline-item">
+                  <span>{item.label}</span>
+                  <strong>{item.value}</strong>
                 </div>
               ))}
-            </dl>
+            </div>
+
+            {strategyDetailLayout.primary.length > 0 ? (
+              <div className="strategy-details-metrics">
+                {strategyDetailLayout.primary.map((item) => (
+                  <div key={item.label} className={`strategy-details-metric ${item.kind === 'muted' ? 'muted' : ''}`}>
+                    <span className="strategy-details-metric-label">{item.label}</span>
+                    <span className="strategy-details-metric-value">{item.value}</span>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+
+            {strategyDetailLayout.secondary.length > 0 ? (
+              <div className="strategy-details-expand-wrap">
+                <button
+                  type="button"
+                  className="strategy-details-see-more"
+                  onClick={() => setStrategyDetailsExpanded((current) => !current)}
+                  aria-expanded={strategyDetailsExpanded}
+                >
+                  {strategyDetailsExpanded ? 'See less' : 'See more details'}
+                </button>
+                {strategyDetailsExpanded ? (
+                  <dl className="strategy-details-list strategy-details-list-secondary">
+                    {strategyDetailLayout.secondary.map((item) => (
+                      <div key={item.label} className="strategy-details-row">
+                        <dt>{item.label}</dt>
+                        <dd className={item.kind === 'muted' ? 'strategy-details-muted' : undefined}>
+                          {item.kind === 'query' ? (
+                            <pre className="strategy-details-query">{item.value}</pre>
+                          ) : item.kind === 'logs' ? (
+                            <pre className="strategy-details-logs">{item.value}</pre>
+                          ) : (
+                            item.value
+                          )}
+                        </dd>
+                      </div>
+                    ))}
+                  </dl>
+                ) : null}
+              </div>
+            ) : null}
+
             <div className="strategy-details-footer">
               <button
                 type="button"

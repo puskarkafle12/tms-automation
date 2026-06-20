@@ -1,7 +1,9 @@
 import {
   DEFAULT_RULE_PLANNED_QTY,
+  describeSchedulePreviewBlockReason,
   extractPlannedQtyFromCompiledPlan,
   getDisplayQtyForOrder,
+  isSchedulePreviewReady,
   planUsesReference,
 } from './rulePlanHelpers';
 
@@ -60,5 +62,35 @@ describe('rulePlanHelpers', () => {
 
   test('planUsesReference returns false for literal triggers', () => {
     expect(planUsesReference(undefined, 'WHEN ltp <= 450')).toBe(false);
+  });
+
+  test('isSchedulePreviewReady accepts eligibility trigger from preview rows', () => {
+    const compiledPlan = {
+      rules: [{ symbols: ['NABIL', 'EBL', 'SCB'] }],
+    };
+    const validation = {
+      valid: true,
+      preview: [
+        {
+          symbol: 'NABIL',
+          trigger: { estimated_price: 495, estimated_price_display: 'Rs. 495.00' },
+        },
+        {
+          symbol: 'EBL',
+          trigger: { estimated_price_display: 'Rs. 480.00 (est.)' },
+        },
+        {
+          symbol: 'SCB',
+          trigger: { estimated_price: null, estimated_price_display: 'Unavailable' },
+        },
+      ],
+      schedule_preview_snapshots_by_symbol: {
+        NABIL: { estimated_trigger_price: null, estimated_trigger_price_display: 'Unavailable' },
+        EBL: { estimated_trigger_price: 480, estimated_trigger_price_display: 'Rs. 480.00 (est.)' },
+      },
+    };
+
+    expect(isSchedulePreviewReady(validation, compiledPlan)).toBe(false);
+    expect(describeSchedulePreviewBlockReason(validation, compiledPlan)).toContain('SCB');
   });
 });

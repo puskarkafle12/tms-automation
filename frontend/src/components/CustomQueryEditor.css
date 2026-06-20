@@ -114,6 +114,19 @@
   padding: 0.5rem 0.75rem;
 }
 
+.custom-query-ai-summary {
+  color: #1a7f37;
+  background: #dafbe1;
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.92rem;
+  line-height: 1.45;
+}
+
+.custom-query-ai-warning {
+  border-left: 3px solid #bf8700;
+}
+
 .custom-query-error {
   color: #cf222e;
   background: #ffebe9;
@@ -437,4 +450,21 @@
   margin-top: 0.35rem;
   color: #9a6700;
   font-size: 0.8rem;
+}
+
+.custom-query-preview-see-more {
+  margin-top: 0.35rem;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: #2563eb;
+  cursor: pointer;
+  font-size: 0.82rem;
+  text-decoration: underline;
+}
+
+.custom-query-preview-more {
+  margin-top: 0.45rem;
+  display: grid;
+  gap: 0.25rem;
 }

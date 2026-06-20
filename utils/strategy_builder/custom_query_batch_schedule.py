@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
@@ -9,6 +10,7 @@ from sqlalchemy.orm import Session
 from database import SessionLocal
 from models.scheduled_order import ScheduledOrder
 from schemas.schemas import OrderCreateRequest
+from utils.strategy_builder.schedule_preview_capture import snapshots_complete_for_symbols
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +80,36 @@ def _build_order_request(symbol: str, payload: Dict[str, Any]) -> OrderCreateReq
         odd_lot_allowed=bool(order_fields.get("odd_lot_allowed")),
         strategy_config=order_fields.get("strategy_config"),
     )
+
+
+def _batch_label_from_payload(payload: Dict[str, Any]) -> str:
+    config = dict((payload.get("order_fields") or {}).get("strategy_config") or {})
+    compiled = config.get("compiled_plan") or {}
+    rules = compiled.get("rules") or []
+    if rules and isinstance(rules[0], dict) and rules[0].get("name"):
+        return str(rules[0]["name"]).strip()[:120]
+    query = str(config.get("query_text") or "").strip()
+    if query:
+        first_line = query.splitlines()[0].strip()
+        if first_line.upper().startswith("RULE "):
+            name_part = first_line[5:].split(" FOR ", 1)[0].strip()
+            return name_part.strip('"').strip()[:120]
+    return "Custom Query Batch"
+
+
+def _attach_batch_metadata(order_data: OrderCreateRequest, payload: Dict[str, Any]) -> None:
+    batch_id = str(payload.get("schedule_batch_id") or "").strip()
+    if not batch_id:
+        return
+    strategy_config = dict(order_data.strategy_config or {})
+    strategy_config["schedule_batch_id"] = batch_id
+    strategy_config["schedule_batch_label"] = str(
+        payload.get("schedule_batch_label") or "Custom Query Batch"
+    ).strip()[:120]
+    strategy_config["schedule_batch_symbol_count"] = int(
+        payload.get("schedule_batch_symbol_count") or 0
+    )
+    order_data.strategy_config = strategy_config
 
 
 def _extract_error_message(exc: Exception) -> str:
@@ -187,7 +219,14 @@ async def _preflight_batch(payload: Dict[str, Any], symbols: List[str]) -> Dict[
         db.close()
 
 
-async def _schedule_one_symbol(symbol: str, payload: Dict[str, Any], *, enforce_preflight: bool = True) -> Dict[str, Any]:
+async def _schedule_one_symbol(
+    symbol: str,
+    payload: Dict[str, Any],
+    *,
+    enforce_preflight: bool = True,
+    holdings_by_symbol: Optional[Dict[str, int]] = None,
+    batch_snapshots: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     db: Session = SessionLocal()
     try:
         from main import (
@@ -202,6 +241,7 @@ async def _schedule_one_symbol(symbol: str, payload: Dict[str, Any], *, enforce_
         from models.user import User
 
         order_data = _build_order_request(symbol, payload)
+        _attach_batch_metadata(order_data, payload)
         incoming_security_details = order_data.security_details or {}
         order_data.security_details = {
             **incoming_security_details,
@@ -235,6 +275,16 @@ async def _schedule_one_symbol(symbol: str, payload: Dict[str, Any], *, enforce_
         await _persist_order_field_references(db, order, order_data)
         order.strategy_config = dict(order.strategy_config or {})
         order.strategy_config["schedule_dedup_key"] = _scheduled_order_dedup_key(order_data)
+        from utils.strategy_builder.schedule_preview_capture import apply_schedule_preview_snapshot
+
+        batch_holdings = dict(holdings_by_symbol or payload.get("holdings_by_symbol") or {})
+        await apply_schedule_preview_snapshot(
+            order,
+            order_data,
+            db,
+            holdings_by_symbol=batch_holdings or None,
+            batch_snapshots=batch_snapshots,
+        )
         db.commit()
         return {"symbol": symbol, "order_id": order.order_id}
     except Exception as exc:
@@ -244,10 +294,23 @@ async def _schedule_one_symbol(symbol: str, payload: Dict[str, Any], *, enforce_
         db.close()
 
 
-async def _schedule_one_symbol_with_retries(symbol: str, payload: Dict[str, Any], *, enforce_preflight: bool = True) -> Dict[str, Any]:
+async def _schedule_one_symbol_with_retries(
+    symbol: str,
+    payload: Dict[str, Any],
+    *,
+    enforce_preflight: bool = True,
+    holdings_by_symbol: Optional[Dict[str, int]] = None,
+    batch_snapshots: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     last_result: Dict[str, Any] = {}
     for attempt in range(1, SCHEDULE_RETRY_ATTEMPTS + 1):
-        result = await _schedule_one_symbol(symbol, payload, enforce_preflight=enforce_preflight)
+        result = await _schedule_one_symbol(
+            symbol,
+            payload,
+            enforce_preflight=enforce_preflight,
+            holdings_by_symbol=holdings_by_symbol,
+            batch_snapshots=batch_snapshots,
+        )
         if result.get("order_id"):
             if attempt > 1:
                 result["retry_attempts"] = attempt
@@ -262,6 +325,13 @@ async def _schedule_one_symbol_with_retries(symbol: str, payload: Dict[str, Any]
 
 async def run_custom_query_batch(payload: Dict[str, Any]) -> Dict[str, Any]:
     symbols = _normalize_symbols(list(payload.get("symbols") or []))
+    batch_id = str(uuid.uuid4())
+    payload = {
+        **payload,
+        "schedule_batch_id": batch_id,
+        "schedule_batch_label": _batch_label_from_payload(payload),
+        "schedule_batch_symbol_count": len(symbols),
+    }
     semaphore = asyncio.Semaphore(PARALLEL_LIMIT)
 
     if not payload.get("skip_preflight"):
@@ -275,14 +345,78 @@ async def run_custom_query_batch(payload: Dict[str, Any]) -> Dict[str, Any]:
             )
             return {
                 "status": "preflight_failed",
+                "schedule_batch_id": batch_id,
+                "schedule_batch_label": payload.get("schedule_batch_label"),
                 "scheduled": [],
                 "failed": failed_preflight,
                 "ready": False,
             }
 
+    batch_holdings = dict(payload.get("holdings_by_symbol") or {})
+    if (
+        not batch_holdings
+        and str(payload.get("order_type") or payload.get("order_fields", {}).get("order_type") or "").lower() == "sell"
+    ):
+        try:
+            from utils.strategy_builder.holdings_preflight import build_holdings_map
+            from utils.tms_client_resolver import get_tms_user_for_client
+
+            db: Session = SessionLocal()
+            try:
+                tms_user = await get_tms_user_for_client(str(payload["client_id"]), db)
+                batch_holdings = await build_holdings_map(tms_user)
+            finally:
+                db.close()
+        except Exception:
+            logger.warning("Custom query batch could not prefetch holdings for client=%s", payload.get("client_id"))
+
+    batch_snapshots: Dict[str, Dict[str, Any]] = dict(
+        (payload.get("order_fields") or {}).get("strategy_config", {}).get("schedule_preview_snapshots_by_symbol") or {}
+    )
+    if symbols and not snapshots_complete_for_symbols(batch_snapshots, symbols):
+        try:
+            from utils.strategy_builder.schedule_preview_capture import capture_batch_preview_snapshots
+
+            template_fields = dict(payload.get("order_fields") or {})
+            template_config = dict(template_fields.get("strategy_config") or {})
+            template_config["schedule_preview_snapshots_by_symbol"] = batch_snapshots
+            template_request = OrderCreateRequest(
+                client_id=str(payload["client_id"]),
+                script_name=symbols[0],
+                order_type=str(payload.get("order_type") or template_fields.get("order_type") or "buy"),
+                price=float(template_fields.get("price") or 0),
+                qty=int(template_fields.get("qty") or 0),
+                status=str(template_fields.get("status") or "pending"),
+                strategy_type=template_fields.get("strategy_type"),
+                strategy_config=template_config,
+            )
+            db: Session = SessionLocal()
+            try:
+                batch_snapshots = await capture_batch_preview_snapshots(
+                    template_request,
+                    db,
+                    symbols,
+                    holdings_by_symbol=batch_holdings or None,
+                )
+            finally:
+                db.close()
+            order_fields = dict(payload.get("order_fields") or {})
+            strategy_config = dict(order_fields.get("strategy_config") or {})
+            strategy_config["schedule_preview_snapshots_by_symbol"] = batch_snapshots
+            order_fields["strategy_config"] = strategy_config
+            payload = {**payload, "order_fields": order_fields}
+        except Exception:
+            logger.exception("Custom query batch preview snapshot capture failed for client=%s", payload.get("client_id"))
+
     async def _schedule_guarded(symbol: str) -> Dict[str, Any]:
         async with semaphore:
-            return await _schedule_one_symbol_with_retries(symbol, payload, enforce_preflight=False)
+            return await _schedule_one_symbol_with_retries(
+                symbol,
+                payload,
+                enforce_preflight=False,
+                holdings_by_symbol=batch_holdings or None,
+                batch_snapshots=batch_snapshots or None,
+            )
 
     results = list(await asyncio.gather(*[_schedule_guarded(symbol) for symbol in symbols]))
     scheduled = [item for item in results if item.get("order_id")]
@@ -302,6 +436,8 @@ async def run_custom_query_batch(payload: Dict[str, Any]) -> Dict[str, Any]:
     )
     return {
         "status": "completed",
+        "schedule_batch_id": batch_id,
+        "schedule_batch_label": payload.get("schedule_batch_label"),
         "scheduled": scheduled,
         "failed": failed,
         "ready": not failed,

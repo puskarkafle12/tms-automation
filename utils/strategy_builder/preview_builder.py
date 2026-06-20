@@ -99,6 +99,41 @@ def _field_name_from_node(node: Any) -> Optional[str]:
     return None
 
 
+def _resolve_operand(node: Any, flat: Dict[str, Any]) -> Tuple[Any, Optional[str]]:
+    node = _node_as_dict(node)
+    if isinstance(node, dict) and node.get("type") == "field":
+        field_name = str(node.get("name") or "")
+        return flat.get(field_name), field_name or None
+    if isinstance(node, dict) and node.get("type") == "literal":
+        return node.get("value"), None
+    return _literal_value(node), None
+
+
+def _comparison_trigger_price(
+    left_field: Optional[str],
+    operator: str,
+    right_field: Optional[str],
+    target_value: Any,
+    flat: Dict[str, Any],
+) -> Tuple[Optional[float], bool, List[PreviewWarning]]:
+    warnings: List[PreviewWarning] = []
+    if target_value is None:
+        return None, False, warnings
+    try:
+        numeric_target = float(target_value)
+    except (TypeError, ValueError):
+        return None, False, warnings
+
+    op = str(operator or "").lower()
+    if left_field == "ltp" and right_field in DIRECT_PRICE_FIELDS:
+        return numeric_target, True, warnings
+    if right_field == "ltp" and left_field in DIRECT_PRICE_FIELDS:
+        return numeric_target, True, warnings
+    if left_field and right_field is None:
+        return _estimate_price_boundary(left_field, op, numeric_target, flat)
+    return None, False, warnings
+
+
 def _estimate_price_boundary(
     field_key: str,
     operator: str,
@@ -192,21 +227,29 @@ def _describe_comparison_node(node: Dict[str, Any], flat: Dict[str, Any]) -> Con
     right_node = node.get("right")
     operator = str(node.get("operator") or "")
     field_key = _field_name_from_node(left_node) or ""
-    target_value = _literal_value(right_node)
+    right_field = _field_name_from_node(right_node)
+    target_value, resolved_right_field = _resolve_operand(right_node, flat)
+    if right_field is None:
+        right_field = resolved_right_field
     actual_value = flat.get(field_key) if field_key else None
     label = field_display_name(field_key) if field_key else "Condition"
     op_text = operator_display(operator)
-    strategy_text = f"{label} {op_text} {format_preview_value(field_key, target_value)}"
+    target_fmt_key = right_field or field_key
+    if right_field:
+        target_label = field_display_name(right_field)
+        strategy_text = (
+            f"{label} {op_text} {target_label} ({format_preview_value(target_fmt_key, target_value)})"
+        )
+    else:
+        strategy_text = f"{label} {op_text} {format_preview_value(field_key, target_value)}"
 
-    estimated_price = None
-    is_exact = False
-    warnings: List[PreviewWarning] = []
-    if field_key and target_value is not None:
-        try:
-            numeric_target = float(target_value)
-            estimated_price, is_exact, warnings = _estimate_price_boundary(field_key, operator, numeric_target, flat)
-        except (TypeError, ValueError):
-            pass
+    estimated_price, is_exact, warnings = _comparison_trigger_price(
+        field_key,
+        operator,
+        right_field,
+        target_value,
+        flat,
+    )
 
     if field_key == "position_in_52_week_range_percent":
         strategy_text = f"52-week range position {op_text} {format_preview_value(field_key, target_value, formatter='percentage')}"
@@ -222,7 +265,7 @@ def _describe_comparison_node(node: Dict[str, Any], flat: Dict[str, Any]) -> Con
         current_value=actual_value,
         target_value=target_value,
         current_display=format_preview_value(field_key, actual_value),
-        target_display=format_preview_value(field_key, target_value),
+        target_display=format_preview_value(target_fmt_key, target_value),
         value_unit=infer_unit(field_key),
         estimated_price=estimated_price,
         estimated_price_available=estimated_price is not None,
@@ -347,7 +390,10 @@ def _enrich_conditions_from_evaluation(
                 merged.current_display = format_preview_value(field_guess, result.actual_value)
             if result.expected_value is not None:
                 merged.target_value = result.expected_value
-                merged.target_display = format_preview_value(None, result.expected_value)
+                field_guess = None
+                if " " in result.expression:
+                    field_guess = result.expression.split(" ")[0]
+                merged.target_display = format_preview_value(field_guess, result.expected_value)
         enriched.append(merged)
     if not enriched and eval_conditions:
         for result in eval_conditions:
@@ -364,6 +410,54 @@ def _enrich_conditions_from_evaluation(
     return enriched
 
 
+def _eligibility_price_boundary(
+    rule: RuleBlock,
+    flat: Dict[str, Any],
+    evaluation: EvaluationResult,
+) -> Tuple[Optional[float], bool, Optional[str], Optional[str], Optional[str]]:
+    if not rule.eligibility:
+        return None, False, None, None, None
+
+    elig_dict = _node_as_dict(rule.eligibility)
+    if not isinstance(elig_dict, dict) or elig_dict.get("type") != "comparison":
+        return None, False, None, None, None
+
+    left_field = _field_name_from_node(elig_dict.get("left"))
+    operator = str(elig_dict.get("operator") or "")
+    if left_field != "ltp":
+        return None, False, None, None, None
+
+    elig_result = evaluation.conditions[0] if evaluation.conditions else None
+    target_value = getattr(elig_result, "expected_value", None) if elig_result else None
+    current_value = getattr(elig_result, "actual_value", None) if elig_result else None
+    strategy_text = None
+    if elig_result and getattr(elig_result, "expression", None):
+        strategy_text = str(elig_result.expression)
+
+    if target_value is None:
+        item = _describe_comparison_node(elig_dict, flat)
+        target_value = item.target_value
+        strategy_text = strategy_text or item.strategy_text
+        current_value = current_value if current_value is not None else item.current_value
+
+    if target_value is None:
+        return None, False, None, None, None
+
+    price, exact, _ = _comparison_trigger_price(
+        left_field,
+        operator,
+        None,
+        target_value,
+        flat,
+    )
+    if price is None:
+        return None, False, None, None, None
+
+    current_display = format_preview_value(left_field, current_value)
+    target_display = format_preview_value("ltp", target_value)
+    return price, exact, strategy_text, current_display, target_display
+
+
 def build_trigger_preview(
     rule: RuleBlock,
     flat: Dict[str, Any],
@@ -376,24 +470,30 @@ def build_trigger_preview(
             continue
     conditions = _enrich_conditions_from_evaluation(raw_conditions, evaluation)
 
+    expr_dict = _node_as_dict(expr)
+    comparison_left = None
+    comparison_right = None
+    comparison_operator = None
+    if isinstance(expr_dict, dict) and expr_dict.get("type") == "comparison":
+        comparison_left = _field_name_from_node(expr_dict.get("left"))
+        comparison_right = _field_name_from_node(expr_dict.get("right"))
+        comparison_operator = str(expr_dict.get("operator") or "")
+
     for item in conditions:
         if item.estimated_price is None and item.target_value is not None:
-            field_key = None
-            for key in flat:
-                if item.strategy_text and field_display_name(key) in item.strategy_text:
-                    field_key = key
-                    break
-            if field_key:
-                try:
-                    price, exact, _ = _estimate_price_boundary(field_key, "gte", float(item.target_value), flat)
-                    item.estimated_price = price
-                    item.estimated_price_available = price is not None
-                    item.is_exact_price = exact
-                except (TypeError, ValueError):
-                    pass
+            price, exact, _ = _comparison_trigger_price(
+                comparison_left,
+                comparison_operator or "gte",
+                comparison_right,
+                item.target_value,
+                flat,
+            )
+            if price is not None:
+                item.estimated_price = price
+                item.estimated_price_available = True
+                item.is_exact_price = exact
 
     logic = None
-    expr_dict = _node_as_dict(expr)
     if isinstance(expr_dict, dict) and expr_dict.get("type") == "group":
         logic = str(expr_dict.get("logic") or "AND")
 
@@ -405,9 +505,21 @@ def build_trigger_preview(
             result = evaluation.conditions[0]
             primary.current_value = result.actual_value
             primary.target_value = result.expected_value
-            field_key = _field_name_from_node(expr_dict.get("left")) or ""
-            primary.current_display = format_preview_value(field_key, result.actual_value)
-            primary.target_display = format_preview_value(field_key, result.expected_value)
+            left_field = comparison_left or ""
+            right_field = comparison_right
+            primary.current_display = format_preview_value(left_field, result.actual_value)
+            primary.target_display = format_preview_value(right_field or left_field, result.expected_value)
+            price, exact, _ = _comparison_trigger_price(
+                left_field,
+                comparison_operator or "",
+                right_field,
+                result.expected_value,
+                flat,
+            )
+            if price is not None:
+                primary.estimated_price = price
+                primary.estimated_price_available = True
+                primary.is_exact_price = exact
 
     estimated_price = None
     is_exact = False
@@ -418,8 +530,13 @@ def build_trigger_preview(
             if logic != "OR":
                 break
 
+    primary_current = primary.current_value
+    primary_target = primary.target_value
+    primary_current_display = primary.current_display
+    primary_target_display = primary.target_display
+
     source_fields: Dict[str, Any] = {}
-    for key in ("fifty_two_week_low", "fifty_two_week_high", "low", "high"):
+    for key in ("fifty_two_week_low", "fifty_two_week_high", "all_time_low", "all_time_high", "low", "high"):
         if flat.get(key) is not None:
             source_fields[key] = flat.get(key)
 
@@ -428,6 +545,29 @@ def build_trigger_preview(
         strategy_text = " · ".join(item.strategy_text for item in conditions[:3])
         if len(conditions) > 3:
             strategy_text += f" · +{len(conditions) - 3} more"
+
+    if estimated_price is None and rule.eligibility and (rule.signal or rule.when):
+        (
+            elig_price,
+            elig_exact,
+            elig_text,
+            elig_current_display,
+            elig_target_display,
+        ) = _eligibility_price_boundary(rule, flat, evaluation)
+        if elig_price is not None:
+            estimated_price = elig_price
+            is_exact = elig_exact
+            if elig_text:
+                gate_label = f"Gate: {elig_text}"
+                strategy_text = (
+                    f"{gate_label} · {strategy_text}"
+                    if strategy_text and strategy_text != "No condition configured"
+                    else gate_label
+                )
+            if elig_current_display and elig_current_display != "—":
+                primary_current_display = elig_current_display
+            if elig_target_display and elig_target_display != "—":
+                primary_target_display = elig_target_display
 
     kind = "derived_price_boundary"
     if is_exact:
@@ -453,10 +593,10 @@ def build_trigger_preview(
         estimated_price_display=price_display,
         estimated_price_available=estimated_price is not None,
         is_exact_price=is_exact,
-        current_value=primary.current_value,
-        target_value=primary.target_value,
-        current_display=primary.current_display,
-        target_display=primary.target_display,
+        current_value=primary_current,
+        target_value=primary_target,
+        current_display=primary_current_display,
+        target_display=primary_target_display,
         value_unit=primary.value_unit,
         source_fields=source_fields,
         conditions=conditions,
@@ -635,13 +775,15 @@ def build_execution_policy_preview(rule: RuleBlock) -> ExecutionPolicyPreview:
 
 def _build_reason(trigger: TriggerPreview, evaluation: EvaluationResult) -> Optional[str]:
     if evaluation.matched:
-        return "All checks passed."
-    if trigger.current_display and trigger.target_display:
-        return f"Current value is {trigger.current_display}; required is {trigger.target_display}."
+        return "Ready to execute."
+    if trigger.target_display and trigger.target_display != "—":
+        if trigger.current_display and trigger.current_display != "—":
+            return f"{trigger.current_display} vs {trigger.target_display}"
+        return f"Target: {trigger.target_display}"
     if trigger.conditions:
         first = trigger.conditions[0]
         if first.current_display and first.target_display:
-            return f"Current {first.current_display}; at least {first.target_display} is required."
+            return f"{first.current_display} vs {first.target_display}"
     return None
 
 

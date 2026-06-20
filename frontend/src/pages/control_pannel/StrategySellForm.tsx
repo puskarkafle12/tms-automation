@@ -24,7 +24,7 @@ import StrategyCatalogModal from '../../components/StrategyCatalogModal';
 import CustomQueryEditor from '../../components/CustomQueryEditor';
 import TechnicalRuleBuilder from '../../components/TechnicalRuleBuilder';
 import ErrorMessage from '../../components/ErrorMessage';
-import { extractPlannedQtyFromCompiledPlan, DEFAULT_RULE_PLANNED_QTY, extractPlanSide, customQueryStrategyForSide, isCustomQueryStrategy, findBlockingValidationIssue, isQueryValidationReady, isSchedulePreflightReady, type PlanValidationSnapshot } from '../../lib/strategies/rulePlanHelpers';
+import { extractPlannedQtyFromCompiledPlan, DEFAULT_RULE_PLANNED_QTY, extractPlanSide, customQueryStrategyForSide, isCustomQueryStrategy, findBlockingValidationIssue, isQueryValidationReady, isSchedulePreflightReady, isSchedulePreviewReady, describeSchedulePreviewBlockReason, isSchedulePreflightKeyCurrent, type PlanValidationSnapshot } from '../../lib/strategies/rulePlanHelpers';
 export type { StrategyPayload, StrategyType } from './strategyValidation';
 
 export const STRATEGY_HELP: Record<string, { helper: string; button: string }> = {
@@ -519,6 +519,15 @@ const StrategySellForm: React.FC<Props> = ({
       if (!ruleQueryText.trim()) {
         return 'Enter a strategy query.';
       }
+      if (!isSchedulePreflightKeyCurrent(schedulePreflightKey, {
+        queryText: ruleQueryText,
+        side: queryPlanSide || side,
+        strategyType: 'Custom Query',
+        clientId,
+        formSymbol: scriptName,
+      })) {
+        return 'Wait for strategy validation to finish.';
+      }
       if (!queryValidation || !compiledPlan) {
         return 'Wait for strategy validation to finish.';
       }
@@ -533,6 +542,10 @@ const StrategySellForm: React.FC<Props> = ({
         return schedulePreflight?.errors?.[0]?.message
           || schedulePreflight?.message
           || 'Schedule preflight is still running or failed.';
+      }
+      if (!isSchedulePreviewReady(queryValidation, compiledPlan)) {
+        return describeSchedulePreviewBlockReason(queryValidation, compiledPlan)
+          || 'Est. trigger prices are still loading. Wait for preview to finish for all symbols.';
       }
       return '';
     }
@@ -564,17 +577,19 @@ const StrategySellForm: React.FC<Props> = ({
     isCustomQuery,
     isRuleBased,
     planValidationError,
+    queryPlanSide,
     queryValidation,
     queryValidating,
     ruleQueryText,
     schedulePreflight,
+    schedulePreflightKey,
     scriptName,
     side,
     submitError,
     validationError,
   ]);
 
-  const canSchedule = !isSubmitting && !scheduleBlockReason;
+  const scheduleButtonReady = !scheduleBlockReason && !isSubmitting;
 
   useEffect(() => {
     if (!isRuleBased || isCustomQuery || !ruleQueryText.trim()) {
@@ -678,8 +693,16 @@ const StrategySellForm: React.FC<Props> = ({
     const customQueryReady = isCustomQuery
       && ruleQueryText.trim()
       && compiledPlan
+      && isSchedulePreflightKeyCurrent(schedulePreflightKey, {
+        queryText: ruleQueryText,
+        side: queryPlanSide || side,
+        strategyType: 'Custom Query',
+        clientId,
+        formSymbol: scriptName,
+      })
       && isQueryValidationReady(queryValidation, compiledPlan)
-      && isSchedulePreflightReady(schedulePreflight);
+      && isSchedulePreflightReady(schedulePreflight)
+      && isSchedulePreviewReady(queryValidation, compiledPlan);
     if (customQueryReady) {
       activeCompiledPlan = compiledPlan;
     } else if (isCustomQuery && ruleQueryText.trim()) {
@@ -754,6 +777,9 @@ const StrategySellForm: React.FC<Props> = ({
         execution_mode: isRuleBased ? 'live' : undefined,
         schedule_preflight_ready: isCustomQuery ? Boolean(schedulePreflight?.ready) : undefined,
         schedule_preflight_key: isCustomQuery ? schedulePreflightKey : undefined,
+        schedule_preview_snapshots_by_symbol: isCustomQuery
+          ? (queryValidation?.schedule_preview_snapshots_by_symbol || undefined)
+          : undefined,
       },
     };
     if (strategy === 'Capital Protection Sell' || strategy === 'Time-Based Exit') {
@@ -1119,7 +1145,12 @@ const StrategySellForm: React.FC<Props> = ({
         </label>
       )}
 
-      <button type="submit" className="btn btn-primary strategy-submit" disabled={!canSchedule}>
+      <button
+        type="submit"
+        className={`btn btn-primary strategy-submit${scheduleButtonReady ? ' strategy-submit-ready' : ''}`}
+        disabled={isSubmitting}
+        title={scheduleBlockReason || undefined}
+      >
         {isSubmitting
           ? 'Scheduling…'
           : (submitButtonLabel || STRATEGY_HELP[strategy]?.button || 'Schedule Order')}
@@ -1129,7 +1160,14 @@ const StrategySellForm: React.FC<Props> = ({
         <p className="strategy-submit-progress" aria-live="polite">{submitProgress}</p>
       ) : null}
       {!isSubmitting && scheduleBlockReason ? (
-        <p className="strategy-submit-progress strategy-submit-progress-muted" aria-live="polite">{scheduleBlockReason}</p>
+        <p className="strategy-submit-progress strategy-submit-progress-muted" aria-live="polite">
+          {scheduleBlockReason}
+        </p>
+      ) : null}
+      {!isSubmitting && !scheduleBlockReason && isCustomQuery ? (
+        <p className="strategy-submit-progress strategy-submit-progress-ready" aria-live="polite">
+          Ready to schedule this custom query.
+        </p>
       ) : null}
 
       {(submitStatus === 'success' || submitStatus === 'error') && submitStatusMessage ? (

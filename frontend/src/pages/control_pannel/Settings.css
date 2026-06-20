@@ -181,7 +181,7 @@
 }
 
 .settings-number-input {
-  width: 4.5rem;
+  width: 5rem;
   height: 2rem;
   padding: 0 0.5rem;
   border: 1px solid var(--color-border);
@@ -191,9 +191,30 @@
   text-align: right;
 }
 
+.settings-field-input-hint {
+  margin: -0.15rem 0 0;
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+}
+
+.settings-field-slider-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  max-width: 28rem;
+}
+
 .settings-range {
   width: 100%;
+  max-width: 28rem;
+  height: 0.35rem;
   accent-color: #4f46e5;
+}
+
+.settings-range-label {
+  font-size: 0.6875rem;
+  color: var(--color-text-muted);
+  font-weight: 600;
 }
 
 .settings-toggle-row {

@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { fetchJson } from '../utils/api';
+import { fetchJson, getApiUrl } from '../utils/api';
 import { readUiPortalSettings, subscribeUiPortalSettings } from '../lib/uiPortalSettings';
 import {
   formatCurrentRequired,
@@ -9,6 +9,7 @@ import {
   formatQuantityCell,
   type PreviewRow,
 } from '../lib/strategies/previewFormatters';
+import { buildSchedulePreflightKey, isSchedulePreviewReady } from '../lib/strategies/rulePlanHelpers';
 import './CustomQueryEditor.css';
 
 interface ValidationIssue {
@@ -28,6 +29,7 @@ interface ValidationResponse {
   compiled_plan?: Record<string, unknown>;
   targets?: Array<Record<string, unknown>>;
   preview?: PreviewRow[];
+  schedule_preview_snapshots_by_symbol?: Record<string, Record<string, unknown>>;
   formatted_query?: string;
   schedule_preflight?: SchedulePreflightResponse;
 }
@@ -44,6 +46,7 @@ interface AiGenerateResponse extends ValidationResponse {
   generated_query?: string;
   ai_summary?: string;
   ai_retry_count?: number;
+  ai_warnings?: ValidationIssue[];
 }
 
 interface Props {
@@ -71,8 +74,17 @@ const PREVIEW_STATUS_STEPS = [
   'Validating query syntax...',
   'Fetching live TMS quotes at a safe rate...',
   'Checking Nepse Alpha data at a safe rate...',
+  'Estimating trigger prices for each symbol...',
   'Preparing preview results...',
   'Still working on live preview...',
+];
+
+const AI_STATUS_STEPS = [
+  'Generating strategy query with AI...',
+  'Validating syntax and field registry...',
+  'Running live preview and schedule preflight...',
+  'Refining query after validation feedback...',
+  'Still working — AI is correcting the query...',
 ];
 
 const formatPreviewLtp = (value: unknown): string => {
@@ -101,20 +113,6 @@ const isHoldingsValidationMessage = (message?: string): boolean => {
   return text.includes('dp holdings') || text.includes('not available in dp holdings');
 };
 
-const buildSchedulePreflightKey = (params: {
-  queryText: string;
-  side: 'buy' | 'sell';
-  strategyType: string;
-  clientId?: string;
-  formSymbol?: string;
-}) => JSON.stringify({
-  query: params.queryText.trim(),
-  side: params.side,
-  strategyType: params.strategyType,
-  clientId: params.clientId || '',
-  formSymbol: params.formSymbol || '',
-});
-
 const CustomQueryEditor: React.FC<Props> = ({
   side,
   strategyType,
@@ -140,12 +138,16 @@ const CustomQueryEditor: React.FC<Props> = ({
   const [error, setError] = useState('');
   const [toastMessage, setToastMessage] = useState('');
   const [previewModalOpen, setPreviewModalOpen] = useState(false);
+  const [expandedPreviewRows, setExpandedPreviewRows] = useState<Set<string>>(new Set());
   const [previewStatus, setPreviewStatus] = useState('');
   const [aiPrompt, setAiPrompt] = useState('');
   const [aiSummary, setAiSummary] = useState('');
+  const [aiWarnings, setAiWarnings] = useState<ValidationIssue[]>([]);
   const [aiBusy, setAiBusy] = useState(false);
   const [aiPortalTarget, setAiPortalTarget] = useState<HTMLElement | null>(null);
   const validateRequestId = useRef(0);
+  const previewAbortRef = useRef<AbortController | null>(null);
+  const aiAbortRef = useRef<AbortController | null>(null);
   const lastPreviewKeyRef = useRef('');
   const [schedulePreflightKey, setSchedulePreflightKey] = useState('');
   const skipNextAutoPreviewRef = useRef(false);
@@ -196,6 +198,7 @@ const CustomQueryEditor: React.FC<Props> = ({
 
   useEffect(() => {
     if (!previewModalOpen) {
+      setExpandedPreviewRows(new Set());
       return undefined;
     }
     const onKeyDown = (event: KeyboardEvent) => {
@@ -207,9 +210,23 @@ const CustomQueryEditor: React.FC<Props> = ({
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [previewModalOpen]);
 
+  const togglePreviewRow = (rowKey: string) => {
+    setExpandedPreviewRows((current) => {
+      const next = new Set(current);
+      if (next.has(rowKey)) {
+        next.delete(rowKey);
+      } else {
+        next.add(rowKey);
+      }
+      return next;
+    });
+  };
+
   const runPreview = useCallback(async (text: string) => {
     const trimmed = text.trim();
     if (!trimmed) {
+      previewAbortRef.current?.abort();
+      previewAbortRef.current = null;
       setValidation(null);
       setError('');
       setAutoValidating(false);
@@ -239,6 +256,10 @@ const CustomQueryEditor: React.FC<Props> = ({
       return;
     }
 
+    previewAbortRef.current?.abort();
+    const abortController = new AbortController();
+    previewAbortRef.current = abortController;
+
     const requestId = validateRequestId.current + 1;
     validateRequestId.current = requestId;
     setBusy(true);
@@ -264,8 +285,9 @@ const CustomQueryEditor: React.FC<Props> = ({
           known_symbols: knownBuySymbols && knownBuySymbols.length > 0 ? knownBuySymbols : undefined,
           include_schedule_preflight: true,
         }),
+        signal: abortController.signal,
       }, PREVIEW_TIMEOUT_MS);
-      if (requestId !== validateRequestId.current) {
+      if ((!result.ok && result.cancelled) || requestId !== validateRequestId.current) {
         return;
       }
       if (!result.ok) {
@@ -286,9 +308,15 @@ const CustomQueryEditor: React.FC<Props> = ({
       if (requestId !== validateRequestId.current) {
         return;
       }
+      if (err instanceof Error && err.name === 'AbortError') {
+        return;
+      }
       setError(err instanceof Error ? err.message : 'Preview request failed');
     } finally {
       if (requestId === validateRequestId.current) {
+        if (previewAbortRef.current === abortController) {
+          previewAbortRef.current = null;
+        }
         setBusy(false);
         setAutoValidating(false);
         setPreviewStatus('');
@@ -298,16 +326,17 @@ const CustomQueryEditor: React.FC<Props> = ({
   }, [clientId, formSymbol, holdingsBySymbol, knownBuySymbols, side, strategyType]);
 
   useEffect(() => {
-    if (!busy) {
+    if (!busy && !aiBusy) {
       return undefined;
     }
+    const steps = aiBusy ? AI_STATUS_STEPS : PREVIEW_STATUS_STEPS;
     let index = 0;
     const timer = window.setInterval(() => {
-      index = Math.min(index + 1, PREVIEW_STATUS_STEPS.length - 1);
-      setPreviewStatus(PREVIEW_STATUS_STEPS[index]);
+      index = Math.min(index + 1, steps.length - 1);
+      setPreviewStatus(steps[index]);
     }, 1400);
     return () => window.clearInterval(timer);
-  }, [busy]);
+  }, [aiBusy, busy]);
 
   useEffect(() => {
     if (skipNextAutoPreviewRef.current) {
@@ -317,7 +346,11 @@ const CustomQueryEditor: React.FC<Props> = ({
     const timer = window.setTimeout(() => {
       void runPreview(queryText);
     }, validateDebounceMs);
-    return () => window.clearTimeout(timer);
+    return () => {
+      window.clearTimeout(timer);
+      previewAbortRef.current?.abort();
+      previewAbortRef.current = null;
+    };
   }, [queryText, runPreview, validateDebounceMs]);
 
   const copyLlmPrompt = async (event: React.MouseEvent<HTMLButtonElement>) => {
@@ -341,6 +374,33 @@ const CustomQueryEditor: React.FC<Props> = ({
     }
   };
 
+  const applyValidationResult = useCallback((text: string, data: ValidationResponse) => {
+    const previewKey = JSON.stringify({
+      query: text.trim(),
+      side,
+      strategyType,
+      formSymbol: formSymbol || '',
+      clientId: clientId || '',
+      holdingsCount: holdingsBySymbol ? Object.keys(holdingsBySymbol).length : 0,
+      knownSymbolsCount: knownBuySymbols?.length || 0,
+    });
+    const nextSchedulePreflightKey = buildSchedulePreflightKey({
+      queryText: text.trim(),
+      side,
+      strategyType,
+      clientId,
+      formSymbol,
+    });
+    lastPreviewKeyRef.current = previewKey;
+    setSchedulePreflightKey(nextSchedulePreflightKey);
+    setValidation(data);
+    if (!data.valid && data.errors?.length) {
+      setError(data.errors[0].message);
+    } else {
+      setError('');
+    }
+  }, [clientId, formSymbol, holdingsBySymbol, knownBuySymbols, side, strategyType]);
+
   const askAi = async (event: React.MouseEvent<HTMLButtonElement>) => {
     event.preventDefault();
     event.stopPropagation();
@@ -349,16 +409,21 @@ const CustomQueryEditor: React.FC<Props> = ({
       setError('Describe the strategy you want the AI to write.');
       return;
     }
+    previewAbortRef.current?.abort();
+    previewAbortRef.current = null;
+    aiAbortRef.current?.abort();
+    const abortController = new AbortController();
+    aiAbortRef.current = abortController;
     setAiBusy(true);
     setAutoValidating(true);
-    setPreviewStatus('Generating AI query...');
+    setPreviewStatus(AI_STATUS_STEPS[0]);
     onValidatingChangeRef.current?.(true);
     setError('');
     setAiSummary('');
+    setAiWarnings([]);
     setToastMessage('');
-    let startedPreview = false;
     try {
-      const result = await fetchJson<AiGenerateResponse>('/api/strategy-plans/generate-query', {
+      const response = await fetch(`${getApiUrl()}/api/strategy-plans/generate-query`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -368,37 +433,66 @@ const CustomQueryEditor: React.FC<Props> = ({
           form_symbol: formSymbol,
           client_id: clientId,
           current_query: queryText.trim() || undefined,
+          holdings_by_symbol: holdingsBySymbol && Object.keys(holdingsBySymbol).length > 0
+            ? holdingsBySymbol
+            : undefined,
+          known_symbols: knownBuySymbols && knownBuySymbols.length > 0 ? knownBuySymbols : undefined,
         }),
-      }, 300000);
-      if (!result.ok) {
-        throw new Error(result.error);
+        signal: abortController.signal,
+      });
+      const body = await response.json().catch(() => ({} as AiGenerateResponse & { detail?: unknown }));
+      if (!response.ok) {
+        const detail = body?.detail;
+        const generatedQuery = detail && typeof detail === 'object' && 'generated_query' in detail
+          ? String((detail as { generated_query?: string }).generated_query || '')
+          : String(body.generated_query || '');
+        if (generatedQuery) {
+          setQueryText(generatedQuery);
+          skipNextAutoPreviewRef.current = true;
+        }
+        const failureMessage = detail && typeof detail === 'object' && 'message' in detail
+          ? String((detail as { message?: string }).message || 'AI request failed')
+          : String(body.message || `HTTP ${response.status}`);
+        throw new Error(failureMessage);
       }
-      const data = result.data;
+
+      const data = body as AiGenerateResponse;
       const generated = data.generated_query || '';
       if (!generated) {
         throw new Error('AI did not return a strategy query.');
       }
+
       setQueryText(generated);
-      setValidation({
-        valid: true,
+      skipNextAutoPreviewRef.current = true;
+      applyValidationResult(generated, {
+        valid: Boolean(data.valid),
+        status: data.status,
+        message: data.message,
         errors: data.errors || [],
         warnings: data.warnings || [],
         suggestions: data.suggestions || [],
         compiled_plan: data.compiled_plan,
         preview: data.preview,
+        schedule_preflight: data.schedule_preflight,
       });
-      setAiSummary(
+
+      const summaryLines = [
         data.ai_summary
           || `Strategy query generated${typeof data.ai_retry_count === 'number' && data.ai_retry_count > 0 ? ` after ${data.ai_retry_count} retry attempt(s)` : ''}.`,
-      );
-      startedPreview = true;
-      skipNextAutoPreviewRef.current = true;
-      void runPreview(generated);
+        data.schedule_preflight?.ready ? 'Schedule preflight: ready.' : '',
+        data.preview?.length ? `Preview ready for ${data.preview.length} symbol(s).` : '',
+      ].filter(Boolean);
+      setAiSummary(summaryLines.join('\n'));
+      setAiWarnings(data.warnings || data.ai_warnings || []);
     } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        return;
+      }
       setError(err instanceof Error ? err.message : 'AI request failed');
     } finally {
-      setAiBusy(false);
-      if (!startedPreview) {
+      if (aiAbortRef.current === abortController) {
+        aiAbortRef.current = null;
+        setAiBusy(false);
         setAutoValidating(false);
         setPreviewStatus('');
         onValidatingChangeRef.current?.(false);
@@ -419,6 +513,11 @@ const CustomQueryEditor: React.FC<Props> = ({
     && validation.warnings.length === 0
     && validation.status !== 'unsupported_data',
   );
+  const schedulePreviewReady = Boolean(
+    validation?.valid
+    && validation.compiled_plan
+    && isSchedulePreviewReady(validation, validation.compiled_plan),
+  );
   const aiPanel = (
     <div className="custom-query-ai-panel">
       <label htmlFor="strategyAiPrompt">Ask AI to generate strategy query</label>
@@ -431,14 +530,19 @@ const CustomQueryEditor: React.FC<Props> = ({
         onChange={(event) => setAiPrompt(event.target.value)}
       />
       <div className="custom-query-ai-actions">
-        <button type="button" disabled={busy || aiBusy} onClick={(event) => void askAi(event)}>
-          {aiBusy ? 'Generating...' : 'Ask AI'}
+        <button type="button" disabled={aiBusy} onClick={(event) => void askAi(event)}>
+          {aiBusy ? 'Generating…' : 'Ask AI'}
         </button>
         <button type="button" className="custom-query-copy-btn" onClick={(event) => void copyLlmPrompt(event)}>
           Copy Prompt
         </button>
       </div>
-      {aiSummary ? <div className="custom-query-warning">{aiSummary}</div> : null}
+      {aiSummary ? <div className="custom-query-ai-summary">{aiSummary.split('\n').map((line) => <div key={line}>{line}</div>)}</div> : null}
+      {aiWarnings.map((warning) => (
+        <div key={`ai-${warning.code}-${warning.message}`} className="custom-query-warning custom-query-ai-warning">
+          AI note: {warning.message}
+        </div>
+      ))}
       {aiVisibleError ? <div className="custom-query-error">{aiVisibleError}</div> : null}
     </div>
   );
@@ -459,7 +563,15 @@ const CustomQueryEditor: React.FC<Props> = ({
         className="custom-query-textarea"
         rows={16}
         value={queryText}
-        onChange={(event) => setQueryText(event.target.value)}
+        onChange={(event) => {
+          aiAbortRef.current?.abort();
+          aiAbortRef.current = null;
+          const nextValue = event.target.value;
+          if (nextValue.trim()) {
+            onValidatingChangeRef.current?.(true);
+          }
+          setQueryText(nextValue);
+        }}
       />
       <div className="custom-query-actions">
         {hasPreviewRows ? (
@@ -474,8 +586,10 @@ const CustomQueryEditor: React.FC<Props> = ({
         ) : null}
         {autoValidating || busy ? (
           <span className="custom-query-validating">{previewStatus || 'Loading preview...'}</span>
+        ) : schedulePreviewReady ? (
+          <span className="custom-query-preview-ok">Ready to schedule</span>
         ) : validation?.valid ? (
-          <span className="custom-query-preview-ok">Preview OK</span>
+          <span className="custom-query-validating">Est. trigger prices loading…</span>
         ) : null}
       </div>
       {visibleError ? <div className="custom-query-error">{visibleError}</div> : null}
@@ -551,64 +665,76 @@ const CustomQueryEditor: React.FC<Props> = ({
                   <tr>
                     <th>Symbol</th>
                     <th>Status</th>
-                    <th>Market</th>
-                    <th>Order</th>
+                    <th>LTP</th>
                     <th>Trigger</th>
+                    <th>Qty</th>
                     <th>Progress</th>
-                    <th>Why</th>
                   </tr>
                 </thead>
                 <tbody>
                   {previewRows.map((row) => {
                     const warnings = formatPreviewWarnings(row);
+                    const rowKey = `${row.symbol}-${row.rule}`;
+                    const expanded = expandedPreviewRows.has(rowKey);
                     const triggerText = row.trigger?.strategy_text
                       || (row.trigger_ltp != null ? `Trigger ${row.trigger_ltp}` : '—');
+                    const progressText = formatCurrentRequired(row);
+                    const hasMore = Boolean(
+                      triggerText !== '—'
+                      || row.confirmation?.display
+                      || row.execution_policy?.display
+                      || row.reason
+                      || row.blocker
+                      || row.message
+                      || warnings.length
+                      || row.strategy,
+                    );
                     return (
-                    <tr key={`${row.symbol}-${row.rule}`} className={row.matched ? 'preview-row-ready' : 'preview-row-blocked'}>
+                    <tr key={rowKey} className={row.matched ? 'preview-row-ready' : 'preview-row-blocked'}>
                       <td className="custom-query-preview-symbol">{String(row.symbol ?? '—')}</td>
                       <td>
                         <span className={`custom-query-status-pill ${previewStatusClass(row.status, row.matched)}`}>
                           {row.status_label || row.status || '—'}
                         </span>
                       </td>
-                      <td className="custom-query-preview-stack">
-                        <div><span className="custom-query-preview-label">Live LTP</span> {formatPreviewLtp(row.preview_ltp)}</div>
-                        {row.reference_ltp != null ? (
-                          <div><span className="custom-query-preview-label">Ref LTP</span> {formatPreviewLtp(row.reference_ltp)}</div>
-                        ) : null}
-                      </td>
-                      <td className="custom-query-preview-stack custom-query-preview-pre">
-                        <div><span className="custom-query-preview-label">Est. Qty</span></div>
-                        {formatQuantityCell(row).split('\n').map((line) => (
-                          <div key={line}>{line}</div>
-                        ))}
-                        {row.execution_price?.description ? (
-                          <div className="custom-query-preview-muted">{row.execution_price.description}</div>
-                        ) : null}
+                      <td className="custom-query-preview-ltp">{formatPreviewLtp(row.preview_ltp)}</td>
+                      <td>{formatPriceBoundary(row)}</td>
+                      <td className="custom-query-preview-pre">
+                        {formatQuantityCell(row).split('\n')[0]}
                       </td>
                       <td className="custom-query-preview-stack">
-                        <div><span className="custom-query-preview-label">Price Boundary</span> {formatPriceBoundary(row)}</div>
-                        <div><span className="custom-query-preview-label">Condition</span> {triggerText}</div>
-                        <div className="custom-query-preview-muted">{formatCurrentRequired(row).split('\n').map((line) => (
-                          <div key={line}>{line}</div>
-                        ))}</div>
-                      </td>
-                      <td className="custom-query-preview-stack">
-                        {row.confirmation?.display ? (
-                          <div><span className="custom-query-preview-label">Confirmation</span> {row.confirmation.display}</div>
+                        <div>{progressText === '—' ? (row.reason || '—') : progressText.split('\n')[0]}</div>
+                        {hasMore ? (
+                          <button
+                            type="button"
+                            className="custom-query-preview-see-more"
+                            onClick={() => togglePreviewRow(rowKey)}
+                          >
+                            {expanded ? 'See less' : 'See more'}
+                          </button>
                         ) : null}
-                        {row.execution_policy?.display ? (
-                          <div className="custom-query-preview-muted">{row.execution_policy.display}</div>
+                        {expanded ? (
+                          <div className="custom-query-preview-more">
+                            {triggerText !== '—' ? (
+                              <div><span className="custom-query-preview-label">Condition</span> {triggerText}</div>
+                            ) : null}
+                            {row.confirmation?.display ? (
+                              <div><span className="custom-query-preview-label">Confirmation</span> {row.confirmation.display}</div>
+                            ) : null}
+                            {row.execution_policy?.display ? (
+                              <div className="custom-query-preview-muted">{row.execution_policy.display}</div>
+                            ) : null}
+                            {row.reason || row.blocker || row.message ? (
+                              <div className="custom-query-preview-muted">{row.reason || row.blocker || row.message}</div>
+                            ) : null}
+                            {row.strategy ? (
+                              <div className="custom-query-preview-strategy">{row.strategy}</div>
+                            ) : null}
+                            {warnings.map((warning) => (
+                              <div key={warning} className="custom-query-preview-warning">{warning}</div>
+                            ))}
+                          </div>
                         ) : null}
-                      </td>
-                      <td className="custom-query-preview-blocker">
-                        {row.strategy ? (
-                          <div className="custom-query-preview-strategy">{row.strategy}</div>
-                        ) : null}
-                        {row.reason || row.blocker || row.message || (row.matched ? 'Ready to execute' : '—')}
-                        {warnings.map((warning) => (
-                          <div key={warning} className="custom-query-preview-warning">{warning}</div>
-                        ))}
                       </td>
                     </tr>
                     );

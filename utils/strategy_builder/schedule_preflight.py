@@ -46,6 +46,14 @@ _TMS_FIELD_KEYS = {
 _NEPSE_PREREQ_FOR_DERIVED_STAT = {
     "fifty_two_week_high",
     "fifty_two_week_low",
+    "all_time_high",
+    "all_time_low",
+}
+_SOFT_MISSING_NEPSE_FIELDS = {
+    "fifty_two_week_high",
+    "fifty_two_week_low",
+    "all_time_high",
+    "all_time_low",
 }
 
 
@@ -328,6 +336,8 @@ async def run_schedule_preflight(
         symbol_data_blocked = False
         if nepse_fields:
             if not getattr(details, "available", False):
+                details = get_script_details(symbol, force_refresh=True)
+            if not getattr(details, "available", False):
                 missing_data_by_symbol[symbol] = sorted(nepse_fields)
                 detail = getattr(details, "fetch_error", None) or "Nepse Alpha request failed"
                 errors.append(
@@ -344,17 +354,19 @@ async def run_schedule_preflight(
             else:
                 missing = _missing_nepse_fields(symbol, details, nepse_fields)
                 if missing:
+                    details = get_script_details(symbol, force_refresh=True)
+                    missing = _missing_nepse_fields(symbol, details, nepse_fields)
+                if missing:
                     missing_data_by_symbol[symbol] = missing
-                    fifty_two_week_fields = {"fifty_two_week_high", "fifty_two_week_low"}
-                    only_fifty_two_week_missing = all(m in fifty_two_week_fields for m in missing)
-                    if only_fifty_two_week_missing:
+                    only_soft_missing = all(field_name in _SOFT_MISSING_NEPSE_FIELDS for field_name in missing)
+                    if only_soft_missing:
                         warnings.append(
                             ValidationIssue(
-                                code="NEPSE_ALPHA_52WEEK_MISSING",
+                                code="NEPSE_ALPHA_PRICE_STAT_MISSING",
                                 symbol=symbol,
                                 message=(
-                                    f"Nepse Alpha does not currently provide 52-week high/low for {symbol}. "
-                                    "Monitoring will proceed but 52-week range rules may not trigger until data is available."
+                                    f"Nepse Alpha does not currently provide {', '.join(missing)} for {symbol}. "
+                                    "Monitoring will proceed but price-extreme rules may not trigger until data is available."
                                 ),
                             )
                         )

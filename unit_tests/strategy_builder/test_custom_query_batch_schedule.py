@@ -80,6 +80,39 @@ class CustomQueryBatchScheduleTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["scheduled"][0]["symbol"], "NRIC")
         self.assertEqual(schedule_mock.await_count, 2)
 
+    async def test_run_batch_stamps_schedule_batch_metadata(self):
+        payload = {
+            "client_id": "C1",
+            "symbols": ["NABIL"],
+            "skip_preflight": True,
+            "order_fields": {
+                "strategy_type": "Custom Query Buy",
+                "order_type": "buy",
+                "qty": 10,
+                "strategy_config": {
+                    "query_text": 'RULE "Buy Blue Chip" FOR SYMBOL IN ("NABIL") { WHEN ltp <= 100 }',
+                    "compiled_plan": {"rules": [{"name": "Buy Blue Chip"}]},
+                },
+            },
+        }
+        captured_payloads: list[dict] = []
+
+        async def _capture(symbol, batch_payload, **kwargs):
+            captured_payloads.append(dict(batch_payload))
+            return {"symbol": symbol, "order_id": 1}
+
+        with patch(
+            "utils.strategy_builder.custom_query_batch_schedule._schedule_one_symbol",
+            new=AsyncMock(side_effect=_capture),
+        ):
+            result = await run_custom_query_batch(payload)
+
+        self.assertTrue(result["schedule_batch_id"])
+        self.assertEqual(result["schedule_batch_label"], "Buy Blue Chip")
+        self.assertEqual(len(captured_payloads), 1)
+        self.assertEqual(captured_payloads[0]["schedule_batch_id"], result["schedule_batch_id"])
+        self.assertEqual(captured_payloads[0]["schedule_batch_symbol_count"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

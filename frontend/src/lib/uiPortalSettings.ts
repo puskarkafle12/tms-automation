@@ -21,7 +21,7 @@ export const DEFAULT_UI_PORTAL_SETTINGS: UiPortalSettings = {
   orderLogsLiveRefreshSeconds: 10,
   orderLogsBackgroundRefreshMinutes: 20,
   marketStatusPollSeconds: 30,
-  customQueryValidateDebounceMs: 900,
+  customQueryValidateDebounceMs: 2000,
 };
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, Math.round(value)));

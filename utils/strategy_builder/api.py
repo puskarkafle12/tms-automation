@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from database import get_db
+from schemas.schemas import OrderCreateRequest
 from utils.strategy_builder.strategy_fields import get_field_catalog, get_supported_functions
 from utils.strategy_builder.strategy_parser import StrategyQueryError, extract_symbols_from_query, format_strategy_query, parse_strategy_query
 from utils.strategy_builder.strategy_validator import validate_strategy_plan
@@ -51,6 +52,8 @@ class StrategyAiGenerateRequest(BaseModel):
     form_symbol: Optional[str] = None
     client_id: Optional[str] = None
     current_query: Optional[str] = None
+    holdings_by_symbol: Optional[Dict[str, int]] = None
+    known_symbols: Optional[List[str]] = None
 
 
 class ScreenerDropBatchRequest(BaseModel):
@@ -78,6 +81,7 @@ class CustomQueryBatchScheduleRequest(BaseModel):
     order_type: str = "buy"
     order_fields: Dict[str, Any] = Field(default_factory=dict)
     security_details_by_symbol: Optional[Dict[str, Dict[str, Any]]] = None
+    holdings_by_symbol: Optional[Dict[str, int]] = None
     skip_preflight: bool = False
 
 
@@ -152,7 +156,7 @@ async def format_query(body: StrategyQueryRequest):
 
 
 @router.post("/strategy-plans/generate-query")
-async def generate_strategy_query(body: StrategyAiGenerateRequest):
+async def generate_strategy_query(body: StrategyAiGenerateRequest, db: Session = Depends(get_db)):
     message = (body.message or "").strip()
     if not message:
         raise HTTPException(status_code=400, detail="Message is required.")
@@ -167,6 +171,11 @@ async def generate_strategy_query(body: StrategyAiGenerateRequest):
             side=body.side,
             form_symbol=body.form_symbol,
             strategy_type=body.strategy_type,
+            client_id=body.client_id,
+            db=db,
+            holdings_by_symbol=body.holdings_by_symbol,
+            known_symbols=body.known_symbols,
+            require_schedule_preflight=True,
         )
     except StrategyQueryAiError as exc:
         raise HTTPException(
@@ -177,6 +186,7 @@ async def generate_strategy_query(body: StrategyAiGenerateRequest):
                 "generated_query": exc.generated_query,
                 "valid": False,
                 "status": exc.status,
+                "ai_attempts": getattr(exc, "ai_attempts", None),
             },
         ) from exc
 
@@ -324,6 +334,38 @@ async def preview_plan(body: StrategyQueryRequest, db: Session = Depends(get_db)
         holdings_by_symbol=preview_holdings,
         holding_retrieval_failed=holdings_failed,
     )
+    from utils.strategy_builder.schedule_preview_capture import (
+        capture_batch_preview_snapshots,
+        snapshots_from_preview_rows,
+    )
+
+    preview_snapshots = snapshots_from_preview_rows(validation["preview"])
+    missing_trigger_symbols = [
+        symbol
+        for symbol, snapshot in preview_snapshots.items()
+        if snapshot.get("estimated_trigger_price") is None
+        and str(snapshot.get("estimated_trigger_price_display") or "") in {"", "—", "Unavailable"}
+    ]
+    if missing_trigger_symbols and body.client_id:
+        retry_request = OrderCreateRequest(
+            client_id=body.client_id,
+            script_name=missing_trigger_symbols[0],
+            order_type=str(plan.side or body.side or "buy").lower(),
+            price=0,
+            qty=0,
+            status="pending",
+            strategy_type=body.strategy_type,
+            strategy_config={"compiled_plan": validation["compiled_plan"]},
+        )
+        retried = await capture_batch_preview_snapshots(
+            retry_request,
+            db,
+            missing_trigger_symbols,
+            holdings_by_symbol=preview_holdings,
+            holding_retrieval_failed=holdings_failed,
+        )
+        preview_snapshots.update(retried)
+    validation["schedule_preview_snapshots_by_symbol"] = preview_snapshots
     if plan_uses_reference(plan) and body.client_id and not body.skip_live_checks:
         validation["preview_reference_note"] = (
             "Preview uses live quotes as temporary REFERENCE values per symbol. "

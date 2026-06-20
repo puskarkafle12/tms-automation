@@ -20,7 +20,7 @@ class PortalSettingsTest(unittest.TestCase):
         normalized = normalize_portal_settings({})
         self.assertTrue(normalized["enable_scan_staggering"])
         self.assertEqual(normalized["nepse_alpha_interval_seconds"], 1800)
-        self.assertEqual(normalized["monitor_tick_seconds"], 1)
+        self.assertEqual(normalized["monitor_tick_seconds"], 5)
         self.assertEqual(normalized["max_price_fetch_concurrency"], 5)
 
     def test_normalize_clamps_orchestration_values(self):
@@ -33,9 +33,13 @@ class PortalSettingsTest(unittest.TestCase):
             }
         )
         self.assertEqual(normalized["nepse_alpha_interval_seconds"], 60)
-        self.assertEqual(normalized["monitor_tick_seconds"], 5)
+        self.assertEqual(normalized["monitor_tick_seconds"], 9)
         self.assertEqual(normalized["max_price_fetch_concurrency"], 20)
         self.assertFalse(normalized["enable_scan_staggering"])
+
+    def test_normalize_clamps_monitor_tick_high_values(self):
+        normalized = normalize_portal_settings({"monitor_tick_seconds": 7200})
+        self.assertEqual(normalized["monitor_tick_seconds"], 3600)
 
     def test_save_updates_tms_config(self):
         with patch("config.portal_settings.SETTINGS_FILE") as settings_file:

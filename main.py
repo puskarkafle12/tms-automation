@@ -1456,6 +1456,9 @@ async def add_order(order_data: OrderCreateRequest, db: Session = Depends(get_db
     await _persist_order_field_references(db, order, order_data)
     order.strategy_config = dict(order.strategy_config or {})
     order.strategy_config["schedule_dedup_key"] = _scheduled_order_dedup_key(order_data)
+    from utils.strategy_builder.schedule_preview_capture import apply_schedule_preview_snapshot
+
+    await apply_schedule_preview_snapshot(order, order_data, db)
     db.commit()
     return {"message": "Order added successfully"}
 
@@ -1530,6 +1533,35 @@ async def delete_scheduled_order(
     return {"message": "Order deleted successfully"}
 
 
+@app.delete("/scheduled_orders/batch/{batch_id}")
+async def delete_scheduled_order_batch(batch_id: str, db: Session = Depends(get_db)):
+    normalized_batch_id = str(batch_id or "").strip()
+    if not normalized_batch_id:
+        raise HTTPException(status_code=400, detail="batch_id is required.")
+
+    orders_to_delete = [
+        order
+        for order in db.query(ScheduledOrder).all()
+        if str((order.strategy_config or {}).get("schedule_batch_id") or "").strip() == normalized_batch_id
+    ]
+    if not orders_to_delete:
+        raise HTTPException(status_code=404, detail="Batch not found.")
+
+    deleted_ids: list[int] = []
+    for order in orders_to_delete:
+        db.add(_order_status_log_from_order(order, status="cancelled"))
+        deleted_ids.append(order.order_id)
+        db.delete(order)
+    db.commit()
+
+    return {
+        "message": f"Deleted {len(deleted_ids)} scheduled order(s) from batch.",
+        "batch_id": normalized_batch_id,
+        "deleted_order_ids": deleted_ids,
+        "deleted_count": len(deleted_ids),
+    }
+
+
 @app.get("/scheduled_orders/")
 async def list_scheduled_orders(db: Session = Depends(get_db)):
     orders = db.query(ScheduledOrder).order_by(ScheduledOrder.order_id).all()
@@ -1592,6 +1624,9 @@ async def create_scheduled_order(order_data: OrderCreateRequest, db: Session = D
     await _persist_order_field_references(db, order, order_data)
     order.strategy_config = dict(order.strategy_config or {})
     order.strategy_config["schedule_dedup_key"] = _scheduled_order_dedup_key(order_data)
+    from utils.strategy_builder.schedule_preview_capture import apply_schedule_preview_snapshot
+
+    await apply_schedule_preview_snapshot(order, order_data, db)
     db.commit()
     db.refresh(order)
     return {"message": "Scheduled order created", "order": _serialize_scheduled_order(order)}
