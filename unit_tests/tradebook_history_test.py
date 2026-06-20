@@ -146,6 +146,75 @@ class TestGetTradebookHistory(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls["count"], 2)
         user._recreate_session.assert_awaited_once()
 
+    async def test_get_tradebook_history_page_retries_after_connector_closed(self):
+        user = self._make_user()
+        calls = {"count": 0}
+
+        async def mock_request(*_args, **_kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise aiohttp.ClientConnectionError("Connector is closed")
+            return 200, SAMPLE_TRADEBOOK_ARRAY
+
+        user._authenticated_request = mock_request  # type: ignore[method-assign]
+        user._recreate_session = AsyncMock()  # type: ignore[method-assign]
+
+        payload = await user.get_tradebook_history_page("2026-06-01", "2026-06-18")
+        self.assertEqual(payload, SAMPLE_TRADEBOOK_ARRAY)
+        self.assertEqual(calls["count"], 2)
+        user._recreate_session.assert_awaited_once()
+
+    async def test_authenticated_request_retries_connector_closed(self):
+        user = self._make_user()
+        calls = {"count": 0}
+
+        class FakeResponse:
+            status = 200
+
+            def __init__(self, request_info):
+                self.request_info = request_info
+                self.history = ()
+                self.reason = "OK"
+                self.headers = {}
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+            async def json(self, content_type=None):
+                return {"ok": True}
+
+        class FakeSession:
+            closed = False
+            request_info = object()
+
+            async def close(self):
+                self.closed = True
+
+            async def request(self, *_args, **_kwargs):
+                calls["count"] += 1
+                if calls["count"] == 1:
+                    raise aiohttp.ClientConnectionError("Connector is closed")
+                return FakeResponse(self.request_info)
+
+        user.session = FakeSession()  # type: ignore[assignment]
+
+        async def recreate_session() -> None:
+            user.session = FakeSession()
+
+        user._recreate_session = recreate_session  # type: ignore[method-assign]
+
+        status, payload = await user._authenticated_request(
+            "GET",
+            "https://example.test/tradebook",
+            expected_statuses={200},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, {"ok": True})
+        self.assertEqual(calls["count"], 2)
+
     async def test_slow_tms_response_within_tradebook_timeout_succeeds(self):
         user = self._make_user()
 

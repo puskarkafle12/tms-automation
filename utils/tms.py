@@ -31,6 +31,7 @@ class TmsUser:
     TRADEBOOK_TIMEOUT = aiohttp.ClientTimeout(total=90, connect=10, sock_read=60)
     TRADEBOOK_CHUNK_DAYS = 366
     TRADEBOOK_MAX_CONCURRENT_CHUNKS = 4
+    TRADEBOOK_PAGE_RETRIES = 3
     _security_cache: Dict[str, tuple[float, List[Dict]]] = {}
     _security_cache_ttl = 300.0
     _collateral_cache: Dict[str, tuple[float, Dict]] = {}
@@ -57,6 +58,7 @@ class TmsUser:
         self.driver = None
         self.session: Optional[aiohttp.ClientSession] = None
         self._auth_refresh_lock = asyncio.Lock()
+        self._session_lock = asyncio.Lock()
         self.security = None
         self.stock_symbol = stock_symbol
         self.max_request_per_sec = 5.0  # Maximum fetch rate
@@ -992,7 +994,7 @@ class TmsUser:
             "membercode": str(self.broker_no),
         }
         last_error: Optional[Exception] = None
-        for attempt in range(2):
+        for attempt in range(self.TRADEBOOK_PAGE_RETRIES):
             try:
                 _, payload = await self._authenticated_request(
                     "GET",
@@ -1002,12 +1004,12 @@ class TmsUser:
                     timeout=self.TRADEBOOK_TIMEOUT,
                 )
                 return payload
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            except Exception as exc:
                 last_error = exc
-                if attempt == 0:
-                    await self._recreate_session()
-                    continue
-                raise
+                if not self._is_transient_request_error(exc) or attempt >= self.TRADEBOOK_PAGE_RETRIES - 1:
+                    raise
+                await self._recreate_session()
+                await asyncio.sleep(min(0.5 * (attempt + 1), 2.0))
         if last_error:
             raise last_error
         raise RuntimeError("tradebook history request failed")
@@ -1091,11 +1093,23 @@ class TmsUser:
 
             async def fetch_chunk(chunk_from: str, chunk_to: str) -> List[Dict]:
                 async with semaphore:
-                    return await self._get_tradebook_history_range(
-                        chunk_from,
-                        chunk_to,
-                        page_size,
-                    )
+                    last_error: Optional[Exception] = None
+                    for attempt in range(self.TRADEBOOK_PAGE_RETRIES):
+                        try:
+                            return await self._get_tradebook_history_range(
+                                chunk_from,
+                                chunk_to,
+                                page_size,
+                            )
+                        except Exception as exc:
+                            last_error = exc
+                            if not self._is_transient_request_error(exc) or attempt >= self.TRADEBOOK_PAGE_RETRIES - 1:
+                                raise
+                            await self._recreate_session()
+                            await asyncio.sleep(min(0.5 * (attempt + 1), 2.0))
+                    if last_error:
+                        raise last_error
+                    return []
 
             chunk_results = await asyncio.gather(
                 *[fetch_chunk(chunk_from, chunk_to) for chunk_from, chunk_to in chunks]
@@ -1263,12 +1277,19 @@ class TmsUser:
             )
 
     async def _recreate_session(self) -> None:
-        if self.session and not self.session.closed:
-            await self.session.close()
-        self.session = aiohttp.ClientSession(
-            connector=aiohttp.TCPConnector(keepalive_timeout=60, limit=20),
-            timeout=self.DEFAULT_TIMEOUT,
-        )
+        async with self._session_lock:
+            if self.session and not self.session.closed:
+                await self.session.close()
+            self.session = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(keepalive_timeout=60, limit=20),
+                timeout=self.DEFAULT_TIMEOUT,
+            )
+
+    @staticmethod
+    def _is_transient_request_error(exc: BaseException) -> bool:
+        if isinstance(exc, (aiohttp.ClientError, asyncio.TimeoutError, ConnectionError, OSError)):
+            return True
+        return "connector is closed" in str(exc).lower()
 
     async def refresh_auth_token(self) -> bool:
         if not self.tokens or not self.headers:
@@ -1341,37 +1362,62 @@ class TmsUser:
         expected_statuses: Optional[set[int]] = None,
         parse_json: bool = True,
         retry_on_unauthorized: bool = True,
+        max_connection_retries: int = 3,
         **kwargs,
     ) -> tuple[int, object]:
-        await self._ensure_session()
         explicit_headers = kwargs.pop("headers", None)
         explicit_cookies = kwargs.pop("cookies", None)
+        last_error: Optional[Exception] = None
+        response = None
 
-        for attempt in range(2):
-            request_kwargs = dict(kwargs)
-            request_kwargs["headers"] = explicit_headers or self.headers
-            request_kwargs["cookies"] = explicit_cookies or self.tokens
+        for connection_attempt in range(max_connection_retries):
+            unauthorized_retried = False
+            while True:
+                await self._ensure_session()
+                request_kwargs = dict(kwargs)
+                request_kwargs["headers"] = explicit_headers or self.headers
+                request_kwargs["cookies"] = explicit_cookies or self.tokens
 
-            async with self.session.request(method.upper(), url, **request_kwargs) as response:
-                if response.status == 401 and retry_on_unauthorized and attempt == 0:
-                    await response.read()
+                try:
+                    async with self._session_lock:
+                        await self._ensure_session()
+                        response = await self.session.request(method.upper(), url, **request_kwargs)
+                        async with response:
+                            if response.status == 401 and retry_on_unauthorized and not unauthorized_retried:
+                                await response.read()
+                                unauthorized_retried = True
+                            elif expected_statuses and response.status not in expected_statuses:
+                                response.raise_for_status()
+                            else:
+                                if parse_json:
+                                    return response.status, await response.json(content_type=None)
+                                return response.status, await response.text()
+                except Exception as exc:
+                    if not self._is_transient_request_error(exc):
+                        raise
+                    last_error = exc
+                    if connection_attempt < max_connection_retries - 1:
+                        await self._recreate_session()
+                        await asyncio.sleep(min(0.25 * (connection_attempt + 1), 1.0))
+                        break
+                    raise
+
+                if unauthorized_retried:
                     await self._refresh_authentication()
                     continue
+                break
 
-                if expected_statuses and response.status not in expected_statuses:
-                    response.raise_for_status()
-
-                if parse_json:
-                    return response.status, await response.json(content_type=None)
-                return response.status, await response.text()
-
-        raise aiohttp.ClientResponseError(
-            request_info=response.request_info,
-            history=response.history,
-            status=response.status,
-            message=response.reason,
-            headers=response.headers,
-        )
+        if last_error:
+            raise last_error
+        if response is not None:
+            raise aiohttp.ClientResponseError(
+                request_info=response.request_info,
+                history=response.history,
+                status=response.status,
+                message=response.reason,
+                headers=response.headers,
+            )
+        raise RuntimeError("authenticated request failed")
 
     async def get_stock_details_async(
         self,

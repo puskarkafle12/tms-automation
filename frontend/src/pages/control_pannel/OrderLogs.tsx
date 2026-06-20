@@ -63,6 +63,8 @@ type ScanIntervalUnit = 'seconds' | 'minutes' | 'hours';
 const CORE_CACHE_STORAGE_KEY = 'tms-order-logs-core-v1';
 const TRADE_BOOK_CACHE_STORAGE_KEY = 'tms-order-logs-trade-book-v1';
 const HISTORY_CACHE_STORAGE_KEY = 'tms-order-logs-history-v1';
+const TRADEBOOK_HISTORY_MAX_ATTEMPTS = 3;
+const TRADEBOOK_HISTORY_RETRY_DELAY_MS = 750;
 
 const HISTORY_RANGE_OPTIONS: { id: HistoryRangePreset; label: string }[] = [
   { id: 'week', label: '1 Week' },
@@ -250,6 +252,19 @@ const isCacheFresh = (fetchedAt: number | null | undefined, ttlMs: number) =>
 
 const tradeBookClientKey = (clientIds: string[]) => [...clientIds].sort().join(',');
 
+const isRetryableTradeHistoryError = (message: string, status?: number) => {
+  const normalized = message.toLowerCase();
+  return (status != null && status >= 500)
+    || normalized.includes('connector is closed')
+    || normalized.includes('timeout')
+    || normalized.includes('network')
+    || normalized.includes('failed to fetch');
+};
+
+const waitForTradeHistoryRetry = (attempt: number) => new Promise((resolve) => {
+  window.setTimeout(resolve, TRADEBOOK_HISTORY_RETRY_DELAY_MS * (attempt + 1));
+});
+
 const isScheduledOrderEditable = (order: ScheduledOrderRow) => {
   if (order.editable === false || order.executed_at) {
     return false;
@@ -361,9 +376,26 @@ const GetOrderStatus: React.FC = () => {
   const [tradeBookLoaded, setTradeBookLoaded] = useState(false);
   const [historyLoaded, setHistoryLoaded] = useState(false);
   const coreCacheRef = useRef<number | null>(null);
-  const tradeBookCacheRef = useRef<{ clientKey: string; fetchedAt: number } | null>(null);
+  const tradeBookCacheRef = useRef<{
+    clientKey: string;
+    fetchedAt: number;
+    open: any[];
+    daily: any[];
+  } | null>(null);
   const historyCacheRef = useRef<{ key: string; rows: any[]; fetchedAt: number } | null>(null);
   const historyRequestIdRef = useRef(0);
+  const historyLoadInFlightRef = useRef<{ key: string; promise: Promise<void> } | null>(null);
+  const tradeBookLoadInFlightRef = useRef<{
+    clientKey: string;
+    promise: Promise<{ open: any[]; daily: any[] }>;
+  } | null>(null);
+  const coreLoadInFlightRef = useRef<Promise<void> | null>(null);
+  const orderLogsRef = useRef(orderLogs);
+  const scheduledOrdersRef = useRef(scheduledOrders);
+  const hasLoadedRef = useRef(hasLoaded);
+  orderLogsRef.current = orderLogs;
+  scheduledOrdersRef.current = scheduledOrders;
+  hasLoadedRef.current = hasLoaded;
   const [loggedInClientIDs, setLoggedInClientIDs] = useState<string[]>([]);
   const [clientSessions, setClientSessions] = useState<ClientSession[]>([]);
   const [activeTab, setActiveTab] = useState<OrderTab>('scheduled');
@@ -631,15 +663,43 @@ const GetOrderStatus: React.FC = () => {
         from_date: fromDate,
         to_date: toDate,
       });
-      const response = await fetch(`${apiUrl}/tradebook_history?${params.toString()}`);
-      if (!response.ok) {
-        const detail = await response.text();
-        throw new Error(detail || `Trade history request failed (${response.status})`);
+      const requestUrl = `${apiUrl}/tradebook_history?${params.toString()}`;
+      let lastError = 'Trade history request failed';
+
+      for (let attempt = 0; attempt < TRADEBOOK_HISTORY_MAX_ATTEMPTS; attempt += 1) {
+        try {
+          const response = await fetch(requestUrl);
+          if (!response.ok) {
+            const detail = await response.text();
+            lastError = detail || `Trade history request failed (${response.status})`;
+            if (
+              attempt < TRADEBOOK_HISTORY_MAX_ATTEMPTS - 1
+              && isRetryableTradeHistoryError(lastError, response.status)
+            ) {
+              await waitForTradeHistoryRetry(attempt);
+              continue;
+            }
+            throw new Error(lastError);
+          }
+          const rows = await response.json();
+          return Array.isArray(rows)
+            ? rows.map((row) => ({ ...row, client_id: selectedClientId }))
+            : [];
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          lastError = message;
+          if (
+            attempt < TRADEBOOK_HISTORY_MAX_ATTEMPTS - 1
+            && isRetryableTradeHistoryError(message)
+          ) {
+            await waitForTradeHistoryRetry(attempt);
+            continue;
+          }
+          throw error instanceof Error ? error : new Error(message);
+        }
       }
-      const rows = await response.json();
-      return Array.isArray(rows)
-        ? rows.map((row) => ({ ...row, client_id: selectedClientId }))
-        : [];
+
+      throw new Error(lastError);
     },
     [apiUrl],
   );
@@ -677,60 +737,81 @@ const GetOrderStatus: React.FC = () => {
       const cached = tradeBookCacheRef.current;
       if (
         !force
-        && tradeBookLoaded
         && cached?.clientKey === clientKey
         && isCacheFresh(cached.fetchedAt, backgroundCacheTtlMs)
       ) {
-        return { open: orderBook, daily: dailyOrderBook };
-      }
-
-      if (clientIds.length === 0) {
-        setOrderBook([]);
-        setDailyOrderBook([]);
+        setOrderBook(cached.open);
+        setDailyOrderBook(cached.daily);
         setTradeBookLoaded(true);
-        tradeBookCacheRef.current = { clientKey, fetchedAt: Date.now() };
-        persistTradeBookCache([], [], clientIds);
-        return { open: [], daily: [] };
+        return { open: cached.open, daily: cached.daily };
       }
 
-      setIsTradeBookLoading(true);
+      if (!force) {
+        const inflight = tradeBookLoadInFlightRef.current;
+        if (inflight?.clientKey === clientKey) {
+          return inflight.promise;
+        }
+      }
+
+      const loadPromise = (async () => {
+        if (clientIds.length === 0) {
+          setOrderBook([]);
+          setDailyOrderBook([]);
+          setTradeBookLoaded(true);
+          const emptyCache = { clientKey, fetchedAt: Date.now(), open: [] as any[], daily: [] as any[] };
+          tradeBookCacheRef.current = emptyCache;
+          persistTradeBookCache([], [], clientIds);
+          return { open: [] as any[], daily: [] as any[] };
+        }
+
+        setIsTradeBookLoading(true);
+        try {
+          const pairs = await Promise.all(
+            clientIds.map(async (id) => {
+              const [open, daily] = await Promise.all([
+                fetchOrderBook(id).catch(() => []),
+                fetchDailyOrderBook(id).catch(() => []),
+              ]);
+              return { open, daily };
+            }),
+          );
+          const open = pairs.flatMap((pair) => pair.open);
+          const daily = pairs
+            .flatMap((pair) => pair.daily)
+            .sort((left, right) => {
+              const leftTime = new Date(left.orderTime || 0).getTime();
+              const rightTime = new Date(right.orderTime || 0).getTime();
+              return rightTime - leftTime;
+            });
+
+          setOrderBook(open);
+          setDailyOrderBook(daily);
+          setTradeBookLoaded(true);
+          tradeBookCacheRef.current = { clientKey, fetchedAt: Date.now(), open, daily };
+          persistTradeBookCache(open, daily, clientIds);
+          return { open, daily };
+        } finally {
+          setIsTradeBookLoading(false);
+        }
+      })();
+
+      if (!force) {
+        tradeBookLoadInFlightRef.current = { clientKey, promise: loadPromise };
+      }
+
       try {
-        const pairs = await Promise.all(
-          clientIds.map(async (id) => {
-            const [open, daily] = await Promise.all([
-              fetchOrderBook(id).catch(() => []),
-              fetchDailyOrderBook(id).catch(() => []),
-            ]);
-            return { open, daily };
-          }),
-        );
-        const open = pairs.flatMap((pair) => pair.open);
-        const daily = pairs
-          .flatMap((pair) => pair.daily)
-          .sort((left, right) => {
-            const leftTime = new Date(left.orderTime || 0).getTime();
-            const rightTime = new Date(right.orderTime || 0).getTime();
-            return rightTime - leftTime;
-          });
-
-        setOrderBook(open);
-        setDailyOrderBook(daily);
-        setTradeBookLoaded(true);
-        tradeBookCacheRef.current = { clientKey, fetchedAt: Date.now() };
-        persistTradeBookCache(open, daily, clientIds);
-        return { open, daily };
+        return await loadPromise;
       } finally {
-        setIsTradeBookLoading(false);
+        if (tradeBookLoadInFlightRef.current?.promise === loadPromise) {
+          tradeBookLoadInFlightRef.current = null;
+        }
       }
     },
     [
       backgroundCacheTtlMs,
-      dailyOrderBook,
       fetchDailyOrderBook,
       fetchOrderBook,
-      orderBook,
       persistTradeBookCache,
-      tradeBookLoaded,
     ],
   );
 
@@ -768,6 +849,8 @@ const GetOrderStatus: React.FC = () => {
       tradeBookCacheRef.current = {
         clientKey: cached.clientKey || '',
         fetchedAt: cached.fetchedAt || Date.now(),
+        open: cached.open || [],
+        daily: cached.daily || [],
       };
       setTradeBookLoaded(true);
     } catch {
@@ -827,59 +910,74 @@ const GetOrderStatus: React.FC = () => {
 
   const loadCoreData = useCallback(
     async (force = false) => {
-      if (!force && isCacheFresh(coreCacheRef.current, backgroundCacheTtlMs) && hasLoaded) {
+      if (!force && isCacheFresh(coreCacheRef.current, backgroundCacheTtlMs) && hasLoadedRef.current) {
         setIsLoading(false);
         return;
       }
 
-      const hasVisibleData = orderLogs.length > 0 || scheduledOrders.length > 0;
-      const showBlockingLoader = !hasLoaded && !hasVisibleData;
-      if (showBlockingLoader) {
-        setIsLoading(true);
+      if (!force && coreLoadInFlightRef.current) {
+        return coreLoadInFlightRef.current;
+      }
+
+      const loadPromise = (async () => {
+        const hasVisibleData = orderLogsRef.current.length > 0 || scheduledOrdersRef.current.length > 0;
+        const showBlockingLoader = !hasLoadedRef.current && !hasVisibleData;
+        if (showBlockingLoader) {
+          setIsLoading(true);
+        }
+
+        try {
+          const logsResult = await Promise.allSettled([
+            fetchOrderStatusLogs({ silent: true }),
+          ]).then((results) => results[0]);
+
+          const nextOrderLogs = logsResult.status === 'fulfilled'
+            ? logsResult.value.orderLogs
+            : orderLogsRef.current;
+          const nextScheduledOrders = logsResult.status === 'fulfilled'
+            ? logsResult.value.scheduledOrders
+            : scheduledOrdersRef.current;
+
+          if (logsResult.status === 'rejected' && !hasVisibleData) {
+            throw logsResult.reason;
+          }
+
+          coreCacheRef.current = Date.now();
+          setHasLoaded(true);
+          persistCoreCache({
+            orderLogs: nextOrderLogs,
+            scheduledOrders: nextScheduledOrders,
+          });
+        } catch {
+          if (!hasLoadedRef.current && !hasVisibleData) {
+            setErrorMessage('Failed to load order data.');
+          } else {
+            setErrorMessage('Failed to refresh order data.');
+          }
+          throw new Error('core load failed');
+        } finally {
+          if (showBlockingLoader) {
+            setIsLoading(false);
+          }
+        }
+      })();
+
+      if (!force) {
+        coreLoadInFlightRef.current = loadPromise;
       }
 
       try {
-        const logsResult = await Promise.allSettled([
-          fetchOrderStatusLogs({ silent: true }),
-        ]).then((results) => results[0]);
-
-        const nextOrderLogs = logsResult.status === 'fulfilled'
-          ? logsResult.value.orderLogs
-          : orderLogs;
-        const nextScheduledOrders = logsResult.status === 'fulfilled'
-          ? logsResult.value.scheduledOrders
-          : scheduledOrders;
-
-        if (logsResult.status === 'rejected' && !hasVisibleData) {
-          throw logsResult.reason;
-        }
-
-        coreCacheRef.current = Date.now();
-        setHasLoaded(true);
-        persistCoreCache({
-          orderLogs: nextOrderLogs,
-          scheduledOrders: nextScheduledOrders,
-        });
-      } catch {
-        if (!hasLoaded && !hasVisibleData) {
-          setErrorMessage('Failed to load order data.');
-        } else {
-          setErrorMessage('Failed to refresh order data.');
-        }
-        throw new Error('core load failed');
+        await loadPromise;
       } finally {
-        if (showBlockingLoader) {
-          setIsLoading(false);
+        if (coreLoadInFlightRef.current === loadPromise) {
+          coreLoadInFlightRef.current = null;
         }
       }
     },
     [
       backgroundCacheTtlMs,
       fetchOrderStatusLogs,
-      hasLoaded,
-      orderLogs,
       persistCoreCache,
-      scheduledOrders,
     ],
   );
 
@@ -901,38 +999,59 @@ const GetOrderStatus: React.FC = () => {
         return;
       }
 
-      const requestId = ++historyRequestIdRef.current;
-      setIsHistoryLoading(true);
-      const { fromDate, toDate } = resolveHistoryDateRange(
-        preset,
-        historyFromDate,
-        historyToDate,
-      );
+      if (!force) {
+        const inflight = historyLoadInFlightRef.current;
+        if (inflight?.key === cacheKey) {
+          return inflight.promise;
+        }
+      }
+
+      const loadPromise = (async () => {
+        const requestId = ++historyRequestIdRef.current;
+        setIsHistoryLoading(true);
+        const { fromDate, toDate } = resolveHistoryDateRange(
+          preset,
+          historyFromDate,
+          historyToDate,
+        );
+
+        try {
+          const historyResults = await Promise.all(
+            activeClientIds.map((id) => fetchTradebookHistory(id, fromDate, toDate)),
+          );
+          if (requestId !== historyRequestIdRef.current) {
+            return;
+          }
+          const rows = historyResults.flat().sort((left, right) => {
+            const leftTime = new Date(left.tradeTime || 0).getTime();
+            const rightTime = new Date(right.tradeTime || 0).getTime();
+            return rightTime - leftTime;
+          });
+          historyCacheRef.current = { key: cacheKey, rows, fetchedAt: Date.now() };
+          setOrderHistory(rows);
+          setHistoryLoaded(true);
+          persistHistoryCache({ key: cacheKey, rows });
+        } catch {
+          if (requestId !== historyRequestIdRef.current) {
+            return;
+          }
+          setErrorMessage('Failed to load trade history.');
+        } finally {
+          if (requestId === historyRequestIdRef.current) {
+            setIsHistoryLoading(false);
+          }
+        }
+      })();
+
+      if (!force) {
+        historyLoadInFlightRef.current = { key: cacheKey, promise: loadPromise };
+      }
 
       try {
-        const historyResults = await Promise.all(
-          activeClientIds.map((id) => fetchTradebookHistory(id, fromDate, toDate)),
-        );
-        if (requestId !== historyRequestIdRef.current) {
-          return;
-        }
-        const rows = historyResults.flat().sort((left, right) => {
-          const leftTime = new Date(left.tradeTime || 0).getTime();
-          const rightTime = new Date(right.tradeTime || 0).getTime();
-          return rightTime - leftTime;
-        });
-        historyCacheRef.current = { key: cacheKey, rows, fetchedAt: Date.now() };
-        setOrderHistory(rows);
-        setHistoryLoaded(true);
-        persistHistoryCache({ key: cacheKey, rows });
-      } catch {
-        if (requestId !== historyRequestIdRef.current) {
-          return;
-        }
-        setErrorMessage('Failed to load trade history.');
+        await loadPromise;
       } finally {
-        if (requestId === historyRequestIdRef.current) {
-          setIsHistoryLoading(false);
+        if (historyLoadInFlightRef.current?.promise === loadPromise) {
+          historyLoadInFlightRef.current = null;
         }
       }
     },
@@ -947,6 +1066,13 @@ const GetOrderStatus: React.FC = () => {
       persistHistoryCache,
     ],
   );
+
+  const loadCoreDataRef = useRef(loadCoreData);
+  const loadTradeBooksRef = useRef(loadTradeBooks);
+  const loadHistoryDataRef = useRef(loadHistoryData);
+  loadCoreDataRef.current = loadCoreData;
+  loadTradeBooksRef.current = loadTradeBooks;
+  loadHistoryDataRef.current = loadHistoryData;
 
   useEffect(() => {
     void fetchServerTime().then((payload) => {
@@ -965,19 +1091,12 @@ const GetOrderStatus: React.FC = () => {
     if (!clientsFetched) {
       return;
     }
-    void loadCoreData(false);
-    void loadTradeBooks(activeClientIds, false);
+    void loadCoreDataRef.current(false);
+    void loadTradeBooksRef.current(activeClientIds, false);
     if (historyRangePreset !== 'custom') {
-      void loadHistoryData(false);
+      void loadHistoryDataRef.current(false);
     }
-  }, [
-    activeClientIds,
-    clientsFetched,
-    historyRangePreset,
-    loadCoreData,
-    loadHistoryData,
-    loadTradeBooks,
-  ]);
+  }, [activeClientIds, clientsFetched, historyRangePreset]);
 
   const refreshScheduledOrders = useCallback(() => {
     coreCacheRef.current = null;
@@ -1035,14 +1154,14 @@ const GetOrderStatus: React.FC = () => {
 
   useEffect(() => {
     const interval = window.setInterval(() => {
-      void loadCoreData(true);
-      void loadTradeBooks(activeClientIds, true);
+      void loadCoreDataRef.current(true);
+      void loadTradeBooksRef.current(activeClientIds, true);
       if (historyRangePreset !== 'custom') {
-        void loadHistoryData(true);
+        void loadHistoryDataRef.current(true);
       }
     }, backgroundCacheTtlMs);
     return () => window.clearInterval(interval);
-  }, [activeClientIds, backgroundCacheTtlMs, historyRangePreset, loadCoreData, loadHistoryData, loadTradeBooks]);
+  }, [activeClientIds, backgroundCacheTtlMs, historyRangePreset]);
 
   const handleRefresh = async (e?: React.FormEvent) => {
     e?.preventDefault();
@@ -1052,6 +1171,9 @@ const GetOrderStatus: React.FC = () => {
     coreCacheRef.current = null;
     historyCacheRef.current = null;
     tradeBookCacheRef.current = null;
+    coreLoadInFlightRef.current = null;
+    historyLoadInFlightRef.current = null;
+    tradeBookLoadInFlightRef.current = null;
     try {
       sessionStorage.removeItem(CORE_CACHE_STORAGE_KEY);
       sessionStorage.removeItem(TRADE_BOOK_CACHE_STORAGE_KEY);
@@ -1129,6 +1251,7 @@ const GetOrderStatus: React.FC = () => {
 
   const handleHistoryPresetChange = (preset: HistoryRangePreset) => {
     historyCacheRef.current = null;
+    historyLoadInFlightRef.current = null;
     historyRequestIdRef.current += 1;
     try {
       sessionStorage.removeItem(HISTORY_CACHE_STORAGE_KEY);
@@ -1147,13 +1270,11 @@ const GetOrderStatus: React.FC = () => {
       setHistoryFromDate(FOREVER_FROM_DATE);
       setHistoryToDate(today);
     }
-    if (preset !== 'custom') {
-      void loadHistoryData(true, preset);
-    }
   };
 
   const handleHistoryRangeApply = () => {
     historyCacheRef.current = null;
+    historyLoadInFlightRef.current = null;
     historyRequestIdRef.current += 1;
     try {
       sessionStorage.removeItem(HISTORY_CACHE_STORAGE_KEY);
