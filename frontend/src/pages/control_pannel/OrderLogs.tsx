@@ -1510,6 +1510,7 @@ const GetOrderStatus: React.FC = () => {
           canEdit: isScheduledOrderEditable(order),
           stock: <StockClientCell symbol={order.script_name} clientLabel={getClientLabel(order.client_id)} />,
           order_type: side,
+          trigger_price: order.trigger_price ?? '-',
           strategy_type: (
             <button
               type="button"
@@ -1661,7 +1662,7 @@ const GetOrderStatus: React.FC = () => {
     },
     scheduled: {
       count: scheduledOrders.length,
-      columns: ['stock', 'order_type', 'qty', 'strategy_type', 'status', 'created_at'],
+      columns: ['stock', 'order_type', 'qty', 'trigger_price', 'strategy_type', 'status', 'created_at'],
       rows: scheduledRows,
       empty: hasLoaded
         ? 'No scheduled orders found.'

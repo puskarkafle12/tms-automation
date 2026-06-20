@@ -15,6 +15,9 @@ interface StockDetailsProps {
     lastTradedTime: number[];
     change: number;
     previousClose: number;
+    referenceLtp?: number | null;
+    triggerPrice?: number | null;
+    dropPercent?: number | null;
   } | null;
   orderType?: 'buy' | 'sell';
   latestLtp?: number | null;
@@ -85,6 +88,16 @@ const StockDetails: React.FC<StockDetailsProps> = ({
     { label: 'Change', value: formatNumber(stock.change) },
     { label: 'Last Traded', value: formatDate(stock.lastTradedTime) },
   ];
+  if (stock.referenceLtp != null || stock.triggerPrice != null || stock.dropPercent != null) {
+    fields.push(
+      { label: 'Reference LTP', value: formatNumber(stock.referenceLtp) },
+      { label: 'Trigger Price', value: formatNumber(stock.triggerPrice) },
+      {
+        label: 'Drop %',
+        value: stock.dropPercent == null ? '-' : `${Number(stock.dropPercent).toLocaleString('en-NP')}%`,
+      },
+    );
+  }
 
   const holdingDisplay = holdingLoading
     ? 'Checking...'
