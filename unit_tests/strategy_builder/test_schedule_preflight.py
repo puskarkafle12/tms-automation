@@ -310,7 +310,7 @@ class SchedulePreflightTest(unittest.IsolatedAsyncioTestCase):
 
     @patch("utils.tms_client_resolver.get_tms_user_for_client", new_callable=AsyncMock)
     @patch("utils.strategy_builder.schedule_preflight.get_script_details")
-    async def test_missing_52_week_prereq_warns_but_does_not_block_schedule(self, mock_details, mock_get_tms):
+    async def test_missing_52_week_prereq_blocks_schedule(self, mock_details, mock_get_tms):
         mock_details.return_value = ScriptDetails(
             available=True,
             rsi_14=45.0,
@@ -333,11 +333,9 @@ class SchedulePreflightTest(unittest.IsolatedAsyncioTestCase):
             db=self._mock_db(),
         )
 
-        self.assertTrue(result["ready"], result.get("message"))
-        warning_codes = {item["code"] for item in result.get("warnings", [])}
-        self.assertIn("DERIVED_52WEEK_FIELD_MISSING", warning_codes)
-        error_messages = " ".join(item["message"] for item in result.get("errors", []))
-        self.assertNotIn("Cannot compute position_in_52_week_range_percent", error_messages)
+        self.assertFalse(result["ready"], result.get("message"))
+        error_codes = {item["code"] for item in result.get("errors", [])}
+        self.assertIn("NEPSE_ALPHA_52WEEK_MISSING", error_codes)
 
 
 if __name__ == "__main__":

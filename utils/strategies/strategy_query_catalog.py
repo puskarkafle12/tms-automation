@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional, Set
 
 from utils.strategy_builder.constants import RULE_BASED_BUY_STRATEGIES, RULE_BASED_SELL_STRATEGIES
@@ -504,6 +504,15 @@ def validate_strategy_params(
     canonical = resolve_strategy_name(strategy_name, side)
     issues: List[StrategyParamValidationIssue] = []
 
+    catalog_entry = STRATEGY_CATALOG.get(canonical)
+    if catalog_entry and catalog_entry.side != side.lower():
+        return [
+            StrategyParamValidationIssue(
+                "STRATEGY_SIDE_MISMATCH",
+                f"{catalog_entry.name} is a {catalog_entry.side.upper()} strategy but plan side is {side.upper()}",
+            )
+        ]
+
     if not is_delegatable_strategy(canonical, side):
         if canonical in RULE_BASED_STRATEGIES:
             return [
@@ -529,8 +538,22 @@ def validate_strategy_params(
     _, param_issues = map_strategy_params_to_order_fields(canonical, raw_params, side=side)
     issues.extend(param_issues)
 
+    mapped, _ = map_strategy_params_to_order_fields(canonical, raw_params, side=side)
+    if entry.name in {"Time-Based Buy", "Time-Based Exit"}:
+        expiry = mapped.get("expiry_time")
+        if isinstance(expiry, datetime):
+            now = datetime.now(timezone.utc)
+            expiry_utc = expiry if expiry.tzinfo else expiry.replace(tzinfo=timezone.utc)
+            if expiry_utc < now:
+                issues.append(
+                    StrategyParamValidationIssue(
+                        "EXPIRY_IN_PAST",
+                        f"{entry.name} expiry time is already in the past",
+                        param="EXPIRY_TIME",
+                    )
+                )
+
     if ltp and ltp > 0:
-        mapped, _ = map_strategy_params_to_order_fields(canonical, raw_params, side=side)
         stop = mapped.get("stop_loss_price")
         if entry.name == "Capital Protection Sell" and stop and float(stop) >= ltp:
             issues.append(

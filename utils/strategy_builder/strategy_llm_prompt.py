@@ -129,8 +129,8 @@ def _strict_output_contract_section() -> str:
 2. Valid query output must start with STRATEGY_VERSION 1 on the first non-empty line and SIDE BUY or SIDE SELL on the next non-empty line.
 3. Do not output markdown fences, headings, bullets, JSON, YAML, comments, explanations, apologies, or prose around the query.
 4. Do not output placeholders such as <symbol>, SYMBOL, YOUR_SYMBOL, target_price, trigger_price, quantity, or TODO.
-5. Do not guess missing numbers. If quantity is missing, omit ORDER QUANTITY and let the runtime default apply.
-6. Use only exact uppercase quoted script symbols supplied by the user or the current form symbol.
+5. Do not guess missing numbers. Every RULE must include explicit ORDER sizing; do not omit ORDER and expect a runtime default.
+6. Use only exact uppercase quoted script symbols supplied by the user or the current form symbol. Lowercase symbols such as "nabil" are rejected.
 7. Use only exact field keys from FIELD REGISTRY. Field keys are lowercase snake_case and case-sensitive.
 8. Use only exact function names from SUPPORTED FUNCTIONS. Function names are uppercase and case-sensitive.
 9. Function arguments must be named. Operator argument values must be quoted strings: operator="gte", not operator=gte.
@@ -191,19 +191,20 @@ A query that parses but cannot be monitored will NOT be placed. Preflight requir
    or WHEN. If Nepse Alpha is down or a direct field is null for that symbol, scheduling is blocked
    with a message naming the symbol and missing fields.
 4. Derived statistical fields (e.g. position_in_52_week_range_percent): computed from live TMS LTP plus
-   Nepse Alpha fifty_two_week_high / fifty_two_week_low. These are NOT Nepse Alpha fields — preflight checks
-   the 52-week prerequisites and live quote separately. If Nepse Alpha provides both 52-week values, this must schedule without a 52-week warning.
-   Only genuinely missing/unparseable 52-week values may produce a warning.
+   Nepse Alpha fifty_two_week_high / fifty_two_week_low. Preflight blocks scheduling when either 52-week
+   endpoint is missing for any targeted symbol, naming the symbol and missing prerequisite.
+   When both 52-week values exist, scheduling must proceed without a 52-week warning.
 5. TMS live quote and market depth: if the query uses live, derived-live, or market-depth fields/functions
    (ltp, volume, open, high, low, change_percent, distance_from_day_high_percent, market_depth_available,
    best_bid, top_buy_quantity, DEPTH_QUANTITY, etc.), preflight fetches a live TMS quote for each symbol.
-   Missing quote blocks scheduling.
+   Missing quote blocks scheduling. Queries that use market-depth fields/functions (DEPTH_IMBALANCE,
+   market_depth_available, TOP_BUY/TOP_SELL order modes, etc.) are blocked when TMS depth is unavailable.
 
 When writing queries:
 - Prefer fields you can see in the FIELD REGISTRY below.
 - For multi-symbol rules, every symbol must pass data checks independently.
 - If the user asks for data the portal cannot supply, refuse and explain what is missing.
-- Default ORDER size when the user omits quantity: {DEFAULT_RULE_ORDER_QUANTITY} kitta (omit ORDER QUANTITY to use it).
+- Every RULE must include explicit ORDER sizing (for example ORDER QUANTITY 10). Do not omit ORDER.
 - Per-symbol different classic strategies: use separate RULE blocks (one USE STRATEGY per symbol or per symbol group).
 
 USE STRATEGY preflight notes:
@@ -212,7 +213,8 @@ USE STRATEGY preflight notes:
 - Order Book Strength Buy requires live market depth at runtime. Custom query conditions can also use registered
   market-depth fields/functions from the TMS stock quote.
 - SELL delegated strategies require sellable DP holdings for the symbol.
-- Strategy params (TARGET_PRICE, STOP_LOSS_PRICE, etc.) are validated at parse/schedule time — include all required * params.
+- Strategy params (TARGET_PRICE, STOP_LOSS_PRICE, EXPIRY_TIME, etc.) are validated at parse/schedule time — include all required * params.
+- Time-Based Buy EXPIRY_TIME must be in the future at schedule time; past expiry is rejected.
 
 Schedule-time field references (preferred for pullback / fixed baseline rules):
 - Use REFERENCE(field=<registered_field>) to snapshot a field value once at schedule time.
@@ -559,11 +561,16 @@ entry_price, effective_stop_price, holding_scan_count, time_since_entry_minutes.
 CONFIRMATION, TRIGGER, EXECUTION
 ================================================================================
 CONFIRM TRUE_FOR 2 SCANS — WHEN/SIGNAL must stay true across consecutive valid observations.
+Each observation requires a distinct trade timestamp (`last_traded_at`); repeated scans with the same
+timestamp do not advance the confirmation counter.
 CONFIRM MATCHES 2 OF LAST 3 SCANS — at least 2 matches inside rolling window.
 CONFIRM IMMEDIATE — fire on first match (no extra confirmation).
 
 TRIGGER ON_CROSS — fire only on false→true transition (default if omitted).
 TRIGGER LEVEL — fire whenever condition is true after confirmation (use with CONFIRM).
+
+Signal-only / non-price conditions (technical indicators, MACD transitions, etc.) do not need a fixed
+trigger price to schedule; preflight treats them as schedule-ready once data checks pass.
 
 EXECUTE ONCE — one execution per rule then stop.
 EXECUTE ONCE PER SYMBOL — one per symbol in the rule.
@@ -572,6 +579,7 @@ EXECUTE MAX 3 TIMES PER SYMBOL — partial re-entries allowed.
 
 Important scan semantics:
 - LTP history uses count_only_new_trade: repeated scans with the same last_traded_at do not add observations.
+- MAX_DATA_AGE N SECONDS skips stale observations: confirmation counters do not advance when last_traded_at is older than N seconds.
 - CONSECUTIVE_RISES/DROPS with count=2 needs 3 valid distinct observations.
 - Paper/shadow mode matches but does not place live orders (portal execution_mode).
 

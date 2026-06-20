@@ -110,6 +110,15 @@ def is_fresh_trade(snapshot: MarketSnapshot, max_age_minutes: int = 15) -> bool:
     return datetime.utcnow() - traded_at <= timedelta(minutes=max_age_minutes)
 
 
+def is_quote_within_max_age(last_traded_at: Optional[str], max_age_seconds: int) -> bool:
+    if max_age_seconds <= 0:
+        return True
+    traded_at = parse_last_traded_time(last_traded_at)
+    if traded_at is None:
+        return False
+    return (datetime.utcnow() - traded_at).total_seconds() <= max_age_seconds
+
+
 def append_scan_value(values: Optional[List[float]], value: Optional[float], limit: int = 10) -> List[float]:
     history = list(values or [])
     if value is not None:

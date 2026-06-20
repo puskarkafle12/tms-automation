@@ -126,8 +126,13 @@ def validate_strategy_plan(
     for rule in plan.rules:
         if not rule.symbols:
             errors.append(ValidationIssue(code="MISSING_STOCK_TARGET", message=f'Rule "{rule.name}" must target at least one symbol.'))
-        if not rule.order or not rule.order.mode:
-            errors.append(ValidationIssue(code="MISSING_ORDER_SIZE", message=f'Rule "{rule.name}" is missing order sizing.'))
+        if not rule.order or not rule.order.mode or not rule.order.explicit:
+            errors.append(
+                ValidationIssue(
+                    code="MISSING_ORDER_SIZE",
+                    message=f'Rule "{rule.name}" must include explicit ORDER sizing (for example ORDER QUANTITY 10).',
+                )
+            )
         elif plan.side == "BUY" and is_holding_dependent_mode(rule.order.mode):
             errors.append(
                 ValidationIssue(
@@ -141,31 +146,32 @@ def validate_strategy_plan(
 
         side = (plan.side or "BUY").lower()
         if rule.use_strategy:
+            param_issues = validate_strategy_params(rule.use_strategy, rule.strategy_params, side=side)
+            for issue in param_issues:
+                errors.append(
+                    ValidationIssue(
+                        code=issue.code,
+                        message=issue.message,
+                    )
+                )
             canonical = resolve_strategy_name(rule.use_strategy, side)
-            if not is_delegatable_strategy(canonical, side):
+            if not param_issues and not is_delegatable_strategy(canonical, side):
                 errors.append(
                     ValidationIssue(
                         code="UNKNOWN_STRATEGY",
                         message=f'Rule "{rule.name}" references unknown or non-delegatable strategy: {rule.use_strategy}',
                     )
                 )
-            else:
-                for issue in validate_strategy_params(canonical, rule.strategy_params, side=side):
-                    errors.append(
-                        ValidationIssue(
-                            code=issue.code,
-                            message=issue.message,
-                        )
-                    )
-                entry = get_catalog_entry(canonical, side)
-                if entry and entry.requires_nepse_alpha:
+            entry = get_catalog_entry(canonical, side) if not param_issues else None
+            if entry:
+                if entry.requires_nepse_alpha:
                     warnings.append(
                         ValidationIssue(
                             code="STRATEGY_REQUIRES_NEPSE_ALPHA",
                             message=f'{entry.name} requires Nepse Alpha data for {", ".join(rule.symbols)}.',
                         )
                     )
-                if entry and entry.requires_market_depth:
+                if entry.requires_market_depth:
                     warnings.append(
                         ValidationIssue(
                             code="STRATEGY_REQUIRES_MARKET_DEPTH",

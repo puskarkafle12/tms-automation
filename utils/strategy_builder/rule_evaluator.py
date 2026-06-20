@@ -521,14 +521,33 @@ def _evaluate_node(
     return ConditionResult(expression=str(node_type), matched=False)
 
 
-def _apply_confirmation(rule: RuleBlock, when_matched: bool, history: TargetHistory) -> tuple[bool, str]:
+def _apply_confirmation(
+    rule: RuleBlock,
+    when_matched: bool,
+    history: TargetHistory,
+    *,
+    trade_timestamp: Optional[str] = None,
+) -> tuple[bool, str]:
     confirmation = rule.confirmation
     if confirmation.mode == "immediate":
         return when_matched, "MATCHED" if when_matched else "NOT_MATCHED"
     if confirmation.mode == "true_for_scans":
         required = int(confirmation.scans or 1)
         if when_matched:
+            if (
+                trade_timestamp
+                and trade_timestamp == history.last_confirmation_trade_timestamp
+            ):
+                matched = history.confirmation_streak >= required
+                status = (
+                    "CONFIRMED"
+                    if matched
+                    else f"WAITING_CONFIRMATION_{history.confirmation_streak}/{required}"
+                )
+                return matched, status
             history.confirmation_streak += 1
+            if trade_timestamp:
+                history.last_confirmation_trade_timestamp = trade_timestamp
         else:
             history.confirmation_streak = 0
         matched = history.confirmation_streak >= required
@@ -607,7 +626,7 @@ def evaluate_rule(
             )
 
     if rule.use_strategy and not signal_expr and not rule.score_items:
-        matched, status = _apply_confirmation(rule, True, history)
+        matched, status = _apply_confirmation(rule, True, history, trade_timestamp=flat.get("last_traded_at"))
         if trigger_on_cross and matched and history.rule_was_true:
             matched = False
             status = "ALREADY_TRIGGERED"
@@ -632,7 +651,7 @@ def evaluate_rule(
     else:
         conditions.append(result)
     when_matched = result.matched and (not rule.score_items or bool(final_score and final_score >= float(rule.required_score or 0)))
-    matched, status = _apply_confirmation(rule, when_matched, history)
+    matched, status = _apply_confirmation(rule, when_matched, history, trade_timestamp=flat.get("last_traded_at"))
     if trigger_on_cross and matched and history.rule_was_true:
         matched = False
         status = "ALREADY_TRIGGERED"

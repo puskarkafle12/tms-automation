@@ -248,10 +248,23 @@ class StrategyTransformer(Transformer):
         return str(side_kw)
 
     def single_symbol(self, value):
-        return [str(value).upper()], "single"
+        raw = str(value)
+        if raw != raw.upper():
+            raise StrategyQueryError(
+                f'Symbol "{raw}" must be an exact uppercase NEPSE code in double quotes.'
+            )
+        return [raw.upper()], "single"
 
     def multi_symbol(self, values):
-        return [str(v).upper() for v in values], "symbol_list"
+        normalized: List[str] = []
+        for value in values:
+            raw = str(value)
+            if raw != raw.upper():
+                raise StrategyQueryError(
+                    f'Symbol "{raw}" must be an exact uppercase NEPSE code in double quotes.'
+                )
+            normalized.append(raw.upper())
+        return normalized, "symbol_list"
 
     def block_stmt(self, stmt):
         return stmt
@@ -296,6 +309,9 @@ class StrategyTransformer(Transformer):
         cleaned = str(name).strip().strip('"')
         return {"use_strategy": cleaned}
 
+    def strategy_param_name(self, token):
+        return str(token)
+
     def strategy_param_number(self, name, value):
         return {"strategy_params": {normalize_query_param_name(str(name)): float(value)}}
 
@@ -327,6 +343,7 @@ class StrategyTransformer(Transformer):
     def order_clause(self, mode, parts):
         order = parts if isinstance(parts, OrderSizing) else OrderSizing(mode="quantity", value=DEFAULT_RULE_ORDER_QUANTITY)
         order.mode = str(mode).lower()
+        order.explicit = True
         return {"order": order}
 
     def order_parts_value_price(self, value, price):
@@ -344,12 +361,17 @@ class StrategyTransformer(Transformer):
     def _build_order_sizing(self, value, price):
         price_source = _normalize_price_source(price)
         if value == "per_symbol":
-            return OrderSizing(mode="quantity", price_source=price_source)
+            return OrderSizing(mode="quantity", price_source=price_source, explicit=True)
         if value == "from_form":
-            return OrderSizing(mode="quantity", value=-1, price_source=price_source)
+            return OrderSizing(mode="quantity", value=-1, price_source=price_source, explicit=True)
         if isinstance(value, (int, float)):
-            return OrderSizing(mode="quantity", value=float(value), price_source=price_source)
-        return OrderSizing(mode="quantity", value=DEFAULT_RULE_ORDER_QUANTITY, price_source=price_source)
+            return OrderSizing(mode="quantity", value=float(value), price_source=price_source, explicit=True)
+        return OrderSizing(
+            mode="quantity",
+            value=DEFAULT_RULE_ORDER_QUANTITY,
+            price_source=price_source,
+            explicit=True,
+        )
 
     def price_clause(self, source):
         return str(source)
@@ -375,15 +397,18 @@ class StrategyTransformer(Transformer):
     def exec_once_per_market_day(self):
         return ExecutionConfig(frequency="once_per_market_day")
 
-    def exec_max_times(self, count):
-        return ExecutionConfig(frequency="max_times", max_times=int(count))
+    def exec_max_times(self, count, per_symbol=None):
+        frequency = "max_times_per_symbol" if per_symbol is not None else "max_times"
+        return ExecutionConfig(frequency=frequency, max_times=int(count))
 
     def exec_clause(self, body):
         return {"execution": body}
 
-    def trigger_clause(self, *args):
-        mode = "on_cross" if "ON_CROSS" in [str(a).upper() for a in args] else "level"
-        return {"execution": ExecutionConfig(trigger=mode)}
+    def trigger_on_cross(self):
+        return {"execution": ExecutionConfig(trigger="on_cross")}
+
+    def trigger_level(self):
+        return {"execution": ExecutionConfig(trigger="level")}
 
     def slippage_clause(self, value):
         return {"execution": ExecutionConfig(max_slippage_pct=float(value))}
@@ -488,7 +513,11 @@ class StrategyTransformer(Transformer):
         symbols, target_type = symbols_info
         rule_id = str(uuid.uuid4())
         when = body.get("when")
-        order = body.get("order") or OrderSizing(mode="quantity", value=DEFAULT_RULE_ORDER_QUANTITY)
+        order = body.get("order") or OrderSizing(
+            mode="quantity",
+            value=DEFAULT_RULE_ORDER_QUANTITY,
+            explicit=False,
+        )
         return RuleBlock(
             rule_id=rule_id,
             name=str(name),

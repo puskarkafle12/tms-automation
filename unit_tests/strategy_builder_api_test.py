@@ -109,7 +109,7 @@ class StrategyBuilderApiHelpersTest(unittest.TestCase):
             f"runtime default is {DEFAULT_RULE_ORDER_QUANTITY} kitta",
             "live field/function/strategy registries",
             "position_in_52_week_range_percent",
-            "must schedule without a 52-week warning",
+            "scheduling must proceed without a 52-week warning",
             "SELL queries must stay within the user's sellable DP holdings",
             "NEPSE ALPHA TECHNICALS",
             "TMS LIVE QUOTE",

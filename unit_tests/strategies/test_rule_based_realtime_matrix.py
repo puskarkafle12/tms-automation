@@ -46,6 +46,10 @@ RULE "RSI Confirm" FOR SYMBOL "CZBIL" {
             price_series=[200.0, 200.0],
             execution_mode="live",
             details=default_details(rsi_14=35.0),
+            snapshot_builder=lambda ltp, idx: default_snapshot(
+                ltp=ltp,
+                last_traded_time=f"2026-01-01 10:00:{idx:02d}",
+            ),
         )
         self.assertEqual(decisions[0].action, "TRACK")
         self.assertEqual(decisions[1].action, "EXECUTE")

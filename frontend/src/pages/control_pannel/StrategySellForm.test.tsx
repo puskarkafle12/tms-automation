@@ -8,6 +8,8 @@ describe('StrategySellForm', () => {
     render(
       <StrategySellForm
         side="sell"
+        clientId="client-1"
+        scriptName="NABIL"
         currentLtp={100}
         availableQty={100}
         initialQty="10"
@@ -32,6 +34,8 @@ describe('StrategySellForm', () => {
     render(
       <StrategySellForm
         side="sell"
+        clientId="client-1"
+        scriptName="NABIL"
         currentLtp={100}
         availableQty={100}
         initialQty="10"
@@ -55,6 +59,8 @@ describe('StrategySellForm', () => {
     render(
       <StrategySellForm
         side="sell"
+        clientId="client-1"
+        scriptName="NABIL"
         currentLtp={100}
         availableQty={100}
         initialQty="10"
@@ -76,6 +82,8 @@ describe('StrategySellForm', () => {
     const { rerender } = render(
       <StrategySellForm
         side="sell"
+        clientId="client-1"
+        scriptName="NABIL"
         currentLtp={100}
         availableQty={100}
         initialQty="10"

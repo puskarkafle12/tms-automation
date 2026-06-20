@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from models.logged_in_user import LoggedInUsers
 from models.user import User
 from utils.strategy_builder.feature_registry import (
+    MARKET_DEPTH_FUNCTIONS,
     SCHEDULE_UNSUPPORTED_FUNCTIONS,
     classify_field,
     classify_function,
@@ -49,6 +50,26 @@ _NEPSE_PREREQ_FOR_DERIVED_STAT = {
     "all_time_high",
     "all_time_low",
 }
+_52W_DERIVED_FIELD_KEYS = {
+    "distance_from_52_week_high",
+    "distance_from_52_week_high_percent",
+    "distance_from_52_week_low",
+    "distance_from_52_week_low_percent",
+    "position_in_52_week_range_percent",
+}
+_ATH_DERIVED_FIELD_KEYS = {
+    "distance_from_all_time_high_percent",
+    "distance_from_all_time_low_percent",
+}
+
+
+def _nepse_prereqs_for_derived_fields(derived_fields: Set[str]) -> Set[str]:
+    prereqs: Set[str] = set()
+    if derived_fields & _52W_DERIVED_FIELD_KEYS:
+        prereqs.update({"fifty_two_week_high", "fifty_two_week_low"})
+    if derived_fields & _ATH_DERIVED_FIELD_KEYS:
+        prereqs.update({"all_time_high", "all_time_low"})
+    return prereqs
 _SOFT_MISSING_NEPSE_FIELDS = {
     "fifty_two_week_high",
     "fifty_two_week_low",
@@ -326,6 +347,8 @@ async def run_schedule_preflight(
         if _field_data_source(field) in {"tms", "tms_derived", "derived_statistical"}
     }
     market_depth_fields = {field for field in fields if field in _MARKET_DEPTH_KEYS}
+    depth_functions = {name for name in functions if name in MARKET_DEPTH_FUNCTIONS}
+    requires_market_depth = bool(market_depth_fields or depth_functions)
     missing_data_by_symbol: Dict[str, List[str]] = {}
     tms_warnings: List[ValidationIssue] = []
 
@@ -383,24 +406,26 @@ async def run_schedule_preflight(
                         )
                         symbol_data_blocked = True
         if derived_stat_fields and not symbol_data_blocked:
+            prereq_keys = _nepse_prereqs_for_derived_fields(derived_stat_fields)
             prereq_missing = [
                 key
-                for key in sorted(_NEPSE_PREREQ_FOR_DERIVED_STAT)
+                for key in sorted(prereq_keys)
                 if getattr(details, key, None) is None
             ]
             if prereq_missing:
                 missing_data_by_symbol[symbol] = sorted(derived_stat_fields)
-                warnings.append(
+                errors.append(
                     ValidationIssue(
                         code="NEPSE_ALPHA_52WEEK_MISSING",
                         symbol=symbol,
                         message=(
                             f"Cannot compute {', '.join(sorted(derived_stat_fields))} for {symbol} "
                             f"because Nepse Alpha 52-week range is missing ({', '.join(prereq_missing)}). "
-                            "Monitoring will proceed but 52-week range rules may not trigger until data is available."
+                            "This order cannot be scheduled until that data is available."
                         ),
                     )
                 )
+                symbol_data_blocked = True
 
     if errors:
         return _result(
@@ -519,28 +544,28 @@ async def run_schedule_preflight(
                 missing_derived = _missing_derived_stat_fields(symbol, details, quote, derived_stat_fields)
                 if missing_derived:
                     missing_data_by_symbol[symbol] = missing_derived
-                    warnings.append(
+                    errors.append(
                         ValidationIssue(
                             code="DERIVED_52WEEK_FIELD_MISSING",
                             symbol=symbol,
                             message=(
                                 f"Cannot compute {', '.join(missing_derived)} for {symbol} "
                                 "(needs live LTP plus Nepse Alpha 52-week high/low). "
-                                "Monitoring will proceed, but this 52-week condition will not match until data is available."
+                                "This order cannot be scheduled until that data is available."
                             ),
                         )
                     )
-            if market_depth_fields:
+            if requires_market_depth:
                 depth_snapshot = normalize_tms_quote(symbol, quote)
                 has_depth = bool(depth_snapshot.top_buy_orders or depth_snapshot.top_sell_orders)
                 if not has_depth:
-                    tms_warnings.append(
+                    errors.append(
                         ValidationIssue(
-                            code="MARKET_DEPTH_EMPTY",
+                            code="MARKET_DEPTH_UNAVAILABLE",
                             symbol=symbol,
                             message=(
-                                f"TMS quote for {symbol} has no top buy/sell levels yet. "
-                                "Depth-based rules may not match until the market session is live."
+                                f"TMS quote for {symbol} has no market depth yet. "
+                                "This query requires live order-book data and cannot be scheduled until depth is available."
                             ),
                         )
                     )

@@ -81,6 +81,7 @@ class OrderSizing(BaseModel):
     mode: str
     value: Optional[float] = None
     price_source: Optional[str] = "ltp"
+    explicit: bool = True
 
 
 class ConfirmationConfig(BaseModel):

@@ -22,6 +22,9 @@ class TargetHistory:
     condition_window: Dict[str, List[bool]] = field(default_factory=dict)
     position: Dict[str, Any] = field(default_factory=dict)
     executed: bool = False
+    execution_count: int = 0
+    last_executed_at: Optional[str] = None
+    last_confirmation_trade_timestamp: Optional[str] = None
 
 
 def is_valid_observation(
@@ -179,6 +182,9 @@ def serialize_target_history(history: TargetHistory) -> Dict[str, Any]:
         },
         "position": dict(history.position or {}),
         "executed": bool(history.executed),
+        "execution_count": int(history.execution_count or 0),
+        "last_executed_at": history.last_executed_at,
+        "last_confirmation_trade_timestamp": history.last_confirmation_trade_timestamp,
     }
 
 
@@ -206,4 +212,7 @@ def deserialize_target_history(payload: Optional[Dict[str, Any]]) -> TargetHisto
     }
     history.position = dict(payload.get("position") or {})
     history.executed = bool(payload.get("executed"))
+    history.execution_count = int(payload.get("execution_count") or 0)
+    history.last_executed_at = payload.get("last_executed_at")
+    history.last_confirmation_trade_timestamp = payload.get("last_confirmation_trade_timestamp")
     return history

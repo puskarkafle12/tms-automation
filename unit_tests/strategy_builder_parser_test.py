@@ -113,5 +113,17 @@ EXECUTE ONCE PER SYMBOL
         self.assertEqual(rule.require.type, "group")
 
 
+    def test_parse_exec_max_times_per_symbol(self):
+        plan = parse_strategy_query(
+            'STRATEGY_VERSION 1\nSIDE BUY\nRULE "Reentry" FOR SYMBOL "CZBIL" {\n'
+            "WHEN change_percent > 0\n"
+            "ORDER QUANTITY 10\n"
+            "EXECUTE MAX 3 TIMES PER SYMBOL\n"
+            "}"
+        )
+        self.assertEqual(plan.rules[0].execution.frequency, "max_times_per_symbol")
+        self.assertEqual(plan.rules[0].execution.max_times, 3)
+
+
 if __name__ == "__main__":
     unittest.main()

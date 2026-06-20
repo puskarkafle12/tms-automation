@@ -429,6 +429,47 @@ def evaluate_time_based_exit(ctx: OrderContext, snapshot: MarketSnapshot, memory
     return _track("Monitoring")
 
 
+def _hold_rule(reason_code: str, reason: str, *, tracking_status: Optional[str] = None) -> StrategyDecision:
+    return StrategyDecision(
+        "TRACK",
+        reason_code,
+        reason,
+        tracking_status=tracking_status or reason,
+    )
+
+
+def _check_execution_limits(rule, history: "TargetHistory") -> Optional[StrategyDecision]:
+    from datetime import datetime, timedelta, timezone
+
+    freq = str(rule.execution.frequency or "once").lower()
+    if freq in {"once", "once_per_symbol"} and history.executed:
+        return _hold_rule("ALREADY_EXECUTED", "Rule already executed for this symbol")
+
+    max_times = rule.execution.max_times
+    if max_times and int(history.execution_count or 0) >= int(max_times):
+        return _hold_rule("MAX_EXECUTIONS_REACHED", f"Maximum {max_times} executions reached")
+
+    cooldown = rule.execution.cooldown_minutes
+    if cooldown and history.last_executed_at:
+        try:
+            last = datetime.fromisoformat(str(history.last_executed_at))
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) - last < timedelta(minutes=int(cooldown)):
+                return _hold_rule("COOLDOWN_ACTIVE", f"Cooldown {cooldown} minutes active")
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def _mark_rule_execution(history: "TargetHistory") -> None:
+    from datetime import datetime, timezone
+
+    history.executed = True
+    history.execution_count = int(history.execution_count or 0) + 1
+    history.last_executed_at = datetime.now(timezone.utc).isoformat()
+
+
 def evaluate_rule_based_strategy(ctx: OrderContext, snapshot: MarketSnapshot, memory: ScannerMemory, details: ScriptDetails) -> StrategyDecision:
     from utils.strategy_builder.derived_fields import enrich_flat_snapshot
     from utils.strategy_builder.execution_depth import (
@@ -518,6 +559,22 @@ def evaluate_rule_based_strategy(ctx: OrderContext, snapshot: MarketSnapshot, me
             flat["reference_ltp"] = float(baseline["reference_ltp"])
     flat["_prev_spread_percent"] = history.previous_values.get("spread_percent")
     normalized["flat"] = flat
+
+    max_age = selected_rule.execution.max_data_age_seconds
+    if max_age:
+        from utils.strategies.helpers import is_quote_within_max_age
+
+        trade_ts = flat.get("last_traded_at") or snapshot.last_traded_time
+        if not is_quote_within_max_age(trade_ts, int(max_age)):
+            target_state[symbol] = serialize_target_history(history)
+            return StrategyDecision(
+                "TRACK",
+                "STALE_QUOTE",
+                f"Last trade data is older than {max_age}s; scan skipped",
+                tracking_status="STALE_DATA",
+                mutate={"target_state": target_state},
+            )
+
     update_history_from_snapshot(history, flat)
 
     reference_store: Optional[ReferenceStore] = None
@@ -614,6 +671,12 @@ def evaluate_rule_based_strategy(ctx: OrderContext, snapshot: MarketSnapshot, me
             mutate=mutate,
         )
 
+    blocked = _check_execution_limits(selected_rule, history)
+    if blocked:
+        target_state[symbol] = serialize_target_history(history)
+        blocked.mutate = mutate
+        return blocked
+
     if selected_rule.use_strategy:
         from utils.strategy_builder.strategy_delegate import (
             evaluate_delegated_strategy,
@@ -658,7 +721,7 @@ def evaluate_rule_based_strategy(ctx: OrderContext, snapshot: MarketSnapshot, me
                 qty = ctx.remaining_qty or ctx.qty or DEFAULT_RULE_ORDER_QUANTITY
 
         exec_price = float(mapped.price or snapshot.ltp or 0)
-        history.executed = True
+        _mark_rule_execution(history)
         if plan.side == "BUY" and snapshot.ltp:
             history.position = seed_position_after_buy(
                 history.position,
@@ -794,7 +857,7 @@ def evaluate_rule_based_strategy(ctx: OrderContext, snapshot: MarketSnapshot, me
                 mutate=mutate,
             )
 
-    history.executed = True
+    _mark_rule_execution(history)
     if plan.side == "BUY" and snapshot.ltp:
         history.position = seed_position_after_buy(
             history.position,

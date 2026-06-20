@@ -61,4 +61,7 @@ class ReferenceRefreshTest(unittest.IsolatedAsyncioTestCase):
         db.query.return_value.filter.return_value.first.return_value = None
         with self.assertRaises(ReferenceRefreshError):
             await refresh_field_references(db, 999)
+
+
+if __name__ == "__main__":
     unittest.main()

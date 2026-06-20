@@ -66,12 +66,12 @@ require_clause: "REQUIRE" expr
 
 use_strategy_clause: "USE" "STRATEGY" STRING
 
+strategy_param_name: IDENTIFIER -> strategy_param_name
+
 strategy_param_clause: strategy_param_name NUMBER -> strategy_param_number
     | strategy_param_name STRING -> strategy_param_string
     | strategy_param_name "TRUE" -> strategy_param_true
     | strategy_param_name "FALSE" -> strategy_param_false
-
-strategy_param_name: IDENTIFIER
 
 order_clause: "ORDER" ORDER_MODE optional_order_parts
 optional_order_parts: order_value price_clause -> order_parts_value_price
@@ -98,7 +98,8 @@ exec_body: "ONCE" -> exec_once
 
 per_symbol: "PER" "SYMBOL"
 
-trigger_clause: "TRIGGER" "ON_CROSS" | "TRIGGER" "LEVEL"
+trigger_clause: "TRIGGER" "ON_CROSS" -> trigger_on_cross
+    | "TRIGGER" "LEVEL" -> trigger_level
 slippage_clause: "MAX_SLIPPAGE_PCT" NUMBER
 data_age_clause: "MAX_DATA_AGE" NUMBER "SECONDS"
 missing_depth_clause: "MISSING_MARKET_DEPTH" MISSING_DEPTH_KW
