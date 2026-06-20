@@ -1,11 +1,15 @@
 # log_sender.py
 
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Iterable, Optional, Set, Tuple
 
 from sqlalchemy.orm import Session
 
+import config.tms_config as tms_config
 from models.order_log import OrderLog
+from models.scheduled_order import ScheduledOrder
+
+Pair = Tuple[str, str]
 
 TRANSIENT_MONITOR_LOG_PREFIXES = (
     "Price fetch failed",
@@ -20,6 +24,85 @@ def is_transient_monitor_log_line(line: str) -> bool:
         stripped.startswith(prefix) or stripped == prefix
         for prefix in TRANSIENT_MONITOR_LOG_PREFIXES
     )
+
+
+def _normalize_scan_pair(client_id: str, script_name: str) -> Pair:
+    return (str(client_id or "").strip(), str(script_name or "").strip())
+
+
+def request_monitor_scan_count_reset(client_id: str, script_name: str) -> None:
+    pair = _normalize_scan_pair(client_id, script_name)
+    if not pair[0] or not pair[1]:
+        return
+    tms_config.scan_count_reset_keys.add(pair)
+
+
+def consume_monitor_scan_count_resets() -> Set[Pair]:
+    resets = set(tms_config.scan_count_reset_keys)
+    tms_config.scan_count_reset_keys.clear()
+    return resets
+
+
+def delete_order_log_scan_count(
+    db: Session,
+    client_id: str,
+    script_name: str,
+    *,
+    commit: bool = False,
+) -> bool:
+    deleted = (
+        db.query(OrderLog)
+        .filter(
+            OrderLog.client_id == client_id,
+            OrderLog.script_name == script_name,
+        )
+        .delete(synchronize_session=False)
+    )
+    request_monitor_scan_count_reset(client_id, script_name)
+    if commit:
+        db.commit()
+    return deleted > 0
+
+
+def delete_order_log_scan_counts_for_client_ids(
+    db: Session,
+    client_ids: Iterable[str],
+    *,
+    commit: bool = False,
+) -> int:
+    normalized = [str(client_id).strip() for client_id in client_ids if str(client_id).strip()]
+    if not normalized:
+        return 0
+
+    for log in db.query(OrderLog).filter(OrderLog.client_id.in_(normalized)).all():
+        request_monitor_scan_count_reset(log.client_id, log.script_name)
+
+    deleted = (
+        db.query(OrderLog)
+        .filter(OrderLog.client_id.in_(normalized))
+        .delete(synchronize_session=False)
+    )
+    if commit:
+        db.commit()
+    return deleted
+
+
+def reset_scan_count_after_scheduled_order_removed(
+    db: Session,
+    client_id: str,
+    script_name: str,
+) -> bool:
+    remaining = (
+        db.query(ScheduledOrder)
+        .filter(
+            ScheduledOrder.client_id == client_id,
+            ScheduledOrder.script_name == script_name,
+        )
+        .count()
+    )
+    if remaining > 0:
+        return False
+    return delete_order_log_scan_count(db, client_id, script_name)
 
 
 def strip_transient_monitor_log_lines(logs: Optional[str]) -> Optional[str]:

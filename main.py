@@ -34,7 +34,12 @@ from schemas.schemas import (
 from utils.base_functions import is_within_time_range, truncate_to_one_decimal_place
 from utils.base_functions import summarize_login_message, get_persisted_collateral
 from utils.lot_size import get_board_lot_size, is_regular_lot_qty, normalize_sell_qty
-from utils.log_sender import is_transient_monitor_log_line
+from utils.log_sender import (
+    delete_order_log_scan_count,
+    delete_order_log_scan_counts_for_client_ids,
+    is_transient_monitor_log_line,
+    reset_scan_count_after_scheduled_order_removed,
+)
 from utils.order_status_log_serializer import serialize_order_status_log, status_log_from_scheduled_order
 from utils.scheduled_monitor_control import (
     get_scheduler_display_status,
@@ -1528,6 +1533,8 @@ async def delete_scheduled_order(
     for order in orders_to_delete:
         db.add(_order_status_log_from_order(order, status="cancelled"))
         db.delete(order)
+    for client_id, script_name in {(order.client_id, order.script_name) for order in orders_to_delete}:
+        reset_scan_count_after_scheduled_order_removed(db, client_id, script_name)
     db.commit()
 
     return {"message": "Order deleted successfully"}
@@ -1552,6 +1559,8 @@ async def delete_scheduled_order_batch(batch_id: str, db: Session = Depends(get_
         db.add(_order_status_log_from_order(order, status="cancelled"))
         deleted_ids.append(order.order_id)
         db.delete(order)
+    for client_id, script_name in {(order.client_id, order.script_name) for order in orders_to_delete}:
+        reset_scan_count_after_scheduled_order_removed(db, client_id, script_name)
     db.commit()
 
     return {
@@ -1690,7 +1699,10 @@ async def update_scheduled_order(order_id: int, order_data: OrderCreateRequest, 
 
 @app.delete("/scheduled_orders/")
 async def clear_scheduled_orders(db: Session = Depends(get_db)):
+    orders_to_delete = db.query(ScheduledOrder).all()
     deleted_count = db.query(ScheduledOrder).delete(synchronize_session=False)
+    for client_id, script_name in {(order.client_id, order.script_name) for order in orders_to_delete}:
+        delete_order_log_scan_count(db, client_id, script_name)
     db.commit()
     return {"message": f"Deleted {deleted_count} scheduled order(s)"}
 
@@ -1990,6 +2002,7 @@ async def clear_order_status_logs(client_ids: str = Query(...), db: Session = De
             .filter(OrderStatusLog.deleted_at.is_(None))
             .update({OrderStatusLog.deleted_at: datetime.utcnow()}, synchronize_session=False)
         )
+        delete_order_log_scan_counts_for_client_ids(db, parsed_client_ids)
         db.commit()
         if updated_count == 0:
             raise HTTPException(status_code=404, detail="No order logs found for the specified client IDs.")
@@ -2363,10 +2376,10 @@ async def clear_logs(client_ids:str = Query(...), db: Session = Depends(get_db))
             raise HTTPException(status_code=404, detail="No logs found for the specified client IDs.")
 
         # Proceed with deletion
-        deleted_count = db.query(OrderLog).filter(OrderLog.client_id.in_(client_ids)).delete(synchronize_session=False)
+        deleted_count = delete_order_log_scan_counts_for_client_ids(db, client_ids)
         db.commit()
 
-        return {"message": f"Logs cleared successfully for {deleted_count} client IDs."}
+        return {"message": f"Logs cleared successfully for {deleted_count} log(s)."}
     
     except Exception as e:
         db.rollback()  # Rollback in case of error

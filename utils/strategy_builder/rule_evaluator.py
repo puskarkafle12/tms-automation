@@ -186,6 +186,53 @@ def _rolling_values(field_name: str, history: TargetHistory, window: int) -> Lis
     return [float(value) for value in values]
 
 
+def _collect_leaf_conditions(
+    node: Any,
+    flat: Dict[str, Any],
+    history: TargetHistory,
+    *,
+    reference_store: Optional["ReferenceStore"] = None,
+    rule_name: str = "",
+    symbol: str = "",
+) -> List[ConditionResult]:
+    node = _node_as_dict(node)
+    if not isinstance(node, dict):
+        return []
+    if node.get("type") == "group":
+        items: List[ConditionResult] = []
+        for child in node.get("children") or []:
+            items.extend(
+                _collect_leaf_conditions(
+                    child,
+                    flat,
+                    history,
+                    reference_store=reference_store,
+                    rule_name=rule_name,
+                    symbol=symbol,
+                )
+            )
+        return items
+    if node.get("type") == "not":
+        return _collect_leaf_conditions(
+            node.get("child"),
+            flat,
+            history,
+            reference_store=reference_store,
+            rule_name=rule_name,
+            symbol=symbol,
+        )
+    return [
+        _evaluate_node(
+            node,
+            flat,
+            history,
+            reference_store=reference_store,
+            rule_name=rule_name,
+            symbol=symbol,
+        )
+    ]
+
+
 def _evaluate_node(
     node: Any,
     flat: Dict[str, Any],
@@ -575,7 +622,15 @@ def evaluate_rule(
         )
 
     result = _evaluate_node(signal_expr, flat, history, **eval_kwargs) if signal_expr else ConditionResult(expression="score_only", matched=True)
-    conditions.append(result)
+    leaf_conditions = (
+        _collect_leaf_conditions(signal_expr, flat, history, **eval_kwargs)
+        if signal_expr
+        else []
+    )
+    if leaf_conditions:
+        conditions.extend(leaf_conditions)
+    else:
+        conditions.append(result)
     when_matched = result.matched and (not rule.score_items or bool(final_score and final_score >= float(rule.required_score or 0)))
     matched, status = _apply_confirmation(rule, when_matched, history)
     if trigger_on_cross and matched and history.rule_was_true:

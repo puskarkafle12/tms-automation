@@ -241,12 +241,16 @@ export interface PlanValidationSnapshot {
   warnings?: Array<{ code?: string; message?: string }>;
   preview?: Array<{
     symbol?: string;
+    status?: string;
     trigger?: {
+      kind?: string;
+      strategy_text?: string;
       estimated_price?: number | null;
       estimated_price_display?: string | null;
     };
   }>;
   schedule_preview_snapshots_by_symbol?: Record<string, {
+    trigger_kind?: string;
     estimated_trigger_price?: number | null;
     estimated_trigger_price_display?: string | null;
     estimated_quantity?: number | null;
@@ -290,11 +294,15 @@ export function isSchedulePreflightReady(
 }
 
 function snapshotTriggerReady(snapshot?: {
+  trigger_kind?: string;
   estimated_trigger_price?: number | null;
   estimated_trigger_price_display?: string | null;
 } | null): boolean {
   if (!snapshot) {
     return false;
+  }
+  if (snapshot.trigger_kind === 'non_price_condition') {
+    return true;
   }
   const price = snapshot.estimated_trigger_price;
   if (price != null && Number(price) > 0) {
@@ -304,14 +312,42 @@ function snapshotTriggerReady(snapshot?: {
   return display !== '' && display !== '—' && display !== 'Unavailable';
 }
 
+export function previewRowIsSignalBased(
+  row?: {
+    status?: string;
+    trigger?: { kind?: string };
+  } | null,
+): boolean {
+  if (!row || row.status === 'MISSING_DATA') {
+    return false;
+  }
+  return row.trigger?.kind === 'non_price_condition';
+}
+
+export function previewRowRequiresEstTriggerPrice(
+  row?: {
+    status?: string;
+    trigger?: { kind?: string };
+  } | null,
+): boolean {
+  if (!row || row.status === 'MISSING_DATA') {
+    return true;
+  }
+  return row.trigger?.kind !== 'non_price_condition';
+}
+
 function previewRowTriggerReady(row?: {
   trigger?: {
+    kind?: string;
     estimated_price?: number | null;
     estimated_price_display?: string | null;
   };
 } | null): boolean {
   if (!row?.trigger) {
     return false;
+  }
+  if (row.trigger.kind === 'non_price_condition') {
+    return true;
   }
   const price = row.trigger.estimated_price;
   if (price != null && Number(price) > 0) {
@@ -321,24 +357,38 @@ function previewRowTriggerReady(row?: {
   return display !== '' && display !== '—' && display !== 'Unavailable';
 }
 
-function symbolPreviewTriggerReady(
+function symbolPreviewScheduleReady(
   symbol: string,
   snapshots: Record<string, {
+    trigger_kind?: string;
     estimated_trigger_price?: number | null;
     estimated_trigger_price_display?: string | null;
   }> | undefined,
   previewBySymbol: Map<string, {
+    status?: string;
     trigger?: {
+      kind?: string;
       estimated_price?: number | null;
       estimated_price_display?: string | null;
     };
   }>,
 ): boolean {
   const normalized = symbol.trim().toUpperCase();
-  if (snapshotTriggerReady(snapshots?.[normalized])) {
+  const row = previewBySymbol.get(normalized);
+  if (previewRowIsSignalBased(row)) {
     return true;
   }
-  return previewRowTriggerReady(previewBySymbol.get(normalized));
+  const snapshot = snapshots?.[normalized];
+  if (snapshot?.trigger_kind === 'non_price_condition') {
+    return true;
+  }
+  if (row && !previewRowRequiresEstTriggerPrice(row)) {
+    return true;
+  }
+  if (snapshotTriggerReady(snapshot)) {
+    return true;
+  }
+  return previewRowTriggerReady(row);
 }
 
 export function describeSchedulePreviewBlockReason(
@@ -357,12 +407,19 @@ export function describeSchedulePreviewBlockReason(
     (validation.preview || []).map((row) => [String(row.symbol || '').trim().toUpperCase(), row]),
   );
   const missingSymbols = symbols.filter(
-    (symbol) => !symbolPreviewTriggerReady(symbol, snapshots, previewBySymbol),
+    (symbol) => !symbolPreviewScheduleReady(symbol, snapshots, previewBySymbol),
   );
   if (!missingSymbols.length) {
     return null;
   }
   if (missingSymbols.length === 1) {
+    const row = previewBySymbol.get(missingSymbols[0]);
+    if (row?.trigger?.kind === 'derived_price_boundary') {
+      return `Could not estimate a trigger price for ${missingSymbols[0]} (required market data is unavailable).`;
+    }
+    if (row?.status === 'MISSING_DATA') {
+      return `Live preview data is unavailable for ${missingSymbols[0]}.`;
+    }
     return `Est. trigger price is still loading for ${missingSymbols[0]}. Wait for preview to finish.`;
   }
   if (missingSymbols.length <= 4) {
@@ -386,7 +443,34 @@ export function isSchedulePreviewReady(
   const previewBySymbol = new Map(
     (validation.preview || []).map((row) => [String(row.symbol || '').trim().toUpperCase(), row]),
   );
-  return symbols.every((symbol) => symbolPreviewTriggerReady(symbol, snapshots, previewBySymbol));
+  return symbols.every((symbol) => symbolPreviewScheduleReady(symbol, snapshots, previewBySymbol));
+}
+
+export function isSignalBasedCustomQueryPreview(
+  validation: PlanValidationSnapshot | null | undefined,
+  compiledPlan?: Record<string, unknown>,
+): boolean {
+  if (!validation?.valid || !compiledPlan) {
+    return false;
+  }
+  const symbols = extractSymbolsFromCompiledPlan(compiledPlan);
+  if (!symbols.length) {
+    return false;
+  }
+  const previewBySymbol = new Map(
+    (validation.preview || []).map((row) => [String(row.symbol || '').trim().toUpperCase(), row]),
+  );
+  return symbols.every((symbol) => previewRowIsSignalBased(previewBySymbol.get(symbol.trim().toUpperCase())));
+}
+
+export function getCustomQueryPreviewReadyLabel(
+  validation: PlanValidationSnapshot | null | undefined,
+  compiledPlan?: Record<string, unknown>,
+): string {
+  if (isSignalBasedCustomQueryPreview(validation, compiledPlan)) {
+    return 'Signal-based — ready to schedule (no fixed trigger price)';
+  }
+  return 'Ready to schedule';
 }
 
 export function isQueryValidationReady(

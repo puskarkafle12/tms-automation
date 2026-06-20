@@ -1963,6 +1963,28 @@ const GetOrderStatus: React.FC = () => {
             <div className="order-logs-empty-state">{current.empty}</div>
           ) : (
             <div className="order-logs-scheduled-sections">
+              {scheduledBatchLayout.standaloneRows.length > 0 ? (
+                <section className="order-logs-scheduled-batch order-logs-scheduled-batch-standalone">
+                  {scheduledBatchLayout.batches.length > 0 ? (
+                    <div className="order-logs-scheduled-batch-header">
+                      <div className="order-logs-scheduled-batch-copy">
+                        <h4 className="order-logs-scheduled-batch-title">Individual orders</h4>
+                        <p className="order-logs-scheduled-batch-meta">Orders not part of a custom-query batch</p>
+                      </div>
+                    </div>
+                  ) : null}
+                  <CommonTable
+                    data={scheduledBatchLayout.standaloneRows}
+                    onAction={handleAction}
+                    columns={scheduledColumns}
+                    selectable
+                    selectedRowIds={selectedScheduledIds}
+                    rowIdKey="order_id"
+                    onToggleRow={handleToggleScheduledRow}
+                    onToggleAll={handleToggleAllScheduledRows}
+                  />
+                </section>
+              ) : null}
               {scheduledBatchLayout.batches.map((batch) => (
                 <section key={batch.batchId} className="order-logs-scheduled-batch">
                   <div className="order-logs-scheduled-batch-header">
@@ -1995,28 +2017,6 @@ const GetOrderStatus: React.FC = () => {
                   />
                 </section>
               ))}
-              {scheduledBatchLayout.standaloneRows.length > 0 ? (
-                <section className="order-logs-scheduled-batch order-logs-scheduled-batch-standalone">
-                  {scheduledBatchLayout.batches.length > 0 ? (
-                    <div className="order-logs-scheduled-batch-header">
-                      <div className="order-logs-scheduled-batch-copy">
-                        <h4 className="order-logs-scheduled-batch-title">Individual orders</h4>
-                        <p className="order-logs-scheduled-batch-meta">Orders not part of a custom-query batch</p>
-                      </div>
-                    </div>
-                  ) : null}
-                  <CommonTable
-                    data={scheduledBatchLayout.standaloneRows}
-                    onAction={handleAction}
-                    columns={scheduledColumns}
-                    selectable
-                    selectedRowIds={selectedScheduledIds}
-                    rowIdKey="order_id"
-                    onToggleRow={handleToggleScheduledRow}
-                    onToggleAll={handleToggleAllScheduledRows}
-                  />
-                </section>
-              ) : null}
             </div>
           )
         ) : (

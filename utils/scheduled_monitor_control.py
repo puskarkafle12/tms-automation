@@ -9,8 +9,8 @@ import config.tms_config as tms_config
 from config.app_environment import is_testing
 from database import SessionLocal
 from models.logged_in_user import LoggedInUsers
-from models.order_log import OrderLog
 from models.scheduled_order import ScheduledOrder
+from utils.log_sender import delete_order_log_scan_count
 from utils.api_time import seconds_until_market_open
 from utils.market_status import get_market_hours_status, get_nepal_now
 from utils.monitor_order import monitor_order_task_func
@@ -120,10 +120,7 @@ async def start_scheduled_order_monitor(*, reset_logs: bool = False) -> bool:
         try:
             pending_orders = db.query(ScheduledOrder).filter_by(status="pending").all()
             for order in pending_orders:
-                db.query(OrderLog).filter(
-                    OrderLog.client_id == order.client_id,
-                    OrderLog.script_name == order.script_name,
-                ).delete(synchronize_session=False)
+                delete_order_log_scan_count(db, order.client_id, order.script_name)
             db.commit()
         finally:
             db.close()

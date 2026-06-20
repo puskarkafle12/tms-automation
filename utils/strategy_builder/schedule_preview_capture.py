@@ -32,13 +32,18 @@ def snapshot_from_preview_row(row: Dict[str, Any]) -> Dict[str, Any]:
     execution_price = row.get("execution_price") or {}
     estimated_price = trigger.get("estimated_price")
     estimated_quantity = quantity.get("estimated_quantity")
+    trigger_kind = str(trigger.get("kind") or "")
     try:
         estimated_quantity_int = int(estimated_quantity) if estimated_quantity is not None else None
     except (TypeError, ValueError):
         estimated_quantity_int = None
+    price_display = trigger.get("estimated_price_display")
+    if trigger_kind == "non_price_condition":
+        price_display = str(trigger.get("strategy_text") or "Signal-based")
     return {
         "estimated_trigger_price": estimated_price,
-        "estimated_trigger_price_display": trigger.get("estimated_price_display"),
+        "estimated_trigger_price_display": price_display,
+        "trigger_kind": trigger_kind or None,
         "is_exact_trigger_price": bool(trigger.get("is_exact_price")),
         "trigger_strategy_text": trigger.get("strategy_text"),
         "current_required_display": _current_required_display(trigger),
@@ -73,6 +78,8 @@ def _current_required_display(trigger: Dict[str, Any]) -> Optional[str]:
 
 
 def _snapshot_missing_trigger(snapshot: Dict[str, Any]) -> bool:
+    if str(snapshot.get("trigger_kind") or "") == "non_price_condition":
+        return False
     estimated = snapshot.get("estimated_trigger_price")
     if estimated is not None:
         try:

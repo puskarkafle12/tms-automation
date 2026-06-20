@@ -335,6 +335,7 @@ async def preview_plan(body: StrategyQueryRequest, db: Session = Depends(get_db)
         holding_retrieval_failed=holdings_failed,
     )
     from utils.strategy_builder.schedule_preview_capture import (
+        _snapshot_missing_trigger,
         capture_batch_preview_snapshots,
         snapshots_from_preview_rows,
     )
@@ -343,8 +344,7 @@ async def preview_plan(body: StrategyQueryRequest, db: Session = Depends(get_db)
     missing_trigger_symbols = [
         symbol
         for symbol, snapshot in preview_snapshots.items()
-        if snapshot.get("estimated_trigger_price") is None
-        and str(snapshot.get("estimated_trigger_price_display") or "") in {"", "—", "Unavailable"}
+        if _snapshot_missing_trigger(snapshot)
     ]
     if missing_trigger_symbols and body.client_id:
         retry_request = OrderCreateRequest(

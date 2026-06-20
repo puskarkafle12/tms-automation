@@ -127,6 +127,27 @@ class SchedulePreviewCaptureTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(_snapshot_missing_trigger({"estimated_trigger_price_display": "Unavailable"}))
         self.assertFalse(_snapshot_missing_trigger({"estimated_trigger_price": 392.5}))
 
+    def test_snapshot_missing_trigger_accepts_signal_based(self):
+        self.assertFalse(_snapshot_missing_trigger({
+            "trigger_kind": "non_price_condition",
+            "estimated_trigger_price": None,
+            "estimated_trigger_price_display": "SMA 20 crossed above",
+        }))
+
+    def test_snapshot_from_preview_row_maps_signal_based_trigger(self):
+        snapshot = snapshot_from_preview_row({
+            "trigger": {
+                "kind": "non_price_condition",
+                "strategy_text": "SMA 20 crossed above",
+                "estimated_price": None,
+                "estimated_price_display": None,
+            },
+            "quantity": {"estimated_quantity": 100, "estimated_quantity_display": "100"},
+        })
+        self.assertEqual(snapshot["trigger_kind"], "non_price_condition")
+        self.assertEqual(snapshot["estimated_trigger_price_display"], "SMA 20 crossed above")
+        self.assertFalse(_snapshot_missing_trigger(snapshot))
+
     def test_snapshots_from_preview_rows_indexes_by_symbol(self):
         snapshots = snapshots_from_preview_rows([
             {

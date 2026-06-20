@@ -67,6 +67,17 @@ RULE "Bulk One Percent Pullback" FOR SYMBOL IN ("NABIL", "EBL") {
 }
 """
 
+OR_REFERENCE_SELL_QUERY = """STRATEGY_VERSION 1
+SIDE SELL
+RULE "HIDCL Profit Target Or Stop Loss" FOR SYMBOL "HIDCL" {
+    WHEN ltp >= REFERENCE(field=ltp) * 1.10
+        OR ltp <= REFERENCE(field=ltp) * 0.95
+    ORDER PERCENT_OF_HOLDING 100
+    CONFIRM TRUE_FOR 2 SCANS
+    EXECUTE ONCE PER SYMBOL
+}
+"""
+
 
 class PreviewBuilderTest(unittest.TestCase):
     def test_52_week_position_price_calculation(self):
@@ -180,6 +191,40 @@ class PreviewBuilderTest(unittest.TestCase):
         self.assertAlmostEqual(trigger.estimated_price or 0, 495.0, places=2)
         self.assertTrue(trigger.is_exact_price)
         self.assertIn("Gate:", trigger.strategy_text)
+
+    def test_or_reference_conditions_produce_trigger_estimates(self):
+        from utils.strategy_builder.reference_store import ReferenceRow, ReferenceStore
+
+        plan = parse_strategy_query(OR_REFERENCE_SELL_QUERY)
+        rule = plan.rules[0]
+        flat = {"ltp": 246.0}
+        history = TargetHistory()
+        store = ReferenceStore.from_rows(
+            [
+                ReferenceRow(
+                    rule_name="HIDCL Profit Target Or Stop Loss",
+                    symbol="HIDCL",
+                    field_key="ltp",
+                    field_type="decimal",
+                    numeric_value=246.0,
+                )
+            ]
+        )
+        evaluation = evaluate_rule(
+            rule,
+            "HIDCL",
+            flat,
+            history,
+            trigger_on_cross=False,
+            reference_store=store,
+        )
+        trigger = build_trigger_preview(rule, flat, evaluation)
+        self.assertTrue(trigger.estimated_price_available)
+        self.assertAlmostEqual(trigger.estimated_price or 0, 270.6, places=1)
+        self.assertIn("/", trigger.estimated_price_display or "")
+        self.assertEqual(len(trigger.conditions or []), 2)
+        self.assertAlmostEqual(trigger.conditions[0].estimated_price or 0, 270.6, places=1)
+        self.assertAlmostEqual(trigger.conditions[1].estimated_price or 0, 233.7, places=1)
 
     def test_percent_of_holding_quantity_preview_not_final(self):
         plan = parse_strategy_query(SELL_52W_QUERY)

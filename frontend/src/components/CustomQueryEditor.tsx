@@ -9,7 +9,7 @@ import {
   formatQuantityCell,
   type PreviewRow,
 } from '../lib/strategies/previewFormatters';
-import { buildSchedulePreflightKey, isSchedulePreviewReady } from '../lib/strategies/rulePlanHelpers';
+import { buildSchedulePreflightKey, getCustomQueryPreviewReadyLabel, isSchedulePreviewReady, describeSchedulePreviewBlockReason } from '../lib/strategies/rulePlanHelpers';
 import './CustomQueryEditor.css';
 
 interface ValidationIssue {
@@ -586,10 +586,15 @@ const CustomQueryEditor: React.FC<Props> = ({
         ) : null}
         {autoValidating || busy ? (
           <span className="custom-query-validating">{previewStatus || 'Loading preview...'}</span>
-        ) : schedulePreviewReady ? (
-          <span className="custom-query-preview-ok">Ready to schedule</span>
+        ) : schedulePreviewReady && validation ? (
+          <span className="custom-query-preview-ok">
+            {getCustomQueryPreviewReadyLabel(validation, validation.compiled_plan)}
+          </span>
         ) : validation?.valid ? (
-          <span className="custom-query-validating">Est. trigger prices loading…</span>
+          <span className="custom-query-validating">
+            {describeSchedulePreviewBlockReason(validation, validation.compiled_plan)
+              || 'Preview not ready to schedule.'}
+          </span>
         ) : null}
       </div>
       {visibleError ? <div className="custom-query-error">{visibleError}</div> : null}

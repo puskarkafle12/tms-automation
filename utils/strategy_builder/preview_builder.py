@@ -25,6 +25,7 @@ from utils.strategy_builder.preview_models import (
 )
 from utils.strategy_builder.strategy_fields import get_field_metadata
 from utils.strategy_builder.strategy_models import EvaluationResult, RuleBlock
+from utils.strategy_builder.strategy_parser import format_expression
 
 HOLDING_DEPENDENT_MODES = frozenset({"percent_of_holding", "all_available", "sell_up_to"})
 
@@ -222,6 +223,77 @@ def _estimate_price_boundary(
     return None, False, warnings
 
 
+def _comparison_fields_from_node(
+    comparison: Optional[Dict[str, Any]],
+) -> Tuple[Optional[str], str, Optional[str]]:
+    if not isinstance(comparison, dict) or comparison.get("type") != "comparison":
+        return None, "gte", None
+    return (
+        _field_name_from_node(comparison.get("left")),
+        str(comparison.get("operator") or "gte"),
+        _field_name_from_node(comparison.get("right")),
+    )
+
+
+def _comparison_slots_for_expression(node: Any) -> List[Optional[Dict[str, Any]]]:
+    """One slot per walked preview row; comparison dict or None for non-price nodes."""
+    node = _node_as_dict(node)
+    if not isinstance(node, dict):
+        return [None]
+    node_type = node.get("type")
+    if node_type == "group":
+        slots: List[Optional[Dict[str, Any]]] = []
+        for child in node.get("children") or []:
+            slots.extend(_comparison_slots_for_expression(child))
+        return slots
+    if node_type == "comparison":
+        return [node]
+    if node_type == "function":
+        return [None]
+    if node_type == "availability_check":
+        return [None]
+    if node_type == "not":
+        return _comparison_slots_for_expression(node.get("child"))
+    return [None]
+
+
+def _signal_evaluation_conditions(
+    walked: List[ConditionPreview],
+    evaluation: EvaluationResult,
+) -> List[Any]:
+    candidates = [
+        item
+        for item in (evaluation.conditions or [])
+        if item.expression and not str(item.expression).endswith(" group")
+    ]
+    if walked and len(candidates) >= len(walked):
+        return candidates[-len(walked) :]
+    return candidates[: len(walked)]
+
+
+def _apply_trigger_price_to_condition(
+    item: ConditionPreview,
+    comparison: Optional[Dict[str, Any]],
+    flat: Dict[str, Any],
+) -> None:
+    if item.estimated_price is not None or item.target_value is None:
+        return
+    left_field, operator, right_field = _comparison_fields_from_node(comparison)
+    if left_field is None and isinstance(item.target_value, (int, float)):
+        left_field = "ltp"
+    price, exact, _ = _comparison_trigger_price(
+        left_field,
+        operator,
+        right_field,
+        item.target_value,
+        flat,
+    )
+    if price is not None:
+        item.estimated_price = price
+        item.estimated_price_available = True
+        item.is_exact_price = exact
+
+
 def _describe_comparison_node(node: Dict[str, Any], flat: Dict[str, Any]) -> ConditionPreview:
     left_node = node.get("left")
     right_node = node.get("right")
@@ -229,19 +301,32 @@ def _describe_comparison_node(node: Dict[str, Any], flat: Dict[str, Any]) -> Con
     field_key = _field_name_from_node(left_node) or ""
     right_field = _field_name_from_node(right_node)
     target_value, resolved_right_field = _resolve_operand(right_node, flat)
+    if isinstance(target_value, dict):
+        target_value = None
     if right_field is None:
         right_field = resolved_right_field
     actual_value = flat.get(field_key) if field_key else None
     label = field_display_name(field_key) if field_key else "Condition"
     op_text = operator_display(operator)
     target_fmt_key = right_field or field_key
+    right_display = (
+        format_expression(right_node)
+        if isinstance(_node_as_dict(right_node), dict)
+        else format_preview_value(target_fmt_key, target_value)
+    )
     if right_field:
         target_label = field_display_name(right_field)
         strategy_text = (
             f"{label} {op_text} {target_label} ({format_preview_value(target_fmt_key, target_value)})"
+            if target_value is not None
+            else f"{label} {op_text} {right_display}"
         )
     else:
-        strategy_text = f"{label} {op_text} {format_preview_value(field_key, target_value)}"
+        strategy_text = (
+            f"{label} {op_text} {format_preview_value(field_key, target_value)}"
+            if target_value is not None
+            else f"{label} {op_text} {right_display}"
+        )
 
     estimated_price, is_exact, warnings = _comparison_trigger_price(
         field_key,
@@ -375,7 +460,7 @@ def _enrich_conditions_from_evaluation(
     conditions: List[ConditionPreview],
     evaluation: EvaluationResult,
 ) -> List[ConditionPreview]:
-    eval_conditions = [item for item in (evaluation.conditions or []) if item.expression]
+    eval_conditions = _signal_evaluation_conditions(conditions, evaluation)
     enriched: List[ConditionPreview] = []
     for index, item in enumerate(conditions):
         merged = item.model_copy()
@@ -471,6 +556,7 @@ def build_trigger_preview(
     conditions = _enrich_conditions_from_evaluation(raw_conditions, evaluation)
 
     expr_dict = _node_as_dict(expr)
+    comparison_slots = _comparison_slots_for_expression(expr)
     comparison_left = None
     comparison_right = None
     comparison_operator = None
@@ -479,56 +565,41 @@ def build_trigger_preview(
         comparison_right = _field_name_from_node(expr_dict.get("right"))
         comparison_operator = str(expr_dict.get("operator") or "")
 
-    for item in conditions:
-        if item.estimated_price is None and item.target_value is not None:
-            price, exact, _ = _comparison_trigger_price(
-                comparison_left,
-                comparison_operator or "gte",
-                comparison_right,
-                item.target_value,
-                flat,
-            )
-            if price is not None:
-                item.estimated_price = price
-                item.estimated_price_available = True
-                item.is_exact_price = exact
+    for index, item in enumerate(conditions):
+        comparison = comparison_slots[index] if index < len(comparison_slots) else None
+        _apply_trigger_price_to_condition(item, comparison, flat)
 
     logic = None
     if isinstance(expr_dict, dict) and expr_dict.get("type") == "group":
         logic = str(expr_dict.get("logic") or "AND")
 
+    signal_eval = _signal_evaluation_conditions(conditions, evaluation)
     primary = conditions[0] if conditions else ConditionPreview(strategy_text="No condition configured")
     if expr_dict and isinstance(expr_dict, dict) and expr_dict.get("type") == "comparison":
         primary = _describe_comparison_node(expr_dict, flat)
-        primary.matched = evaluation.conditions[0].matched if evaluation.conditions else None
-        if evaluation.conditions:
-            result = evaluation.conditions[0]
+        if signal_eval:
+            result = signal_eval[0]
+            primary.matched = result.matched
             primary.current_value = result.actual_value
             primary.target_value = result.expected_value
             left_field = comparison_left or ""
             right_field = comparison_right
             primary.current_display = format_preview_value(left_field, result.actual_value)
             primary.target_display = format_preview_value(right_field or left_field, result.expected_value)
-            price, exact, _ = _comparison_trigger_price(
-                left_field,
-                comparison_operator or "",
-                right_field,
-                result.expected_value,
-                flat,
-            )
-            if price is not None:
-                primary.estimated_price = price
-                primary.estimated_price_available = True
-                primary.is_exact_price = exact
+            _apply_trigger_price_to_condition(primary, expr_dict, flat)
 
     estimated_price = None
     is_exact = False
+    price_displays: List[str] = []
     for item in conditions:
         if item.estimated_price is not None:
-            estimated_price = item.estimated_price
-            is_exact = item.is_exact_price
-            if logic != "OR":
-                break
+            if estimated_price is None:
+                estimated_price = item.estimated_price
+                is_exact = item.is_exact_price
+            display = format_preview_value("ltp", item.estimated_price)
+            if not item.is_exact_price:
+                display = f"{display} (est.)"
+            price_displays.append(display)
 
     primary_current = primary.current_value
     primary_target = primary.target_value
@@ -580,9 +651,14 @@ def build_trigger_preview(
 
     price_display = "—"
     if estimated_price is not None:
-        price_display = format_preview_value("ltp", estimated_price)
-        if not is_exact:
-            price_display = f"{price_display} (est.)"
+        if len(price_displays) > 1:
+            price_display = " / ".join(price_displays)
+        elif price_displays:
+            price_display = price_displays[0]
+        else:
+            price_display = format_preview_value("ltp", estimated_price)
+            if not is_exact:
+                price_display = f"{price_display} (est.)"
     elif kind == "derived_price_boundary":
         price_display = "Unavailable"
 

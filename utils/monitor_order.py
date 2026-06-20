@@ -18,7 +18,7 @@ from utils.lot_size import get_board_lot_size, is_regular_lot_qty, normalize_sel
 from sqlalchemy import or_, update
 
 from utils.strategy_builder.constants import RULE_BASED_STRATEGIES
-from utils.log_sender import store_or_update_logs
+from utils.log_sender import consume_monitor_scan_count_resets, store_or_update_logs
 from utils.market_gate import resolve_market_gate
 from utils.tms import TmsUser
 from utils.strategies.normalize import normalize_tms_quote
@@ -476,6 +476,9 @@ async def monitor_order_task_func():
 
     try:
         while config.is_running:
+            for reset_key in consume_monitor_scan_count_resets():
+                count_dict.pop(reset_key, None)
+
             pending_orders = []
             tick_seconds = int(getattr(config, "monitor_tick_seconds", None) or 1)
             try:

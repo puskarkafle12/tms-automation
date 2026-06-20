@@ -64,6 +64,25 @@ describe('rulePlanHelpers', () => {
     expect(planUsesReference(undefined, 'WHEN ltp <= 450')).toBe(false);
   });
 
+  test('isSchedulePreviewReady accepts OR trigger display from preview rows', () => {
+    const compiledPlan = {
+      rules: [{ symbols: ['HIDCL'] }],
+    };
+    const validation = {
+      valid: true,
+      preview: [
+        {
+          symbol: 'HIDCL',
+          trigger: {
+            estimated_price: 233.7,
+            estimated_price_display: 'Rs. 270.60 / Rs. 233.70',
+          },
+        },
+      ],
+    };
+    expect(isSchedulePreviewReady(validation, compiledPlan)).toBe(true);
+  });
+
   test('isSchedulePreviewReady accepts eligibility trigger from preview rows', () => {
     const compiledPlan = {
       rules: [{ symbols: ['NABIL', 'EBL', 'SCB'] }],
@@ -92,5 +111,34 @@ describe('rulePlanHelpers', () => {
 
     expect(isSchedulePreviewReady(validation, compiledPlan)).toBe(false);
     expect(describeSchedulePreviewBlockReason(validation, compiledPlan)).toContain('SCB');
+  });
+
+  test('isSchedulePreviewReady accepts signal-based preview without trigger price', () => {
+    const compiledPlan = {
+      rules: [{ symbols: ['CZBIL'] }],
+    };
+    const validation = {
+      valid: true,
+      preview: [
+        {
+          symbol: 'CZBIL',
+          status: 'OK',
+          trigger: {
+            kind: 'non_price_condition',
+            strategy_text: 'SMA 20 crossed above',
+            estimated_price: null,
+            estimated_price_display: null,
+          },
+        },
+      ],
+      schedule_preview_snapshots_by_symbol: {
+        CZBIL: {
+          trigger_kind: 'non_price_condition',
+          estimated_trigger_price: null,
+          estimated_trigger_price_display: 'SMA 20 crossed above',
+        },
+      },
+    };
+    expect(isSchedulePreviewReady(validation, compiledPlan)).toBe(true);
   });
 });

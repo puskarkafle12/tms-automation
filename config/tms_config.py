@@ -22,3 +22,6 @@ scheduled_status_message: str = ""
 grabber_started_at: Dict[str, datetime] = {}
 grabber_phase: Dict[str, str] = {}
 grabber_status_message: Dict[str, str] = {}
+
+# (client_id, script_name) pairs whose in-memory monitor scan counts should reset.
+scan_count_reset_keys: set = set()
