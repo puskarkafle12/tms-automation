@@ -9,7 +9,11 @@ import {
   SCREENER_QUERY_GUIDE,
   ScreenerPreset,
 } from '../../lib/screener/presets';
-import { buildChatGptScreenerPrompt, ScreenerQuerySpec } from '../../lib/screener/chatGptPrompt';
+import {
+  buildChatGptScreenerPrompt,
+  buildChatGptScreenerPromptForCopy,
+  ScreenerQuerySpec,
+} from '../../lib/screener/chatGptPrompt';
 import { buildNepseAlphaChartUrl } from '../../lib/nepseAlpha';
 import ScreenerDropConfirmModal from '../../components/ScreenerDropConfirmModal';
 import { ScreenerDropScheduleInput } from '../../api/screenerDrop.api';
@@ -210,7 +214,14 @@ const StockScreener: React.FC = () => {
     [activePresetId],
   );
 
-  const chatGptPrompt = useMemo(() => buildChatGptScreenerPrompt(fields, querySpec), [fields, querySpec]);
+  const chatGptPromptFull = useMemo(
+    () => buildChatGptScreenerPrompt(fields, querySpec),
+    [fields, querySpec],
+  );
+  const chatGptPromptCopy = useMemo(
+    () => buildChatGptScreenerPromptForCopy(fields, querySpec),
+    [fields, querySpec],
+  );
 
   useEffect(() => {
     const loadFields = async () => {
@@ -786,32 +797,38 @@ const StockScreener: React.FC = () => {
                 <div>
                   <h4>ChatGPT / AI assistant prompt</h4>
                   <p className="stock-screener-ai-prompt-desc">
-                    Copy this into ChatGPT (or any AI). It embeds the live field catalog from
-                    <code> /stock_screener/fields</code> — every column key, label, type, operator, and alias.
-                    The AI must return <code>STATUS: ERROR</code> if you ask for a column that is not in the API.
+                    Copy sends a compact prompt with rules and the live field list. Expand preview below
+                    only if you need the full reference catalog (JSON and per-field operator docs).
                   </p>
                 </div>
                 <div className="stock-screener-prompt-actions">
                   <button
                     type="button"
                     className="btn-primary"
-                    onClick={() => void copyText(chatGptPrompt, 'ChatGPT prompt')}
+                    onClick={() => void copyText(chatGptPromptCopy, 'ChatGPT prompt')}
                   >
                     Copy prompt for ChatGPT
                   </button>
                   <button
                     type="button"
                     className="btn-secondary"
+                    onClick={() => void copyText(chatGptPromptFull, 'Full reference prompt')}
+                  >
+                    Copy full reference
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-secondary"
                     onClick={() => void copyText(SCREENER_QUERY_GUIDE, 'Syntax guide')}
                   >
-                    Copy short syntax only
+                    Copy syntax only
                   </button>
                 </div>
               </div>
               {copyMessage && !activePreset && <p className="stock-screener-copy-msg">{copyMessage}</p>}
               <details className="stock-screener-ai-prompt-details">
-                <summary>Preview full AI prompt ({fields.length} fields documented)</summary>
-                <pre className="stock-screener-prompt-body stock-screener-ai-prompt-preview">{chatGptPrompt}</pre>
+                <summary>Preview full reference prompt ({fields.length} fields documented)</summary>
+                <pre className="stock-screener-prompt-body stock-screener-ai-prompt-preview">{chatGptPromptFull}</pre>
               </details>
             </div>
 

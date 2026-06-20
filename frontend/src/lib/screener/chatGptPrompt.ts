@@ -174,26 +174,88 @@ const buildMachineReadableCatalog = (fields: ScreenerFieldRef[], spec: ScreenerQ
   return JSON.stringify(payload, null, 2);
 };
 
+const defaultQuerySpec = (fields: ScreenerFieldRef[]): ScreenerQuerySpec => ({
+  allowed_filter_keys: fields.map((f) => f.key),
+  result_columns: ['rank', 'symbol', ...fields.map((f) => f.key)],
+  non_filterable_columns: ['rank', 'symbol', 'cached', 'fetched_at'],
+  unsupported_user_terms: [
+    'market_cap', 'sector', 'eps', 'volume', 'company_name', 'name', 'ticker', 'symbol',
+  ],
+  numeric_operators: ['gt', 'gte', 'lt', 'lte', 'eq', 'neq', 'between'],
+  text_operators: ['eq', 'neq', 'contains', 'in'],
+  field_aliases: {},
+  alias_map: {},
+  limit_default: 25,
+  limit_max: 500,
+  default_rank_by: 'alpha_annualized',
+  default_rank_direction: 'desc',
+});
+
+const resolveQuerySpec = (
+  fields: ScreenerFieldRef[],
+  querySpec?: ScreenerQuerySpec | null,
+): ScreenerQuerySpec => querySpec || defaultQuerySpec(fields);
+
+export const buildChatGptScreenerPromptForCopy = (
+  fields: ScreenerFieldRef[],
+  querySpec?: ScreenerQuerySpec | null,
+): string => {
+  const spec = resolveQuerySpec(fields, querySpec);
+  const allowedKeys = [...spec.allowed_filter_keys].sort();
+  const examples = buildDynamicExamples(fields, spec);
+  const exampleBlock = examples[0]
+    ? `\nExample query:\n\`\`\`\n${examples[0]}\n\`\`\`\n`
+    : '';
+  const aliasReference = buildAliasReference(spec);
+  const unsupportedTerms = buildUnsupportedTermsBlock(spec, new Set(allowedKeys));
+
+  return `You generate NEPSE stock screener queries for a TMS automation app. Output uses a mini-language (NOT full SQL).
+
+Rules:
+- Use ONLY the field keys listed below in WHERE and ORDER BY (copy snake_case keys exactly).
+- Combine filters with AND only. No OR, no parentheses, no JOIN, no subqueries, no comparing two fields.
+- Numeric fields: >, >=, <, <=, =, !=, BETWEEN low AND high
+- Text fields: =, !=, IN ('a', 'b'), CONTAINS 'text' or LIKE 'text'
+- Always include ORDER BY <field> ASC|DESC and LIMIT (default ${spec.limit_default}, max ${spec.limit_max}).
+- symbol is returned in results but is NOT filterable.
+- If any user request cannot map to an allowed key, reply with STATUS: ERROR and no query block.
+
+Allowed field keys (${allowedKeys.length}):
+${allowedKeys.join(', ')}
+
+Field reference:
+${fields.length > 0 ? buildCompactFieldReference(fields) : '(Load the screener page first to fetch live fields.)'}
+
+Common aliases (output the canonical key in the query):
+${aliasReference}
+
+Unsupported terms (always STATUS: ERROR):
+${unsupportedTerms}
+
+Response when valid:
+STATUS: OK
+Summary: (2-4 bullets)
+Query:
+\`\`\`
+WHERE ...
+ORDER BY ${spec.default_rank_by} DESC
+LIMIT ${spec.limit_default}
+\`\`\`
+
+Response when invalid:
+STATUS: ERROR
+Reason: ...
+Do NOT include a Query block.
+${exampleBlock}
+User request:
+[PASTE WHAT YOU WANT TO SCREEN FOR HERE]`;
+};
+
 export const buildChatGptScreenerPrompt = (
   fields: ScreenerFieldRef[],
   querySpec?: ScreenerQuerySpec | null,
 ): string => {
-  const spec: ScreenerQuerySpec = querySpec || {
-    allowed_filter_keys: fields.map((f) => f.key),
-    result_columns: ['rank', 'symbol', ...fields.map((f) => f.key)],
-    non_filterable_columns: ['rank', 'symbol', 'cached', 'fetched_at'],
-    unsupported_user_terms: [
-      'market_cap', 'sector', 'eps', 'volume', 'company_name', 'name', 'ticker', 'symbol',
-    ],
-    numeric_operators: ['gt', 'gte', 'lt', 'lte', 'eq', 'neq', 'between'],
-    text_operators: ['eq', 'neq', 'contains', 'in'],
-    field_aliases: {},
-    alias_map: {},
-    limit_default: 25,
-    limit_max: 500,
-    default_rank_by: 'alpha_annualized',
-    default_rank_direction: 'desc',
-  };
+  const spec = resolveQuerySpec(fields, querySpec);
 
   const allowedKeys = [...spec.allowed_filter_keys].sort();
   const allowedKeySet = new Set(allowedKeys);
