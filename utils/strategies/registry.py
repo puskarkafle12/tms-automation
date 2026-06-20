@@ -8,6 +8,7 @@ from utils.strategies.handlers import HANDLERS, evaluate_time_based_buy, evaluat
 from utils.strategies.order_context import build_order_context
 from utils.strategies.risk_guard import can_place_order
 from utils.strategies.types import AccountState, MarketSnapshot, ScannerMemory, ScriptDetails, StrategyDecision
+from utils.strategy_builder.execution_quantity import is_holding_dependent_mode
 
 
 def evaluate_strategy(
@@ -38,24 +39,28 @@ def evaluate_strategy(
     decision = handler(ctx, snapshot, memory, details)
 
     if decision.action == "EXECUTE" and decision.price is not None:
-        requires_depth = canonical == "Order Book Strength Buy"
-        risk = can_place_order(
-            context=ctx,
-            snapshot=snapshot,
-            account=account,
-            price=float(decision.price),
-            qty=int(decision.qty or ctx.remaining_qty or ctx.qty),
-            requires_depth=requires_depth,
-            strategy_expired=decision.expired,
+        defer_qty_checks = bool(
+            decision.order_mode and is_holding_dependent_mode(decision.order_mode)
         )
-        if not risk.allowed:
-            return StrategyDecision(
-                "NO_TRADE",
-                risk.reason_code,
-                risk.reason,
-                score=decision.score,
-                tracking_status="Blocked by risk guard",
+        if not defer_qty_checks:
+            requires_depth = canonical == "Order Book Strength Buy"
+            risk = can_place_order(
+                context=ctx,
+                snapshot=snapshot,
+                account=account,
+                price=float(decision.price),
+                qty=int(decision.qty or ctx.remaining_qty or ctx.qty),
+                requires_depth=requires_depth,
+                strategy_expired=decision.expired,
             )
+            if not risk.allowed:
+                return StrategyDecision(
+                    "NO_TRADE",
+                    risk.reason_code,
+                    risk.reason,
+                    score=decision.score,
+                    tracking_status="Blocked by risk guard",
+                )
 
     if decision.mutate:
         config_payload = dict(getattr(db_order, "strategy_config", None) or {})
@@ -84,7 +89,12 @@ def decision_to_execute_dict(decision: StrategyDecision) -> Optional[dict]:
         "price": float(decision.price),
         "reason": f"{decision.reason_code}: {decision.reason}",
     }
-    if decision.qty is not None:
+    if decision.order_mode and is_holding_dependent_mode(decision.order_mode):
+        payload["order_action"] = {
+            "mode": str(decision.order_mode).lower(),
+            "value": decision.order_value,
+        }
+    elif decision.qty is not None:
         payload["qty"] = int(decision.qty)
     if decision.source:
         payload["source"] = decision.source

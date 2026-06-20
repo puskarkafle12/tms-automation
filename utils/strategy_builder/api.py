@@ -308,11 +308,21 @@ async def preview_plan(body: StrategyQueryRequest, db: Session = Depends(get_db)
     from utils.strategy_builder.strategy_models import StrategyPlanAST
 
     plan = StrategyPlanAST.model_validate(validation["compiled_plan"])
+    preview_holdings = body.holdings_by_symbol
+    holdings_failed = False
+    if plan.side == "SELL" and body.client_id and not preview_holdings:
+        preview_holdings, holdings_checked = await _resolve_validate_holdings(
+            body.model_copy(update={"check_holdings": True}),
+            db,
+        )
+        holdings_failed = not holdings_checked
     validation["preview"] = await build_rule_previews(
         plan,
         client_id=body.client_id,
         db=db,
         preview_references=body.preview_references,
+        holdings_by_symbol=preview_holdings,
+        holding_retrieval_failed=holdings_failed,
     )
     if plan_uses_reference(plan) and body.client_id and not body.skip_live_checks:
         validation["preview_reference_note"] = (

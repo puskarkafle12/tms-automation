@@ -454,6 +454,7 @@ def evaluate_rule_based_strategy(ctx: OrderContext, snapshot: MarketSnapshot, me
     )
     from utils.strategies.helpers import is_market_depth_available
     from utils.strategy_builder.reference_store import ReferenceEvaluationError, ReferenceStore
+    from utils.strategy_builder.execution_quantity import is_holding_dependent_mode
     from utils.strategy_builder.rule_evaluator import evaluate_rule, update_history_from_snapshot
     from utils.strategy_builder.strategy_models import RuleBlock, StrategyPlanAST
     from utils.strategy_builder.strategy_parser import parse_strategy_query
@@ -550,6 +551,18 @@ def evaluate_rule_based_strategy(ctx: OrderContext, snapshot: MarketSnapshot, me
     target_state[symbol] = serialize_target_history(history)
     mutate = {"target_state": target_state}
     if exit_intent and plan.side == "SELL":
+        exit_mode = str(exit_intent.get("order_mode") or "").lower()
+        if is_holding_dependent_mode(exit_mode):
+            return StrategyDecision(
+                "EXECUTE",
+                "POSITION_EXIT",
+                "Position exit rule matched",
+                price=snapshot.ltp,
+                order_mode=exit_mode,
+                order_value=exit_intent.get("order_value"),
+                source="Position exit",
+                mutate=mutate,
+            )
         return StrategyDecision(
             "EXECUTE",
             "POSITION_EXIT",
@@ -626,10 +639,10 @@ def evaluate_rule_based_strategy(ctx: OrderContext, snapshot: MarketSnapshot, me
             return mapped
 
         qty = int(mapped.qty or ctx.remaining_qty or ctx.qty or 0)
-        if qty <= 0:
+        order_mode = str(selected_rule.order.mode or "quantity").lower()
+        if qty <= 0 and not is_holding_dependent_mode(order_mode):
             from utils.strategy_builder.constants import DEFAULT_RULE_ORDER_QUANTITY
 
-            order_mode = str(selected_rule.order.mode or "quantity").lower()
             stop_loss = selected_rule.stop_loss_price or flat.get("fixed_stop_loss_price") or flat.get("effective_stop_price")
             qty = resolve_order_quantity(
                 order_mode=order_mode,
@@ -661,7 +674,9 @@ def evaluate_rule_based_strategy(ctx: OrderContext, snapshot: MarketSnapshot, me
             mapped.reason_code or "STRATEGY_EXECUTE",
             mapped.reason or f"{selected_rule.use_strategy} matched for {symbol}",
             price=exec_price,
-            qty=qty,
+            qty=qty if not is_holding_dependent_mode(order_mode) else None,
+            order_mode=order_mode if is_holding_dependent_mode(order_mode) else None,
+            order_value=selected_rule.order.value if is_holding_dependent_mode(order_mode) else None,
             source=mapped.source or selected_rule.use_strategy,
             leg_id=mapped.leg_id,
             mutate=mapped.mutate,
@@ -721,20 +736,23 @@ def evaluate_rule_based_strategy(ctx: OrderContext, snapshot: MarketSnapshot, me
             )
     else:
         stop_loss = selected_rule.stop_loss_price or flat.get("fixed_stop_loss_price") or flat.get("effective_stop_price")
-        qty = resolve_order_quantity(
-            order_mode=order_mode,
-            order_value=selected_rule.order.value,
-            ltp=snapshot.ltp,
-            holding_qty=int(memory.holding_qty or 0),
-            form_qty=int(ctx.remaining_qty or ctx.qty or 0),
-            entry_price=flat.get("entry_price"),
-            stop_loss_price=stop_loss,
-            depth_supported_qty=int(flat.get("depth_supported_quantity") or 0),
-        )
-        if qty <= 0:
-            from utils.strategy_builder.constants import DEFAULT_RULE_ORDER_QUANTITY
+        if is_holding_dependent_mode(order_mode):
+            qty = None
+        else:
+            qty = resolve_order_quantity(
+                order_mode=order_mode,
+                order_value=selected_rule.order.value,
+                ltp=snapshot.ltp,
+                holding_qty=int(memory.holding_qty or 0),
+                form_qty=int(ctx.remaining_qty or ctx.qty or 0),
+                entry_price=flat.get("entry_price"),
+                stop_loss_price=stop_loss,
+                depth_supported_qty=int(flat.get("depth_supported_quantity") or 0),
+            )
+            if qty <= 0:
+                from utils.strategy_builder.constants import DEFAULT_RULE_ORDER_QUANTITY
 
-            qty = ctx.remaining_qty or ctx.qty or DEFAULT_RULE_ORDER_QUANTITY
+                qty = ctx.remaining_qty or ctx.qty or DEFAULT_RULE_ORDER_QUANTITY
 
     exec_price, price_label = resolve_rule_execution_price(
         snapshot,
@@ -745,19 +763,22 @@ def evaluate_rule_based_strategy(ctx: OrderContext, snapshot: MarketSnapshot, me
     if exec_price <= 0:
         exec_price = float(snapshot.ltp or 0)
 
-    sufficient, sufficiency_msg = depth_quantity_sufficient(
-        side=plan.side,
-        requested_qty=int(qty),
-        snapshot=snapshot,
-        flat=flat,
-    )
+    sufficient = True
+    sufficiency_msg = ""
+    if qty is not None:
+        sufficient, sufficiency_msg = depth_quantity_sufficient(
+            side=plan.side,
+            requested_qty=int(qty),
+            snapshot=snapshot,
+            flat=flat,
+        )
     reason = f"Rule matched for {symbol}"
     if depth_note:
         reason = f"{reason} ({depth_note})"
-    elif not sufficient and order_mode == "quantity" and price_source in {"top_buy", "best_bid", "top_sell", "best_ask"}:
+    elif qty is not None and not sufficient and order_mode == "quantity" and price_source in {"top_buy", "best_bid", "top_sell", "best_ask"}:
         reason = f"{reason} — partial fill likely: {sufficiency_msg}"
 
-    if plan.side == "BUY":
+    if plan.side == "BUY" and qty is not None:
         portfolio_state = dict(config.get("portfolio_state") or {})
         allowed, reason = portfolio_allows_new_buy(
             plan.portfolio_limits,
@@ -789,6 +810,8 @@ def evaluate_rule_based_strategy(ctx: OrderContext, snapshot: MarketSnapshot, me
         reason,
         price=exec_price,
         qty=qty,
+        order_mode=order_mode if is_holding_dependent_mode(order_mode) else None,
+        order_value=selected_rule.order.value if is_holding_dependent_mode(order_mode) else None,
         source=price_label,
         mutate=mutate,
     )

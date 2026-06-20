@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock
 
 from fastapi import HTTPException
 
-from main import _validate_sell_lot_against_holdings
+from main import _validate_sell_lot_against_holdings, _validate_strategy_order
 from schemas.schemas import OrderCreateRequest
 from utils.strategy_builder.strategy_parser import parse_strategy_query
 
@@ -40,11 +40,12 @@ class SellPercentHoldingScheduleTest(unittest.IsolatedAsyncioTestCase):
         tms_user = AsyncMock()
         tms_user.get_user_stock_details.return_value = [{"scrip": "HDL", "currentBalance": 4}]
         order_data = self._order(SELL_100_PERCENT_QUERY, qty=100)
+        _validate_strategy_order(order_data)
 
         await _validate_sell_lot_against_holdings(order_data, tms_user)
 
-        self.assertEqual(order_data.qty, 4)
-        self.assertEqual(order_data.remaining_quantity, 4)
+        self.assertEqual(order_data.qty, 0)
+        self.assertEqual(order_data.remaining_quantity, 0)
 
     async def test_fixed_sell_quantity_still_rejects_when_it_exceeds_holding(self):
         fixed_qty_query = SELL_100_PERCENT_QUERY.replace("ORDER PERCENT_OF_HOLDING 100", "ORDER QUANTITY 100")

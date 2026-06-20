@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 
 from utils.strategy_builder.execution_sizing import resolve_order_quantity
 from utils.strategy_builder.rule_evaluator import evaluate_expression
+from utils.strategy_builder.execution_quantity import is_holding_dependent_mode
 from utils.strategy_builder.history_service import TargetHistory
 from utils.strategy_builder.strategy_models import PositionExitAction, StrategyPlanAST
 
@@ -41,6 +42,14 @@ def evaluate_position_exits(
             history.position = position
             continue
         if action.action == "sell":
+            mode = str(action.order_mode or "percent_of_holding").lower()
+            if is_holding_dependent_mode(mode):
+                return {
+                    "action": "sell",
+                    "order_mode": mode,
+                    "order_value": action.order_value,
+                    "reason": "position_exit",
+                }
             qty = resolve_order_quantity(
                 order_mode=action.order_mode or "percent_of_holding",
                 order_value=action.order_value,

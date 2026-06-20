@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 
 from utils.strategy_builder.history_service import TargetHistory
 from utils.strategy_builder.market_normalizer import build_symbol_snapshot_from_parts
+from utils.strategy_builder.preview_builder import build_rule_preview, format_preview_value
 from utils.strategy_builder.reference_dependencies import collect_reference_fields_from_plan, plan_uses_reference
 from utils.strategy_builder.reference_store import ReferenceEvaluationError, ReferenceRow, ReferenceStore, build_preview_reference_store
 from utils.strategy_builder.rule_evaluator import evaluate_rule, update_history_from_snapshot
@@ -224,6 +225,8 @@ async def _preview_symbol(
     client_id: Optional[str],
     db,
     reference_store: Optional[ReferenceStore] = None,
+    holdings_by_symbol: Optional[Dict[str, int]] = None,
+    holding_retrieval_failed: bool = False,
 ) -> Dict[str, Any]:
     try:
         details = await asyncio.to_thread(get_script_details, symbol, force_refresh=False)
@@ -251,26 +254,16 @@ async def _preview_symbol(
             reference_store=reference_store,
         )
         reference_ltp = _preview_reference_ltp(reference_store, rule_name=rule.name, symbol=symbol)
-        failed = [item for item in evaluation.conditions if not item.matched]
-        trigger_ltp = None
-        if failed and failed[0].expected_value is not None:
-            try:
-                trigger_ltp = float(failed[0].expected_value)
-            except (TypeError, ValueError):
-                trigger_ltp = None
-        row: Dict[str, Any] = {
-            "symbol": symbol,
-            "rule": rule.name,
-            "matched": evaluation.matched,
-            "status": evaluation.status,
-            "status_label": _status_label(evaluation.status),
-            "blocker": _primary_blocker(evaluation),
-            "reference_ltp": reference_ltp,
-            "trigger_ltp": trigger_ltp,
-            "nepse_alpha_available": details.available,
-            "preview_ltp": live_ltp or _preview_ltp(details, quote),
-        }
+        normalized_symbol = symbol.strip().upper()
+        current_holding: Optional[int] = None
+        holding_failed = holding_retrieval_failed
+        if holdings_by_symbol is not None and not holding_failed:
+            current_holding = int(holdings_by_symbol.get(normalized_symbol, 0) or 0)
+        elif holding_failed:
+            current_holding = None
+        row: Dict[str, Any] = {}
         use_strategy = getattr(rule, "use_strategy", None)
+        strategy_action = None
         if use_strategy:
             row["strategy"] = use_strategy
             if not evaluation.matched:
@@ -310,13 +303,16 @@ async def _preview_symbol(
                     strategy_name=use_strategy,
                 )
                 row["strategy_action"] = mapped.action
-                row["matched"] = mapped.action == "EXECUTE"
-                row["status"] = mapped.reason_code or mapped.action
+                strategy_action = mapped.action
+                evaluation = evaluation.model_copy(
+                    update={
+                        "matched": mapped.action == "EXECUTE",
+                        "status": mapped.reason_code or mapped.action,
+                    }
+                )
                 if mapped.action == "EXECUTE":
                     row["status_label"] = "Ready"
                     row["blocker"] = mapped.reason or "Strategy ready to execute"
-                    if mapped.price:
-                        row["trigger_ltp"] = float(mapped.price)
                 else:
                     row["status_label"] = "Monitoring" if mapped.action == "TRACK" else _status_label(mapped.action)
                     row["blocker"] = mapped.reason or mapped.tracking_status or "Strategy not ready"
@@ -324,8 +320,28 @@ async def _preview_symbol(
             details=details,
             evaluation=evaluation,
         )
-        if message:
-            row["message"] = message
+        preview = build_rule_preview(
+            rule=rule,
+            symbol=symbol,
+            plan_side=plan_side,
+            flat=normalized["flat"],
+            evaluation=evaluation,
+            history=history,
+            status_label=row.get("status_label") or _status_label(evaluation.status),
+            live_ltp=live_ltp or _preview_ltp(details, quote),
+            reference_ltp=reference_ltp,
+            current_holding=current_holding,
+            holding_retrieval_failed=holding_failed,
+            blocker=row.get("blocker") or _primary_blocker(evaluation),
+            message=message,
+            nepse_alpha_available=details.available,
+            strategy=use_strategy,
+            strategy_action=strategy_action,
+        )
+        row = preview.to_legacy_row()
+        row["rule"] = rule.name
+        if use_strategy:
+            row["strategy"] = use_strategy
         return row
     except ReferenceEvaluationError as exc:
         return {
@@ -351,6 +367,8 @@ async def build_rule_previews(
     client_id: Optional[str] = None,
     db=None,
     preview_references: Optional[Dict[str, Dict[str, Any]]] = None,
+    holdings_by_symbol: Optional[Dict[str, int]] = None,
+    holding_retrieval_failed: bool = False,
 ) -> List[Dict[str, Any]]:
     reference_store: Optional[ReferenceStore] = None
     if preview_references and plan_uses_reference(plan):
@@ -365,6 +383,18 @@ async def build_rule_previews(
         except Exception:
             reference_store = None
 
+    resolved_holdings = dict(holdings_by_symbol or {})
+    holdings_failed = holding_retrieval_failed
+    if plan.side == "SELL" and client_id and db is not None and not resolved_holdings:
+        try:
+            from utils.strategy_builder.holdings_preflight import build_holdings_map
+            from utils.tms_client_resolver import get_tms_user_for_client
+
+            tms_user = await get_tms_user_for_client(client_id, db)
+            resolved_holdings = await build_holdings_map(tms_user)
+        except Exception:
+            holdings_failed = True
+
     semaphore = asyncio.Semaphore(3)
 
     async def _guarded_preview(rule, symbol: str) -> Dict[str, Any]:
@@ -377,6 +407,8 @@ async def build_rule_previews(
                 client_id=client_id,
                 db=db,
                 reference_store=reference_store,
+                holdings_by_symbol=resolved_holdings,
+                holding_retrieval_failed=holdings_failed,
             )
 
     tasks = []

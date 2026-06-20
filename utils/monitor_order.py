@@ -350,6 +350,7 @@ class TmsSubmissionResult:
     execution_qty: Optional[int] = None
     order_response: Optional[dict] = None
     lot_rule_blocked: bool = False
+    retryable: bool = False
 
 
 def _try_claim_order_for_execution(db, order_id: int) -> bool:
@@ -362,6 +363,17 @@ def _try_claim_order_for_execution(db, order_id: int) -> bool:
         .values(status="Executing", updated_at=datetime.utcnow())
     )
     return bool(result.rowcount)
+
+
+def _release_execution_claim(db, order_id: int, *, status: str = "Monitoring") -> None:
+    db.execute(
+        update(ScheduledOrder)
+        .where(
+            ScheduledOrder.order_id == order_id,
+            ScheduledOrder.status == "Executing",
+        )
+        .values(status=status, updated_at=datetime.utcnow())
+    )
 
 
 async def submit_scheduled_order_to_tms(
@@ -393,7 +405,35 @@ async def submit_scheduled_order_to_tms(
                 ),
             )
 
-    execution_qty = int(decision.get("qty") or db_order.remaining_quantity or fallback_qty)
+    from utils.strategy_builder.execution_quantity import (
+        apply_quantity_resolution_audit,
+        resolve_execution_quantity,
+    )
+
+    order_action = decision.get("order_action")
+    if order_action:
+        resolution = await resolve_execution_quantity(
+            scheduled_order=db_order,
+            matched_order_action=order_action,
+            tms_user=tms_user,
+            symbol=db_order.script_name,
+            side=order_type,
+            security_details=security_details,
+        )
+        db_order.strategy_config = apply_quantity_resolution_audit(
+            getattr(db_order, "strategy_config", None),
+            resolution,
+        )
+        if resolution.error or resolution.final_quantity <= 0:
+            return TmsSubmissionResult(
+                submitted=False,
+                blocked_reason=resolution.error or "Execution quantity could not be resolved.",
+                retryable=resolution.retryable,
+            )
+        execution_qty = int(resolution.final_quantity)
+    else:
+        execution_qty = int(decision.get("qty") or db_order.remaining_quantity or fallback_qty)
+
     lot_rule_error = await _validate_execution_lot_rule(
         db_order,
         tms_user,
@@ -767,6 +807,9 @@ async def monitor_order_task_func():
                                     db_order.failed_reason = submission.blocked_reason
                                     db.add(_status_log_from_order(db_order))
                                     db.delete(db_order)
+                                elif submission.retryable:
+                                    db_order.failed_reason = submission.blocked_reason
+                                    _release_execution_claim(db, db_order.order_id, status="Monitoring")
                                 continue
 
                             db_order.runner_lock_id = f"{order.order_id}:{snapshot.scan_count}"

@@ -96,7 +96,23 @@ export async function fetchJson<T>(
     const data = (await response.json()) as T;
     return { ok: true, data, status: response.status };
   } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') {
+      const seconds = Math.round(timeoutMs / 1000);
+      return {
+        ok: false,
+        error: `Request timed out after ${seconds}s. The server may still be processing — check Order Logs.`,
+        status: 408,
+      };
+    }
     const message = err instanceof Error ? err.message : 'Network error';
+    if (/aborted|abort/i.test(message)) {
+      const seconds = Math.round(timeoutMs / 1000);
+      return {
+        ok: false,
+        error: `Request timed out after ${seconds}s. The server may still be processing — check Order Logs.`,
+        status: 408,
+      };
+    }
     return { ok: false, error: message };
   }
 };

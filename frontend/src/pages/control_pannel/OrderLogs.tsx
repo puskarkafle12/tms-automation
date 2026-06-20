@@ -33,7 +33,7 @@ import {
   resolveScheduledOrderIdsForBulkDelete,
   type ScheduledBulkDeleteMode,
 } from './scheduleOrderHelpers';
-import { extractSymbolsFromCompiledPlan, getDisplayQtyForOrder } from '../../lib/strategies/rulePlanHelpers';
+import { extractSymbolsFromCompiledPlan, formatOrderQuantityDisplay, getDisplayQtyForOrder } from '../../lib/strategies/rulePlanHelpers';
 import { formatShortRelativeTime } from '../../utils/relativeTime';
 import { fetchServerTime, serverUtcToMs } from '../../api/time.api';
 import type { ApiTimeValue } from '../../utils/nepalTime';
@@ -331,7 +331,7 @@ const getStrategyDetails = (order: ScheduledOrderRow, now: number | null = null)
   addDetail(details, 'Strategy', strategy);
   addDetail(details, 'Side', side);
   addDetail(details, 'Stock', order.script_name);
-  addDetail(details, 'Quantity', getDisplayQtyForOrder(order));
+  addDetail(details, 'Quantity', formatOrderQuantityDisplay(order));
   addDetail(details, 'Status', order.status);
   addDetail(details, 'Created At', order.created_at, formatDateTime);
 
@@ -1533,7 +1533,7 @@ const GetOrderStatus: React.FC = () => {
             </button>
           ),
           created_at: formatDateTime(order.created_at || order.target_reached_at || ''),
-          qty: formatScanCount(getDisplayQtyForOrder(order)),
+          qty: formatOrderQuantityDisplay(order),
           status: <ScheduledOrderStatusCell order={order} />,
         };
       }),

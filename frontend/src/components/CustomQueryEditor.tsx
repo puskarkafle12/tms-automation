@@ -2,27 +2,19 @@ import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from
 import { createPortal } from 'react-dom';
 import { fetchJson } from '../utils/api';
 import { readUiPortalSettings, subscribeUiPortalSettings } from '../lib/uiPortalSettings';
+import {
+  formatCurrentRequired,
+  formatPriceBoundary,
+  formatPreviewWarnings,
+  formatQuantityCell,
+  type PreviewRow,
+} from '../lib/strategies/previewFormatters';
 import './CustomQueryEditor.css';
 
 interface ValidationIssue {
   code: string;
   message: string;
   symbol?: string;
-}
-
-interface PreviewRow {
-  symbol?: string;
-  rule?: string;
-  matched?: boolean;
-  status?: string;
-  status_label?: string;
-  blocker?: string;
-  reference_ltp?: number;
-  trigger_ltp?: number;
-  strategy?: string;
-  strategy_action?: string;
-  message?: string;
-  preview_ltp?: number;
 }
 
 interface ValidationResponse {
@@ -72,17 +64,6 @@ interface Props {
   }) => void;
   onValidatingChange?: (validating: boolean) => void;
 }
-
-const DEFAULT_QUERY = (side: 'buy' | 'sell', symbol: string) => `STRATEGY_VERSION 1
-SIDE ${side.toUpperCase()}
-
-RULE "${symbol} Rule" FOR SYMBOL "${symbol}" {
-    WHEN technical_rsi_14 < 70
-
-    ORDER QUANTITY 100
-    MAX_SLIPPAGE_PCT 1
-    EXECUTE ONCE
-}`;
 
 const PREVIEW_TIMEOUT_MS = 120000;
 const TOAST_DURATION_MS = 4000;
@@ -151,7 +132,7 @@ const CustomQueryEditor: React.FC<Props> = ({
   const onValidatingChangeRef = useRef(onValidatingChange);
   onValidatingChangeRef.current = onValidatingChange;
 
-  const [queryText, setQueryText] = useState(initialQuery || DEFAULT_QUERY(side, formSymbol || 'CZBIL'));
+  const [queryText, setQueryText] = useState(initialQuery ?? '');
   const [validation, setValidation] = useState<ValidationResponse | null>(null);
   const validationRef = useRef<ValidationResponse | null>(null);
   const [busy, setBusy] = useState(false);
@@ -565,19 +546,24 @@ const CustomQueryEditor: React.FC<Props> = ({
               </button>
             </div>
             <div className="custom-query-preview-table-wrap">
-              <table className="custom-query-preview-table">
+              <table className="custom-query-preview-table custom-query-preview-table-semantic">
                 <thead>
                   <tr>
                     <th>Symbol</th>
                     <th>Status</th>
-                    <th>Live LTP</th>
-                    <th>Ref LTP</th>
+                    <th>Market</th>
+                    <th>Order</th>
                     <th>Trigger</th>
+                    <th>Progress</th>
                     <th>Why</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {previewRows.map((row) => (
+                  {previewRows.map((row) => {
+                    const warnings = formatPreviewWarnings(row);
+                    const triggerText = row.trigger?.strategy_text
+                      || (row.trigger_ltp != null ? `Trigger ${row.trigger_ltp}` : '—');
+                    return (
                     <tr key={`${row.symbol}-${row.rule}`} className={row.matched ? 'preview-row-ready' : 'preview-row-blocked'}>
                       <td className="custom-query-preview-symbol">{String(row.symbol ?? '—')}</td>
                       <td>
@@ -585,17 +571,48 @@ const CustomQueryEditor: React.FC<Props> = ({
                           {row.status_label || row.status || '—'}
                         </span>
                       </td>
-                      <td className="custom-query-preview-ltp">{formatPreviewLtp(row.preview_ltp)}</td>
-                      <td className="custom-query-preview-ltp">{formatPreviewLtp(row.reference_ltp)}</td>
-                      <td className="custom-query-preview-ltp">{formatPreviewLtp(row.trigger_ltp)}</td>
+                      <td className="custom-query-preview-stack">
+                        <div><span className="custom-query-preview-label">Live LTP</span> {formatPreviewLtp(row.preview_ltp)}</div>
+                        {row.reference_ltp != null ? (
+                          <div><span className="custom-query-preview-label">Ref LTP</span> {formatPreviewLtp(row.reference_ltp)}</div>
+                        ) : null}
+                      </td>
+                      <td className="custom-query-preview-stack custom-query-preview-pre">
+                        <div><span className="custom-query-preview-label">Est. Qty</span></div>
+                        {formatQuantityCell(row).split('\n').map((line) => (
+                          <div key={line}>{line}</div>
+                        ))}
+                        {row.execution_price?.description ? (
+                          <div className="custom-query-preview-muted">{row.execution_price.description}</div>
+                        ) : null}
+                      </td>
+                      <td className="custom-query-preview-stack">
+                        <div><span className="custom-query-preview-label">Price Boundary</span> {formatPriceBoundary(row)}</div>
+                        <div><span className="custom-query-preview-label">Condition</span> {triggerText}</div>
+                        <div className="custom-query-preview-muted">{formatCurrentRequired(row).split('\n').map((line) => (
+                          <div key={line}>{line}</div>
+                        ))}</div>
+                      </td>
+                      <td className="custom-query-preview-stack">
+                        {row.confirmation?.display ? (
+                          <div><span className="custom-query-preview-label">Confirmation</span> {row.confirmation.display}</div>
+                        ) : null}
+                        {row.execution_policy?.display ? (
+                          <div className="custom-query-preview-muted">{row.execution_policy.display}</div>
+                        ) : null}
+                      </td>
                       <td className="custom-query-preview-blocker">
                         {row.strategy ? (
                           <div className="custom-query-preview-strategy">{row.strategy}</div>
                         ) : null}
-                        {row.blocker || row.message || (row.matched ? 'Ready to execute' : '—')}
+                        {row.reason || row.blocker || row.message || (row.matched ? 'Ready to execute' : '—')}
+                        {warnings.map((warning) => (
+                          <div key={warning} className="custom-query-preview-warning">{warning}</div>
+                        ))}
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

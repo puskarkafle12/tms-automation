@@ -739,10 +739,16 @@ const ScheduleOrder: React.FC = () => {
         return;
       }
       const canReusePreflight = Boolean(strategyPayload.strategy_config?.schedule_preflight_ready);
+      if (customQuery && !canReusePreflight) {
+        setStatus('error');
+        setStatusMessage('Schedule preflight is not complete. Wait for validation to finish before scheduling.');
+        return;
+      }
+      const batchTimeoutMs = Math.min(300000, Math.max(60000, eligibleSymbols.length * 8000));
       setIsSubmitting(true);
       setSubmitProgress(
         canReusePreflight
-          ? `Scheduling ${eligibleSymbols.length} prepared symbol(s)…`
+          ? `Placing ${eligibleSymbols.length} order(s)…`
           : `Preparing ${eligibleSymbols.length} symbol(s) for scheduling…`,
       );
       try {
@@ -768,10 +774,18 @@ const ScheduleOrder: React.FC = () => {
             ),
             skip_preflight: canReusePreflight,
           }),
-        }, 30000);
+        }, batchTimeoutMs);
         if (!batch.ok) {
+          const timedOut = batch.status === 408 || /timed out|aborted/i.test(batch.error || '');
+          if (timedOut) {
+            notifyScheduledOrdersChanged();
+          }
           setStatus('error');
-          setStatusMessage(batch.error || 'Batch scheduling failed.');
+          setStatusMessage(
+            timedOut
+              ? `${batch.error} Refresh Order Logs to confirm which orders were created.`
+              : (batch.error || 'Batch scheduling failed.'),
+          );
           return;
         }
         if (batch.data.scheduled?.length) {
@@ -872,6 +886,7 @@ const ScheduleOrder: React.FC = () => {
     try {
       const scheduled: string[] = [];
       const failures: string[] = [];
+      const skipped: string[] = [];
 
       for (let index = 0; index < scheduleSymbols.length; index += 1) {
         const symbol = scheduleSymbols[index];
@@ -892,6 +907,7 @@ const ScheduleOrder: React.FC = () => {
             Accept: 'application/json',
             'Content-Type': 'application/json',
           },
+          keepalive: true,
           body: JSON.stringify({
             client_id: clientID,
             script_name: symbol,
@@ -902,7 +918,12 @@ const ScheduleOrder: React.FC = () => {
         });
 
         if (response.ok) {
-          scheduled.push(symbol);
+          const data = await response.json().catch(() => ({} as { skipped?: boolean; message?: string }));
+          if (data?.skipped) {
+            skipped.push(`${symbol}: ${data.message || 'Skipped duplicate order.'}`);
+          } else {
+            scheduled.push(symbol);
+          }
         } else {
           const data = await response.json().catch(() => ({}));
           failures.push(`${symbol}: ${formatApiErrorDetail(data.detail, data.message || 'Failed')}`);
@@ -913,17 +934,24 @@ const ScheduleOrder: React.FC = () => {
         notifyScheduledOrdersChanged();
         setStatus(failures.length ? 'error' : 'success');
         setStatusMessage(
-          failures.length
-            ? `Scheduled ${strategyPayload.strategy_type} for ${scheduled.join(', ')}. Failed: ${failures.join('; ')}`
-            : `${strategyPayload.strategy_type} scheduled for ${scheduled.join(', ')}.`,
+          [
+            scheduled.length ? `Scheduled ${strategyPayload.strategy_type} for ${scheduled.join(', ')}.` : '',
+            skipped.length ? `Skipped duplicates: ${skipped.join('; ')}` : '',
+            failures.length ? `Failed: ${failures.join('; ')}` : '',
+          ].filter(Boolean).join(' '),
         );
         if (!failures.length) {
           setPrice('');
           setQty('');
         }
       } else {
-        setStatus('error');
-        setStatusMessage(failures.join('; ') || 'Failed to add order.');
+        if (skipped.length && !failures.length) {
+          setStatus('success');
+          setStatusMessage(skipped.join('; '));
+        } else {
+          setStatus('error');
+          setStatusMessage(skipped.length ? skipped.join('; ') : failures.join('; ') || 'Failed to add order.');
+        }
       }
     } catch (error) {
       setStatus('error');

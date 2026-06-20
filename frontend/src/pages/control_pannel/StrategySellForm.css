@@ -277,6 +277,10 @@
   font-size: 0.92rem;
 }
 
+.strategy-submit-progress-muted {
+  color: #8b949e;
+}
+
 .strategy-submit-status {
   margin-top: 0.65rem;
 }

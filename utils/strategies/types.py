@@ -162,6 +162,8 @@ class StrategyDecision:
     score: Optional[float] = None
     price: Optional[float] = None
     qty: Optional[int] = None
+    order_mode: Optional[str] = None
+    order_value: Optional[float] = None
     source: Optional[str] = None
     leg_id: Optional[str] = None
     tracking_status: Optional[str] = None

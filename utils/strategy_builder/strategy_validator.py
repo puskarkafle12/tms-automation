@@ -18,6 +18,7 @@ from utils.strategy_builder.strategy_models import (
     ValidationResult,
 )
 from utils.strategy_builder.reference_validator import validate_reference_expressions
+from utils.strategy_builder.execution_quantity import is_holding_dependent_mode
 from utils.strategy_builder.strategy_linter import lint_rule_expression
 from utils.strategies.strategy_query_catalog import (
     get_catalog_entry,
@@ -127,6 +128,16 @@ def validate_strategy_plan(
             errors.append(ValidationIssue(code="MISSING_STOCK_TARGET", message=f'Rule "{rule.name}" must target at least one symbol.'))
         if not rule.order or not rule.order.mode:
             errors.append(ValidationIssue(code="MISSING_ORDER_SIZE", message=f'Rule "{rule.name}" is missing order sizing.'))
+        elif plan.side == "BUY" and is_holding_dependent_mode(rule.order.mode):
+            errors.append(
+                ValidationIssue(
+                    code="INVALID_BUY_ORDER_SIZE",
+                    message=(
+                        f'Rule "{rule.name}" uses {rule.order.mode}, which applies to existing holdings '
+                        "and is only valid for SELL strategies."
+                    ),
+                )
+            )
 
         side = (plan.side or "BUY").lower()
         if rule.use_strategy:

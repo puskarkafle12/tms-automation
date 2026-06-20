@@ -199,7 +199,9 @@ RULE "Hold" FOR SYMBOL "CZBIL" {
         )
         self.assertEqual(decisions[0].action, "EXECUTE")
         self.assertEqual(decisions[0].reason_code, "POSITION_EXIT")
-        self.assertEqual(decisions[0].qty, 50)
+        self.assertIsNone(decisions[0].qty)
+        self.assertEqual(decisions[0].order_mode, "percent_of_holding")
+        self.assertEqual(decisions[0].order_value, 50)
 
     def test_derived_52_week_position_buy(self):
         query = """
@@ -286,7 +288,7 @@ RULE "Qty" FOR SYMBOL "CZBIL" {
         self.assertEqual(decisions[0].action, "EXECUTE")
         self.assertEqual(decisions[0].qty, 75)
 
-    def test_sell_all_available_uses_holding_qty(self):
+    def test_sell_all_available_defers_quantity_to_execution(self):
         query = """
 STRATEGY_VERSION 1
 SIDE SELL
@@ -306,7 +308,8 @@ RULE "Liquidate" FOR SYMBOL "CZBIL" {
             holding_qty=80,
         )
         self.assertEqual(decisions[0].action, "EXECUTE")
-        self.assertEqual(decisions[0].qty, 80)
+        self.assertIsNone(decisions[0].qty)
+        self.assertEqual(decisions[0].order_mode, "all_available")
 
     def test_sell_rule_with_zero_holding_still_evaluates_as_track(self):
         query = """

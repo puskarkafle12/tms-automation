@@ -225,7 +225,9 @@ RULE "LTP" FOR SYMBOL "CZBIL" {
     self.assertIsNotNone(second)
     assert second is not None
     self.assertEqual(second["action"], "execute")
-    self.assertEqual(second["qty"], 4)
+    self.assertIn("order_action", second)
+    self.assertEqual(second["order_action"]["mode"], "percent_of_holding")
+    self.assertNotIn("qty", second)
 
 
 class CzbilRsiMonitorFlowTest(unittest.TestCase):

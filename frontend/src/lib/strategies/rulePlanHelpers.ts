@@ -58,6 +58,64 @@ type CompiledRule = {
   order?: { mode?: string; value?: number };
 };
 
+const HOLDING_DEPENDENT_MODES = new Set(['percent_of_holding', 'all_available', 'sell_up_to']);
+
+export function isHoldingDependentOrderMode(mode?: string): boolean {
+  return HOLDING_DEPENDENT_MODES.has(String(mode || '').toLowerCase());
+}
+
+export function extractOrderQuantityLabel(
+  compiledPlan?: Record<string, unknown>,
+  symbol?: string,
+): string | null {
+  const rules = (compiledPlan?.rules as CompiledRule[] | undefined) || [];
+  const normalizedSymbol = String(symbol || '').trim().toUpperCase();
+  for (const rule of rules) {
+    const ruleSymbols = (rule.symbols || [])
+      .map((item) => String(item).trim().toUpperCase())
+      .filter(Boolean);
+    if (normalizedSymbol && ruleSymbols.length > 0 && !ruleSymbols.includes(normalizedSymbol)) {
+      continue;
+    }
+    const order = rule.order;
+    const mode = String(order?.mode || '').toLowerCase();
+    const value = Number(order?.value);
+    if (mode === 'percent_of_holding' && Number.isFinite(value) && value > 0) {
+      return `${value}% of available holding (final quantity calculated immediately before execution)`;
+    }
+    if (mode === 'all_available') {
+      return 'All available holding (final quantity calculated immediately before execution)';
+    }
+    if (mode === 'sell_up_to' && Number.isFinite(value) && value > 0) {
+      return `Sell up to ${Math.floor(value)} (final quantity calculated immediately before execution)`;
+    }
+  }
+  return null;
+}
+
+export function formatOrderQuantityDisplay(order: {
+  qty?: number | string | null;
+  script_name?: string;
+  strategy_type?: string;
+  strategy_config?: Record<string, unknown>;
+}): string {
+  const config = (order.strategy_config || {}) as Record<string, unknown>;
+  const audit = config.execution_quantity_audit as
+    | { resolved_execution_quantity?: number }
+    | undefined;
+  if (audit?.resolved_execution_quantity && audit.resolved_execution_quantity > 0) {
+    return String(audit.resolved_execution_quantity);
+  }
+  const dynamicLabel = extractOrderQuantityLabel(
+    config.compiled_plan as Record<string, unknown> | undefined,
+    order.script_name,
+  );
+  if (dynamicLabel) {
+    return dynamicLabel;
+  }
+  return String(getDisplayQtyForOrder(order));
+}
+
 export function extractPlannedQtyFromCompiledPlan(
   compiledPlan?: Record<string, unknown>,
   symbol?: string,
@@ -74,6 +132,9 @@ export function extractPlannedQtyFromCompiledPlan(
     const order = rule.order;
     const mode = String(order?.mode || '').toLowerCase();
     const value = Number(order?.value);
+    if (isHoldingDependentOrderMode(mode)) {
+      return null;
+    }
     if (mode === 'quantity') {
       if (Number.isFinite(value) && value > 0) {
         return Math.floor(value);
@@ -161,6 +222,12 @@ export function findBlockingValidationIssue(
     }
   }
   return null;
+}
+
+export function isSchedulePreflightReady(
+  schedulePreflight?: { ready?: boolean } | null,
+): boolean {
+  return Boolean(schedulePreflight?.ready);
 }
 
 export function isQueryValidationReady(

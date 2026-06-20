@@ -1,4 +1,5 @@
 import logging
+import json
 import uuid
 import aiohttp
 import time as monotonic_time
@@ -717,6 +718,59 @@ def _is_scheduled_order_editable(order: ScheduledOrder) -> bool:
     return status not in NON_EDITABLE_SCHEDULED_STATUSES
 
 
+def _scheduled_order_dedup_key(order_data: OrderCreateRequest) -> str:
+    strategy_config = dict(order_data.strategy_config or {})
+    compiled_plan = strategy_config.get("compiled_plan")
+    key_payload = {
+        "client_id": (order_data.client_id or "").strip().upper(),
+        "script_name": (order_data.script_name or "").strip().upper(),
+        "order_type": (order_data.order_type or "").strip().lower(),
+        "strategy_type": (order_data.strategy_type or "Fixed Price").strip(),
+        "price": float(order_data.price or 0),
+        "qty": int(order_data.qty or 0),
+        "side": (order_data.side or order_data.order_type or "").strip().lower(),
+        "query_text": str(strategy_config.get("query_text") or "").strip(),
+        "compiled_plan": compiled_plan or {},
+    }
+    return json.dumps(key_payload, sort_keys=True, default=str)
+
+
+def _find_duplicate_scheduled_order(db: Session, order_data: OrderCreateRequest) -> Optional[ScheduledOrder]:
+    dedup_key = _scheduled_order_dedup_key(order_data)
+    query = db.query(ScheduledOrder).filter(
+        ScheduledOrder.client_id == order_data.client_id,
+        ScheduledOrder.script_name == order_data.script_name,
+        ScheduledOrder.order_type == order_data.order_type,
+        ScheduledOrder.strategy_type == (order_data.strategy_type or "Fixed Price"),
+    )
+    for existing in query.all():
+        existing_config = dict(existing.strategy_config or {})
+        if existing_config.get("schedule_dedup_key") == dedup_key:
+            return existing
+        if (
+            existing.price == order_data.price
+            and existing.qty == order_data.qty
+            and str(existing_config.get("query_text") or "").strip() == str((order_data.strategy_config or {}).get("query_text") or "").strip()
+        ):
+            return existing
+    return None
+
+
+async def _reject_duplicate_scheduled_order(db: Session, order_data: OrderCreateRequest) -> Optional[dict]:
+    duplicate = _find_duplicate_scheduled_order(db, order_data)
+    if not duplicate:
+        return None
+    return {
+        "message": (
+            f"Skipped duplicate order for {order_data.script_name}. "
+            f"An equivalent scheduled order already exists (order_id={duplicate.order_id})."
+        ),
+        "skipped": True,
+        "existing_order_id": duplicate.order_id,
+        "order": _serialize_scheduled_order(duplicate),
+    }
+
+
 def _serialize_scheduled_order(order: ScheduledOrder) -> dict:
     def ts(value):
         return format_api_timestamp(value)
@@ -819,17 +873,22 @@ def _validate_strategy_order(order_data: OrderCreateRequest) -> None:
     lot_size = get_board_lot_size(security_details)
     if order_data.qty <= 0 and not is_rule_based:
         raise HTTPException(status_code=400, detail="Quantity must be greater than zero.")
-    if is_rule_based and order_data.qty <= 0:
+    if is_rule_based:
         from utils.strategy_builder.constants import DEFAULT_RULE_ORDER_QUANTITY
+        from utils.strategy_builder.execution_quantity import plan_uses_holding_dependent_quantity
         from utils.strategy_builder.plan_helpers import extract_planned_quantity_from_compiled_plan
 
-        plan_qty = None
-        if isinstance(rule_plan, dict):
-            plan_qty = extract_planned_quantity_from_compiled_plan(
-                rule_plan,
-                order_data.script_name,
-            )
-        order_data.qty = plan_qty or DEFAULT_RULE_ORDER_QUANTITY
+        if isinstance(rule_plan, dict) and plan_uses_holding_dependent_quantity(rule_plan):
+            order_data.qty = 0
+            order_data.remaining_quantity = 0
+        elif order_data.qty <= 0:
+            plan_qty = None
+            if isinstance(rule_plan, dict):
+                plan_qty = extract_planned_quantity_from_compiled_plan(
+                    rule_plan,
+                    order_data.script_name,
+                )
+            order_data.qty = plan_qty or DEFAULT_RULE_ORDER_QUANTITY
     if (
         not is_rule_based
         and not odd_lot_allowed
@@ -873,6 +932,7 @@ def _validate_strategy_order(order_data: OrderCreateRequest) -> None:
 
 
 async def _validate_sell_lot_against_holdings(order_data: OrderCreateRequest, tms_user: TmsUser) -> None:
+    from utils.strategy_builder.execution_quantity import is_holding_dependent_mode
     from utils.strategy_builder.execution_sizing import resolve_order_quantity
     from utils.strategy_builder.strategy_models import StrategyPlanAST
 
@@ -898,6 +958,7 @@ async def _validate_sell_lot_against_holdings(order_data: OrderCreateRequest, tm
     desired_qty = int(order_data.qty or 0)
     config = dict(order_data.strategy_config or {})
     compiled_plan = config.get("compiled_plan")
+    dynamic_mode = False
     if compiled_plan:
         try:
             plan = StrategyPlanAST.model_validate(compiled_plan)
@@ -905,8 +966,12 @@ async def _validate_sell_lot_against_holdings(order_data: OrderCreateRequest, tm
             for rule in plan.rules:
                 if symbol not in {item.upper() for item in rule.symbols} or not rule.order:
                     continue
+                order_mode = str(rule.order.mode or "quantity").lower()
+                if is_holding_dependent_mode(order_mode):
+                    dynamic_mode = True
+                    break
                 desired_qty = resolve_order_quantity(
-                    order_mode=rule.order.mode,
+                    order_mode=order_mode,
                     order_value=rule.order.value,
                     ltp=None,
                     holding_qty=holding_qty,
@@ -916,6 +981,9 @@ async def _validate_sell_lot_against_holdings(order_data: OrderCreateRequest, tm
                 break
         except Exception:
             desired_qty = int(order_data.qty or 0)
+
+    if dynamic_mode:
+        return
 
     if desired_qty <= 0:
         return
@@ -928,9 +996,6 @@ async def _validate_sell_lot_against_holdings(order_data: OrderCreateRequest, tm
             status_code=400,
             detail=normalized.get("error") or normalized.get("warning") or "Sell quantity violates board-lot rules.",
         )
-    if compiled_plan:
-        order_data.qty = int(normalized.get("qty") or desired_qty)
-        order_data.remaining_quantity = order_data.qty
 
 
 async def _get_script_high(tms_user: TmsUser, script_name: str) -> Optional[float]:
@@ -1353,6 +1418,9 @@ async def add_order(order_data: OrderCreateRequest, db: Session = Depends(get_db
     user = db.query(User).filter(User.client_id == order_data.client_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    duplicate_result = await _reject_duplicate_scheduled_order(db, order_data)
+    if duplicate_result:
+        return duplicate_result
 
     if order_data.order_type.lower() == "buy":
         from utils.strategies.aliases import canonical_strategy_name
@@ -1386,6 +1454,8 @@ async def add_order(order_data: OrderCreateRequest, db: Session = Depends(get_db
     db.add(order)
     db.flush()
     await _persist_order_field_references(db, order, order_data)
+    order.strategy_config = dict(order.strategy_config or {})
+    order.strategy_config["schedule_dedup_key"] = _scheduled_order_dedup_key(order_data)
     db.commit()
     return {"message": "Order added successfully"}
 
@@ -1513,10 +1583,15 @@ async def _validate_scheduled_order_payload(order_data: OrderCreateRequest, db: 
 @app.post("/scheduled_orders/")
 async def create_scheduled_order(order_data: OrderCreateRequest, db: Session = Depends(get_db)):
     await _validate_scheduled_order_payload(order_data, db)
+    duplicate_result = await _reject_duplicate_scheduled_order(db, order_data)
+    if duplicate_result:
+        return duplicate_result
     order = ScheduledOrder(order_data)
     db.add(order)
     db.flush()
     await _persist_order_field_references(db, order, order_data)
+    order.strategy_config = dict(order.strategy_config or {})
+    order.strategy_config["schedule_dedup_key"] = _scheduled_order_dedup_key(order_data)
     db.commit()
     db.refresh(order)
     return {"message": "Scheduled order created", "order": _serialize_scheduled_order(order)}

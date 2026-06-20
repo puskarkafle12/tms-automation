@@ -24,7 +24,7 @@ import StrategyCatalogModal from '../../components/StrategyCatalogModal';
 import CustomQueryEditor from '../../components/CustomQueryEditor';
 import TechnicalRuleBuilder from '../../components/TechnicalRuleBuilder';
 import ErrorMessage from '../../components/ErrorMessage';
-import { extractPlannedQtyFromCompiledPlan, DEFAULT_RULE_PLANNED_QTY, extractPlanSide, customQueryStrategyForSide, isCustomQueryStrategy, findBlockingValidationIssue, isQueryValidationReady, type PlanValidationSnapshot } from '../../lib/strategies/rulePlanHelpers';
+import { extractPlannedQtyFromCompiledPlan, DEFAULT_RULE_PLANNED_QTY, extractPlanSide, customQueryStrategyForSide, isCustomQueryStrategy, findBlockingValidationIssue, isQueryValidationReady, isSchedulePreflightReady, type PlanValidationSnapshot } from '../../lib/strategies/rulePlanHelpers';
 export type { StrategyPayload, StrategyType } from './strategyValidation';
 
 export const STRATEGY_HELP: Record<string, { helper: string; button: string }> = {
@@ -519,11 +519,20 @@ const StrategySellForm: React.FC<Props> = ({
       if (!ruleQueryText.trim()) {
         return 'Enter a strategy query.';
       }
-      if (queryValidation && !isQueryValidationReady(queryValidation, compiledPlan)) {
+      if (!queryValidation || !compiledPlan) {
+        return 'Wait for strategy validation to finish.';
+      }
+      if (!isQueryValidationReady(queryValidation, compiledPlan)) {
         const validationMessage = resolveValidationMessage(queryValidation) || planValidationError;
         if (validationMessage) {
           return validationMessage;
         }
+        return 'Strategy query is not ready to schedule.';
+      }
+      if (!isSchedulePreflightReady(schedulePreflight)) {
+        return schedulePreflight?.errors?.[0]?.message
+          || schedulePreflight?.message
+          || 'Schedule preflight is still running or failed.';
       }
       return '';
     }
@@ -558,13 +567,14 @@ const StrategySellForm: React.FC<Props> = ({
     queryValidation,
     queryValidating,
     ruleQueryText,
+    schedulePreflight,
     scriptName,
     side,
     submitError,
     validationError,
   ]);
 
-  const canSchedule = !isSubmitting;
+  const canSchedule = !isSubmitting && !scheduleBlockReason;
 
   useEffect(() => {
     if (!isRuleBased || isCustomQuery || !ruleQueryText.trim()) {
@@ -665,41 +675,16 @@ const StrategySellForm: React.FC<Props> = ({
     }
     let activeCompiledPlan = compiledPlan;
     const resolvedCustomSide = extractPlanSide(activeCompiledPlan) || queryPlanSide || side;
-    if (isCustomQuery && ruleQueryText.trim()) {
-      const result = await fetchJson<{
-        valid: boolean;
-        compiled_plan?: Record<string, unknown>;
-        errors?: Array<{ code?: string; message?: string }>;
-        warnings?: Array<{ code?: string; message?: string }>;
-      }>('/api/strategy-plans/validate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          query_text: ruleQueryText,
-          strategy_type: 'Custom Query',
-          side: resolvedCustomSide,
-          form_symbol: scriptName,
-          client_id: clientId,
-          skip_live_checks: true,
-          check_holdings: resolvedCustomSide === 'sell',
-          holdings_by_symbol: holdingsBySymbol,
-        }),
-      });
-      if (!result.ok) {
-        setLocalError(result.error);
-        return;
-      }
-      const validationMessage = resolveValidationMessage(result.data);
-      if (!result.data.valid || !result.data.compiled_plan) {
-        setLocalError(validationMessage || result.data.errors?.[0]?.message || 'Rule plan must be valid before scheduling.');
-        return;
-      }
-      if (validationMessage) {
-        setLocalError(validationMessage);
-      }
-      activeCompiledPlan = result.data.compiled_plan;
-      setCompiledPlan(activeCompiledPlan);
-      setPlanValidationError('');
+    const customQueryReady = isCustomQuery
+      && ruleQueryText.trim()
+      && compiledPlan
+      && isQueryValidationReady(queryValidation, compiledPlan)
+      && isSchedulePreflightReady(schedulePreflight);
+    if (customQueryReady) {
+      activeCompiledPlan = compiledPlan;
+    } else if (isCustomQuery && ruleQueryText.trim()) {
+      setLocalError(scheduleBlockReason || 'Strategy is not ready to schedule yet.');
+      return;
     } else if (isRuleBuilder && !activeCompiledPlan && ruleQueryText.trim()) {
       const result = await fetchJson<{
         valid: boolean;
@@ -1136,12 +1121,15 @@ const StrategySellForm: React.FC<Props> = ({
 
       <button type="submit" className="btn btn-primary strategy-submit" disabled={!canSchedule}>
         {isSubmitting
-          ? (submitProgress || 'Scheduling…')
+          ? 'Scheduling…'
           : (submitButtonLabel || STRATEGY_HELP[strategy]?.button || 'Schedule Order')}
       </button>
 
       {isSubmitting && submitProgress ? (
         <p className="strategy-submit-progress" aria-live="polite">{submitProgress}</p>
+      ) : null}
+      {!isSubmitting && scheduleBlockReason ? (
+        <p className="strategy-submit-progress strategy-submit-progress-muted" aria-live="polite">{scheduleBlockReason}</p>
       ) : null}
 
       {(submitStatus === 'success' || submitStatus === 'error') && submitStatusMessage ? (

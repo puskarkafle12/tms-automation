@@ -403,3 +403,38 @@
   gap: 0.5rem;
   flex-wrap: wrap;
 }
+
+.custom-query-preview-table-semantic {
+  min-width: 960px;
+}
+
+.custom-query-preview-stack {
+  min-width: 10rem;
+  line-height: 1.45;
+}
+
+.custom-query-preview-pre {
+  white-space: pre-wrap;
+}
+
+.custom-query-preview-label {
+  display: inline-block;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #656d76;
+  margin-right: 0.35rem;
+}
+
+.custom-query-preview-muted {
+  color: #656d76;
+  font-size: 0.8rem;
+  margin-top: 0.2rem;
+}
+
+.custom-query-preview-warning {
+  margin-top: 0.35rem;
+  color: #9a6700;
+  font-size: 0.8rem;
+}

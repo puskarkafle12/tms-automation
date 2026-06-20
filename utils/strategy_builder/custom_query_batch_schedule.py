@@ -193,6 +193,7 @@ async def _schedule_one_symbol(symbol: str, payload: Dict[str, Any], *, enforce_
         from main import (
             _apply_schedule_baseline_if_requested,
             _enforce_rule_based_schedule_preflight,
+            _scheduled_order_dedup_key,
             _persist_order_field_references,
             _validate_sell_lot_against_holdings,
             _validate_strategy_order,
@@ -220,13 +221,20 @@ async def _schedule_one_symbol(symbol: str, payload: Dict[str, Any], *, enforce_
             return {"symbol": symbol, "error": "User not found"}
 
         if order_data.order_type.lower() == "sell":
-            tms_user_instance = await get_cached_tms_user(user)
-            await _validate_sell_lot_against_holdings(order_data, tms_user_instance)
+            config = dict(order_data.strategy_config or {})
+            skip_holding_recheck = bool(payload.get("skip_preflight")) and bool(
+                config.get("schedule_preflight_ready")
+            )
+            if not skip_holding_recheck:
+                tms_user_instance = await get_cached_tms_user(user)
+                await _validate_sell_lot_against_holdings(order_data, tms_user_instance)
 
         order = ScheduledOrder(order_data)
         db.add(order)
         db.flush()
         await _persist_order_field_references(db, order, order_data)
+        order.strategy_config = dict(order.strategy_config or {})
+        order.strategy_config["schedule_dedup_key"] = _scheduled_order_dedup_key(order_data)
         db.commit()
         return {"symbol": symbol, "order_id": order.order_id}
     except Exception as exc:
