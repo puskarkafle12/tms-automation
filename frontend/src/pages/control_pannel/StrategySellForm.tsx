@@ -24,7 +24,7 @@ import StrategyCatalogModal from '../../components/StrategyCatalogModal';
 import CustomQueryEditor from '../../components/CustomQueryEditor';
 import TechnicalRuleBuilder from '../../components/TechnicalRuleBuilder';
 import ErrorMessage from '../../components/ErrorMessage';
-import { extractPlannedQtyFromCompiledPlan, DEFAULT_RULE_PLANNED_QTY, extractPlanSide, customQueryStrategyForSide, isCustomQueryStrategy, findBlockingValidationIssue, isQueryValidationReady, validatePlanSymbolsForSchedule, type PlanValidationSnapshot } from '../../lib/strategies/rulePlanHelpers';
+import { extractPlannedQtyFromCompiledPlan, DEFAULT_RULE_PLANNED_QTY, extractPlanSide, customQueryStrategyForSide, isCustomQueryStrategy, findBlockingValidationIssue, isQueryValidationReady, type PlanValidationSnapshot } from '../../lib/strategies/rulePlanHelpers';
 export type { StrategyPayload, StrategyType } from './strategyValidation';
 
 export const STRATEGY_HELP: Record<string, { helper: string; button: string }> = {
@@ -493,11 +493,6 @@ const StrategySellForm: React.FC<Props> = ({
     wrappedStrategyType,
   ]);
 
-  const knownBuySymbolSet = useMemo(
-    () => new Set((knownBuySymbols || []).map((symbol) => symbol.trim().toUpperCase()).filter(Boolean)),
-    [knownBuySymbols],
-  );
-
   const scheduleBlockReason = useMemo(() => {
     if (!clientId) {
       return 'Select a logged-in client before scheduling.';
@@ -516,18 +511,11 @@ const StrategySellForm: React.FC<Props> = ({
       if (!ruleQueryText.trim()) {
         return 'Enter a strategy query.';
       }
-      if (!isQueryValidationReady(queryValidation, compiledPlan)) {
-        return planValidationError || 'Fix all query validation errors before scheduling.';
-      }
-      const effectiveSide = extractPlanSide(compiledPlan) || queryPlanSide || side;
-      const symbolError = validatePlanSymbolsForSchedule(compiledPlan, effectiveSide, {
-        knownBuySymbols: knownBuySymbolSet,
-        holdingsBySymbol,
-        scriptListLoading: effectiveSide === 'buy' ? scriptListLoading : false,
-        holdingsLoading: effectiveSide === 'sell' ? holdingsLoading : false,
-      });
-      if (symbolError) {
-        return symbolError;
+      if (queryValidation && !isQueryValidationReady(queryValidation, compiledPlan)) {
+        const validationMessage = resolveValidationMessage(queryValidation) || planValidationError;
+        if (validationMessage) {
+          return validationMessage;
+        }
       }
       return '';
     }
@@ -555,17 +543,13 @@ const StrategySellForm: React.FC<Props> = ({
     availableQty,
     clientId,
     compiledPlan,
-    holdingsBySymbol,
     holdingsLoading,
     isCustomQuery,
     isRuleBased,
-    knownBuySymbolSet,
     planValidationError,
-    queryPlanSide,
     queryValidation,
     queryValidating,
     ruleQueryText,
-    scriptListLoading,
     scriptName,
     side,
     submitError,
@@ -673,6 +657,7 @@ const StrategySellForm: React.FC<Props> = ({
           form_symbol: scriptName,
           client_id: clientId,
           skip_live_checks: true,
+          check_holdings: resolvedCustomSide === 'sell',
           holdings_by_symbol: holdingsBySymbol,
         }),
       });
@@ -681,9 +666,12 @@ const StrategySellForm: React.FC<Props> = ({
         return;
       }
       const validationMessage = resolveValidationMessage(result.data);
-      if (!result.data.valid || !result.data.compiled_plan || validationMessage) {
+      if (!result.data.valid || !result.data.compiled_plan) {
         setLocalError(validationMessage || result.data.errors?.[0]?.message || 'Rule plan must be valid before scheduling.');
         return;
+      }
+      if (validationMessage) {
+        setLocalError(validationMessage);
       }
       activeCompiledPlan = result.data.compiled_plan;
       setCompiledPlan(activeCompiledPlan);
@@ -1123,9 +1111,7 @@ const StrategySellForm: React.FC<Props> = ({
       <button type="submit" className="btn btn-primary strategy-submit" disabled={!canSchedule}>
         {isSubmitting
           ? (submitProgress || 'Scheduling…')
-          : queryValidating
-            ? 'Checking query…'
-            : (submitButtonLabel || STRATEGY_HELP[strategy]?.button || 'Schedule Order')}
+          : (submitButtonLabel || STRATEGY_HELP[strategy]?.button || 'Schedule Order')}
       </button>
 
       {isSubmitting && submitProgress ? (

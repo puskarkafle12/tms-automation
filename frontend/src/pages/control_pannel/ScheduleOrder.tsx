@@ -739,12 +739,12 @@ const ScheduleOrder: React.FC = () => {
         return;
       }
       setIsSubmitting(true);
-      setSubmitProgress(`Checking ${eligibleSymbols.length} symbols before scheduling…`);
+      setSubmitProgress(`Validating and scheduling ${eligibleSymbols.length} symbols…`);
       try {
         const batch = await fetchJson<{
           status: string;
           scheduled: Array<{ order_id: number; symbol: string }>;
-          failed: Array<{ symbol: string; message: string }>;
+          failed: Array<{ symbol: string; message?: string; error?: string }>;
           ready: boolean;
         }>('/api/strategy-plans/schedule-batch/wait', {
           method: 'POST',
@@ -768,15 +768,29 @@ const ScheduleOrder: React.FC = () => {
           setStatusMessage(batch.error || 'Batch scheduling failed.');
           return;
         }
-        notifyScheduledOrdersChanged();
+        if (batch.data.scheduled?.length) {
+          notifyScheduledOrdersChanged();
+        }
         const scheduledSymbols = batch.data.scheduled?.map((item) => item.symbol).filter(Boolean) || [];
         const failedSymbols = batch.data.failed || [];
+        const rejectedSummary = failedSymbols
+          .map((item) => `${item.symbol} (${item.message || item.error || 'Rejected during validation'})`)
+          .join('; ');
+        if (batch.data.status === 'preflight_failed') {
+          setStatus('error');
+          setStatusMessage(
+            rejectedSummary
+              ? `Cannot schedule yet. Rejected: ${rejectedSummary}`
+              : 'Cannot schedule yet. Some symbols failed validation.',
+          );
+          return;
+        }
         if (failedSymbols.length) {
           setStatus('error');
           setStatusMessage(
             [
               scheduledSymbols.length ? `Scheduled: ${scheduledSymbols.join(', ')}` : '',
-              `Rejected: ${failedSymbols.map((item) => `${item.symbol} (${item.message})`).join('; ')}`,
+              `Rejected: ${rejectedSummary}`,
             ].filter(Boolean).join(' · '),
           );
         } else {

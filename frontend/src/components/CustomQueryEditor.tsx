@@ -124,6 +124,7 @@ const CustomQueryEditor: React.FC<Props> = ({
 
   const [queryText, setQueryText] = useState(initialQuery || DEFAULT_QUERY(side, formSymbol || 'CZBIL'));
   const [validation, setValidation] = useState<ValidationResponse | null>(null);
+  const validationRef = useRef<ValidationResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [autoValidating, setAutoValidating] = useState(false);
   const [error, setError] = useState('');
@@ -135,6 +136,8 @@ const CustomQueryEditor: React.FC<Props> = ({
   const [aiBusy, setAiBusy] = useState(false);
   const [aiPortalTarget, setAiPortalTarget] = useState<HTMLElement | null>(null);
   const validateRequestId = useRef(0);
+  const lastPreviewKeyRef = useRef('');
+  const skipNextAutoPreviewRef = useRef(false);
   const [validateDebounceMs, setValidateDebounceMs] = useState(
     () => readUiPortalSettings().customQueryValidateDebounceMs,
   );
@@ -162,6 +165,7 @@ const CustomQueryEditor: React.FC<Props> = ({
   }, [aiPortalTargetId]);
 
   useEffect(() => {
+    validationRef.current = validation;
     onPlanChangeRef.current({ queryText, compiledPlan: validation?.compiled_plan, validation });
   }, [queryText, validation]);
 
@@ -195,6 +199,19 @@ const CustomQueryEditor: React.FC<Props> = ({
       setBusy(false);
       setPreviewStatus('');
       onValidatingChangeRef.current?.(false);
+      return;
+    }
+
+    const previewKey = JSON.stringify({
+      query: trimmed,
+      side,
+      strategyType,
+      formSymbol: formSymbol || '',
+      clientId: clientId || '',
+      holdingsCount: holdingsBySymbol ? Object.keys(holdingsBySymbol).length : 0,
+      knownSymbolsCount: knownBuySymbols?.length || 0,
+    });
+    if (lastPreviewKeyRef.current === previewKey && validationRef.current) {
       return;
     }
 
@@ -232,6 +249,7 @@ const CustomQueryEditor: React.FC<Props> = ({
         return;
       }
       const data = result.data;
+      lastPreviewKeyRef.current = previewKey;
       setValidation(data);
       if (!data.valid && data.errors?.length) {
         setError(data.errors[0].message);
@@ -266,8 +284,10 @@ const CustomQueryEditor: React.FC<Props> = ({
   }, [busy]);
 
   useEffect(() => {
-    setValidation(null);
-    setError('');
+    if (skipNextAutoPreviewRef.current) {
+      skipNextAutoPreviewRef.current = false;
+      return undefined;
+    }
     const timer = window.setTimeout(() => {
       void runPreview(queryText);
     }, validateDebounceMs);
@@ -346,6 +366,7 @@ const CustomQueryEditor: React.FC<Props> = ({
           || `Strategy query generated${typeof data.ai_retry_count === 'number' && data.ai_retry_count > 0 ? ` after ${data.ai_retry_count} retry attempt(s)` : ''}.`,
       );
       startedPreview = true;
+      skipNextAutoPreviewRef.current = true;
       void runPreview(generated);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'AI request failed');
@@ -361,9 +382,10 @@ const CustomQueryEditor: React.FC<Props> = ({
 
   const previewRows = validation?.preview ?? [];
   const hasPreviewRows = previewRows.length > 0;
-  const visibleError = error && !isHoldingsValidationMessage(error) ? error : '';
-  const visibleErrors = (validation?.errors || []).filter((issue) => !isHoldingsValidationMessage(issue.message));
-  const visibleWarnings = (validation?.warnings || []).filter((warning) => !isHoldingsValidationMessage(warning.message));
+  const visibleError = error;
+  const visibleErrors = validation?.errors || [];
+  const visibleWarnings = validation?.warnings || [];
+  const aiVisibleError = error && !isHoldingsValidationMessage(error) ? error : '';
   const isSilentOk = Boolean(
     validation
     && validation.valid
@@ -391,7 +413,7 @@ const CustomQueryEditor: React.FC<Props> = ({
         </button>
       </div>
       {aiSummary ? <div className="custom-query-warning">{aiSummary}</div> : null}
-      {visibleError ? <div className="custom-query-error">{visibleError}</div> : null}
+      {aiVisibleError ? <div className="custom-query-error">{aiVisibleError}</div> : null}
     </div>
   );
 
