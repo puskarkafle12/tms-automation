@@ -6,7 +6,9 @@ from utils.strategy_builder.execution_depth import (
     resolve_rule_execution_price,
 )
 from utils.strategy_builder.strategy_parser import parse_strategy_query
-from utils.strategies.types import MarketSnapshot, OrderBookLevel
+from utils.strategy_builder.strategy_validator import validate_strategy_plan
+from utils.strategies.handlers import evaluate_rule_based_strategy
+from utils.strategies.types import MarketSnapshot, OrderBookLevel, OrderContext, ScannerMemory, ScriptDetails, StrategyConfig
 
 
 def _snapshot_with_depth(*, ltp: float = 200.0, top_buy_qty: int = 50, top_sell_qty: int = 40):
@@ -102,6 +104,88 @@ RULE "Depth Check" FOR SYMBOL "CZBIL" {
 """
         plan = parse_strategy_query(query)
         self.assertIsNotNone(plan.rules[0].require)
+
+    def test_depth_sell_query_executes_at_top_buy_end_to_end(self):
+        query = """
+STRATEGY_VERSION 1
+SIDE SELL
+RULE "Depth Sell" FOR SYMBOL "CZBIL" {
+    WHEN ltp > 0
+    REQUIRE market_depth_available = TRUE AND top_buy_quantity >= 10
+    ORDER TOP_BUY_QTY PRICE TOP_BUY
+    EXECUTE ONCE
+}
+"""
+        plan = parse_strategy_query(query)
+        validation = validate_strategy_plan(
+            plan,
+            strategy_type="Custom Query Sell",
+            known_symbols={"CZBIL"},
+            holdings={"CZBIL": 100},
+            holdings_checked=True,
+        )
+        self.assertTrue(validation.valid, validation.errors)
+
+        decision = evaluate_rule_based_strategy(
+            OrderContext(
+                strategy_type="Custom Query Sell",
+                canonical_strategy="Custom Query Sell",
+                side="sell",
+                symbol="CZBIL",
+                qty=100,
+                remaining_qty=100,
+                target_price=199.5,
+                config=StrategyConfig(extra={"compiled_plan": plan.model_dump(), "execution_mode": "live"}),
+            ),
+            _snapshot_with_depth(top_buy_qty=30),
+            ScannerMemory(holding_qty=80),
+            ScriptDetails(available=True),
+        )
+
+        self.assertEqual(decision.action, "EXECUTE")
+        self.assertEqual(decision.price, 199.5)
+        self.assertEqual(decision.qty, 30)
+        self.assertEqual(decision.source, "Top Buy")
+
+    def test_depth_buy_query_executes_at_top_sell_end_to_end(self):
+        query = """
+STRATEGY_VERSION 1
+SIDE BUY
+RULE "Depth Buy" FOR SYMBOL "CZBIL" {
+    ELIGIBILITY market_depth_available = TRUE
+    SIGNAL top_sell_quantity >= 10 AND spread_percent <= 1
+    ORDER TOP_SELL_QTY PRICE TOP_SELL
+    EXECUTE ONCE
+}
+"""
+        plan = parse_strategy_query(query)
+        validation = validate_strategy_plan(
+            plan,
+            strategy_type="Custom Query Buy",
+            known_symbols={"CZBIL"},
+        )
+        self.assertTrue(validation.valid, validation.errors)
+
+        decision = evaluate_rule_based_strategy(
+            OrderContext(
+                strategy_type="Custom Query Buy",
+                canonical_strategy="Custom Query Buy",
+                side="buy",
+                symbol="CZBIL",
+                qty=100,
+                remaining_qty=100,
+                target_price=200.5,
+                config=StrategyConfig(extra={"compiled_plan": plan.model_dump(), "execution_mode": "live"}),
+            ),
+            _snapshot_with_depth(top_sell_qty=40),
+            ScannerMemory(),
+            ScriptDetails(available=True),
+        )
+
+        self.assertEqual(decision.action, "EXECUTE")
+        self.assertEqual(decision.price, 200.5)
+        self.assertEqual(decision.qty, 40)
+        self.assertEqual(decision.source, "Top Sell")
 
 
 if __name__ == "__main__":

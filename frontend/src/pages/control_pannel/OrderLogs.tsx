@@ -105,6 +105,8 @@ interface ScheduledOrderRow {
   scanning_count?: number;
   tms_scan_count?: number;
   nepse_alpha_scan_count?: number;
+  nepse_alpha_last_source?: string | null;
+  nepse_alpha_last_fetched_at?: number | string | null;
   current_price?: number | null;
   last_checked_ltp?: number | null;
   last_scan_at?: ApiTimeValue;
@@ -291,6 +293,13 @@ const addLiveMonitoringDetails = (
   addDetail(details, 'Status Detail', order.display_error);
   addDetail(details, 'TMS Price Scans', order.tms_scan_count ?? order.scanning_count, formatScanCount);
   addDetail(details, 'Nepse Alpha Scans', order.nepse_alpha_scan_count, formatScanCount);
+  addDetail(
+    details,
+    'Nepse Alpha Source',
+    order.nepse_alpha_last_source
+      ? `${String(order.nepse_alpha_last_source).toUpperCase()}${order.nepse_alpha_last_fetched_at ? ' · refreshed' : ''}`
+      : undefined,
+  );
   addDetail(details, 'Live LTP', order.current_price ?? order.last_checked_ltp, formatCurrency);
   if (order.last_scan_at) {
     const absolute = formatDateTime(order.last_scan_at);

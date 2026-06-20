@@ -207,7 +207,7 @@ def validate_strategy_plan(
                     entry = get_catalog_entry(rule.use_strategy, side) if rule.use_strategy else None
                     message = (
                         f"{normalized} is not in your DP holdings for this client. "
-                        "Select the correct client or update holdings before scheduling a SELL query."
+                        "Select the correct client, update holdings, or ask the user for sellable quantity before scheduling a SELL query."
                     )
                     if entry and entry.requires_holdings:
                         message = (

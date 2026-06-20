@@ -84,6 +84,30 @@ class ScheduleBaselineTest(unittest.TestCase):
         self.assertEqual(config["fixed_symbols"], ["API", "NABIL"])
         self.assertIn("baseline_warning", config)
 
+    def test_merge_baseline_into_order_fields_freezes_reference_values(self):
+        from utils.strategy_builder.schedule_baseline import merge_baseline_into_order_fields
+
+        baseline = {
+            "symbol": "API",
+            "reference_ltp": 500.0,
+            "reference_ltp_captured_at": datetime.utcnow().isoformat(),
+            "drop_percent": 10.0,
+            "trigger_price": 450.0,
+        }
+        order_data = MagicMock(
+            reference_ltp=None,
+            trigger_price=None,
+            drop_percent=None,
+            reference_ltp_captured_at=None,
+        )
+
+        merge_baseline_into_order_fields(order_data, baseline)
+
+        self.assertEqual(order_data.reference_ltp, 500.0)
+        self.assertEqual(order_data.trigger_price, 450.0)
+        self.assertEqual(order_data.drop_percent, 10.0)
+        self.assertIsNotNone(order_data.reference_ltp_captured_at)
+
 
 class RuleExpirationTest(unittest.TestCase):
     def _ctx(self, *, expiry_action="CANCEL", extra=None):

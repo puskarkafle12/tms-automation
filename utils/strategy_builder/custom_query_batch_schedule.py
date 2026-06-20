@@ -12,8 +12,18 @@ from schemas.schemas import OrderCreateRequest
 
 logger = logging.getLogger(__name__)
 
-MAX_BATCH_SYMBOLS = 20
 PARALLEL_LIMIT = 8
+SCHEDULE_RETRY_ATTEMPTS = 3
+SCHEDULE_RETRY_BACKOFF_SECONDS = 0.75
+TRANSIENT_SCHEDULE_ERROR_MARKERS = (
+    "server disconnected",
+    "connection reset",
+    "connection aborted",
+    "connection closed",
+    "timeout",
+    "timed out",
+    "temporarily unavailable",
+)
 
 
 class CustomQueryBatchError(Exception):
@@ -32,8 +42,6 @@ def _normalize_symbols(symbols: List[str]) -> List[str]:
         normalized.append(symbol)
     if not normalized:
         raise CustomQueryBatchError("At least one symbol is required.")
-    if len(normalized) > MAX_BATCH_SYMBOLS:
-        raise CustomQueryBatchError(f"A maximum of {MAX_BATCH_SYMBOLS} symbols is supported per batch.")
     return normalized
 
 
@@ -86,6 +94,11 @@ def _extract_error_message(exc: Exception) -> str:
         if detail:
             return str(detail)
     return message
+
+
+def _is_transient_schedule_error(message: str) -> bool:
+    lowered = str(message or "").lower()
+    return any(marker in lowered for marker in TRANSIENT_SCHEDULE_ERROR_MARKERS)
 
 
 async def _preflight_one_symbol(symbol: str, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -223,28 +236,45 @@ async def _schedule_one_symbol(symbol: str, payload: Dict[str, Any], *, enforce_
         db.close()
 
 
+async def _schedule_one_symbol_with_retries(symbol: str, payload: Dict[str, Any], *, enforce_preflight: bool = True) -> Dict[str, Any]:
+    last_result: Dict[str, Any] = {}
+    for attempt in range(1, SCHEDULE_RETRY_ATTEMPTS + 1):
+        result = await _schedule_one_symbol(symbol, payload, enforce_preflight=enforce_preflight)
+        if result.get("order_id"):
+            if attempt > 1:
+                result["retry_attempts"] = attempt
+            return result
+        message = str(result.get("message") or result.get("error") or "")
+        last_result = result
+        if not _is_transient_schedule_error(message) or attempt >= SCHEDULE_RETRY_ATTEMPTS:
+            return result
+        await asyncio.sleep(SCHEDULE_RETRY_BACKOFF_SECONDS * attempt)
+    return last_result
+
+
 async def run_custom_query_batch(payload: Dict[str, Any]) -> Dict[str, Any]:
     symbols = _normalize_symbols(list(payload.get("symbols") or []))
     semaphore = asyncio.Semaphore(PARALLEL_LIMIT)
 
-    batch_preflight = await _preflight_batch(payload, symbols)
-    if not batch_preflight.get("ready"):
-        failed_preflight = batch_preflight.get("failed") or []
-        logger.info(
-            "Custom query batch preflight blocked scheduling: %s failed (client=%s)",
-            len(failed_preflight),
-            payload.get("client_id"),
-        )
-        return {
-            "status": "preflight_failed",
-            "scheduled": [],
-            "failed": failed_preflight,
-            "ready": False,
-        }
+    if not payload.get("skip_preflight"):
+        batch_preflight = await _preflight_batch(payload, symbols)
+        if not batch_preflight.get("ready"):
+            failed_preflight = batch_preflight.get("failed") or []
+            logger.info(
+                "Custom query batch preflight blocked scheduling: %s failed (client=%s)",
+                len(failed_preflight),
+                payload.get("client_id"),
+            )
+            return {
+                "status": "preflight_failed",
+                "scheduled": [],
+                "failed": failed_preflight,
+                "ready": False,
+            }
 
     async def _schedule_guarded(symbol: str) -> Dict[str, Any]:
         async with semaphore:
-            return await _schedule_one_symbol(symbol, payload, enforce_preflight=False)
+            return await _schedule_one_symbol_with_retries(symbol, payload, enforce_preflight=False)
 
     results = list(await asyncio.gather(*[_schedule_guarded(symbol) for symbol in symbols]))
     scheduled = [item for item in results if item.get("order_id")]

@@ -34,6 +34,7 @@ class StrategyQueryRequest(BaseModel):
     check_holdings: bool = False
     holdings_by_symbol: Optional[Dict[str, int]] = None
     known_symbols: Optional[List[str]] = None
+    include_schedule_preflight: bool = False
 
 
 class StrategyPlanCreateRequest(StrategyQueryRequest):
@@ -77,6 +78,7 @@ class CustomQueryBatchScheduleRequest(BaseModel):
     order_type: str = "buy"
     order_fields: Dict[str, Any] = Field(default_factory=dict)
     security_details_by_symbol: Optional[Dict[str, Dict[str, Any]]] = None
+    skip_preflight: bool = False
 
 
 @router.get("/strategy-builder/fields")
@@ -316,6 +318,21 @@ async def preview_plan(body: StrategyQueryRequest, db: Session = Depends(get_db)
         validation["preview_reference_note"] = (
             "Preview uses live quotes as temporary REFERENCE values per symbol. "
             "Final reference snapshots are captured once at schedule time."
+        )
+    if body.include_schedule_preflight:
+        from utils.strategy_builder.schedule_preflight import run_schedule_preflight
+
+        validation["schedule_preflight"] = await run_schedule_preflight(
+            query_text=body.query_text or None,
+            compiled_plan=validation["compiled_plan"],
+            strategy_type=body.strategy_type,
+            client_id=body.client_id,
+            script_name=body.form_symbol,
+            db=db,
+            holdings=body.holdings_by_symbol,
+            capture_reference_ltp=body.capture_reference_ltp,
+            drop_percent=body.drop_percent,
+            fixed_symbols=body.fixed_symbols,
         )
     return validation
 

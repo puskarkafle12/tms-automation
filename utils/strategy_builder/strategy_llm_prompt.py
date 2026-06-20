@@ -11,7 +11,6 @@ from typing import Dict, List, Optional
 
 from utils.strategy_builder.constants import DEFAULT_RULE_ORDER_QUANTITY
 from utils.strategy_builder.feature_registry import (
-    MARKET_DEPTH_FUNCTIONS,
     RUNTIME_FUNCTIONS,
     UNSUPPORTED_DATA_FIELDS,
     classify_field,
@@ -26,6 +25,8 @@ _PROMPT_FIELD_CATEGORIES = {
     "live",
     "derived_live",
     "derived_statistical",
+    "market_depth",
+    "liquidity",
     "position",
 }
 
@@ -60,6 +61,8 @@ def _field_registry_section() -> str:
         "live": "TMS LIVE QUOTE",
         "derived_live": "DERIVED LIVE (from TMS quote)",
         "derived_statistical": "DERIVED STATISTICAL (TMS LTP + Nepse Alpha 52w range)",
+        "market_depth": "TMS MARKET DEPTH (from stock quote topBuy/topSell)",
+        "liquidity": "DERIVED MARKET DEPTH / LIQUIDITY",
         "position": "POSITION STATE (after entry)",
     }
     sections: List[str] = []
@@ -71,6 +74,8 @@ def _field_registry_section() -> str:
         "live",
         "derived_live",
         "derived_statistical",
+        "market_depth",
+        "liquidity",
         "position",
     ):
         lines = by_category.get(category)
@@ -98,15 +103,14 @@ def _function_section() -> str:
 
 def _forbidden_section() -> str:
     blocked_fields = sorted(UNSUPPORTED_DATA_FIELDS)
-    blocked_functions = sorted(MARKET_DEPTH_FUNCTIONS)
     return (
         "FORBIDDEN — never use these in a query and never suggest them as alternatives:\n"
         "Fields:\n"
         + "\n".join(f"- {item}" for item in blocked_fields)
         + "\nFunctions:\n"
-        + "\n".join(f"- {item}" for item in blocked_functions)
+        "- (none currently beyond unregistered/custom functions)\n"
         + "\nOther blocked indicators: technical_adx, adx, ADX, and any custom indicator not in FIELD REGISTRY.\n"
-        "Market depth / order book is NOT available for strategy queries — use ltp, volume, high, low instead."
+        "Market depth is available only through registered stock quote fields/functions; do not invent unlisted depth names."
     )
 
 
@@ -119,19 +123,40 @@ def _unsupported_section() -> str:
     )
 
 
+def _strict_output_contract_section() -> str:
+    return """STRICT OUTPUT CONTRACT — this is the final gate before answering:
+1. Output exactly one Strategy Query Language document, or exactly one refusal sentence.
+2. Valid query output must start with STRATEGY_VERSION 1 on the first non-empty line and SIDE BUY or SIDE SELL on the next non-empty line.
+3. Do not output markdown fences, headings, bullets, JSON, YAML, comments, explanations, apologies, or prose around the query.
+4. Do not output placeholders such as <symbol>, SYMBOL, YOUR_SYMBOL, target_price, trigger_price, quantity, or TODO.
+5. Do not guess missing numbers. If quantity is missing, omit ORDER QUANTITY and let the runtime default apply.
+6. Use only exact uppercase quoted script symbols supplied by the user or the current form symbol.
+7. Use only exact field keys from FIELD REGISTRY. Field keys are lowercase snake_case and case-sensitive.
+8. Use only exact function names from SUPPORTED FUNCTIONS. Function names are uppercase and case-sensitive.
+9. Function arguments must be named. Operator argument values must be quoted strings: operator="gte", not operator=gte.
+10. Enum values must match ENUM TEXT VALUES exactly, including case, e.g. "Bullish", "Bearish", "above", "below".
+11. For unavailable requests, output only: This query is not supported — <name> is not available.
+12. Never produce a query that contains a forbidden, unknown, or approximate field/function/strategy name."""
+
+
 def _hard_rules_section() -> str:
     return """HARD RULES — follow without exception:
 1. Use ONLY field keys from FIELD REGISTRY and functions from SUPPORTED FUNCTIONS.
-2. If the user asks for market depth, order book, spread, best bid/ask, ADX, or any unlisted indicator:
+2. If the user asks for ADX or any unlisted indicator/field/function:
    - Respond with a clear refusal: "This query is not supported — <name> is not available."
    - Do NOT output a Strategy Query Language plan that references those fields or functions.
-   - Suggest the closest registered alternative (e.g. technical_rsi_14 instead of ADX, volume instead of depth).
+   - Suggest the closest registered alternative (e.g. technical_rsi_14 instead of ADX, registered depth fields instead of raw order-book names).
 3. Never invent field names, SQL, Python, or indicators outside the registries.
 4. Every RULE must declare FOR SYMBOL targets and include ORDER sizing.
 5. A RULE must include at least one of: USE STRATEGY "...", WHEN <expr>, or ELIGIBILITY + SIGNAL.
 6. USE STRATEGY may combine with optional ELIGIBILITY / WHEN / SIGNAL / REQUIRE gates (gates run first).
 7. Never nest Custom Query / Technical Buy/Sell inside USE STRATEGY — those are rule-based types, not delegatable.
-8. Output only valid Strategy Query Language text unless the user explicitly asks for an explanation."""
+8. Symbols must be exact uppercase NEPSE/TMS script codes in double quotes, copied only from the user's requested symbols or the current form symbol.
+9. For multi-symbol requests, use FOR SYMBOL IN ("NABIL", "EBL") or separate RULE blocks; never invent, lowercase, or rename symbols.
+10. Use quoted operator strings inside function calls: operator="gte" / "lte" / "gt" / "lt" / "eq" / "neq".
+11. Use positive numeric literals only; do not write negative numbers like -3. Prefer equivalent comparisons such as field < 0.
+12. SELL queries must stay within the user's sellable DP holdings. If the user has not provided the holding quantity, ask for it before generating a sell quantity. Use SELL ALL_AVAILABLE or SELL PERCENT_OF_HOLDING only when the user explicitly wants those modes.
+13. Output only valid Strategy Query Language text unless the user explicitly asks for an explanation."""
 
 
 def _data_sources_section() -> str:
@@ -144,11 +169,14 @@ def _data_sources_section() -> str:
 5. TMS live quote — ltp, open, high, low, volume, previous_close, change, change_percent, last_traded_at
 6. Derived live — computed from TMS quote: distance_from_day_high_percent, opening_gap_percent,
    position_in_intraday_range_percent, intraday_range_percent, etc.
-7. Derived statistical — computed from TMS LTP + Nepse 52w range: position_in_52_week_range_percent,
+7. TMS market depth — computed from stock_quote topBuy/topSell: market_depth_available, best_bid, best_ask,
+   spread, spread_percent, top_buy_quantity, top_sell_quantity, total_buy_quantity, total_sell_quantity,
+   buy_sell_quantity_ratio, order_book_imbalance, and DEPTH_* functions.
+8. Derived statistical — computed from TMS LTP + Nepse 52w range: position_in_52_week_range_percent,
    distance_from_52_week_high_percent, distance_from_52_week_low_percent, etc.
-8. Position state — after a buy entry: profit_percent, effective_stop_price, drawdown_from_peak_percent, etc.
+9. Position state — after a buy entry: profit_percent, effective_stop_price, drawdown_from_peak_percent, etc.
 
-NOT available: market depth, order book levels, best_bid, best_ask, spread, DEPTH_* functions, ADX."""
+NOT available: ADX, unregistered indicators, or raw order-book level fields outside the registered depth fields/functions."""
 
 
 def _scheduling_preflight_section() -> str:
@@ -156,7 +184,7 @@ def _scheduling_preflight_section() -> str:
 A query that parses but cannot be monitored will NOT be placed. Preflight requires:
 
 1. Parser + validator pass (only registered, supported fields/functions; SIDE must match portal side).
-   Queries using market depth, ADX, or other blocked fields/functions are rejected immediately.
+   Queries using ADX or other blocked/unregistered fields/functions are rejected immediately.
 2. TMS client selected and logged in (monitoring needs an active TMS session).
 3. Nepse Alpha direct fields: every symbol in FOR SYMBOL / FOR SYMBOL IN (...) must have Nepse Alpha data
    for each technical_*, fundamental_*, statistical_*, or sector_* field used in ELIGIBILITY, SIGNAL, REQUIRE,
@@ -164,9 +192,11 @@ A query that parses but cannot be monitored will NOT be placed. Preflight requir
    with a message naming the symbol and missing fields.
 4. Derived statistical fields (e.g. position_in_52_week_range_percent): computed from live TMS LTP plus
    Nepse Alpha fifty_two_week_high / fifty_two_week_low. These are NOT Nepse Alpha fields — preflight checks
-   the 52-week prerequisites and live quote separately.
-5. TMS live quote: if the query uses live or derived-live fields (ltp, volume, open, high, low, change_percent,
-   distance_from_day_high_percent, etc.), preflight fetches a live TMS quote for each symbol.
+   the 52-week prerequisites and live quote separately. If Nepse Alpha provides both 52-week values, this must schedule without a 52-week warning.
+   Only genuinely missing/unparseable 52-week values may produce a warning.
+5. TMS live quote and market depth: if the query uses live, derived-live, or market-depth fields/functions
+   (ltp, volume, open, high, low, change_percent, distance_from_day_high_percent, market_depth_available,
+   best_bid, top_buy_quantity, DEPTH_QUANTITY, etc.), preflight fetches a live TMS quote for each symbol.
    Missing quote blocks scheduling.
 
 When writing queries:
@@ -179,7 +209,8 @@ When writing queries:
 USE STRATEGY preflight notes:
 - Delegated strategies run only after optional ELIGIBILITY / WHEN / SIGNAL / REQUIRE gates pass.
 - Strategies marked requires Nepse Alpha (Quality Pullback, Mean Reversion, Technical Weakness) need Nepse Alpha at runtime.
-- Order Book Strength Buy requires live market depth at runtime (not available in query conditions — use USE STRATEGY only).
+- Order Book Strength Buy requires live market depth at runtime. Custom query conditions can also use registered
+  market-depth fields/functions from the TMS stock quote.
 - SELL delegated strategies require sellable DP holdings for the symbol.
 - Strategy params (TARGET_PRICE, STOP_LOSS_PRICE, etc.) are validated at parse/schedule time — include all required * params.
 
@@ -192,6 +223,7 @@ Schedule-time field references (preferred for pullback / fixed baseline rules):
 - Live ltp (and other live fields) stay dynamic on every scan; REFERENCE(field=...) stays fixed until explicitly refreshed.
 - Do NOT guess numeric LTP, symbols, quantities, or expiration timestamps.
 - Expiration (expires_at, expiration_action) is configured outside the query in schedule settings, not with EXPIRES_AT query syntax.
+- SELL schedules should not guess quantity. If the user does not tell you the sellable holding amount, ask first or choose an all-available/percent-of-holding style only when explicitly requested.
 
 Legacy schedule-time drop baseline (older orders only):
 - Some existing orders use capture_reference_ltp with literal compiled triggers; new queries should prefer REFERENCE(field=ltp) instead."""
@@ -376,6 +408,11 @@ preview, and schedule preflight — use only keys listed in FIELD REGISTRY, SUPP
 Goal: produce a valid STRATEGY_VERSION 1 query for SIDE {side_upper}.{form_note}
 
 ================================================================================
+STRICT OUTPUT CONTRACT
+================================================================================
+{_strict_output_contract_section()}
+
+================================================================================
 HARD RULES
 ================================================================================
 {_hard_rules_section()}
@@ -456,13 +493,19 @@ Function calls — ALWAYS use named arguments:
 - AVERAGE(field=ltp, window=5) | MIN_VALUE | MAX_VALUE | SUM_VALUE | STDDEV | SLOPE | TREND
 - REFERENCE(field=<registered_field>) — schedule-time snapshot; stays fixed until refresh
 - REFERENCE(field=ltp) * 0.90 — compare live LTP to 90% of captured schedule-time LTP
-- DEPTH_IMBALANCE(levels=2) | DEPTH_QUANTITY(side="BUY", levels=3) | DEPTH_ORDER_COUNT(side="SELL", levels=2)
+- DEPTH_QUANTITY(side="BUY", levels=3, operator="gte", threshold=1000)
+- DEPTH_ORDER_COUNT(side="SELL", levels=3, operator="gte", threshold=2)
+- DEPTH_IMBALANCE(levels=2, operator="gte", threshold=0.2)
+- DEPTH_IMBALANCE_REMAINS_ABOVE(levels=2, threshold=0.2, scans=2)
+- DEPTH_PRESSURE_TREND(levels=3, scans=3, value="BUYING")
 - SPREAD_REMAINS_BELOW(threshold=0.5, scans=2)
-- SECTOR_POSITION(field=ltp, operator=gte, threshold=80)
-- UNIVERSE_PERCENTILE(field=volume, operator=gte, threshold=80)   # preview only — not schedulable
-- SECTOR_PERCENTILE(field=change_percent, operator=gte, threshold=70)   # preview only — not schedulable
+- SECTOR_POSITION(field=ltp, operator="gte", threshold=80)
+- UNIVERSE_PERCENTILE(field=volume, operator="gte", threshold=80)   # preview only — not schedulable
+- SECTOR_PERCENTILE(field=change_percent, operator="gte", threshold=70)   # preview only — not schedulable
 
 Do NOT use positional-only function args like CONSECUTIVE_RISES(ltp, count=2).
+Depth functions must use named args and registered names only; use top_buy_quantity/top_sell_quantity for top-level qty checks.
+Operator args inside functions must be quoted strings, e.g. operator="gte". Unquoted operator=gte is parsed as a field and is invalid.
 
 ================================================================================
 ORDER SIZING MODES (SIDE {side_upper})
@@ -486,9 +529,9 @@ Notes:
 - ORDER PARTIAL_TOP_BUY 100 PRICE TOP_BUY — sell min(100, holding, top_buy_quantity)
 - ORDER TOP_SELL_QTY PRICE TOP_SELL — buy quantity = top sell level qty
 - ORDER PARTIAL_TOP_SELL 50 PRICE TOP_SELL — buy min(50, top_sell_quantity)
+- REQUIRE market_depth_available = TRUE before depth-dependent signals/orders
 - REQUIRE top_buy_quantity >= 10 — ensure top-of-book can absorb size before selling
 - REQUIRE order_quantity_to_top_buy_ratio <= 1 — order fits in top buy level
-- Use market_depth_available = TRUE when depth is required; depth may be empty outside live session
 
 ================================================================================
 POSITION PROTECTION (BUY entries — optional, before RULEs)
@@ -541,7 +584,7 @@ FORBIDDEN / UNSUPPORTED — REFUSE THESE
 {_unsupported_section()}
 
 If the user asks for unavailable indicators, respond that the query is not supported and suggest
-the closest registered alternative (e.g. technical_rsi_14 instead of ADX, volume instead of depth).
+the closest registered alternative (e.g. technical_rsi_14 instead of ADX, registered depth fields/functions for depth).
 Do NOT output a query containing forbidden fields or functions.
 
 ================================================================================
@@ -678,7 +721,7 @@ STRATEGY_VERSION 1
 SIDE SELL
 RULE "Top Buyer Partial" FOR SYMBOL "CZBIL" {{
     WHEN ltp > 0
-    REQUIRE market_depth_available = TRUE AND top_buy_quantity > 0
+    REQUIRE market_depth_available = TRUE AND top_buy_quantity >= 10
     ORDER PARTIAL_TOP_BUY 100 PRICE TOP_BUY
     EXECUTE ONCE
 }}
@@ -751,10 +794,12 @@ COMMON MISTAKES (avoid)
 ================================================================================
 - SIDE mismatch (BUY rules when portal side is SELL)
 - SQL/Python syntax
-- Unknown or forbidden fields (technical_adx, adx, market_depth_available, best_bid, best_ask, spread)
-- Forbidden functions (DEPTH_IMBALANCE, DEPTH_QUANTITY, SPREAD_REMAINS_BELOW, etc.)
+- Unknown or forbidden fields (technical_adx, adx, or any field not in FIELD REGISTRY)
+- Unknown/custom functions not listed in SUPPORTED FUNCTIONS
 - Wrong enum strings for MACD/SMA/volume trend
 - Positional function args instead of field= / count= named args
+- Unquoted function operator args such as operator=gte; use operator="gte"
+- Placeholder names such as <symbol>, SYMBOL, trigger_price, target_price, quantity, or TODO
 - Missing ORDER clause
 - Missing FOR SYMBOL target
 - Combining ELIGIBILITY and WHEN without SIGNAL (use ELIGIBILITY+SIGNAL OR just WHEN)
@@ -766,6 +811,9 @@ COMMON MISTAKES (avoid)
 - Referencing Nepse Alpha fields without confirming symbols are listed in FOR SYMBOL
 - Expecting scheduling when TMS client is not logged in or live/Nepse Alpha data is missing
 - Using UNIVERSE_PERCENTILE or SECTOR_PERCENTILE in scheduled single-symbol orders
+- Inventing depth field names instead of market_depth_available, best_bid, best_ask, top_buy_quantity, top_sell_quantity, etc.
+- Inventing symbols not provided by the user or current form
+- Using unquoted/lowercase symbols instead of exact uppercase quoted script codes
 
 Output only the final Strategy Query Language text. No markdown fences. No explanation unless asked.
 """

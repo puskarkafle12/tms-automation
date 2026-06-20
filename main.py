@@ -67,6 +67,10 @@ from utils.external_data_sources.nepse_alpha.query_parser import ScreenerQueryEr
 from utils.external_data_sources.nepse_alpha.screener import get_field_catalog, get_screener_query_spec, run_stock_screener
 from utils.stock_screener_symbols import resolve_screener_symbols, screener_universe_label
 from utils.strategy_builder.api import router as strategy_builder_router
+from utils.strategy_builder.reference_display import (
+    display_values_for_scheduled_order,
+    display_values_from_strategy_config,
+)
 
 app = FastAPI(debug=True)
 app.include_router(strategy_builder_router)
@@ -717,6 +721,20 @@ def _serialize_scheduled_order(order: ScheduledOrder) -> dict:
     def ts(value):
         return format_api_timestamp(value)
 
+    reference_display = display_values_from_strategy_config(
+        strategy_config=dict(order.strategy_config or {}),
+        symbol=order.symbol or order.script_name,
+    )
+    display_reference_ltp = order.reference_ltp
+    if display_reference_ltp is None:
+        display_reference_ltp = reference_display.reference_ltp
+    display_trigger_price = order.trigger_price
+    if display_trigger_price is None:
+        display_trigger_price = reference_display.trigger_price
+    display_reference_captured_at = order.reference_ltp_captured_at
+    if display_reference_captured_at is None:
+        display_reference_captured_at = reference_display.reference_ltp_captured_at
+
     return {
         "order_id": order.order_id,
         "client_id": order.client_id,
@@ -757,9 +775,9 @@ def _serialize_scheduled_order(order: ScheduledOrder) -> dict:
         "failed_reason": order.failed_reason,
         "expiry_time": ts(order.expiry_time),
         "expiry_action": order.expiry_action,
-        "reference_ltp": order.reference_ltp,
-        "trigger_price": order.trigger_price,
-        "reference_ltp_captured_at": ts(order.reference_ltp_captured_at),
+        "reference_ltp": display_reference_ltp,
+        "trigger_price": display_trigger_price,
+        "reference_ltp_captured_at": ts(display_reference_captured_at),
         "drop_percent": order.drop_percent,
         "max_allowed_slippage_percent": order.max_allowed_slippage_percent,
         "emergency_execution": order.emergency_execution,
@@ -855,6 +873,9 @@ def _validate_strategy_order(order_data: OrderCreateRequest) -> None:
 
 
 async def _validate_sell_lot_against_holdings(order_data: OrderCreateRequest, tms_user: TmsUser) -> None:
+    from utils.strategy_builder.execution_sizing import resolve_order_quantity
+    from utils.strategy_builder.strategy_models import StrategyPlanAST
+
     security_details = order_data.security_details or {}
     odd_lot_allowed = bool(security_details.get("odd_lot_allowed") or security_details.get("oddLotAllowed"))
     if odd_lot_allowed:
@@ -873,15 +894,43 @@ async def _validate_sell_lot_against_holdings(order_data: OrderCreateRequest, tm
 
     if holding_qty <= 0:
         raise HTTPException(status_code=400, detail=f"{order_data.script_name} is not available in DP holdings.")
-    if order_data.qty > holding_qty:
+
+    desired_qty = int(order_data.qty or 0)
+    config = dict(order_data.strategy_config or {})
+    compiled_plan = config.get("compiled_plan")
+    if compiled_plan:
+        try:
+            plan = StrategyPlanAST.model_validate(compiled_plan)
+            symbol = normalized_symbol
+            for rule in plan.rules:
+                if symbol not in {item.upper() for item in rule.symbols} or not rule.order:
+                    continue
+                desired_qty = resolve_order_quantity(
+                    order_mode=rule.order.mode,
+                    order_value=rule.order.value,
+                    ltp=None,
+                    holding_qty=holding_qty,
+                    board_lot=lot_size,
+                    form_qty=int(order_data.qty or 0),
+                )
+                break
+        except Exception:
+            desired_qty = int(order_data.qty or 0)
+
+    if desired_qty <= 0:
+        return
+    if desired_qty > holding_qty:
         raise HTTPException(status_code=400, detail=f"Sell quantity cannot exceed DP holding quantity ({holding_qty}).")
 
-    normalized = normalize_sell_qty(order_data.qty, holding_qty, lot_size)
-    if not normalized.get("is_sell_all") and normalized.get("qty") != order_data.qty:
+    normalized = normalize_sell_qty(desired_qty, holding_qty, lot_size)
+    if not normalized.get("is_sell_all") and normalized.get("qty") != desired_qty:
         raise HTTPException(
             status_code=400,
             detail=normalized.get("error") or normalized.get("warning") or "Sell quantity violates board-lot rules.",
         )
+    if compiled_plan:
+        order_data.qty = int(normalized.get("qty") or desired_qty)
+        order_data.remaining_quantity = order_data.qty
 
 
 async def _get_script_high(tms_user: TmsUser, script_name: str) -> Optional[float]:
@@ -1735,6 +1784,16 @@ async def get_order_status_logs(
             last_monitor_message=last_monitor_message,
             current_price=current_price_val,
         )
+        reference_display = display_values_for_scheduled_order(db, order)
+        display_reference_ltp = order.reference_ltp
+        if display_reference_ltp is None:
+            display_reference_ltp = reference_display.reference_ltp
+        display_trigger_price = order.trigger_price
+        if display_trigger_price is None:
+            display_trigger_price = reference_display.trigger_price
+        display_reference_captured_at = order.reference_ltp_captured_at
+        if display_reference_captured_at is None:
+            display_reference_captured_at = reference_display.reference_ltp_captured_at
         scheduled_payload.append({
             "order_id": order.order_id,
             "client_id": order.client_id,
@@ -1765,9 +1824,9 @@ async def get_order_status_logs(
             "executed_at": format_api_timestamp(order.executed_at),
             "expiry_time": format_api_timestamp(order.expiry_time),
             "expiry_action": order.expiry_action,
-            "reference_ltp": order.reference_ltp,
-            "trigger_price": order.trigger_price,
-            "reference_ltp_captured_at": format_api_timestamp(order.reference_ltp_captured_at),
+            "reference_ltp": display_reference_ltp,
+            "trigger_price": display_trigger_price,
+            "reference_ltp_captured_at": format_api_timestamp(display_reference_captured_at),
             "drop_percent": order.drop_percent,
             "max_allowed_slippage_percent": order.max_allowed_slippage_percent,
             "user_allocation": order.user_allocation,
@@ -1776,6 +1835,8 @@ async def get_order_status_logs(
             "last_checked_ltp": order.last_checked_ltp,
             "strategy_config": order.strategy_config,
             "nepse_alpha_scan_count": int((order.strategy_config or {}).get("nepse_alpha_scan_count") or 0),
+            "nepse_alpha_last_source": (order.strategy_config or {}).get("nepse_alpha_last_source"),
+            "nepse_alpha_last_fetched_at": (order.strategy_config or {}).get("nepse_alpha_last_fetched_at"),
             "tms_scan_count": int((order.strategy_config or {}).get("tms_scan_count") or scanning_count),
             "security_details": order.security_details or {},
             "editable": _is_scheduled_order_editable(order),

@@ -49,7 +49,19 @@ DERIVED_STAT_FIELDS: List[Dict[str, Any]] = [
     {"key": "distance_from_all_time_low_percent", "label": "Distance From ATL %", "category": "derived_statistical", "data_type": "decimal", "nullable": True},
 ]
 
-MARKET_DEPTH_FIELDS: List[Dict[str, Any]] = []
+MARKET_DEPTH_FIELDS: List[Dict[str, Any]] = [
+    {"key": "market_depth_available", "label": "Market Depth Available", "category": "market_depth", "data_type": "boolean", "nullable": False},
+    {"key": "best_bid", "label": "Best Bid / Top Buy Price", "category": "market_depth", "data_type": "decimal", "nullable": True},
+    {"key": "best_ask", "label": "Best Ask / Top Sell Price", "category": "market_depth", "data_type": "decimal", "nullable": True},
+    {"key": "spread", "label": "Bid-Ask Spread", "category": "market_depth", "data_type": "decimal", "nullable": True},
+    {"key": "spread_percent", "label": "Bid-Ask Spread %", "category": "market_depth", "data_type": "decimal", "nullable": True},
+    {"key": "top_buy_quantity", "label": "Top Buy Quantity", "category": "market_depth", "data_type": "decimal", "nullable": True},
+    {"key": "top_sell_quantity", "label": "Top Sell Quantity", "category": "market_depth", "data_type": "decimal", "nullable": True},
+    {"key": "total_buy_quantity", "label": "Total Buy Quantity", "category": "market_depth", "data_type": "decimal", "nullable": True},
+    {"key": "total_sell_quantity", "label": "Total Sell Quantity", "category": "market_depth", "data_type": "decimal", "nullable": True},
+    {"key": "buy_sell_quantity_ratio", "label": "Buy/Sell Quantity Ratio", "category": "market_depth", "data_type": "decimal", "nullable": True},
+    {"key": "order_book_imbalance", "label": "Order Book Imbalance", "category": "market_depth", "data_type": "decimal", "nullable": True},
+]
 
 POSITION_PROTECTION_FIELDS: List[Dict[str, Any]] = [
     {"key": "entry_price", "label": "Entry Price", "category": "position", "data_type": "decimal", "nullable": True},
@@ -117,6 +129,13 @@ SUPPORTED_FUNCTIONS: List[Dict[str, Any]] = [
     {"name": "SECTOR_POSITION", "category": "sector", "description": "Sector-relative position percent"},
     {"name": "UNIVERSE_PERCENTILE", "category": "ranking", "description": "Percentile within current scan universe"},
     {"name": "SECTOR_PERCENTILE", "category": "ranking", "description": "Percentile within sector in current scan"},
+    {"name": "DEPTH_QUANTITY", "category": "market_depth", "description": "Total quantity on BUY or SELL side across top N levels"},
+    {"name": "DEPTH_ORDER_COUNT", "category": "market_depth", "description": "Number of non-empty BUY or SELL depth levels"},
+    {"name": "DEPTH_IMBALANCE", "category": "market_depth", "description": "Buy/sell quantity imbalance across top N levels"},
+    {"name": "DEPTH_IMBALANCE_REMAINS_ABOVE", "category": "market_depth", "description": "Depth imbalance remains above a threshold"},
+    {"name": "DEPTH_IMBALANCE_REMAINS_BELOW", "category": "market_depth", "description": "Depth imbalance remains below a threshold"},
+    {"name": "DEPTH_PRESSURE_TREND", "category": "market_depth", "description": "Buying/selling pressure trend from depth imbalance"},
+    {"name": "SPREAD_REMAINS_BELOW", "category": "market_depth", "description": "Spread percent remains below a threshold"},
     {"name": "REFERENCE", "category": "schedule", "description": "Schedule-time snapshot of a registered field captured once per symbol"},
 ]
 

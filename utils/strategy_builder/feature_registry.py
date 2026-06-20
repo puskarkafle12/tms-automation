@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-# Market-depth query fields are not supported for strategy queries (TMS depth is unreliable
-# outside live session). Use live quote fields (ltp, volume, high, low) instead.
+# Market-depth query fields are supported when the TMS stock quote includes topBuy/topSell.
 MARKET_DEPTH_FIELD_KEYS = {
     "market_depth_available",
     "best_bid",
@@ -36,6 +35,7 @@ RUNTIME_FUNCTIONS = {
     "AVERAGE", "MIN_VALUE", "MAX_VALUE", "SUM_VALUE", "STDDEV", "SLOPE", "TREND",
     "SECTOR_POSITION",
     "UNIVERSE_PERCENTILE", "SECTOR_PERCENTILE",
+    *MARKET_DEPTH_FUNCTIONS,
 }
 
 PARSER_ONLY_FUNCTIONS: set[str] = set()
@@ -46,19 +46,17 @@ SCHEDULE_UNSUPPORTED_FUNCTIONS = {
     "SECTOR_PERCENTILE",
 }
 
-UNSUPPORTED_DATA_FIELDS = {"technical_adx", "adx", *MARKET_DEPTH_FIELD_KEYS}
+UNSUPPORTED_DATA_FIELDS = {"technical_adx", "adx"}
 
 
 def classify_field(field_name: str) -> str:
-    if field_name.lower() in UNSUPPORTED_DATA_FIELDS or field_name in MARKET_DEPTH_FIELD_KEYS:
+    if field_name.lower() in UNSUPPORTED_DATA_FIELDS:
         return "UNSUPPORTED_DATA"
     return "SUPPORTED_RUNTIME"
 
 
 def classify_function(name: str) -> str:
     upper = (name or "").upper()
-    if upper in MARKET_DEPTH_FUNCTIONS:
-        return "UNSUPPORTED_DATA"
     if upper in RUNTIME_FUNCTIONS:
         return "SUPPORTED_RUNTIME"
     if upper in PARSER_ONLY_FUNCTIONS:

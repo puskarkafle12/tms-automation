@@ -324,7 +324,7 @@ async def run_schedule_preflight(
     for symbol in sorted(symbols):
         if not nepse_fields and not derived_stat_fields:
             continue
-        details = get_script_details(symbol, force_refresh=True)
+        details = get_script_details(symbol, force_refresh=False)
         symbol_data_blocked = False
         if nepse_fields:
             if not getattr(details, "available", False):
@@ -345,17 +345,31 @@ async def run_schedule_preflight(
                 missing = _missing_nepse_fields(symbol, details, nepse_fields)
                 if missing:
                     missing_data_by_symbol[symbol] = missing
-                    errors.append(
-                        ValidationIssue(
-                            code="NEPSE_ALPHA_FIELD_MISSING",
-                            symbol=symbol,
-                            message=(
-                                f"Nepse Alpha does not currently provide {', '.join(missing)} for {symbol}. "
-                                "This order cannot be monitored until that data is available."
-                            ),
+                    fifty_two_week_fields = {"fifty_two_week_high", "fifty_two_week_low"}
+                    only_fifty_two_week_missing = all(m in fifty_two_week_fields for m in missing)
+                    if only_fifty_two_week_missing:
+                        warnings.append(
+                            ValidationIssue(
+                                code="NEPSE_ALPHA_52WEEK_MISSING",
+                                symbol=symbol,
+                                message=(
+                                    f"Nepse Alpha does not currently provide 52-week high/low for {symbol}. "
+                                    "Monitoring will proceed but 52-week range rules may not trigger until data is available."
+                                ),
+                            )
                         )
-                    )
-                    symbol_data_blocked = True
+                    else:
+                        errors.append(
+                            ValidationIssue(
+                                code="NEPSE_ALPHA_FIELD_MISSING",
+                                symbol=symbol,
+                                message=(
+                                    f"Nepse Alpha does not currently provide {', '.join(missing)} for {symbol}. "
+                                    "This order cannot be monitored until that data is available."
+                                ),
+                            )
+                        )
+                        symbol_data_blocked = True
         if derived_stat_fields and not symbol_data_blocked:
             prereq_missing = [
                 key
@@ -364,13 +378,14 @@ async def run_schedule_preflight(
             ]
             if prereq_missing:
                 missing_data_by_symbol[symbol] = sorted(derived_stat_fields)
-                errors.append(
+                warnings.append(
                     ValidationIssue(
-                        code="NEPSE_ALPHA_STAT_MISSING",
+                        code="NEPSE_ALPHA_52WEEK_MISSING",
                         symbol=symbol,
                         message=(
                             f"Cannot compute {', '.join(sorted(derived_stat_fields))} for {symbol} "
-                            f"because Nepse Alpha 52-week range is missing ({', '.join(prereq_missing)})."
+                            f"because Nepse Alpha 52-week range is missing ({', '.join(prereq_missing)}). "
+                            "Monitoring will proceed but 52-week range rules may not trigger until data is available."
                         ),
                     )
                 )
@@ -439,7 +454,7 @@ async def run_schedule_preflight(
                 if rule.order.mode == "quantity" and rule.order.value and int(rule.order.value) > held:
                     message = (
                         f"Cannot schedule SELL for {sym}: query requests {int(rule.order.value)} shares "
-                        f"but only {held} are sellable."
+                        f"but only {held} are sellable. Ask for the user's holding quantity or change the order to SELL ALL_AVAILABLE / SELL PERCENT_OF_HOLDING."
                     )
                     errors.append(
                         ValidationIssue(
@@ -492,13 +507,14 @@ async def run_schedule_preflight(
                 missing_derived = _missing_derived_stat_fields(symbol, details, quote, derived_stat_fields)
                 if missing_derived:
                     missing_data_by_symbol[symbol] = missing_derived
-                    errors.append(
+                    warnings.append(
                         ValidationIssue(
-                            code="DERIVED_FIELD_MISSING",
+                            code="DERIVED_52WEEK_FIELD_MISSING",
                             symbol=symbol,
                             message=(
                                 f"Cannot compute {', '.join(missing_derived)} for {symbol} "
-                                "(needs live LTP plus Nepse Alpha 52-week high/low)."
+                                "(needs live LTP plus Nepse Alpha 52-week high/low). "
+                                "Monitoring will proceed, but this 52-week condition will not match until data is available."
                             ),
                         )
                     )

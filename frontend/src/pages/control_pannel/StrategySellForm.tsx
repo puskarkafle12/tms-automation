@@ -127,6 +127,14 @@ const StrategySellForm: React.FC<Props> = ({
   const [planValidationError, setPlanValidationError] = useState('');
   const [queryValidating, setQueryValidating] = useState(false);
   const [queryValidation, setQueryValidation] = useState<PlanValidationSnapshot | null>(null);
+  const [schedulePreflight, setSchedulePreflight] = useState<{
+    ready?: boolean;
+    status?: string;
+    message?: string;
+    errors?: Array<{ code?: string; message?: string }>;
+    warnings?: Array<{ code?: string; message?: string }>;
+  } | null>(null);
+  const [schedulePreflightKey, setSchedulePreflightKey] = useState('');
   const [strategyGuideOpen, setStrategyGuideOpen] = useState(false);
   const [qty, setQty] = useState(initialQty);
   const [price, setPrice] = useState(initialPrice);
@@ -608,16 +616,32 @@ const StrategySellForm: React.FC<Props> = ({
     queryText: string;
     compiledPlan?: Record<string, unknown>;
     validation: { valid?: boolean; errors?: Array<{ code?: string; message?: string }>; warnings?: Array<{ code?: string; message?: string }> } | null;
+    schedulePreflight?: {
+      ready?: boolean;
+      status?: string;
+      message?: string;
+      errors?: Array<{ code?: string; message?: string }>;
+      warnings?: Array<{ code?: string; message?: string }>;
+    } | null;
+    schedulePreflightKey?: string;
   }) => {
     setRuleQueryText(payload.queryText);
     setLocalError('');
     setCompiledPlan(payload.compiledPlan);
+    setQueryValidation(payload.validation);
+    setSchedulePreflight(payload.schedulePreflight ?? null);
+    setSchedulePreflightKey(payload.schedulePreflightKey || '');
     const detectedSide = extractPlanSide(payload.compiledPlan);
     if (detectedSide) {
       setQueryPlanSide(detectedSide);
       onCustomQuerySideChange?.(detectedSide);
     }
-    const message = resolveValidationMessage(payload.validation);
+    const preflightError = payload.schedulePreflight?.ready === false
+      ? (payload.schedulePreflight.errors?.[0]?.message
+        || payload.schedulePreflight.message
+        || 'Schedule preflight failed.')
+      : '';
+    const message = resolveValidationMessage(payload.validation) || preflightError;
     setPlanValidationError(message);
   }, [onCustomQuerySideChange, resolveValidationMessage]);
 
@@ -743,6 +767,8 @@ const StrategySellForm: React.FC<Props> = ({
         compiled_plan: isRuleBased ? activeCompiledPlan : undefined,
         rule_planned_qty: isRuleBased ? plannedRuleQty : undefined,
         execution_mode: isRuleBased ? 'live' : undefined,
+        schedule_preflight_ready: isCustomQuery ? Boolean(schedulePreflight?.ready) : undefined,
+        schedule_preflight_key: isCustomQuery ? schedulePreflightKey : undefined,
       },
     };
     if (strategy === 'Capital Protection Sell' || strategy === 'Time-Based Exit') {

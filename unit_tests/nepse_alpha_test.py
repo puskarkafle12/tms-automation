@@ -6,6 +6,8 @@ from utils.external_data_sources.nepse_alpha import (
     get_nepse_alpha_signals,
     parse_nepse_alpha_signals_html,
 )
+from utils.external_data_sources.nepse_alpha.screener import flatten_nepse_alpha_for_screener
+from utils.strategies.normalize import normalize_nepse_alpha_payload
 
 SAMPLE_SIGNALS_HTML = """
 <div class="row">
@@ -138,6 +140,31 @@ class TestNepseAlphaParser(unittest.TestCase):
     def test_parse_empty_html_raises(self):
         with self.assertRaises(NepseAlphaError):
             parse_nepse_alpha_signals_html("", "ACLBSL")
+
+    def test_normalizers_accept_non_slash_52_week_range(self):
+        cases = [
+            ("NPR. 1,200.50 - NPR. 800.25", 1200.50, 800.25),
+            ("NPR.530.29/NPR.429.63", 530.29, 429.63),
+        ]
+        for raw_range, expected_high, expected_low in cases:
+            with self.subTest(raw_range=raw_range):
+                payload = {
+                    "symbol": "CHCL",
+                    "statistical_performance": {
+                        "52_weeks_high_low": raw_range,
+                        "ltp": "NPR. 900",
+                    },
+                    "fundamental_signals": [],
+                    "technical_signals": [],
+                }
+
+                details = normalize_nepse_alpha_payload(payload)
+                flat = flatten_nepse_alpha_for_screener(payload)
+
+                self.assertEqual(details.fifty_two_week_high, expected_high)
+                self.assertEqual(details.fifty_two_week_low, expected_low)
+                self.assertEqual(flat["fifty_two_week_high"], expected_high)
+                self.assertEqual(flat["fifty_two_week_low"], expected_low)
 
 
 class TestNepseAlphaFetch(unittest.TestCase):

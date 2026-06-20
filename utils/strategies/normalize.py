@@ -34,6 +34,22 @@ def _find_signal_value(rows: List[Dict[str, Any]], *needles: str) -> Optional[st
     return None
 
 
+def _parse_week_range(raw: Any) -> tuple[Optional[float], Optional[float]]:
+    if raw is None:
+        return None, None
+    text = str(raw).strip()
+    if not text:
+        return None, None
+    numbers = re.findall(r"\d[\d,]*(?:\.\d+)?", text)
+    values = [safe_number(item) for item in numbers]
+    values = [item for item in values if item is not None]
+    if len(values) >= 2:
+        return float(values[0]), float(values[1])
+    if len(values) == 1:
+        return float(values[0]), None
+    return None, None
+
+
 def normalize_tms_quote(symbol: str, quote: Optional[Dict[str, Any]]) -> MarketSnapshot:
     payload = quote or {}
     top_buy = [
@@ -106,11 +122,7 @@ def normalize_nepse_alpha_payload(payload: Dict[str, Any]) -> ScriptDetails:
     )
 
     week_range = stats.get("52_weeks_high_low") or stats.get("52_week_high_low")
-    if week_range:
-        parts = re.split(r"[/]", str(week_range))
-        if len(parts) >= 2:
-            details.fifty_two_week_high = safe_number(parts[0])
-            details.fifty_two_week_low = safe_number(parts[1])
+    details.fifty_two_week_high, details.fifty_two_week_low = _parse_week_range(week_range)
 
     details.all_time_high = safe_number(stats.get("all_time_high"))
     details.all_time_low = safe_number(stats.get("all_time_low"))

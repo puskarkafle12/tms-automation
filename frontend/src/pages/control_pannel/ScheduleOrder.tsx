@@ -738,8 +738,13 @@ const ScheduleOrder: React.FC = () => {
         setStatusMessage(symbolErrors.join(' '));
         return;
       }
+      const canReusePreflight = Boolean(strategyPayload.strategy_config?.schedule_preflight_ready);
       setIsSubmitting(true);
-      setSubmitProgress(`Validating and scheduling ${eligibleSymbols.length} symbols…`);
+      setSubmitProgress(
+        canReusePreflight
+          ? `Scheduling ${eligibleSymbols.length} prepared symbol(s)…`
+          : `Preparing ${eligibleSymbols.length} symbol(s) for scheduling…`,
+      );
       try {
         const batch = await fetchJson<{
           status: string;
@@ -761,6 +766,7 @@ const ScheduleOrder: React.FC = () => {
             security_details_by_symbol: Object.fromEntries(
               eligibleSymbols.map((symbol) => [symbol, resolveSecurityDetails(symbol)]),
             ),
+            skip_preflight: canReusePreflight,
           }),
         }, 30000);
         if (!batch.ok) {

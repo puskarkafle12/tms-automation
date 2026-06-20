@@ -686,12 +686,14 @@ async def monitor_order_task_func():
                             )
                         )
                         nepse_network_attempted = False
+                        nepse_source = "cache"
                         if nepse_due:
                             details, nepse_network_attempted = _resolve_script_details_for_order(
                                 db_order,
                                 nepse_fetch_due=True,
                             )
                             last_nepse_alpha_details[db_order.order_id] = details
+                            nepse_source = "live"
                             next_nepse_alpha_scan_at[db_order.order_id] = advance_nepse_alpha_scan_due_at(
                                 scan_finished_at,
                                 nepse_interval,
@@ -714,6 +716,11 @@ async def monitor_order_task_func():
                             details=details,
                             nepse_network_attempted=nepse_network_attempted,
                         )
+                        config_payload = dict(getattr(db_order, "strategy_config", None) or {})
+                        config_payload["nepse_alpha_last_source"] = nepse_source
+                        if nepse_source == "live" and nepse_network_attempted:
+                            config_payload["nepse_alpha_last_fetched_at"] = time.time()
+                        db_order.strategy_config = config_payload
                         if strategy_log:
                             await store_or_update_logs(
                                 db,

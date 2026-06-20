@@ -37,6 +37,15 @@ interface ValidationResponse {
   targets?: Array<Record<string, unknown>>;
   preview?: PreviewRow[];
   formatted_query?: string;
+  schedule_preflight?: SchedulePreflightResponse;
+}
+
+interface SchedulePreflightResponse {
+  ready?: boolean;
+  status?: string;
+  message?: string;
+  errors?: ValidationIssue[];
+  warnings?: ValidationIssue[];
 }
 
 interface AiGenerateResponse extends ValidationResponse {
@@ -54,7 +63,13 @@ interface Props {
   knownBuySymbols?: string[];
   initialQuery?: string;
   aiPortalTargetId?: string;
-  onPlanChange: (payload: { queryText: string; compiledPlan?: Record<string, unknown>; validation: ValidationResponse | null }) => void;
+  onPlanChange: (payload: {
+    queryText: string;
+    compiledPlan?: Record<string, unknown>;
+    validation: ValidationResponse | null;
+    schedulePreflight?: SchedulePreflightResponse | null;
+    schedulePreflightKey?: string;
+  }) => void;
   onValidatingChange?: (validating: boolean) => void;
 }
 
@@ -105,6 +120,20 @@ const isHoldingsValidationMessage = (message?: string): boolean => {
   return text.includes('dp holdings') || text.includes('not available in dp holdings');
 };
 
+const buildSchedulePreflightKey = (params: {
+  queryText: string;
+  side: 'buy' | 'sell';
+  strategyType: string;
+  clientId?: string;
+  formSymbol?: string;
+}) => JSON.stringify({
+  query: params.queryText.trim(),
+  side: params.side,
+  strategyType: params.strategyType,
+  clientId: params.clientId || '',
+  formSymbol: params.formSymbol || '',
+});
+
 const CustomQueryEditor: React.FC<Props> = ({
   side,
   strategyType,
@@ -137,6 +166,7 @@ const CustomQueryEditor: React.FC<Props> = ({
   const [aiPortalTarget, setAiPortalTarget] = useState<HTMLElement | null>(null);
   const validateRequestId = useRef(0);
   const lastPreviewKeyRef = useRef('');
+  const [schedulePreflightKey, setSchedulePreflightKey] = useState('');
   const skipNextAutoPreviewRef = useRef(false);
   const [validateDebounceMs, setValidateDebounceMs] = useState(
     () => readUiPortalSettings().customQueryValidateDebounceMs,
@@ -166,8 +196,14 @@ const CustomQueryEditor: React.FC<Props> = ({
 
   useEffect(() => {
     validationRef.current = validation;
-    onPlanChangeRef.current({ queryText, compiledPlan: validation?.compiled_plan, validation });
-  }, [queryText, validation]);
+    onPlanChangeRef.current({
+      queryText,
+      compiledPlan: validation?.compiled_plan,
+      validation,
+      schedulePreflight: validation?.schedule_preflight ?? null,
+      schedulePreflightKey,
+    });
+  }, [queryText, schedulePreflightKey, validation]);
 
   useEffect(() => {
     if (!toastMessage) {
@@ -211,6 +247,13 @@ const CustomQueryEditor: React.FC<Props> = ({
       holdingsCount: holdingsBySymbol ? Object.keys(holdingsBySymbol).length : 0,
       knownSymbolsCount: knownBuySymbols?.length || 0,
     });
+    const nextSchedulePreflightKey = buildSchedulePreflightKey({
+      queryText: trimmed,
+      side,
+      strategyType,
+      clientId,
+      formSymbol,
+    });
     if (lastPreviewKeyRef.current === previewKey && validationRef.current) {
       return;
     }
@@ -238,6 +281,7 @@ const CustomQueryEditor: React.FC<Props> = ({
             ? holdingsBySymbol
             : undefined,
           known_symbols: knownBuySymbols && knownBuySymbols.length > 0 ? knownBuySymbols : undefined,
+          include_schedule_preflight: true,
         }),
       }, PREVIEW_TIMEOUT_MS);
       if (requestId !== validateRequestId.current) {
@@ -250,6 +294,7 @@ const CustomQueryEditor: React.FC<Props> = ({
       }
       const data = result.data;
       lastPreviewKeyRef.current = previewKey;
+      setSchedulePreflightKey(nextSchedulePreflightKey);
       setValidation(data);
       if (!data.valid && data.errors?.length) {
         setError(data.errors[0].message);
@@ -408,7 +453,7 @@ const CustomQueryEditor: React.FC<Props> = ({
         <button type="button" disabled={busy || aiBusy} onClick={(event) => void askAi(event)}>
           {aiBusy ? 'Generating...' : 'Ask AI'}
         </button>
-        <button type="button" className="custom-query-copy-btn" disabled={busy || aiBusy} onClick={(event) => void copyLlmPrompt(event)}>
+        <button type="button" className="custom-query-copy-btn" onClick={(event) => void copyLlmPrompt(event)}>
           Copy Prompt
         </button>
       </div>

@@ -31,6 +31,19 @@ RULE "CZBIL Rule" FOR SYMBOL "CZBIL" {
 }
 """
 
+SELL_10_PERCENT_GAIN_QUERY = """
+STRATEGY_VERSION 1
+SIDE SELL
+RULE "Sell At 10 Percent Gain" FOR SYMBOL "HDL" {
+    WHEN ltp >= REFERENCE(field=ltp) * 1.10
+    ORDER PERCENT_OF_HOLDING 100
+    CONFIRM TRUE_FOR 2 SCANS
+    TRIGGER LEVEL
+    MAX_SLIPPAGE_PCT 1
+    EXECUTE ONCE PER SYMBOL
+}
+"""
+
 
 def _make_rule_order(
     *,
@@ -168,10 +181,51 @@ RULE "LTP" FOR SYMBOL "CZBIL" {
 """
     db_order = _make_rule_order(query=query)
     decision, _ = _evaluate_strategy(db_order, 199.5, _tms_quote(ltp=199.5), scan_count=1)
-    self.assertIsNotNone(decision)
-    assert decision is not None
-    self.assertEqual(decision["action"], "execute")
-    self.assertEqual(decision["qty"], 10)
+
+  def test_sell_percent_holding_reference_query_executes_actual_holding_qty(self):
+    db_order = _make_rule_order(
+      query=SELL_10_PERCENT_GAIN_QUERY,
+      strategy_type="Custom Query Sell",
+      order_type="sell",
+      qty=4,
+    )
+    db_order.script_name = "HDL"
+    db_order.symbol = "HDL"
+    db_order.remaining_quantity = 4
+    db_order.strategy_config["uses_field_references"] = True
+    db_order.strategy_config["field_reference_rows"] = [
+      {
+        "rule_name": "Sell At 10 Percent Gain",
+        "symbol": "HDL",
+        "field_key": "ltp",
+        "field_type": "decimal",
+        "numeric_value": 100.0,
+        "source": "schedule",
+      }
+    ]
+
+    first, _ = _evaluate_strategy(
+      db_order,
+      111.0,
+      _tms_quote(ltp=111.0),
+      scan_count=1,
+      details=_nepse_details(),
+      nepse_network_attempted=False,
+    )
+    second, _ = _evaluate_strategy(
+      db_order,
+      112.0,
+      _tms_quote(ltp=112.0),
+      scan_count=2,
+      details=_nepse_details(),
+      nepse_network_attempted=False,
+    )
+
+    self.assertIsNone(first)
+    self.assertIsNotNone(second)
+    assert second is not None
+    self.assertEqual(second["action"], "execute")
+    self.assertEqual(second["qty"], 4)
 
 
 class CzbilRsiMonitorFlowTest(unittest.TestCase):

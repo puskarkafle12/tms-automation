@@ -47,10 +47,14 @@ def _parse_stat_number(raw: Any) -> Optional[float]:
 def _week_range_parts(raw: Optional[str]) -> Tuple[Optional[float], Optional[float]]:
     if not raw:
         return None, None
-    parts = re.split(r"[/]", str(raw))
-    if len(parts) < 2:
-        return _parse_stat_number(raw), None
-    return _parse_stat_number(parts[0]), _parse_stat_number(parts[1])
+    numbers = re.findall(r"\d[\d,]*(?:\.\d+)?", str(raw))
+    values = [_parse_stat_number(item) for item in numbers]
+    values = [item for item in values if item is not None]
+    if len(values) >= 2:
+        return values[0], values[1]
+    if len(values) == 1:
+        return values[0], None
+    return None, None
 
 
 def flatten_nepse_alpha_for_screener(payload: Dict[str, Any]) -> Dict[str, Any]:
