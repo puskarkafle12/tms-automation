@@ -2,6 +2,7 @@ import asyncio
 import importlib.util
 import time
 import unittest
+from unittest.mock import AsyncMock
 
 
 @unittest.skipIf(importlib.util.find_spec("aiohttp") is None, "aiohttp is not installed")
@@ -57,6 +58,36 @@ class TestTmsPerformanceOptimizations(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(result)
         self.assertEqual(sleeps, [])
+
+    async def test_quote_fetch_retries_with_exponential_backoff(self):
+        user = self.TmsUser(broker_no="35", username="u", password="p")
+        sleeps = []
+        calls = []
+
+        async def fake_sleep(delay):
+            sleeps.append(delay)
+
+        async def fake_authenticated_request(method, url, **kwargs):
+            calls.append((method, url, kwargs))
+            if len(calls) < 3:
+                raise ConnectionError("temporary outage")
+            return 200, {"payload": {"data": [{"ltp": 123.4}]}}
+
+        original_sleep = asyncio.sleep
+        original_recreate_session = user._recreate_session
+        asyncio.sleep = fake_sleep
+        user._authenticated_request = fake_authenticated_request
+        user._recreate_session = AsyncMock(return_value=None)
+        try:
+            result = await user.get_stock_details_async("1", max_retries=3, retry_backoff=True)
+        finally:
+            asyncio.sleep = original_sleep
+            user._recreate_session = original_recreate_session
+            await user.close()
+
+        self.assertEqual(result["ltp"], 123.4)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(sleeps, [0.2, 0.4])
 
     async def test_authenticated_request_refreshes_token_once_on_401(self):
         user = self.TmsUser(broker_no="35", username="u", password="p")

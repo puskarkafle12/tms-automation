@@ -75,7 +75,9 @@ class ScriptDetails:
     sma_200_status: Optional[str] = None
     volume_trend: Optional[str] = None
     three_month_price_trend: Optional[str] = None
+    reference_ltp: Optional[float] = None
     available: bool = False
+    fetch_error: Optional[str] = None
 
 
 @dataclass

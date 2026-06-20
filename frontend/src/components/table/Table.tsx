@@ -12,6 +12,11 @@ interface CommonTableProps {
   columns?: string[];
   emptyMessage?: string;
   columnLinks?: Record<string, (row: TableRow) => string | undefined>;
+  selectable?: boolean;
+  selectedRowIds?: Set<string | number>;
+  rowIdKey?: string;
+  onToggleRow?: (rowId: string | number, selected: boolean) => void;
+  onToggleAll?: (selected: boolean, rowIds: Array<string | number>) => void;
 }
 
 const formatColumnLabel = (column: string) =>
@@ -21,7 +26,18 @@ const formatColumnLabel = (column: string) =>
     .replace(/\b\w/g, (char) => char.toUpperCase())
     .trim();
 
-const CommonTable: React.FC<CommonTableProps> = ({ data, onAction, columns, emptyMessage, columnLinks }) => {
+const CommonTable: React.FC<CommonTableProps> = ({
+  data,
+  onAction,
+  columns,
+  emptyMessage,
+  columnLinks,
+  selectable = false,
+  selectedRowIds,
+  rowIdKey = 'order_id',
+  onToggleRow,
+  onToggleAll,
+}) => {
   const [sortConfig, setSortConfig] = useState<{ key: string; direction: 'asc' | 'desc' } | null>(null);
 
   // Sort data based on the sort configuration
@@ -46,6 +62,20 @@ const CommonTable: React.FC<CommonTableProps> = ({ data, onAction, columns, empt
 
   // Columns to render, defaulting to keys from the first data object
   const columnsToRender = columns ? columns : Object.keys(data[0] || {});
+
+  const visibleRowIds = React.useMemo(
+    () => sortedData
+      .map((row) => row[rowIdKey])
+      .filter((value) => value != null && value !== '') as Array<string | number>,
+    [rowIdKey, sortedData],
+  );
+
+  const allVisibleSelected = selectable
+    && visibleRowIds.length > 0
+    && visibleRowIds.every((id) => selectedRowIds?.has(id));
+
+  const someVisibleSelected = selectable
+    && visibleRowIds.some((id) => selectedRowIds?.has(id));
 
   // Render actions for each row
   const renderActions = (row: TableRow) => (
@@ -109,6 +139,21 @@ const CommonTable: React.FC<CommonTableProps> = ({ data, onAction, columns, empt
         <table className="common-table">
           <thead>
             <tr>
+              {selectable ? (
+                <th className="common-table-select-col">
+                  <input
+                    type="checkbox"
+                    aria-label="Select all rows"
+                    checked={allVisibleSelected}
+                    ref={(input) => {
+                      if (input) {
+                        input.indeterminate = !allVisibleSelected && someVisibleSelected;
+                      }
+                    }}
+                    onChange={(event) => onToggleAll?.(event.target.checked, visibleRowIds)}
+                  />
+                </th>
+              ) : null}
               {columnsToRender.map((column, index) => (
                 <th key={index} onClick={() => handleSort(column)}>
                   {formatColumnLabel(column)}
@@ -123,6 +168,16 @@ const CommonTable: React.FC<CommonTableProps> = ({ data, onAction, columns, empt
           <tbody>
             {sortedData.map((row, rowIndex) => (
               <tr key={rowIndex} style={{ backgroundColor: row.color }}>
+                {selectable ? (
+                  <td className="common-table-select-col">
+                    <input
+                      type="checkbox"
+                      aria-label={`Select row ${row[rowIdKey]}`}
+                      checked={selectedRowIds?.has(row[rowIdKey]) ?? false}
+                      onChange={(event) => onToggleRow?.(row[rowIdKey], event.target.checked)}
+                    />
+                  </td>
+                ) : null}
                 {columnsToRender.map((column, colIndex) => (
                   <td
                     key={colIndex}

@@ -1,8 +1,8 @@
 # schemas.py
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 class OrderCreateRequest(BaseModel):
     client_id: str
     security_details: Dict={}
@@ -34,6 +34,10 @@ class OrderCreateRequest(BaseModel):
     expiry_action: Optional[str] = None
     max_allowed_slippage_percent: Optional[float] = None
     emergency_execution: Optional[bool] = False
+    reference_ltp: Optional[float] = None
+    trigger_price: Optional[float] = None
+    reference_ltp_captured_at: Optional[datetime] = None
+    drop_percent: Optional[float] = None
     user_allocation: Optional[Any] = None
     odd_lot_allowed: Optional[bool] = False
     scan_price_history: Optional[Any] = None
@@ -83,7 +87,9 @@ class ScreenerFilter(BaseModel):
 
 
 class StockScreenerRequest(BaseModel):
+    universe: Literal["nepse", "combined_holdings", "client_holdings"] = "nepse"
     client_id: Optional[str] = None
+    client_ids: Optional[List[str]] = None
     symbols: Optional[List[str]] = None
     filters: List[ScreenerFilter] = []
     query: Optional[str] = None
@@ -92,9 +98,23 @@ class StockScreenerRequest(BaseModel):
     limit: int = 50
     force_refresh: bool = False
 
+    @model_validator(mode="after")
+    def validate_universe(self):
+        if self.universe == "client_holdings" and not (self.client_id or "").strip():
+            raise ValueError("client_id is required when universe is client_holdings")
+        return self
+
 
 class StockScreenerAiRequest(BaseModel):
+    universe: Literal["nepse", "combined_holdings", "client_holdings"] = "nepse"
     client_id: Optional[str] = None
+    client_ids: Optional[List[str]] = None
     symbols: Optional[List[str]] = None
     message: str
     force_refresh: bool = False
+
+    @model_validator(mode="after")
+    def validate_universe(self):
+        if self.universe == "client_holdings" and not (self.client_id or "").strip():
+            raise ValueError("client_id is required when universe is client_holdings")
+        return self

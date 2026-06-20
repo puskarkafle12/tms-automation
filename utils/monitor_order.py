@@ -1,6 +1,7 @@
 # tasks.py
 
 import asyncio
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional, Type
@@ -14,17 +15,29 @@ from utils.strategies.execution_price import sell_price_exceeds_slippage
 from models.scheduled_order import ScheduledOrder
 from utils.base_functions import truncate_to_one_decimal_place
 from utils.lot_size import get_board_lot_size, is_regular_lot_qty, normalize_sell_qty, round_down_to_board_lot
+from sqlalchemy import or_, update
+
+from utils.strategy_builder.constants import RULE_BASED_STRATEGIES
 from utils.log_sender import store_or_update_logs
 from utils.market_gate import resolve_market_gate
 from utils.tms import TmsUser
-from utils.strategies.normalize import get_script_details, normalize_tms_quote
+from utils.strategies.normalize import normalize_tms_quote
 from utils.strategies.order_context import build_scanner_memory, update_scan_history
 from utils.strategies.registry import decision_to_execute_dict, evaluate_strategy
+from utils.strategies.types import ScriptDetails
 from utils.tms_user_loader import load_tms_users_instances
+from utils.monitor_scan_settings import (
+    advance_nepse_alpha_scan_due_at,
+    advance_tms_scan_due_at,
+    ensure_scan_phase_offset_in_config,
+    initial_tms_scan_due_at,
+    is_tms_scan_due,
+    order_requires_nepse_alpha,
+)
 import config.tms_config as config
 
 
-MAX_PRICE_FETCH_CONCURRENCY = 5
+MAX_PRICE_FETCH_CONCURRENCY = 1
 TERMINAL_STATUSES = {
     "order_placed",
     "Executed",
@@ -48,6 +61,7 @@ ACTIVE_STATUSES = {
     "Stop-loss triggered",
     "Partially executed",
     "WatchingRecovery",
+    "EXPIRY_PENDING_MARKET_OPEN",
 }
 
 
@@ -141,7 +155,15 @@ def _load_monitor_cycle_data():
     try:
         pending_orders = (
             db.query(ScheduledOrder)
-            .filter(ScheduledOrder.status.in_(ACTIVE_STATUSES))
+            .filter(
+                or_(
+                    ScheduledOrder.status.in_(ACTIVE_STATUSES),
+                    (
+                        ScheduledOrder.strategy_type.in_(RULE_BASED_STRATEGIES)
+                        & ~ScheduledOrder.status.in_(TERMINAL_STATUSES)
+                    ),
+                )
+            )
             .all()
         )
         snapshots = [
@@ -217,6 +239,8 @@ def _top_level_price(quote: Optional[dict], side: str) -> tuple[Optional[float],
 
 
 def _mark_tracking(db_order: ScheduledOrder, status: str, current_price: float) -> None:
+    if status not in ACTIVE_STATUSES:
+        status = "Monitoring"
     now = datetime.utcnow()
     db_order.status = status
     db_order.last_checked_ltp = current_price
@@ -239,24 +263,65 @@ def _naive_utc(value: Optional[datetime]) -> Optional[datetime]:
     return value.astimezone(timezone.utc).replace(tzinfo=None)
 
 
+def _resolve_script_details_for_order(
+    db_order: ScheduledOrder,
+    *,
+    nepse_fetch_due: bool,
+) -> tuple[ScriptDetails, bool]:
+    """Return script details and whether a Nepse Alpha network fetch was attempted."""
+    if not order_requires_nepse_alpha(db_order):
+        return ScriptDetails(available=False), False
+
+    from utils.strategies.normalize import get_script_details, get_script_details_fetch_meta
+
+    if nepse_fetch_due:
+        return get_script_details_fetch_meta(db_order.script_name, force_refresh=False)
+    return get_script_details(db_order.script_name, force_refresh=False), False
+
+
 def _evaluate_strategy(
     db_order: ScheduledOrder,
     current_price: float,
     quote: Optional[dict],
+    *,
+    scan_count: int = 0,
+    db=None,
+    details: Optional[ScriptDetails] = None,
+    nepse_network_attempted: bool = False,
 ) -> tuple[Optional[dict], Optional[str]]:
     update_scan_history(db_order, current_price, (quote or {}).get("volume"))
     snapshot = normalize_tms_quote(db_order.script_name, quote)
     snapshot.ltp = float(current_price)
     memory = build_scanner_memory(db_order, current_price, snapshot.volume)
-    details = get_script_details(db_order.script_name)
+    if details is None:
+        details, nepse_network_attempted = _resolve_script_details_for_order(
+            db_order,
+            nepse_fetch_due=True,
+        )
+
+    config_payload = dict(getattr(db_order, "strategy_config", None) or {})
+    if db is not None:
+        from utils.strategy_builder.reference_store import hydrate_strategy_config_references
+
+        config_payload = hydrate_strategy_config_references(db, db_order.order_id, config_payload)
+    config_payload["tms_scan_count"] = int(scan_count or 0)
+    if nepse_network_attempted:
+        config_payload["nepse_alpha_scan_count"] = int(config_payload.get("nepse_alpha_scan_count") or 0) + 1
+    db_order.strategy_config = config_payload
 
     decision = evaluate_strategy(db_order, snapshot, memory, details)
 
     if decision.action == "EXPIRE":
-        _mark_tracking(db_order, decision.tracking_status or "Expired", current_price)
+        db_order.status = decision.tracking_status or "Expired"
+        db_order.last_checked_ltp = current_price
+        db_order.last_checked_at = datetime.utcnow()
         if decision.cancelled_reason:
             db_order.cancelled_reason = decision.cancelled_reason
-        return None, f"{decision.reason_code}: {decision.reason}"
+        config_payload = dict(getattr(db_order, "strategy_config", None) or {})
+        reason = config_payload.get("expiration_execution_reason")
+        if reason:
+            db_order.execution_reason = str(reason)
+        return {"action": "expire"}, f"{decision.reason_code}: {decision.reason}"
 
     if decision.action == "EXECUTE":
         execute_payload = decision_to_execute_dict(decision)
@@ -272,24 +337,152 @@ def _evaluate_strategy(
         db_order.failed_reason = decision.failed_reason
 
     log_message = f"{decision.reason_code}: {decision.reason}"
-    if decision.action in {"WATCH", "NO_TRADE", "SKIP"}:
+    if decision.action in {"WATCH", "NO_TRADE", "SKIP", "TRACK"}:
         return None, log_message
     return None, None
 
 
+@dataclass
+class TmsSubmissionResult:
+    submitted: bool
+    blocked_reason: Optional[str] = None
+    target_price: Optional[float] = None
+    execution_qty: Optional[int] = None
+    order_response: Optional[dict] = None
+    lot_rule_blocked: bool = False
+
+
+def _try_claim_order_for_execution(db, order_id: int) -> bool:
+    result = db.execute(
+        update(ScheduledOrder)
+        .where(
+            ScheduledOrder.order_id == order_id,
+            ScheduledOrder.status.in_(list(ACTIVE_STATUSES)),
+        )
+        .values(status="Executing", updated_at=datetime.utcnow())
+    )
+    return bool(result.rowcount)
+
+
+async def submit_scheduled_order_to_tms(
+    db_order: ScheduledOrder,
+    decision: dict,
+    *,
+    high_price: Optional[float],
+    fallback_qty: int,
+    security_details: dict,
+    order_type: str,
+    tms_user: TmsUser,
+    execution_gate: dict,
+) -> TmsSubmissionResult:
+    if not decision or decision.get("action") != "execute":
+        return TmsSubmissionResult(submitted=False, blocked_reason="not_execute")
+
+    if not execution_gate.get("can_execute"):
+        return TmsSubmissionResult(submitted=False, blocked_reason=execution_gate.get("message"))
+
+    target_price = truncate_to_one_decimal_place(float(decision["price"]))
+    if order_type.lower() == "buy" and high_price is not None:
+        day_high = truncate_to_one_decimal_place(float(high_price))
+        if target_price > day_high:
+            return TmsSubmissionResult(
+                submitted=False,
+                blocked_reason=(
+                    f"Buy price ({target_price}) exceeds today's high "
+                    f"({day_high}) for {db_order.script_name}"
+                ),
+            )
+
+    execution_qty = int(decision.get("qty") or db_order.remaining_quantity or fallback_qty)
+    lot_rule_error = await _validate_execution_lot_rule(
+        db_order,
+        tms_user,
+        execution_qty,
+        security_details,
+    )
+    if lot_rule_error:
+        db_order.status = "BlockedByLotRule"
+        return TmsSubmissionResult(
+            submitted=False,
+            blocked_reason=lot_rule_error,
+            lot_rule_blocked=True,
+        )
+
+    order_response = await tms_user.order(
+        target_price,
+        execution_qty,
+        security=security_details,
+        order_type=order_type,
+    )
+    return TmsSubmissionResult(
+        submitted=True,
+        target_price=target_price,
+        execution_qty=execution_qty,
+        order_response=order_response,
+    )
+
+
 async def monitor_order_task_func():
+    from config.portal_settings import get_portal_settings
+
     tms_users_instances: Dict[str, Type[TmsUser]] = {}
-    count_dict = {}
+    count_dict: Dict[tuple, int] = {}
     security_cache = {}
-    price_fetch_sem = asyncio.Semaphore(MAX_PRICE_FETCH_CONCURRENCY)
+    next_tms_scan_at: Dict[int, float] = {}
+    next_nepse_alpha_scan_at: Dict[int, float] = {}
+    last_nepse_alpha_details: Dict[int, ScriptDetails] = {}
+    price_fetch_sem: Optional[asyncio.Semaphore] = None
+    price_fetch_sem_limit = 0
 
     try:
         while config.is_running:
             pending_orders = []
+            tick_seconds = int(getattr(config, "monitor_tick_seconds", None) or 1)
             try:
+                portal_settings = get_portal_settings()
+                tms_interval = int(portal_settings.get("monitor_interval_seconds") or config.monitor_interval or 5)
+                nepse_interval = int(
+                    portal_settings.get("nepse_alpha_interval_seconds") or config.nepse_alpha_interval_seconds or 1800
+                )
+                tick_seconds = int(portal_settings.get("monitor_tick_seconds") or config.monitor_tick_seconds or 1)
+                stagger_enabled = bool(
+                    portal_settings.get("enable_scan_staggering", config.enable_scan_staggering)
+                )
+                fetch_concurrency = int(
+                    portal_settings.get("max_price_fetch_concurrency")
+                    or config.max_price_fetch_concurrency
+                    or MAX_PRICE_FETCH_CONCURRENCY
+                )
+                if price_fetch_sem is None or price_fetch_sem_limit != fetch_concurrency:
+                    price_fetch_sem = asyncio.Semaphore(fetch_concurrency)
+                    price_fetch_sem_limit = fetch_concurrency
+
                 pending_orders, client_ids, logged_out_client_ids = await asyncio.to_thread(
                     _load_monitor_cycle_data
                 )
+
+                active_order_ids = {order.order_id for order in pending_orders}
+                for order_id in list(next_tms_scan_at):
+                    if order_id not in active_order_ids:
+                        next_tms_scan_at.pop(order_id, None)
+                        next_nepse_alpha_scan_at.pop(order_id, None)
+                        last_nepse_alpha_details.pop(order_id, None)
+
+                now = time.time()
+                for order in pending_orders:
+                    if order.order_id not in next_tms_scan_at:
+                        next_tms_scan_at[order.order_id] = initial_tms_scan_due_at(
+                            now,
+                            order.order_id,
+                            tms_interval,
+                            stagger_enabled=stagger_enabled,
+                        )
+
+                due_orders = [
+                    order
+                    for order in pending_orders
+                    if is_tms_scan_due(next_tms_scan_at.get(order.order_id), now)
+                ]
 
                 for client_id in logged_out_client_ids:
                     tms_users_instances.pop(client_id, None)
@@ -337,7 +530,7 @@ async def monitor_order_task_func():
                         db.close()
 
                     try:
-                        await asyncio.sleep(config.monitor_interval)
+                        await asyncio.sleep(tick_seconds)
                     except asyncio.CancelledError:
                         break
                     continue
@@ -377,7 +570,8 @@ async def monitor_order_task_func():
                         async with price_fetch_sem:
                             quote = await tms_user.get_stock_details_async(
                                 security_details["id"],
-                                max_retries=1,
+                                max_retries=3,
+                                retry_backoff=True,
                             )
                         if quote is None:
                             return OrderQuoteSnapshot(
@@ -405,15 +599,23 @@ async def monitor_order_task_func():
                             error_message=f"An error occurred: {exc}",
                         )
 
-                snapshots = await asyncio.gather(
-                    *(fetch_order_snapshot(order) for order in pending_orders)
-                )
+                snapshots = []
+                if due_orders:
+                    snapshots = await asyncio.gather(
+                        *(fetch_order_snapshot(order) for order in due_orders)
+                    )
 
                 db = SessionLocal()
                 try:
                     for snapshot in snapshots:
                         order = snapshot.order
                         key = (order.client_id, order.script_name)
+                        scan_finished_at = time.time()
+                        next_tms_scan_at[order.order_id] = advance_tms_scan_due_at(
+                            scan_finished_at,
+                            tms_interval,
+                            stagger_enabled=stagger_enabled,
+                        )
 
                         if snapshot.error_message:
                             await store_or_update_logs(
@@ -466,7 +668,52 @@ async def monitor_order_task_func():
                                 db.delete(db_order)
                             continue
 
-                        decision, strategy_log = _evaluate_strategy(db_order, current_price, snapshot.quote)
+                        updated_config, _ = ensure_scan_phase_offset_in_config(
+                            db_order.strategy_config,
+                            db_order.order_id,
+                            tms_interval,
+                            stagger_enabled=stagger_enabled,
+                        )
+                        if updated_config != (db_order.strategy_config or {}):
+                            db_order.strategy_config = updated_config
+
+                        requires_nepse_alpha = order_requires_nepse_alpha(db_order)
+                        nepse_due = requires_nepse_alpha and (
+                            db_order.order_id not in next_nepse_alpha_scan_at
+                            or is_tms_scan_due(
+                                next_nepse_alpha_scan_at.get(db_order.order_id),
+                                scan_finished_at,
+                            )
+                        )
+                        nepse_network_attempted = False
+                        if nepse_due:
+                            details, nepse_network_attempted = _resolve_script_details_for_order(
+                                db_order,
+                                nepse_fetch_due=True,
+                            )
+                            last_nepse_alpha_details[db_order.order_id] = details
+                            next_nepse_alpha_scan_at[db_order.order_id] = advance_nepse_alpha_scan_due_at(
+                                scan_finished_at,
+                                nepse_interval,
+                                stagger_enabled=stagger_enabled,
+                            )
+                        elif requires_nepse_alpha:
+                            details = last_nepse_alpha_details.get(db_order.order_id) or ScriptDetails(
+                                available=False,
+                                fetch_error="Waiting for next Nepse Alpha refresh slot",
+                            )
+                        else:
+                            details = ScriptDetails(available=False)
+
+                        decision, strategy_log = _evaluate_strategy(
+                            db_order,
+                            current_price,
+                            snapshot.quote,
+                            scan_count=count_dict[key],
+                            db=db,
+                            details=details,
+                            nepse_network_attempted=nepse_network_attempted,
+                        )
                         if strategy_log:
                             await store_or_update_logs(
                                 db,
@@ -478,24 +725,27 @@ async def monitor_order_task_func():
                                 strategy_log,
                                 commit=False,
                             )
+                        if decision and decision.get("action") == "expire":
+                            db.add(_status_log_from_order(db_order))
+                            db.delete(db_order)
+                            continue
                         if decision and decision.get("action") == "execute":
-                            if not execution_gate["can_execute"]:
-                                await store_or_update_logs(
-                                    db,
-                                    order.client_id,
-                                    order.script_name,
-                                    count_dict[key],
-                                    current_price,
-                                    False,
-                                    execution_gate["message"],
-                                    commit=False,
-                                )
+                            if not _try_claim_order_for_execution(db, db_order.order_id):
                                 continue
-
-                            target_price = truncate_to_one_decimal_place(float(decision["price"]))
-                            if db_order.order_type.lower() == "buy" and snapshot.high_price is not None:
-                                day_high = truncate_to_one_decimal_place(float(snapshot.high_price))
-                                if target_price > day_high:
+                            db.refresh(db_order)
+                            tms_user = tms_users_instances[order.client_id]
+                            submission = await submit_scheduled_order_to_tms(
+                                db_order,
+                                decision,
+                                high_price=snapshot.high_price,
+                                fallback_qty=order.qty,
+                                security_details=snapshot.security_details,
+                                order_type=order.order_type,
+                                tms_user=tms_user,
+                                execution_gate=execution_gate,
+                            )
+                            if not submission.submitted:
+                                if submission.blocked_reason and submission.blocked_reason != "not_execute":
                                     await store_or_update_logs(
                                         db,
                                         order.client_id,
@@ -503,48 +753,20 @@ async def monitor_order_task_func():
                                         count_dict[key],
                                         current_price,
                                         False,
-                                        (
-                                            f"Buy price ({target_price}) exceeds today's high "
-                                            f"({day_high}) for {order.script_name}"
-                                        ),
+                                        submission.blocked_reason,
                                         commit=False,
                                     )
-                                    continue
-
-                            db_order.status = "Executing"
-                            db_order.runner_lock_id = f"{order.order_id}:{snapshot.scan_count}"
-                            db.flush()
-                            tms_user = tms_users_instances[order.client_id]
-                            execution_qty = int(decision.get("qty") or db_order.remaining_quantity or order.qty)
-                            lot_rule_error = await _validate_execution_lot_rule(
-                                db_order,
-                                tms_user,
-                                execution_qty,
-                                snapshot.security_details,
-                            )
-                            if lot_rule_error:
-                                db_order.status = "BlockedByLotRule"
-                                db_order.failed_reason = lot_rule_error
-                                await store_or_update_logs(
-                                    db,
-                                    order.client_id,
-                                    order.script_name,
-                                    count_dict[key],
-                                    current_price,
-                                    False,
-                                    lot_rule_error,
-                                    commit=False,
-                                )
-                                db.add(_status_log_from_order(db_order))
-                                db.delete(db_order)
+                                if submission.lot_rule_blocked:
+                                    db_order.failed_reason = submission.blocked_reason
+                                    db.add(_status_log_from_order(db_order))
+                                    db.delete(db_order)
                                 continue
 
-                            order_response = await tms_user.order(
-                                target_price,
-                                execution_qty,
-                                security=snapshot.security_details,
-                                order_type=order.order_type,
-                            )
+                            db_order.runner_lock_id = f"{order.order_id}:{snapshot.scan_count}"
+                            db.flush()
+                            target_price = submission.target_price
+                            execution_qty = submission.execution_qty
+                            order_response = submission.order_response or {}
 
                             if order_response.get("status") == 200:
                                 await tms_user.refresh_client_collateral()
@@ -643,7 +865,7 @@ async def monitor_order_task_func():
                 break
 
             try:
-                await asyncio.sleep(config.monitor_interval)
+                await asyncio.sleep(tick_seconds)
             except asyncio.CancelledError:
                 break
     finally:

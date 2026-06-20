@@ -14,6 +14,9 @@ import {
   refreshTmsAccountCollateral,
   updateTmsAccount,
 } from '../../api/tmsAccounts.api';
+import { fetchAppBuildInfo } from '../../api/appInfo.api';
+import { formatRelativeTime, formatShortRelativeTime } from '../../utils/relativeTime';
+import { formatNepalDateTime, type ApiTimeValue } from '../../utils/nepalTime';
 import {
   TmsExportType,
   copyJsonToClipboard,
@@ -49,22 +52,7 @@ const formatAccountLabel = (account: Pick<TmsAccount, 'client_id' | 'display_nam
   return broker ? `${name}[${broker}]` : name;
 };
 
-const shortRelativeTime = (value?: string | null, now = Date.now()) => {
-  if (!value) {
-    return '';
-  }
-  const timestamp = new Date(value).getTime();
-  if (!Number.isFinite(timestamp) || timestamp > now + 5000) {
-    return '';
-  }
-  const diffSeconds = Math.max(0, Math.floor((now - timestamp) / 1000));
-  if (diffSeconds < 60) return `${diffSeconds}s ago`;
-  const diffMinutes = Math.floor(diffSeconds / 60);
-  if (diffMinutes < 60) return `${diffMinutes}m ago`;
-  const diffHours = Math.floor(diffMinutes / 60);
-  if (diffHours < 24) return `${diffHours}h ago`;
-  return `${Math.floor(diffHours / 24)}d ago`;
-};
+const shortRelativeTime = formatShortRelativeTime;
 
 const accountSessionTimestamp = (account: TmsAccount) =>
   account.last_login_at || account.session_updated_at || account.last_updated || null;
@@ -123,6 +111,7 @@ const Login: React.FC = () => {
   const [importPreviewText, setImportPreviewText] = useState('');
   const [exportJson, setExportJson] = useState('');
   const [now, setNow] = useState(() => Date.now());
+  const [appDeployedAt, setAppDeployedAt] = useState<ApiTimeValue>(null);
 
   const loadAccounts = useCallback(async (options?: { silent?: boolean }) => {
     if (!options?.silent) {
@@ -154,6 +143,24 @@ const Login: React.FC = () => {
   useEffect(() => {
     loadAccounts();
   }, [loadAccounts]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadAppInfo = async () => {
+      try {
+        const info = await fetchAppBuildInfo();
+        if (!cancelled && info.deployed_at) {
+          setAppDeployedAt(info.deployed_at);
+        }
+      } catch {
+        // Non-blocking: login page still works without deploy metadata.
+      }
+    };
+    void loadAppInfo();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
@@ -435,6 +442,7 @@ const Login: React.FC = () => {
 
   const loggedInAccounts = accounts.filter((a) => a.session_status === 'logged_in');
   const exportContainsSensitiveData = useMemo(() => exportJson.trim().length > 0, [exportJson]);
+  const appUpdatedLabel = formatRelativeTime(appDeployedAt, now);
 
   return (
     <div className="tms-login-page">
@@ -448,6 +456,11 @@ const Login: React.FC = () => {
             <p className="tms-login-hero-subtitle">
               Connect broker accounts, manage sessions, and view who is logged in to NEPSE TMS.
             </p>
+            {appUpdatedLabel && (
+              <p className="tms-app-updated" title={formatNepalDateTime(appDeployedAt) || undefined}>
+                App last updated {appUpdatedLabel}
+              </p>
+            )}
           </div>
         </div>
         <button

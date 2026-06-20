@@ -14,7 +14,7 @@ class TestScheduledMonitorControl(unittest.TestCase):
 
         with patch.object(control, "get_market_hours_status", return_value={"market_hours_open": False}), patch.object(
             control, "has_logged_in_tms_users", return_value=True
-        ):
+        ), patch.object(control, "is_testing", return_value=False):
             self.assertFalse(control.should_auto_run_scheduler())
 
         with patch.object(control, "get_market_hours_status", return_value={"market_hours_open": True}), patch.object(
@@ -26,11 +26,24 @@ class TestScheduledMonitorControl(unittest.TestCase):
         tms_config.is_running = False
         with patch.object(control, "get_market_hours_status", return_value={"market_hours_open": False}), patch.object(
             control, "has_logged_in_tms_users", return_value=True
-        ):
+        ), patch.object(control, "is_testing", return_value=False):
             status = control.get_scheduler_display_status()
         self.assertEqual(status["scheduled_phase"], "waiting_hours")
         self.assertFalse(status["scheduled_orders_active"])
         self.assertIn("waiting for market", status["scheduled_status_message"].lower())
+
+    def test_testing_mode_auto_runs_outside_market_hours(self):
+        with patch.object(control, "get_market_hours_status", return_value={"market_hours_open": False}), patch.object(
+            control, "has_logged_in_tms_users", return_value=True
+        ), patch.object(control, "is_testing", return_value=True):
+            self.assertTrue(control.should_auto_run_scheduler())
+        tms_config.is_running = False
+        with patch.object(control, "get_market_hours_status", return_value={"market_hours_open": False}), patch.object(
+            control, "has_logged_in_tms_users", return_value=True
+        ), patch.object(control, "is_testing", return_value=True):
+            status = control.get_scheduler_display_status()
+        self.assertEqual(status["scheduled_phase"], "armed")
+        self.assertIn("test mode", status["scheduled_status_message"].lower())
 
     def test_display_status_waiting_when_not_logged_in(self):
         tms_config.is_running = False

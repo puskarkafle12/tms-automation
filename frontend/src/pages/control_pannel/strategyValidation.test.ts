@@ -4,8 +4,17 @@ import {
   nepalDateTimeLocalToIso,
   validateStrategyForm,
 } from './strategyValidation';
+import { currentNepalDateTimeLocal } from '../../utils/nepalTime';
 
-const futureDate = () => new Date(Date.now() + 60 * 60 * 1000).toISOString();
+const futureDate = () => {
+  const current = currentNepalDateTimeLocal();
+  if (!current) {
+    return '2026-06-20T08:30';
+  }
+  const [date, time] = current.split('T');
+  const [hour, minute] = time.split(':').map((part) => Number.parseInt(part, 10));
+  return `${date}T${String(hour + 1).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+};
 
 const baseValues = (strategy: StrategyType, side: 'buy' | 'sell' = 'sell'): StrategyFormValues => ({
   strategy,
@@ -81,10 +90,8 @@ describe('validateStrategyForm', () => {
   });
 
   test('validates Time-Based Exit against current Nepal time', () => {
-    jest.useFakeTimers().setSystemTime(new Date('2026-06-15T04:45:00.000Z'));
-
-    expect(validateStrategyForm({ ...baseValues('Time-Based Exit'), expiryTime: '2026-06-15T10:31' })).toBe('');
-    expect(validateStrategyForm({ ...baseValues('Time-Based Exit'), expiryTime: '2026-06-15T10:29' })).toBe(
+    expect(validateStrategyForm({ ...baseValues('Time-Based Exit'), expiryTime: '2026-06-20T07:31' })).toBe('');
+    expect(validateStrategyForm({ ...baseValues('Time-Based Exit'), expiryTime: '2026-06-20T07:28' })).toBe(
       'Expiry time must be in the future.',
     );
   });
@@ -103,5 +110,29 @@ describe('validateStrategyForm', () => {
     expect(validateStrategyForm({ ...baseValues('Emergency Exit by Top Buyer'), emergencyConfirmed: false })).toBe(
       'Confirm emergency exit risk before submitting.',
     );
+  });
+
+  test('rule-based strategies require query text but not quantity', () => {
+    expect(
+      validateStrategyForm({
+        ...baseValues('Technical Buy', 'buy'),
+        qty: '',
+        ruleQueryText: '',
+      }),
+    ).toBe('Rule plan is required.');
+    expect(
+      validateStrategyForm({
+        ...baseValues('Technical Buy', 'buy'),
+        qty: '',
+        ruleQueryText: 'STRATEGY_VERSION 1\nSIDE BUY',
+      }),
+    ).toBe('');
+    expect(
+      validateStrategyForm({
+        ...baseValues('Custom Query Sell', 'sell'),
+        qty: '0',
+        ruleQueryText: 'STRATEGY_VERSION 1\nSIDE SELL',
+      }),
+    ).toBe('');
   });
 });

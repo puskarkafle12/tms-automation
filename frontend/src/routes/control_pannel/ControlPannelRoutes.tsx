@@ -12,6 +12,7 @@ const dashboardSections = [
   DASHBOARD_PATHS.stockTable,
   DASHBOARD_PATHS.stockGrabber,
   DASHBOARD_PATHS.stockScreener,
+  DASHBOARD_PATHS.settings,
 ];
 
 const ControlPannelRoutes = () => {

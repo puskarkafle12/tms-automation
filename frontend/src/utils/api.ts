@@ -64,7 +64,33 @@ export async function fetchJson<T>(
     window.clearTimeout(timeoutId);
 
     if (!response.ok) {
-      return { ok: false, error: `HTTP ${response.status}`, status: response.status };
+      let errorMessage = `HTTP ${response.status}`;
+      try {
+        const body = await response.json() as { detail?: unknown; message?: string; errors?: Array<{ message?: string }> };
+        if (typeof body.detail === 'string') {
+          errorMessage = body.detail;
+        } else if (Array.isArray(body.detail)) {
+          errorMessage = body.detail.map((item) => (typeof item === 'object' && item && 'msg' in item ? String((item as { msg?: string }).msg) : String(item))).join('; ');
+        } else if (body.detail && typeof body.detail === 'object' && !Array.isArray(body.detail)) {
+          const detailObj = body.detail as {
+            message?: string;
+            generated_query?: string;
+            errors?: Array<{ message?: string }>;
+          };
+          if (detailObj.message) {
+            errorMessage = detailObj.message;
+          } else if (detailObj.errors?.[0]?.message) {
+            errorMessage = detailObj.errors[0].message;
+          }
+        } else if (body.errors?.[0]?.message) {
+          errorMessage = body.errors[0].message;
+        } else if (body.message) {
+          errorMessage = body.message;
+        }
+      } catch {
+        // keep generic HTTP status message
+      }
+      return { ok: false, error: errorMessage, status: response.status };
     }
 
     const data = (await response.json()) as T;

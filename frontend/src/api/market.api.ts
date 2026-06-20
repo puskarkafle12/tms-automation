@@ -1,10 +1,14 @@
 import axios from 'axios';
 import { getApiUrl } from '../utils/api';
+import type { ApiTimestamp } from './time.api';
 
 export interface MarketStatus {
+  server_time: ApiTimestamp;
+  today_npt: string;
   nepal_time: string;
   nepal_time_formatted: string;
   nepal_date_formatted: string;
+  nepal_time_display: string;
   timezone: string;
   is_trading_day: boolean;
   is_pre_open: boolean;

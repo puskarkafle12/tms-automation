@@ -77,6 +77,31 @@ export const STRATEGY_TEST_SCENARIOS: Record<StrategyType, StrategyTestScenario[
     { situation: 'At expiry — cancel action', action: 'EXPIRE', order: 'No order' },
     { situation: 'At expiry — sell via top buy', action: 'EXECUTE', order: 'Emergency exit order @ top buy / LTP' },
   ],
+  'Technical Buy': [
+    { situation: 'Rule not matched', action: 'TRACK — monitoring', order: 'No order' },
+    { situation: 'Rule matched in paper mode', action: 'TRACK — matched (paper)', order: 'No live order' },
+    { situation: 'Rule matched in live mode', action: 'EXECUTE', order: 'Limit BUY per rule sizing' },
+  ],
+  'Custom Query': [
+    { situation: 'Invalid query or missing holding (SELL)', action: 'BLOCKED', order: 'No order' },
+    { situation: 'Matched symbol (BUY)', action: 'EXECUTE or paper match', order: 'Limit BUY per query sizing' },
+    { situation: 'Matched held symbol (SELL)', action: 'EXECUTE', order: 'Limit SELL per query sizing' },
+  ],
+  'Custom Query Buy': [
+    { situation: 'Invalid query', action: 'NO_TRADE', order: 'No order' },
+    { situation: 'Matched symbol', action: 'EXECUTE or paper match', order: 'Limit BUY per query sizing' },
+    { situation: 'Portfolio limit reached', action: 'SKIP', order: 'No order' },
+  ],
+  'Technical Sell': [
+    { situation: 'Target not held', action: 'SKIP', order: 'No order' },
+    { situation: 'Rule matched', action: 'EXECUTE', order: 'Limit SELL per rule sizing' },
+    { situation: 'Paper mode match', action: 'TRACK — matched (paper)', order: 'No live order' },
+  ],
+  'Custom Query Sell': [
+    { situation: 'Symbol not held', action: 'SKIP with warning', order: 'No order' },
+    { situation: 'Matched held symbol', action: 'EXECUTE', order: 'Limit SELL per query sizing' },
+    { situation: 'Partial batch result', action: 'PARTIAL', order: 'Some symbols submit, others skip' },
+  ],
 };
 
 export const STRATEGY_ON_EXECUTE: Record<StrategyType, string> = {
@@ -87,6 +112,9 @@ export const STRATEGY_ON_EXECUTE: Record<StrategyType, string> = {
   'Mean Reversion Bounce Buy': 'Sends a limit buy at the current LTP when mean-reversion bounce confirms.',
   'Order Book Strength Buy': 'Sends a limit buy at the current LTP when order-book pressure is strong.',
   'Time-Based Buy': 'No direct order — wraps another buy strategy until expiry.',
+  'Technical Buy': 'Evaluates compiled technical rules per symbol and sends limit buys when matched in live mode.',
+  'Custom Query': 'Parses Strategy Query Language. SIDE BUY/SELL in the query controls order direction; holdings are checked for SELL.',
+  'Custom Query Buy': 'Parses Strategy Query Language and sends limit buys for each matched symbol that passes limits.',
   'Fixed Price Sell': 'Sends a limit sell at your target price for the full quantity.',
   'Capital Protection Sell': 'Sends a limit sell clamped to live LTP; uses stale-data guard, volatility trail, depth support, and 2-scan confirmation.',
   'Profit Ladder Sell': 'Sends partial limit sells at LTP/top buy when each profit step is hit.',
@@ -94,4 +122,6 @@ export const STRATEGY_ON_EXECUTE: Record<StrategyType, string> = {
   'Technical Weakness Sell': 'Sends a limit sell at LTP/top buy when weakness is confirmed.',
   'Emergency Exit by Top Buyer': 'Sends an urgent limit sell to the best buyer price (or LTP if no depth).',
   'Time-Based Exit': 'At expiry either cancels or triggers an emergency-style sell.',
+  'Technical Sell': 'Evaluates compiled technical sell rules per symbol and sends limit sells when matched in live mode.',
+  'Custom Query Sell': 'Parses Strategy Query Language and sends limit sells for matched held symbols; non-held targets warn and skip.',
 };

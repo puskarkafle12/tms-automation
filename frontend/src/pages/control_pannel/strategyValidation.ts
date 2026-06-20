@@ -67,6 +67,7 @@ export interface StrategyFormValues {
   side: 'buy' | 'sell';
   qty: string;
   price: string;
+  ruleQueryText?: string;
   currentLtp?: number | null;
   availableQty?: number | null;
   stopLossPrice: string;
@@ -131,11 +132,27 @@ export const nepalDateTimeLocalToIso = (value: string) => {
   return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : '';
 };
 
+export const RULE_BASED_STRATEGIES = new Set([
+  'Technical Buy',
+  'Technical Sell',
+  'Custom Query',
+  'Custom Query Buy',
+  'Custom Query Sell',
+]);
+
 export const validateStrategyForm = (values: StrategyFormValues): string => {
+  const strategy = values.strategy;
+
+  if (RULE_BASED_STRATEGIES.has(String(strategy))) {
+    if (!values.ruleQueryText?.trim()) {
+      return 'Rule plan is required.';
+    }
+    return '';
+  }
+
   const parsedQty = Number.parseInt(values.qty, 10);
   const ltp = Number(values.currentLtp || 0);
   const lotSize = Math.max(1, Number(values.boardLotSize || 10));
-  const strategy = values.strategy;
 
   if (!parsedQty || parsedQty <= 0) {
     if (values.side === 'buy' && values.investmentAmount) {

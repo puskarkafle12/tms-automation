@@ -11,6 +11,9 @@ import {
 } from '../../lib/screener/presets';
 import { buildChatGptScreenerPrompt, ScreenerQuerySpec } from '../../lib/screener/chatGptPrompt';
 import { buildNepseAlphaChartUrl } from '../../lib/nepseAlpha';
+import ScreenerDropConfirmModal from '../../components/ScreenerDropConfirmModal';
+import { ScreenerDropScheduleInput } from '../../api/screenerDrop.api';
+import { addNepalDays, currentNepalDateTimeLocal, todayNepalDate } from '../../utils/nepalTime';
 
 type FieldType = 'number' | 'text';
 
@@ -90,6 +93,14 @@ const DEFAULT_QUERY = SCREENER_PRESETS[0].query;
 
 type InputMode = 'builder' | 'query' | 'ai';
 
+type ScreenerUniverse = 'nepse' | 'combined_holdings' | 'client_holdings';
+
+interface ClientSession {
+  client_id: string;
+  display_name?: string | null;
+  broker_no: string;
+}
+
 interface AiChatMessage {
   id: string;
   role: 'user' | 'assistant';
@@ -147,6 +158,20 @@ const formatNonJsonResponse = (rawText: string, fallback: string): string => {
   return trimmed ? trimmed.slice(0, 400) : fallback;
 };
 
+const clientLabel = (client: ClientSession) => {
+  const name = client.display_name?.trim() || client.client_id;
+  return client.broker_no ? `${name}[${client.broker_no}]` : name;
+};
+
+const defaultBaselineExpiryLocal = () => {
+  const today = todayNepalDate() || currentNepalDateTimeLocal().slice(0, 10);
+  const nextDay = addNepalDays(today, 1);
+  return `${nextDay}T15:00`;
+};
+
+const universeRequiresLogin = (universe: ScreenerUniverse) =>
+  universe === 'nepse' || universe === 'combined_holdings';
+
 const StockScreener: React.FC = () => {
   const [fields, setFields] = useState<ScreenerField[]>([]);
   const [inputMode, setInputMode] = useState<InputMode>('builder');
@@ -154,8 +179,10 @@ const StockScreener: React.FC = () => {
   const [activePresetId, setActivePresetId] = useState<string | null>(null);
   const [copyMessage, setCopyMessage] = useState('');
   const [filters, setFilters] = useState<FilterRow[]>([makeFilterRow()]);
+  const [universe, setUniverse] = useState<ScreenerUniverse>('nepse');
   const [clientId, setClientId] = useState('');
-  const [clientIds, setClientIds] = useState<string[]>([]);
+  const [clientSessions, setClientSessions] = useState<ClientSession[]>([]);
+  const [universeLabel, setUniverseLabel] = useState('');
   const [rankBy, setRankBy] = useState('alpha_annualized');
   const [rankDirection, setRankDirection] = useState<'desc' | 'asc'>('desc');
   const [limit, setLimit] = useState('25');
@@ -173,6 +200,9 @@ const StockScreener: React.FC = () => {
   const [aiMessages, setAiMessages] = useState<AiChatMessage[]>([]);
   const [aiSummary, setAiSummary] = useState('');
   const [generatedQuery, setGeneratedQuery] = useState('');
+  const [baselineModalOpen, setBaselineModalOpen] = useState(false);
+  const [baselineScheduleInput, setBaselineScheduleInput] = useState<ScreenerDropScheduleInput | null>(null);
+  const [scheduleMessage, setScheduleMessage] = useState('');
   const resultsRef = useRef<HTMLElement | null>(null);
 
   const activePreset = useMemo(
@@ -206,10 +236,13 @@ const StockScreener: React.FC = () => {
           return;
         }
         const data = await response.json();
-        const ids: string[] = data.logged_in_client_ids || [];
-        setClientIds(ids);
-        if (ids.length > 0) {
-          setClientId(ids[0]);
+        const sessions: ClientSession[] = data.sessions || (data.logged_in_client_ids || []).map((id: string) => ({
+          client_id: id,
+          broker_no: '',
+        }));
+        setClientSessions(sessions);
+        if (sessions.length > 0) {
+          setClientId((current) => current || sessions[0].client_id);
         }
       } catch {
         // ignore
@@ -283,6 +316,51 @@ const StockScreener: React.FC = () => {
       .filter(Boolean);
   }, [fieldsByKey, filters]);
 
+  const buildUniversePayload = useCallback(() => {
+    const payload: {
+      universe: ScreenerUniverse;
+      client_id?: string;
+      client_ids?: string[];
+    } = { universe };
+
+    if (universe === 'client_holdings') {
+      payload.client_id = clientId;
+    } else if (universe === 'combined_holdings') {
+      payload.client_ids = clientSessions.map((session) => session.client_id);
+    }
+
+    return payload;
+  }, [clientId, clientSessions, universe]);
+
+  const validateUniverse = useCallback((): string | null => {
+    if (universe === 'client_holdings') {
+      if (!clientId) {
+        return 'Select a user to screen their DP holdings.';
+      }
+      return null;
+    }
+    if (universeRequiresLogin(universe) && clientSessions.length === 0) {
+      return 'At least one logged-in TMS account is required for this symbol universe.';
+    }
+    return null;
+  }, [clientId, clientSessions.length, universe]);
+
+  const selectNepseUniverse = () => {
+    setUniverse('nepse');
+    setError('');
+  };
+
+  const selectCombinedUniverse = () => {
+    setUniverse('combined_holdings');
+    setError('');
+  };
+
+  const selectClientUniverse = (selectedClientId: string) => {
+    setUniverse('client_holdings');
+    setClientId(selectedClientId);
+    setError('');
+  };
+
   const copyText = async (text: string, label: string) => {
     try {
       await navigator.clipboard.writeText(text);
@@ -294,8 +372,9 @@ const StockScreener: React.FC = () => {
   };
 
   const runAiScreener = async (messageOverride?: string) => {
-    if (!clientId) {
-      setError('Select a logged-in TMS client to scan the full symbol universe.');
+    const universeError = validateUniverse();
+    if (universeError) {
+      setError(universeError);
       return;
     }
 
@@ -319,6 +398,7 @@ const StockScreener: React.FC = () => {
     setStats(null);
     setAiSummary('');
     setGeneratedQuery('');
+    setUniverseLabel('');
     setHasRun(false);
 
     let completedScreen = false;
@@ -329,7 +409,7 @@ const StockScreener: React.FC = () => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          client_id: clientId,
+          ...buildUniversePayload(),
           message: userMessage,
           force_refresh: forceRefresh,
         }),
@@ -379,6 +459,7 @@ const StockScreener: React.FC = () => {
       ]);
       setResults((data as { results?: ScreenerResult[] }).results || []);
       setStats((data as { stats?: ScreenerStats | null }).stats || null);
+      setUniverseLabel(String((data as { universe_label?: string }).universe_label || ''));
       completedScreen = true;
       setHasRun(true);
     } catch (err) {
@@ -410,8 +491,9 @@ const StockScreener: React.FC = () => {
     fromPreset?: boolean;
     loadingMessage?: string;
   }) => {
-    if (!clientId) {
-      setError('Select a logged-in TMS client to scan the full symbol universe.');
+    const universeError = validateUniverse();
+    if (universeError) {
+      setError(universeError);
       return;
     }
 
@@ -429,6 +511,7 @@ const StockScreener: React.FC = () => {
     setError('');
     setResults([]);
     setStats(null);
+    setUniverseLabel('');
 
     if (options?.fromPreset) {
       resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -437,12 +520,12 @@ const StockScreener: React.FC = () => {
     let completedScreen = false;
     const payload = useQueryMode
       ? {
-          client_id: clientId,
+          ...buildUniversePayload(),
           query,
           force_refresh: forceRefresh,
         }
       : {
-          client_id: clientId,
+          ...buildUniversePayload(),
           filters: buildFilterPayload(),
           rank_by: rankBy,
           rank_direction: rankDirection,
@@ -478,6 +561,7 @@ const StockScreener: React.FC = () => {
 
       setResults(data.results || []);
       setStats(data.stats || null);
+      setUniverseLabel(String(data.universe_label || ''));
       completedScreen = true;
       setHasRun(true);
     } catch (err) {
@@ -540,6 +624,7 @@ const StockScreener: React.FC = () => {
         <div className="stock-screener-status">
           {stats ? (
             <>
+              {universeLabel && <span>{universeLabel}</span>}
               <span>Scanned {stats.requested}</span>
               <span>Loaded {stats.loaded}</span>
               <span>Matched {stats.matched}</span>
@@ -552,19 +637,54 @@ const StockScreener: React.FC = () => {
       </section>
 
       <section className="stock-screener-controls card">
-        <div className="stock-screener-row">
-          <label htmlFor="screener-client">TMS Client (symbol universe)</label>
-          <select
-            id="screener-client"
-            className="input"
-            value={clientId}
-            onChange={(e) => setClientId(e.target.value)}
-          >
-            <option value="">Select client</option>
-            {clientIds.map((id) => (
-              <option key={id} value={id}>{id}</option>
+        <div className="stock-screener-universe">
+          <div className="stock-screener-universe-header">
+            <span className="stock-screener-universe-label">Symbol universe</span>
+            <span className="stock-screener-universe-note">
+              {universe === 'nepse'
+                ? 'All TMS-listed NEPSE stocks'
+                : universe === 'combined_holdings'
+                  ? 'Union of DP holdings across logged-in users'
+                  : 'DP holdings for selected user (qty > 0)'}
+            </span>
+          </div>
+          <div className="stock-screener-universe-chips" role="group" aria-label="Symbol universe">
+            <button
+              type="button"
+              className={`stock-screener-universe-chip${universe === 'nepse' ? ' active' : ''}`}
+              onClick={selectNepseUniverse}
+              disabled={loading}
+            >
+              NEPSE
+            </button>
+            <button
+              type="button"
+              className={`stock-screener-universe-chip${universe === 'combined_holdings' ? ' active' : ''}`}
+              onClick={selectCombinedUniverse}
+              disabled={loading || clientSessions.length === 0}
+              title={clientSessions.length === 0 ? 'Log in at least one TMS account first' : undefined}
+            >
+              Combined holdings
+            </button>
+            {clientSessions.map((session) => (
+              <button
+                key={session.client_id}
+                type="button"
+                className={`stock-screener-universe-chip user${
+                  universe === 'client_holdings' && clientId === session.client_id ? ' active' : ''
+                }`}
+                onClick={() => selectClientUniverse(session.client_id)}
+                disabled={loading}
+              >
+                {clientLabel(session)}
+              </button>
             ))}
-          </select>
+          </div>
+          {clientSessions.length === 0 && (
+            <p className="stock-screener-universe-warning">
+              No logged-in TMS accounts. Log in from the Accounts page to use combined or user holdings.
+            </p>
+          )}
         </div>
 
         <div className="stock-screener-presets">
@@ -891,6 +1011,9 @@ const StockScreener: React.FC = () => {
               Top Ranked Results
               {activePreset ? ` — ${activePreset.title}` : ''}
             </h3>
+            {universeLabel && (
+              <p className="stock-screener-universe-result">{universeLabel}</p>
+            )}
             {inputMode === 'ai' && generatedQuery && (
               <div className="stock-screener-generated-query">
                 <span className="stock-screener-prompt-query-label">AI-generated query (strictly validated)</span>
@@ -914,16 +1037,57 @@ const StockScreener: React.FC = () => {
                 <p className="stock-screener-no-records">No records found</p>
                 <p className="stock-screener-empty-meta">
                   {stats
-                    ? `Scanned ${stats.requested} symbols · ${stats.loaded} loaded · ${stats.matched} matched your filters`
+                    ? `${universeLabel ? `${universeLabel} · ` : ''}Scanned ${stats.requested} symbols · ${stats.loaded} loaded · ${stats.matched} matched your filters`
                     : 'No stocks matched your filters. Try relaxing conditions or pick another quick screen.'}
                 </p>
               </div>
             ) : (
-              <CommonTable data={results} columns={displayColumns} columnLinks={symbolColumnLinks} />
+              <>
+                {clientId && (
+                  <div className="stock-screener-schedule-row">
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={() => {
+                        const symbols = results.slice(0, 10).map((row) => row.symbol);
+                        setBaselineScheduleInput({
+                          clientId,
+                          queryText: '',
+                          symbols,
+                          dropPercent: 10,
+                          expiryTimeLocal: defaultBaselineExpiryLocal(),
+                          expirationAction: 'CANCEL',
+                          strategyType: 'Custom Query Buy',
+                        });
+                        setBaselineModalOpen(true);
+                      }}
+                    >
+                      Schedule Top {Math.min(results.length, 10)}
+                    </button>
+                    {scheduleMessage ? <p className="stock-screener-schedule-message">{scheduleMessage}</p> : null}
+                  </div>
+                )}
+                <CommonTable data={results} columns={displayColumns} columnLinks={symbolColumnLinks} />
+              </>
             )}
           </section>
         )}
       </section>
+      <ScreenerDropConfirmModal
+        open={baselineModalOpen}
+        input={baselineScheduleInput}
+        onClose={() => {
+          setBaselineModalOpen(false);
+          setBaselineScheduleInput(null);
+        }}
+        onCommitted={({ scheduled, failed }) => {
+          setScheduleMessage(
+            failed.length
+              ? `Scheduled ${scheduled.join(', ')}. Failed: ${failed.join('; ')}`
+              : `Baseline schedule created for ${scheduled.join(', ')}.`,
+          );
+        }}
+      />
     </div>
   );
 };

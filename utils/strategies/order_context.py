@@ -9,6 +9,19 @@ from utils.strategies.types import OrderContext, ScannerMemory, StrategyConfig
 
 def _config_from_dict(raw: Optional[Dict[str, Any]]) -> StrategyConfig:
     payload = raw or {}
+    known_keys = {
+        "min_buy_score", "require_fresh_trade", "require_volume_increase", "allow_market_depth_filter",
+        "wrapped_strategy_type", "expiry_action", "stop_loss_pct", "defaultStopLossPct",
+        "break_even_trigger_pct", "breakEvenTriggerPct", "target1_pct", "target1Pct",
+        "target1_sell_pct", "target1SellPct", "target2_pct", "target2Pct", "target2_sell_pct",
+        "target2SellPct", "trailing_stop_pct", "trailingStopPct", "max_capital_per_stock_pct",
+        "order_timeout_minutes", "allow_split_emergency_exit", "sold_target1", "sold_target2",
+        "break_even_armed", "extra",
+    }
+    extra = dict(payload.get("extra") or {})
+    for key, value in payload.items():
+        if key not in known_keys:
+            extra[key] = value
     return StrategyConfig(
         min_buy_score=float(payload.get("min_buy_score") or 65.0),
         require_fresh_trade=bool(payload.get("require_fresh_trade")),
@@ -29,7 +42,7 @@ def _config_from_dict(raw: Optional[Dict[str, Any]]) -> StrategyConfig:
         sold_target1=bool(payload.get("sold_target1")),
         sold_target2=bool(payload.get("sold_target2")),
         break_even_armed=bool(payload.get("break_even_armed")),
-        extra=dict(payload.get("extra") or {}),
+        extra=extra,
     )
 
 
@@ -38,6 +51,46 @@ def build_order_context(db_order) -> OrderContext:
     raw_strategy = db_order.strategy_type or "Fixed Price"
     canonical = canonical_strategy_name(raw_strategy, side)
     config = _config_from_dict(getattr(db_order, "strategy_config", None))
+    if getattr(db_order, "reference_ltp", None) and getattr(db_order, "trigger_price", None):
+        baseline = dict(config.extra.get("schedule_baseline") or {})
+        baseline.setdefault("reference_ltp", float(db_order.reference_ltp))
+        baseline.setdefault("trigger_price", float(db_order.trigger_price))
+        if getattr(db_order, "drop_percent", None) is not None:
+            baseline.setdefault("drop_percent", float(db_order.drop_percent))
+        if getattr(db_order, "reference_ltp_captured_at", None):
+            baseline.setdefault(
+                "reference_ltp_captured_at",
+                db_order.reference_ltp_captured_at.isoformat(),
+            )
+        config.extra["schedule_baseline"] = baseline
+    order_id = getattr(db_order, "order_id", None)
+    if config.extra.get("uses_field_references") and not config.extra.get("field_reference_rows") and order_id is not None:
+        try:
+            from database import get_db_session
+            from utils.strategy_builder.reference_store import load_reference_store
+
+            session = get_db_session()
+            try:
+                store = load_reference_store(session, order_id)
+                config.extra["field_reference_rows"] = [
+                    {
+                        "rule_name": row.rule_name,
+                        "symbol": row.symbol,
+                        "field_key": row.field_key,
+                        "field_type": row.field_type,
+                        "numeric_value": row.numeric_value,
+                        "text_value": row.text_value,
+                        "boolean_value": row.boolean_value,
+                        "source": row.source,
+                    }
+                    for row in store.to_rows()
+                ]
+            finally:
+                session.close()
+        except Exception:
+            pass
+    if order_id is not None:
+        config.extra["order_id"] = order_id
 
     return OrderContext(
         strategy_type=raw_strategy,

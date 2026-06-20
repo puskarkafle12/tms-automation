@@ -37,6 +37,15 @@ class TestMarketStatus(unittest.TestCase):
         self.assertFalse(status["is_continuous"])
         self.assertFalse(status["market_hours_open"])
 
+    def test_format_nepal_datetime_matches_api_timestamp_shape(self):
+        from utils.market_status import format_nepal_datetime
+
+        payload = format_nepal_datetime(datetime(2026, 6, 15, 11, 30, tzinfo=NEPAL_TZ))
+        self.assertIn("npt", payload)
+        self.assertIn("utc", payload)
+        self.assertEqual(payload["date"], "2026-06-15")
+        self.assertEqual(payload["timezone"], "Asia/Kathmandu")
+
     def test_nepal_calendar_day_converts_to_utc_bounds(self):
         start_utc, end_utc = nepal_date_utc_bounds(datetime(2026, 6, 15).date())
 

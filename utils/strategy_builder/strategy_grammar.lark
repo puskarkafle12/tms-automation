@@ -1,0 +1,172 @@
+?start: document
+
+document: strategy_version side defaults_block? portfolio_limits_block? position_protection_block? position_exit_block? rank_block? rule+
+
+position_exit_block: "POSITION_EXIT" "{" position_exit_stmt* "}"
+
+position_exit_stmt: sell_exit_stmt
+    | move_stop_stmt
+    | lock_profit_stmt
+    | trail_remaining_stmt
+
+sell_exit_stmt: "SELL" ORDER_MODE order_value "WHEN" expr -> sell_exit_with_value
+    | "SELL" ORDER_MODE "WHEN" expr -> sell_exit_no_value
+move_stop_stmt: "MOVE_STOP_TO_ENTRY" "WHEN" expr
+lock_profit_stmt: "LOCK_PROFIT_PCT" NUMBER "WHEN" expr
+trail_remaining_stmt: "TRAIL_REMAINING" "WHEN" expr
+
+position_protection_block: "POSITION_PROTECTION" "{" position_protection_stmt* "}"
+
+position_protection_stmt: fixed_stop_clause
+    | trailing_stop_clause
+
+fixed_stop_clause: "FIXED_STOP_LOSS_PRICE" NUMBER
+trailing_stop_clause: "TRAILING_STOP_PCT" NUMBER
+
+strategy_version: "STRATEGY_VERSION" NUMBER
+side: "SIDE" SIDE_KW
+
+SIDE_KW: "BUY" | "SELL"
+
+defaults_block: "DEFAULTS" block_body
+portfolio_limits_block: "PORTFOLIO_LIMITS" block_body
+rank_block: "RANK" "MATCHES" "BY" rank_field ("," rank_field)* rank_limit?
+
+rank_field: IDENTIFIER order_dir?
+order_dir: "ASC" | "DESC"
+rank_limit: "LIMIT" NUMBER "ORDERS"
+
+rule: "RULE" STRING "FOR" "SYMBOL" symbol_target block_body
+
+symbol_target: STRING -> single_symbol
+    | "IN" "(" string_list ")" -> multi_symbol
+
+block_body: "{" block_stmt* "}"
+
+block_stmt: when_clause
+    | eligibility_clause
+    | signal_clause
+    | require_clause
+    | use_strategy_clause
+    | strategy_param_clause
+    | order_clause
+    | confirm_clause
+    | exec_clause
+    | trigger_clause
+    | slippage_clause
+    | data_age_clause
+    | missing_depth_clause
+    | missing_holding_clause
+    | cooldown_clause
+
+when_clause: "WHEN" expr
+eligibility_clause: "ELIGIBILITY" expr
+signal_clause: "SIGNAL" expr
+require_clause: "REQUIRE" expr
+
+use_strategy_clause: "USE" "STRATEGY" STRING
+
+strategy_param_clause: strategy_param_name NUMBER -> strategy_param_number
+    | strategy_param_name STRING -> strategy_param_string
+    | strategy_param_name "TRUE" -> strategy_param_true
+    | strategy_param_name "FALSE" -> strategy_param_false
+
+strategy_param_name: IDENTIFIER
+
+order_clause: "ORDER" ORDER_MODE optional_order_parts
+optional_order_parts: order_value price_clause -> order_parts_value_price
+    | order_value -> order_parts_value
+    | price_clause -> order_parts_price
+    | -> order_parts_empty
+ORDER_MODE: /(?i:QUANTITY|AMOUNT|PERCENT_OF_HOLDING|PERCENT_OF_AVAILABLE_CASH|TARGET_POSITION_VALUE|ALL_AVAILABLE|SELL_UP_TO|RISK_PERCENT|MAX_LOSS_AMOUNT|TOP_BUY_QTY|TOP_SELL_QTY|PARTIAL_TOP_BUY|PARTIAL_TOP_SELL)/
+price_clause: "PRICE" PRICE_SOURCE
+PRICE_SOURCE: /(?i:TOP_BUY|TOP_SELL|LTP|BEST_BID|BEST_ASK)/
+order_value: NUMBER
+    | "PER" "SYMBOL"
+    | "FROM_FORM"
+
+confirm_clause: "CONFIRM" confirm_body
+confirm_body: "TRUE_FOR" NUMBER "SCANS"
+    | "MATCHES" NUMBER "OF" "LAST" NUMBER "SCANS"
+    | "IMMEDIATE"
+
+exec_clause: "EXECUTE" exec_body
+exec_body: "ONCE" -> exec_once
+    | "ONCE" "PER" "SYMBOL" -> exec_once_per_symbol
+    | "ONCE" "PER" "MARKET" "DAY" -> exec_once_per_market_day
+    | "MAX" NUMBER "TIMES" per_symbol? -> exec_max_times
+
+per_symbol: "PER" "SYMBOL"
+
+trigger_clause: "TRIGGER" "ON_CROSS" | "TRIGGER" "LEVEL"
+slippage_clause: "MAX_SLIPPAGE_PCT" NUMBER
+data_age_clause: "MAX_DATA_AGE" NUMBER "SECONDS"
+missing_depth_clause: "MISSING_MARKET_DEPTH" MISSING_DEPTH_KW
+missing_holding_clause: "MISSING_HOLDING" MISSING_HOLDING_KW
+
+MISSING_DEPTH_KW: "WAIT" | "TREAT_AS_FALSE" | "SKIP_DEPTH_CONDITION" | "PAUSE_TARGET"
+MISSING_HOLDING_KW: "WARN_AND_SKIP" | "WAITING_FOR_HOLDING" | "REJECT"
+
+cooldown_clause: "COOLDOWN" NUMBER "MINUTES"
+
+?expr: or_expr
+
+?or_expr: and_expr ("OR" and_expr)*
+?and_expr: not_expr ("AND" not_expr)*
+?not_expr: "NOT" not_expr -> not_expr
+    | atom_expr
+
+?atom_expr: comparison
+    | paren_expr
+    | value_expr
+
+paren_expr: "(" expr ")"
+
+comparison: value_expr COMP_OP value_expr
+    | value_expr "BETWEEN" value_expr "AND" value_expr -> between_expr
+    | value_expr "NOT" "BETWEEN" value_expr "AND" value_expr -> not_between_expr
+    | value_expr "IN" "(" value_list ")" -> in_expr
+    | value_expr "NOT" "IN" "(" value_list ")" -> not_in_expr
+    | value_expr "CONTAINS" value_expr -> contains_expr
+    | value_expr "NOT" "CONTAINS" value_expr -> not_contains_expr
+    | value_expr "IS" "AVAILABLE" -> is_available
+    | value_expr "IS" "NOT" "AVAILABLE" -> is_not_available
+    | value_expr "IS" "NULL" -> is_null
+    | value_expr "IS" "NOT" "NULL" -> is_not_null
+    | value_expr "CHANGED" "TO" value_expr -> changed_to
+    | value_expr "CHANGED" "FROM" value_expr "TO" value_expr -> changed_from_to
+
+COMP_OP: "=" | "!=" | ">" | ">=" | "<" | "<="
+
+PLUS: "+"
+MINUS: "-"
+STAR: "*"
+SLASH: "/"
+
+?value_expr: arith_expr
+
+?arith_expr: term ((PLUS | MINUS) term)*
+?term: factor ((STAR | SLASH) factor)*
+?factor: NUMBER -> number
+    | STRING -> string
+    | "TRUE" -> true_lit
+    | "FALSE" -> false_lit
+    | IDENTIFIER -> identifier
+    | function_call
+    | "(" arith_expr ")"
+
+function_call: IDENTIFIER "(" [arg_list] ")"
+arg_list: arg ("," arg)*
+arg: IDENTIFIER "=" expr
+    | expr
+
+value_list: expr ("," expr)*
+
+string_list: STRING ("," STRING)*
+
+IDENTIFIER: /[a-zA-Z_][a-zA-Z0-9_]*/
+STRING: /"[^"]*"/
+NUMBER: /\d+(\.\d+)?/
+
+%import common.WS
+%ignore WS

@@ -4,19 +4,12 @@ import './LoginPage.css';
 import { useNavigate } from 'react-router-dom';
 import ErrorMessage from '../components/ErrorMessage';
 import { extractApiErrorMessage } from '../utils/apiError';
-import Settings from './Settings';
-import useHotkeys from '@reecelucas/react-use-hotkeys';
 
 const LoginPage: React.FC = () => {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
-  const [showSettings, setShowSettings] = useState(false);
   const navigate = useNavigate();
-
-  useHotkeys('shift+s', () => {
-    setShowSettings((prev) => !prev);
-  });
 
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -73,12 +66,6 @@ const LoginPage: React.FC = () => {
             Sign In
           </button>
         </form>
-        <p className="login-page-hint">Press <kbd>Shift+S</kbd> to open API settings</p>
-        {showSettings && (
-          <div className="login-page-settings">
-            <Settings />
-          </div>
-        )}
       </div>
     </div>
   );

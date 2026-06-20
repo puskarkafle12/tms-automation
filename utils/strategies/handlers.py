@@ -429,6 +429,371 @@ def evaluate_time_based_exit(ctx: OrderContext, snapshot: MarketSnapshot, memory
     return _track("Monitoring")
 
 
+def evaluate_rule_based_strategy(ctx: OrderContext, snapshot: MarketSnapshot, memory: ScannerMemory, details: ScriptDetails) -> StrategyDecision:
+    from utils.strategy_builder.derived_fields import enrich_flat_snapshot
+    from utils.strategy_builder.execution_depth import (
+        depth_quantity_sufficient,
+        resolve_depth_order_quantity,
+        resolve_rule_execution_price,
+    )
+    from utils.strategy_builder.execution_sizing import resolve_order_quantity
+    from utils.strategy_builder.history_service import (
+        deserialize_target_history,
+        serialize_target_history,
+    )
+    from utils.strategy_builder.market_normalizer import build_symbol_snapshot_from_parts
+    from utils.strategy_builder.portfolio_guard import portfolio_allows_new_buy
+    from utils.strategy_builder.position_exit import evaluate_position_exits
+    from utils.strategy_builder.position_protection import (
+        compute_protective_fields,
+        seed_position_after_buy,
+    )
+    from utils.strategy_builder.rule_expiration import (
+        evaluate_rule_based_expiration,
+        should_skip_normal_trigger_after_expiry,
+    )
+    from utils.strategies.helpers import is_market_depth_available
+    from utils.strategy_builder.reference_store import ReferenceEvaluationError, ReferenceStore
+    from utils.strategy_builder.rule_evaluator import evaluate_rule, update_history_from_snapshot
+    from utils.strategy_builder.strategy_models import RuleBlock, StrategyPlanAST
+    from utils.strategy_builder.strategy_parser import parse_strategy_query
+
+    config = ctx.config.extra or {}
+    if config.get("expiration_executed"):
+        return _skip("ALREADY_EXECUTED", "Expiration action already executed")
+
+    expiry_decision = evaluate_rule_based_expiration(ctx, snapshot, details)
+    if expiry_decision is not None:
+        return expiry_decision
+
+    compiled = config.get("compiled_plan")
+    if not compiled and config.get("query_text"):
+        try:
+            compiled = parse_strategy_query(config["query_text"]).model_dump()
+        except Exception as exc:
+            return _skip("INVALID_RULE_PLAN", f"Could not parse strategy query: {exc}")
+    if not compiled:
+        return _skip("MISSING_RULE_PLAN", "Rule-based strategy is missing compiled plan data")
+
+    try:
+        plan = StrategyPlanAST.model_validate(compiled)
+    except Exception as exc:
+        return _skip("INVALID_RULE_PLAN", f"Compiled plan is invalid: {exc}")
+
+    symbol = (ctx.symbol or snapshot.symbol or "").upper()
+    selected_rule = None
+    for rule_data in plan.rules:
+        rule = RuleBlock.model_validate(rule_data) if isinstance(rule_data, dict) else rule_data
+        if symbol in {item.upper() for item in rule.symbols}:
+            selected_rule = rule
+            break
+    if not selected_rule:
+        return _skip("SYMBOL_NOT_IN_PLAN", f"No rule targets {symbol} in this plan")
+
+    normalized = build_symbol_snapshot_from_parts(symbol, snapshot, details)
+    target_state = dict(config.get("target_state") or {})
+    history = deserialize_target_history(target_state.get(symbol))
+    if memory.last_prices and not history.observations.get("ltp"):
+        for price in memory.last_prices:
+            update_history_from_snapshot(
+                history,
+                {**normalized["flat"], "ltp": price, "last_traded_at": snapshot.last_traded_time},
+            )
+    if history.position.get("entry_price"):
+        history.position["holding_scan_count"] = int(history.position.get("holding_scan_count") or 0) + 1
+    protective = compute_protective_fields(history.position, snapshot.ltp, plan.position_protection)
+    history.position.update(protective)
+    flat = enrich_flat_snapshot(
+        normalized["flat"],
+        position_state=history.position,
+        order_qty=ctx.remaining_qty or ctx.qty,
+    )
+    baseline = dict(config.get("schedule_baseline") or {})
+    uses_field_references = bool(config.get("uses_field_references"))
+    if not uses_field_references:
+        if baseline.get("trigger_price") is not None:
+            flat["trigger_price"] = float(baseline["trigger_price"])
+        if baseline.get("reference_ltp") is not None:
+            flat["reference_ltp"] = float(baseline["reference_ltp"])
+    flat["_prev_spread_percent"] = history.previous_values.get("spread_percent")
+    normalized["flat"] = flat
+    update_history_from_snapshot(history, flat)
+
+    reference_store: Optional[ReferenceStore] = None
+    if uses_field_references:
+        from utils.strategy_builder.reference_store import ReferenceRow
+
+        reference_store = ReferenceStore(
+            [
+                ReferenceRow(
+                    rule_name=str(item.get("rule_name") or ""),
+                    symbol=str(item.get("symbol") or symbol),
+                    field_key=str(item.get("field_key") or ""),
+                    field_type=str(item.get("field_type") or "decimal"),
+                    numeric_value=item.get("numeric_value"),
+                    text_value=item.get("text_value"),
+                    boolean_value=item.get("boolean_value"),
+                    source=item.get("source"),
+                )
+                for item in (config.get("field_reference_rows") or [])
+            ]
+        )
+
+    exit_intent = evaluate_position_exits(
+        plan,
+        symbol,
+        flat,
+        history,
+        holding_qty=int(memory.holding_qty or 0),
+        form_qty=int(ctx.remaining_qty or ctx.qty or 0),
+    )
+    target_state[symbol] = serialize_target_history(history)
+    mutate = {"target_state": target_state}
+    if exit_intent and plan.side == "SELL":
+        return StrategyDecision(
+            "EXECUTE",
+            "POSITION_EXIT",
+            "Position exit rule matched",
+            price=snapshot.ltp,
+            qty=int(exit_intent["qty"]),
+            source="Position exit",
+            mutate=mutate,
+        )
+
+    trigger_on_cross = (selected_rule.execution.trigger or "on_cross") == "on_cross"
+    if should_skip_normal_trigger_after_expiry(ctx):
+        return StrategyDecision(
+            "EXPIRE",
+            "EXPIRY_CANCELLED",
+            "Monitoring stopped at expiration without trigger",
+            expired=True,
+            cancelled_reason="EXPIRY_CANCELLED",
+            tracking_status="Expired",
+            mutate={"expiration_cancelled": True},
+        )
+
+    try:
+        evaluation = evaluate_rule(
+            selected_rule,
+            symbol,
+            flat,
+            history,
+            trigger_on_cross=trigger_on_cross,
+            reference_store=reference_store,
+        )
+    except ReferenceEvaluationError as exc:
+        return StrategyDecision(
+            "NO_TRADE",
+            exc.code,
+            str(exc),
+            tracking_status="BlockedReferenceMissing",
+            mutate=mutate,
+        )
+    target_state[symbol] = serialize_target_history(history)
+    mutate = {"target_state": target_state}
+
+    if not evaluation.matched:
+        return StrategyDecision(
+            "TRACK",
+            "TRACKING",
+            f"Monitoring: {evaluation.status or 'Monitoring'}",
+            tracking_status=evaluation.status or "Monitoring",
+            mutate=mutate,
+        )
+
+    if selected_rule.use_strategy:
+        from utils.strategy_builder.strategy_delegate import (
+            evaluate_delegated_strategy,
+            map_delegated_decision_to_rule_action,
+        )
+
+        delegated = evaluate_delegated_strategy(
+            selected_rule,
+            plan_side=plan.side,
+            symbol=symbol,
+            parent_ctx=ctx,
+            snapshot=snapshot,
+            memory=memory,
+            details=details,
+        )
+        mapped = map_delegated_decision_to_rule_action(
+            delegated,
+            symbol=symbol,
+            strategy_name=selected_rule.use_strategy,
+            mutate=mutate,
+        )
+        if mapped.action != "EXECUTE":
+            return mapped
+
+        qty = int(mapped.qty or ctx.remaining_qty or ctx.qty or 0)
+        if qty <= 0:
+            from utils.strategy_builder.constants import DEFAULT_RULE_ORDER_QUANTITY
+
+            order_mode = str(selected_rule.order.mode or "quantity").lower()
+            stop_loss = selected_rule.stop_loss_price or flat.get("fixed_stop_loss_price") or flat.get("effective_stop_price")
+            qty = resolve_order_quantity(
+                order_mode=order_mode,
+                order_value=selected_rule.order.value,
+                ltp=snapshot.ltp,
+                holding_qty=int(memory.holding_qty or 0),
+                form_qty=int(ctx.remaining_qty or ctx.qty or 0),
+                entry_price=flat.get("entry_price"),
+                stop_loss_price=stop_loss,
+                depth_supported_qty=int(flat.get("depth_supported_quantity") or 0),
+            )
+            if qty <= 0:
+                qty = ctx.remaining_qty or ctx.qty or DEFAULT_RULE_ORDER_QUANTITY
+
+        exec_price = float(mapped.price or snapshot.ltp or 0)
+        history.executed = True
+        if plan.side == "BUY" and snapshot.ltp:
+            history.position = seed_position_after_buy(
+                history.position,
+                entry_price=float(snapshot.ltp),
+                protection=plan.position_protection,
+            )
+            target_state[symbol] = serialize_target_history(history)
+            mapped.mutate = dict(mapped.mutate or {})
+            mapped.mutate["target_state"] = target_state
+
+        return StrategyDecision(
+            "EXECUTE",
+            mapped.reason_code or "STRATEGY_EXECUTE",
+            mapped.reason or f"{selected_rule.use_strategy} matched for {symbol}",
+            price=exec_price,
+            qty=qty,
+            source=mapped.source or selected_rule.use_strategy,
+            leg_id=mapped.leg_id,
+            mutate=mapped.mutate,
+        )
+
+    execution_mode = str(config.get("execution_mode") or "live").lower()
+    if execution_mode in {"validate_only", "paper", "shadow"}:
+        return StrategyDecision(
+            "TRACK",
+            "TRACKING",
+            f"Matched ({execution_mode})",
+            tracking_status=f"Matched ({execution_mode})",
+            mutate=mutate,
+        )
+
+    price_source = str(selected_rule.order.price_source or "ltp").lower()
+    depth_modes = {"top_buy_qty", "top_sell_qty", "partial_top_buy", "partial_top_sell"}
+    order_mode = str(selected_rule.order.mode or "quantity").lower()
+
+    if price_source not in {"ltp"} or order_mode in depth_modes:
+        if not is_market_depth_available(snapshot):
+            missing_depth = str(selected_rule.execution.missing_market_depth or "wait").lower()
+            if missing_depth == "skip":
+                return StrategyDecision(
+                    "TRACK",
+                    "DEPTH_UNAVAILABLE",
+                    "Market depth unavailable for depth-based order",
+                    tracking_status="DEPTH_UNAVAILABLE",
+                    mutate=mutate,
+                )
+            return StrategyDecision(
+                "TRACK",
+                "TRACKING",
+                "Waiting for market depth",
+                tracking_status="Waiting for depth",
+                mutate=mutate,
+            )
+
+    depth_qty, depth_note = resolve_depth_order_quantity(
+        order_mode=order_mode,
+        order_value=selected_rule.order.value,
+        snapshot=snapshot,
+        flat=flat,
+        side=plan.side,
+        form_qty=int(ctx.remaining_qty or ctx.qty or 0),
+        holding_qty=int(memory.holding_qty or 0),
+    )
+    if order_mode in depth_modes:
+        qty = depth_qty
+        if qty <= 0:
+            return StrategyDecision(
+                "TRACK",
+                "DEPTH_QTY_UNAVAILABLE",
+                depth_note or "Depth quantity unavailable",
+                tracking_status="DEPTH_QTY_UNAVAILABLE",
+                mutate=mutate,
+            )
+    else:
+        stop_loss = selected_rule.stop_loss_price or flat.get("fixed_stop_loss_price") or flat.get("effective_stop_price")
+        qty = resolve_order_quantity(
+            order_mode=order_mode,
+            order_value=selected_rule.order.value,
+            ltp=snapshot.ltp,
+            holding_qty=int(memory.holding_qty or 0),
+            form_qty=int(ctx.remaining_qty or ctx.qty or 0),
+            entry_price=flat.get("entry_price"),
+            stop_loss_price=stop_loss,
+            depth_supported_qty=int(flat.get("depth_supported_quantity") or 0),
+        )
+        if qty <= 0:
+            from utils.strategy_builder.constants import DEFAULT_RULE_ORDER_QUANTITY
+
+            qty = ctx.remaining_qty or ctx.qty or DEFAULT_RULE_ORDER_QUANTITY
+
+    exec_price, price_label = resolve_rule_execution_price(
+        snapshot,
+        plan.side,
+        price_source,
+        max_slippage_percent=selected_rule.execution.max_slippage_pct,
+    )
+    if exec_price <= 0:
+        exec_price = float(snapshot.ltp or 0)
+
+    sufficient, sufficiency_msg = depth_quantity_sufficient(
+        side=plan.side,
+        requested_qty=int(qty),
+        snapshot=snapshot,
+        flat=flat,
+    )
+    reason = f"Rule matched for {symbol}"
+    if depth_note:
+        reason = f"{reason} ({depth_note})"
+    elif not sufficient and order_mode == "quantity" and price_source in {"top_buy", "best_bid", "top_sell", "best_ask"}:
+        reason = f"{reason} — partial fill likely: {sufficiency_msg}"
+
+    if plan.side == "BUY":
+        portfolio_state = dict(config.get("portfolio_state") or {})
+        allowed, reason = portfolio_allows_new_buy(
+            plan.portfolio_limits,
+            portfolio_state,
+            proposed_amount=float(qty) * float(snapshot.ltp or 0),
+        )
+        if not allowed:
+            return StrategyDecision(
+                "TRACK",
+                "PORTFOLIO_BLOCKED",
+                reason,
+                tracking_status=reason,
+                mutate=mutate,
+            )
+
+    history.executed = True
+    if plan.side == "BUY" and snapshot.ltp:
+        history.position = seed_position_after_buy(
+            history.position,
+            entry_price=float(snapshot.ltp),
+            protection=plan.position_protection,
+        )
+        target_state[symbol] = serialize_target_history(history)
+        mutate = {"target_state": target_state}
+
+    return StrategyDecision(
+        "EXECUTE",
+        "RULE_MATCHED",
+        reason,
+        price=exec_price,
+        qty=qty,
+        source=price_label,
+        mutate=mutate,
+    )
+
+
 HANDLERS: Dict[str, Callable] = {
     "Fixed Price Buy": evaluate_fixed_price_buy,
     "Fixed Price Sell": evaluate_fixed_price_sell,
@@ -442,4 +807,8 @@ HANDLERS: Dict[str, Callable] = {
     "Trailing Runner Sell": evaluate_trailing_runner_sell,
     "Technical Weakness Sell": evaluate_technical_weakness_sell,
     "Emergency Exit by Top Buyer": evaluate_emergency_exit,
+    "Technical Buy": evaluate_rule_based_strategy,
+    "Technical Sell": evaluate_rule_based_strategy,
+    "Custom Query Buy": evaluate_rule_based_strategy,
+    "Custom Query Sell": evaluate_rule_based_strategy,
 }

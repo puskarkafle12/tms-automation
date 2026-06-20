@@ -45,6 +45,10 @@ class ScheduledOrder(Base):
     expiry_time = Column(DateTime)
     expiry_action = Column(String)
     max_allowed_slippage_percent = Column(Float)
+    reference_ltp = Column(Float)
+    trigger_price = Column(Float)
+    reference_ltp_captured_at = Column(DateTime)
+    drop_percent = Column(Float)
     emergency_execution = Column(Boolean, default=False)
     user_allocation = Column(JSON)
     last_checked_ltp = Column(Float)
@@ -96,6 +100,10 @@ class ScheduledOrder(Base):
         self.expiry_time = order_data.expiry_time
         self.expiry_action = order_data.expiry_action
         self.max_allowed_slippage_percent = order_data.max_allowed_slippage_percent
+        self.reference_ltp = getattr(order_data, "reference_ltp", None)
+        self.trigger_price = getattr(order_data, "trigger_price", None)
+        self.reference_ltp_captured_at = getattr(order_data, "reference_ltp_captured_at", None)
+        self.drop_percent = getattr(order_data, "drop_percent", None)
         self.emergency_execution = order_data.emergency_execution
         self.user_allocation = order_data.user_allocation
         self.scan_price_history = order_data.scan_price_history
@@ -129,6 +137,16 @@ class ScheduledOrder(Base):
         self.expiry_time = order_data.expiry_time
         self.expiry_action = order_data.expiry_action
         self.max_allowed_slippage_percent = order_data.max_allowed_slippage_percent
+        refresh_baseline = bool((order_data.strategy_config or {}).get("refresh_reference_ltp"))
+        recalc_drop_only = bool((order_data.strategy_config or {}).get("recalc_drop_percent_only"))
+        if refresh_baseline:
+            self.reference_ltp = getattr(order_data, "reference_ltp", None)
+            self.trigger_price = getattr(order_data, "trigger_price", None)
+            self.reference_ltp_captured_at = getattr(order_data, "reference_ltp_captured_at", None)
+            self.drop_percent = getattr(order_data, "drop_percent", None)
+        elif recalc_drop_only and order_data.trigger_price is not None:
+            self.trigger_price = getattr(order_data, "trigger_price", None)
+            self.drop_percent = getattr(order_data, "drop_percent", None)
         self.emergency_execution = order_data.emergency_execution
         self.user_allocation = order_data.user_allocation
         self.scan_price_history = order_data.scan_price_history

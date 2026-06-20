@@ -1,0 +1,42 @@
+from __future__ import annotations
+
+STRATEGY_QUERY_VERSION = 1
+
+RULE_BASED_BUY_STRATEGIES = {
+    "Technical Buy",
+    "Custom Query Buy",
+}
+
+RULE_BASED_SELL_STRATEGIES = {
+    "Technical Sell",
+    "Custom Query Sell",
+}
+
+RULE_BASED_STRATEGIES = RULE_BASED_BUY_STRATEGIES | RULE_BASED_SELL_STRATEGIES
+
+MAX_QUERY_LENGTH = 50 * 1024
+MAX_RULE_BLOCKS = 100
+MAX_SYMBOLS = 200
+MAX_CONDITIONS_PER_RULE = 50
+MAX_GROUP_NESTING = 5
+MAX_FUNCTION_NESTING = 5
+MAX_HISTORY_WINDOW = 500
+MAX_ARITHMETIC_OPS = 100
+
+FORBIDDEN_SQL_KEYWORDS = {
+    "SELECT",
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "DROP",
+    "ALTER",
+    "CREATE",
+    "TRUNCATE",
+    "JOIN",
+    "UNION",
+    "EXEC",
+    "IMPORT",
+}
+
+EXECUTION_MODES = {"validate_only", "paper", "shadow", "live"}
+DEFAULT_RULE_ORDER_QUANTITY = 10

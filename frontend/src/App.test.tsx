@@ -2,8 +2,8 @@ import React from 'react';
 import { render, screen } from '@testing-library/react';
 import App from './App';
 
-test('renders learn react link', () => {
+test('renders login page at root route', () => {
   render(<App />);
-  const linkElement = screen.getByText(/learn react/i);
-  expect(linkElement).toBeInTheDocument();
+  expect(screen.getByText('TMS Automation')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: /sign in/i })).toBeInTheDocument();
 });

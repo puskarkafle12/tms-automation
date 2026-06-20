@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import './StrategySellForm.css';
 import {
   BUY_STRATEGIES,
@@ -19,7 +19,12 @@ import {
 } from './lotSize';
 import { calculateQuantityFromAmount, getOrderEstimate } from '../../utils/orderEstimate';
 import { currentNepalDateTimeLocal } from '../../utils/nepalTime';
+import { fetchJson } from '../../utils/api';
 import StrategyCatalogModal from '../../components/StrategyCatalogModal';
+import CustomQueryEditor from '../../components/CustomQueryEditor';
+import TechnicalRuleBuilder from '../../components/TechnicalRuleBuilder';
+import ErrorMessage from '../../components/ErrorMessage';
+import { extractPlannedQtyFromCompiledPlan, DEFAULT_RULE_PLANNED_QTY, extractPlanSide, customQueryStrategyForSide, isCustomQueryStrategy, findBlockingValidationIssue, isQueryValidationReady, validatePlanSymbolsForSchedule, type PlanValidationSnapshot } from '../../lib/strategies/rulePlanHelpers';
 export type { StrategyPayload, StrategyType } from './strategyValidation';
 
 export const STRATEGY_HELP: Record<string, { helper: string; button: string }> = {
@@ -30,6 +35,9 @@ export const STRATEGY_HELP: Record<string, { helper: string; button: string }> =
   'Mean Reversion Bounce Buy': { helper: 'Buy mean-reverting setups after bounce confirmation.', button: 'Schedule Mean Reversion Buy' },
   'Order Book Strength Buy': { helper: 'Buy when top-of-book buy pressure is strong.', button: 'Schedule Order Book Buy' },
   'Time-Based Buy': { helper: 'Wrap a buy strategy with an expiry time.', button: 'Schedule Time-Based Buy' },
+  'Technical Buy': { helper: 'Build multi-stock technical buy rules with confirmations and execution controls.', button: 'Schedule Technical Buy Order' },
+  'Custom Query': { helper: '', button: 'Schedule Custom Query Order' },
+  'Custom Query Buy': { helper: 'Write a Strategy Query Language buy plan for one or many stocks.', button: 'Schedule Custom Query Buy Order' },
   'Fixed Price Sell': { helper: '', button: 'Schedule Sell Order' },
   'Capital Protection Sell': { helper: 'Stop-loss and break-even protection combined.', button: 'Schedule Capital Protection' },
   'Profit Ladder Sell': { helper: 'Sell partial quantity at target levels.', button: 'Schedule Profit Ladder' },
@@ -37,6 +45,8 @@ export const STRATEGY_HELP: Record<string, { helper: string; button: string }> =
   'Technical Weakness Sell': { helper: 'Exit on technical and live price weakness.', button: 'Schedule Weakness Exit' },
   'Emergency Exit by Top Buyer': { helper: 'Sell quickly using best buyer price.', button: 'Confirm Emergency Exit' },
   'Time-Based Exit': { helper: 'Cancel or exit if strategy does not trigger by selected time.', button: 'Schedule Time Exit' },
+  'Technical Sell': { helper: 'Build multi-stock technical sell rules with confirmations and execution controls.', button: 'Schedule Technical Sell Order' },
+  'Custom Query Sell': { helper: 'Write a Strategy Query Language sell plan for one or many stocks.', button: 'Schedule Custom Query Sell Order' },
 };
 
 export { BUY_STRATEGIES, SELL_STRATEGIES };
@@ -55,9 +65,21 @@ interface Props {
   securityDetails?: ScripLotMetadata | null;
   holdingDays?: number;
   isSubmitting?: boolean;
+  submitProgress?: string;
   submitError?: string;
+  submitStatus?: 'idle' | 'success' | 'error';
+  submitStatusMessage?: string;
   prefill?: StrategyFormPrefill | null;
   submitButtonLabel?: string;
+  clientId?: string;
+  holdingsBySymbol?: Record<string, number>;
+  knownBuySymbols?: string[];
+  scriptListLoading?: boolean;
+  holdingsLoading?: boolean;
+  initialStrategy?: StrategyType;
+  draftKey?: string;
+  aiPortalTargetId?: string;
+  onCustomQuerySideChange?: (side: 'buy' | 'sell') => void;
   onStrategyChange?: (strategy: StrategyType) => void;
   onSubmit: (payload: StrategyPayload) => Promise<void> | void;
 }
@@ -76,14 +98,35 @@ const StrategySellForm: React.FC<Props> = ({
   securityDetails,
   holdingDays = 400,
   isSubmitting = false,
+  submitProgress = '',
   submitError,
+  submitStatus = 'idle',
+  submitStatusMessage = '',
   prefill = null,
   submitButtonLabel,
+  clientId,
+  holdingsBySymbol,
+  knownBuySymbols,
+  scriptListLoading = false,
+  holdingsLoading = false,
+  initialStrategy,
+  draftKey,
+  aiPortalTargetId,
+  onCustomQuerySideChange,
   onStrategyChange,
   onSubmit,
 }) => {
   const strategies = side === 'buy' ? BUY_STRATEGIES : SELL_STRATEGIES;
-  const [strategy, setStrategy] = useState<StrategyType>(side === 'buy' ? 'Fixed Price Buy' : 'Fixed Price Sell');
+  const defaultStrategy = initialStrategy || (side === 'buy' ? 'Fixed Price Buy' : 'Fixed Price Sell');
+  const [strategy, setStrategy] = useState<StrategyType>(defaultStrategy);
+  const isRuleBuilder = strategy === 'Technical Buy' || strategy === 'Technical Sell';
+  const isCustomQuery = isCustomQueryStrategy(strategy);
+  const isRuleBased = isRuleBuilder || isCustomQuery;
+  const [ruleQueryText, setRuleQueryText] = useState('');
+  const [compiledPlan, setCompiledPlan] = useState<Record<string, unknown> | undefined>(undefined);
+  const [planValidationError, setPlanValidationError] = useState('');
+  const [queryValidating, setQueryValidating] = useState(false);
+  const [queryValidation, setQueryValidation] = useState<PlanValidationSnapshot | null>(null);
   const [strategyGuideOpen, setStrategyGuideOpen] = useState(false);
   const [qty, setQty] = useState(initialQty);
   const [price, setPrice] = useState(initialPrice);
@@ -119,6 +162,154 @@ const StrategySellForm: React.FC<Props> = ({
   const [localError, setLocalError] = useState('');
   const minNepalExpiryTime = currentNepalDateTimeLocal().slice(0, 16);
   const boardLotSize = useMemo(() => getBoardLotSize(securityDetails), [securityDetails]);
+  const priceTouchedRef = React.useRef(false);
+  const [queryPlanSide, setQueryPlanSide] = useState<'buy' | 'sell' | null>(null);
+
+  useEffect(() => {
+    if (initialStrategy && initialStrategy !== strategy) {
+      setStrategy(initialStrategy);
+    }
+  }, [initialStrategy, strategy]);
+
+  useEffect(() => {
+    if (!draftKey) {
+      return;
+    }
+    try {
+      const raw = localStorage.getItem(`tms-strategy-form-draft-v1:${draftKey}`);
+      if (!raw) {
+        return;
+      }
+      const draft = JSON.parse(raw) as Partial<{
+        strategy: StrategyType;
+        ruleQueryText: string;
+        qty: string;
+        price: string;
+        quantityMode: 'quantity' | 'amount';
+        investmentAmount: string;
+        stopLossPrice: string;
+        stopLimitPrice: string;
+        bookProfitPrice: string;
+        profitTargetPrice: string;
+        trailingDropPercent: string;
+        stableBandPercent: string;
+        minimumWaitMinutes: string;
+        consecutiveDropChecks: string;
+        activationPrice: string;
+        averagePrice: string;
+        maxSlippage: string;
+        expiryTime: string;
+        expiryAction: string;
+        minBuyScore: string;
+        wrappedStrategyType: string;
+      }>;
+      if (draft.strategy) setStrategy(draft.strategy);
+      if (draft.ruleQueryText != null) setRuleQueryText(String(draft.ruleQueryText));
+      if (draft.qty != null) setQty(String(draft.qty));
+      if (draft.price != null) setPrice(String(draft.price));
+      if (draft.quantityMode === 'quantity' || draft.quantityMode === 'amount') setQuantityMode(draft.quantityMode);
+      if (draft.investmentAmount != null) setInvestmentAmount(String(draft.investmentAmount));
+      if (draft.stopLossPrice != null) setStopLossPrice(String(draft.stopLossPrice));
+      if (draft.stopLimitPrice != null) setStopLimitPrice(String(draft.stopLimitPrice));
+      if (draft.bookProfitPrice != null) setBookProfitPrice(String(draft.bookProfitPrice));
+      if (draft.profitTargetPrice != null) setProfitTargetPrice(String(draft.profitTargetPrice));
+      if (draft.trailingDropPercent != null) setTrailingDropPercent(String(draft.trailingDropPercent));
+      if (draft.stableBandPercent != null) setStableBandPercent(String(draft.stableBandPercent));
+      if (draft.minimumWaitMinutes != null) setMinimumWaitMinutes(String(draft.minimumWaitMinutes));
+      if (draft.consecutiveDropChecks != null) setConsecutiveDropChecks(String(draft.consecutiveDropChecks));
+      if (draft.activationPrice != null) setActivationPrice(String(draft.activationPrice));
+      if (draft.averagePrice != null) setAveragePrice(String(draft.averagePrice));
+      if (draft.maxSlippage != null) setMaxSlippage(String(draft.maxSlippage));
+      if (draft.expiryTime != null) setExpiryTime(String(draft.expiryTime));
+      if (draft.expiryAction != null) setExpiryAction(String(draft.expiryAction));
+      if (draft.minBuyScore != null) setMinBuyScore(String(draft.minBuyScore));
+      if (draft.wrappedStrategyType != null) setWrappedStrategyType(String(draft.wrappedStrategyType));
+    } catch {
+      localStorage.removeItem(`tms-strategy-form-draft-v1:${draftKey}`);
+    }
+  }, [draftKey]);
+
+  useEffect(() => {
+    if (!draftKey) {
+      return;
+    }
+    localStorage.setItem(`tms-strategy-form-draft-v1:${draftKey}`, JSON.stringify({
+      strategy,
+      ruleQueryText,
+      qty,
+      price,
+      quantityMode,
+      investmentAmount,
+      stopLossPrice,
+      stopLimitPrice,
+      bookProfitPrice,
+      profitTargetPrice,
+      trailingDropPercent,
+      stableBandPercent,
+      minimumWaitMinutes,
+      consecutiveDropChecks,
+      activationPrice,
+      averagePrice,
+      maxSlippage,
+      expiryTime,
+      expiryAction,
+      minBuyScore,
+      wrappedStrategyType,
+    }));
+  }, [
+    activationPrice,
+    averagePrice,
+    bookProfitPrice,
+    consecutiveDropChecks,
+    draftKey,
+    expiryAction,
+    expiryTime,
+    investmentAmount,
+    maxSlippage,
+    minBuyScore,
+    minimumWaitMinutes,
+    price,
+    profitTargetPrice,
+    qty,
+    quantityMode,
+    ruleQueryText,
+    stableBandPercent,
+    stopLimitPrice,
+    stopLossPrice,
+    strategy,
+    trailingDropPercent,
+    wrappedStrategyType,
+  ]);
+
+  const resolveValidationMessage = useCallback((validation: PlanValidationSnapshot | null) => {
+    if (!validation) {
+      return '';
+    }
+    const blocking = findBlockingValidationIssue(validation);
+    if (blocking?.message) {
+      return blocking.message;
+    }
+    if (validation.valid === false && validation.errors?.length) {
+      return validation.errors[0].message || 'Rule plan is invalid.';
+    }
+    return '';
+  }, []);
+
+  useEffect(() => {
+    priceTouchedRef.current = false;
+  }, [scriptName]);
+
+  useEffect(() => {
+    if (currentLtp && currentLtp > 0 && !priceTouchedRef.current) {
+      setPrice(String(Math.round(currentLtp)));
+    }
+  }, [currentLtp, scriptName]);
+
+  useEffect(() => {
+    if (initialPrice && !priceTouchedRef.current) {
+      setPrice(initialPrice);
+    }
+  }, [initialPrice, scriptName]);
 
   useEffect(() => {
     if (!prefill) {
@@ -245,6 +436,7 @@ const StrategySellForm: React.FC<Props> = ({
       side,
       qty,
       price,
+      ruleQueryText,
       currentLtp,
       availableQty,
       stopLossPrice,
@@ -295,10 +487,132 @@ const StrategySellForm: React.FC<Props> = ({
     stopLimitPrice,
     stopLossPrice,
     strategy,
+    ruleQueryText,
     trailingDropPercent,
     minBuyScore,
     wrappedStrategyType,
   ]);
+
+  const knownBuySymbolSet = useMemo(
+    () => new Set((knownBuySymbols || []).map((symbol) => symbol.trim().toUpperCase()).filter(Boolean)),
+    [knownBuySymbols],
+  );
+
+  const scheduleBlockReason = useMemo(() => {
+    if (!clientId) {
+      return 'Select a logged-in client before scheduling.';
+    }
+    if (queryValidating) {
+      return 'Validation in progress…';
+    }
+    if (validationError) {
+      return validationError;
+    }
+    if (planValidationError) {
+      return planValidationError;
+    }
+
+    if (isCustomQuery) {
+      if (!ruleQueryText.trim()) {
+        return 'Enter a strategy query.';
+      }
+      if (!isQueryValidationReady(queryValidation, compiledPlan)) {
+        return planValidationError || 'Fix all query validation errors before scheduling.';
+      }
+      const effectiveSide = extractPlanSide(compiledPlan) || queryPlanSide || side;
+      const symbolError = validatePlanSymbolsForSchedule(compiledPlan, effectiveSide, {
+        knownBuySymbols: knownBuySymbolSet,
+        holdingsBySymbol,
+        scriptListLoading: effectiveSide === 'buy' ? scriptListLoading : false,
+        holdingsLoading: effectiveSide === 'sell' ? holdingsLoading : false,
+      });
+      if (symbolError) {
+        return symbolError;
+      }
+      return '';
+    }
+
+    if (isRuleBased) {
+      if (!compiledPlan) {
+        return 'Rule plan must be valid before scheduling.';
+      }
+      return '';
+    }
+
+    if (!scriptName?.trim()) {
+      return 'Select a script before scheduling.';
+    }
+    if (side === 'sell') {
+      if (holdingsLoading) {
+        return 'Verifying DP holdings…';
+      }
+      if (!availableQty || availableQty <= 0) {
+        return submitError || `${scriptName} is not available in DP holdings.`;
+      }
+    }
+    return '';
+  }, [
+    availableQty,
+    clientId,
+    compiledPlan,
+    holdingsBySymbol,
+    holdingsLoading,
+    isCustomQuery,
+    isRuleBased,
+    knownBuySymbolSet,
+    planValidationError,
+    queryPlanSide,
+    queryValidation,
+    queryValidating,
+    ruleQueryText,
+    scriptListLoading,
+    scriptName,
+    side,
+    submitError,
+    validationError,
+  ]);
+
+  const canSchedule = !isSubmitting;
+
+  useEffect(() => {
+    if (!isRuleBased || isCustomQuery || !ruleQueryText.trim()) {
+      if (!isCustomQuery) {
+        setCompiledPlan(undefined);
+        setPlanValidationError('');
+      }
+      return undefined;
+    }
+    const timer = window.setTimeout(async () => {
+      const result = await fetchJson<{
+        valid: boolean;
+        compiled_plan?: Record<string, unknown>;
+        errors?: Array<{ message?: string }>;
+      }>('/api/strategy-plans/validate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          query_text: ruleQueryText,
+          strategy_type: strategy,
+          side,
+          form_symbol: scriptName,
+          client_id: clientId,
+        }),
+      });
+      if (!result.ok) {
+        setPlanValidationError(result.error);
+        setCompiledPlan(undefined);
+        return;
+      }
+      if (!result.data.valid) {
+        setPlanValidationError(result.data.errors?.[0]?.message || 'Rule plan is invalid.');
+        setCompiledPlan(undefined);
+        return;
+      }
+      setPlanValidationError('');
+      setCompiledPlan(result.data.compiled_plan);
+    }, 400);
+    return () => window.clearTimeout(timer);
+  }, [clientId, isRuleBased, ruleQueryText, scriptName, side, strategy]);
 
   useEffect(() => {
     if (quantityMode === 'amount') {
@@ -306,20 +620,123 @@ const StrategySellForm: React.FC<Props> = ({
     }
   }, [amountPlan.quantity, quantityMode]);
 
+  const handleCustomPlanChange = useCallback((payload: {
+    queryText: string;
+    compiledPlan?: Record<string, unknown>;
+    validation: { valid?: boolean; errors?: Array<{ code?: string; message?: string }>; warnings?: Array<{ code?: string; message?: string }> } | null;
+  }) => {
+    setRuleQueryText(payload.queryText);
+    setLocalError('');
+    setCompiledPlan(payload.compiledPlan);
+    const detectedSide = extractPlanSide(payload.compiledPlan);
+    if (detectedSide) {
+      setQueryPlanSide(detectedSide);
+      onCustomQuerySideChange?.(detectedSide);
+    }
+    const message = resolveValidationMessage(payload.validation);
+    setPlanValidationError(message);
+  }, [onCustomQuerySideChange, resolveValidationMessage]);
+
   const submit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (scheduleBlockReason) {
+      setLocalError(scheduleBlockReason);
+      return;
+    }
     if (validationError) {
       setLocalError(validationError);
       return;
     }
+    if (planValidationError) {
+      setLocalError(planValidationError);
+      return;
+    }
+    if (isCustomQuery && queryValidating) {
+      setLocalError('Strategy query is still validating. Please wait a moment.');
+      return;
+    }
+    let activeCompiledPlan = compiledPlan;
+    const resolvedCustomSide = extractPlanSide(activeCompiledPlan) || queryPlanSide || side;
+    if (isCustomQuery && ruleQueryText.trim()) {
+      const result = await fetchJson<{
+        valid: boolean;
+        compiled_plan?: Record<string, unknown>;
+        errors?: Array<{ code?: string; message?: string }>;
+        warnings?: Array<{ code?: string; message?: string }>;
+      }>('/api/strategy-plans/validate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          query_text: ruleQueryText,
+          strategy_type: 'Custom Query',
+          side: resolvedCustomSide,
+          form_symbol: scriptName,
+          client_id: clientId,
+          skip_live_checks: true,
+          holdings_by_symbol: holdingsBySymbol,
+        }),
+      });
+      if (!result.ok) {
+        setLocalError(result.error);
+        return;
+      }
+      const validationMessage = resolveValidationMessage(result.data);
+      if (!result.data.valid || !result.data.compiled_plan || validationMessage) {
+        setLocalError(validationMessage || result.data.errors?.[0]?.message || 'Rule plan must be valid before scheduling.');
+        return;
+      }
+      activeCompiledPlan = result.data.compiled_plan;
+      setCompiledPlan(activeCompiledPlan);
+      setPlanValidationError('');
+    } else if (isRuleBuilder && !activeCompiledPlan && ruleQueryText.trim()) {
+      const result = await fetchJson<{
+        valid: boolean;
+        compiled_plan?: Record<string, unknown>;
+        errors?: Array<{ message?: string }>;
+      }>('/api/strategy-plans/validate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          query_text: ruleQueryText,
+          strategy_type: strategy,
+          side,
+          form_symbol: scriptName,
+          client_id: clientId,
+        }),
+      });
+      if (!result.ok) {
+        setLocalError(result.error);
+        return;
+      }
+      if (!result.data.valid || !result.data.compiled_plan) {
+        setLocalError(result.data.errors?.[0]?.message || 'Rule plan must be valid before scheduling.');
+        return;
+      }
+      activeCompiledPlan = result.data.compiled_plan;
+      setCompiledPlan(activeCompiledPlan);
+      setPlanValidationError('');
+    }
+    if (isRuleBased && !activeCompiledPlan) {
+      setLocalError('Rule plan must be valid before scheduling.');
+      return;
+    }
     setLocalError('');
-    const parsedQty = Number.parseInt(qty, 10);
-    const fallbackPrice = toPositiveNumber(price) || (side === 'buy' ? topSellPrice : topBuyPrice) || currentLtp || 0;
+    const fallbackPrice = isCustomQuery
+      ? 0
+      : (toPositiveNumber(price) || (side === 'buy' ? topSellPrice : topBuyPrice) || currentLtp || 0);
+    if (isRuleBuilder && fallbackPrice <= 0) {
+      setLocalError('Reference price is required. It is prefilled from LTP — adjust if needed.');
+      return;
+    }
+    const plannedRuleQty = isRuleBased
+      ? (extractPlannedQtyFromCompiledPlan(activeCompiledPlan, scriptName)
+        ?? (parsedQty > 0 ? parsedQty : DEFAULT_RULE_PLANNED_QTY))
+      : parsedQty;
     const payload: StrategyPayload = {
-      strategy_type: strategy,
+      strategy_type: isCustomQuery ? customQueryStrategyForSide(extractPlanSide(activeCompiledPlan) || queryPlanSide || side) : strategy,
       price: fallbackPrice,
-      qty: parsedQty,
-      status: strategy === 'Fixed Price Buy' || strategy === 'Fixed Price Sell' ? 'pending' : 'Waiting',
+      qty: plannedRuleQty,
+      status: isRuleBased || strategy === 'Fixed Price Buy' || strategy === 'Fixed Price Sell' ? (isRuleBased ? 'Waiting' : 'pending') : 'Waiting',
       max_allowed_slippage_percent: Number(maxSlippage) || 1,
       emergency_execution: emergencyExecution || strategy === 'Emergency Exit by Top Buyer',
       odd_lot_allowed: oddLotAllowed,
@@ -334,6 +751,10 @@ const StrategySellForm: React.FC<Props> = ({
         target1_sell_pct: Number(firstPercent) || 30,
         target2_sell_pct: Number(secondPercent) || 30,
         allow_split_emergency_exit: allowSplitEmergencyExit,
+        query_text: isRuleBased ? ruleQueryText : undefined,
+        compiled_plan: isRuleBased ? activeCompiledPlan : undefined,
+        rule_planned_qty: isRuleBased ? plannedRuleQty : undefined,
+        execution_mode: isRuleBased ? 'live' : undefined,
       },
     };
     if (strategy === 'Capital Protection Sell' || strategy === 'Time-Based Exit') {
@@ -382,7 +803,16 @@ const StrategySellForm: React.FC<Props> = ({
   };
 
   const handleStrategyChange = (nextStrategy: StrategyType) => {
-    setStrategy(nextStrategy);
+    const nextIsCustomQuery = isCustomQueryStrategy(nextStrategy);
+    setStrategy(nextIsCustomQuery ? 'Custom Query' : nextStrategy);
+    if (nextIsCustomQuery) {
+      priceTouchedRef.current = true;
+      setPrice('');
+      setQueryPlanSide(null);
+    } else if (isCustomQuery && currentLtp && currentLtp > 0) {
+      priceTouchedRef.current = false;
+      setPrice(String(Math.round(currentLtp)));
+    }
     onStrategyChange?.(nextStrategy);
   };
 
@@ -415,7 +845,61 @@ const StrategySellForm: React.FC<Props> = ({
 
       {(localError || submitError) && <p className="strategy-error" role="alert">{localError || submitError}</p>}
 
+      {isRuleBuilder && (
+        <TechnicalRuleBuilder
+          side={side}
+          formSymbol={scriptName}
+          onQueryChange={setRuleQueryText}
+        />
+      )}
+
+      {isRuleBuilder && (
+        <div className="form-group">
+          <label htmlFor="strategyReferencePrice">
+            {side === 'buy' ? 'Reference buy price (from LTP)' : 'Reference sell price (from LTP)'}
+          </label>
+          <input
+            id="strategyReferencePrice"
+            className="input"
+            type="number"
+            min="0"
+            step="1"
+            value={price}
+            onChange={(e) => {
+              priceTouchedRef.current = true;
+              setPrice(e.target.value);
+            }}
+          />
+        </div>
+      )}
+
+      {planValidationError ? <p className="strategy-error" role="alert">{planValidationError}</p> : null}
+
+      {isCustomQuery && (
+        <>
+          {queryPlanSide ? (
+            <div className={`strategy-query-side-ok ${queryPlanSide}`} role="status" aria-live="polite">
+              <span className="strategy-query-side-ok-check">OK</span>
+              <strong>{queryPlanSide.toUpperCase()}</strong>
+            </div>
+          ) : null}
+          <CustomQueryEditor
+            side={queryPlanSide || side}
+            strategyType="Custom Query"
+            formSymbol={scriptName}
+            clientId={clientId}
+            holdingsBySymbol={holdingsBySymbol}
+            initialQuery={ruleQueryText}
+            aiPortalTargetId={aiPortalTargetId}
+            onPlanChange={handleCustomPlanChange}
+            onValidatingChange={setQueryValidating}
+          />
+        </>
+      )}
+
       <div className="strategy-grid">
+        {!isRuleBased && (
+        <>
         <div className="form-group strategy-qty-field">
           <div className="strategy-qty-header">
             <label htmlFor={quantityMode === 'amount' ? 'strategyInvestmentAmount' : 'strategyQty'}>
@@ -484,7 +968,18 @@ const StrategySellForm: React.FC<Props> = ({
         {(strategy === 'Fixed Price Buy' || strategy === 'Fixed Price Sell' || strategy === 'Smart Pullback Buy' || strategy === 'Confirmed Breakout Buy') && (
           <div className="form-group">
             <label htmlFor="strategyPrice">{side === 'buy' ? 'Buy trigger price' : 'Sell price'}</label>
-            <input id="strategyPrice" className="input" type="number" min="0" step="0.1" value={price} onChange={(e) => setPrice(e.target.value)} />
+            <input
+              id="strategyPrice"
+              className="input"
+              type="number"
+              min="0"
+              step="1"
+              value={price}
+              onChange={(e) => {
+                priceTouchedRef.current = true;
+                setPrice(e.target.value);
+              }}
+            />
           </div>
         )}
         {(strategy === 'Quality Pullback Recovery Buy' || strategy === 'Mean Reversion Bounce Buy' || strategy === 'Order Book Strength Buy') && (
@@ -589,9 +1084,17 @@ const StrategySellForm: React.FC<Props> = ({
             <input id="maxSlippage" className="input" type="number" min="0" step="0.1" value={maxSlippage} onChange={(e) => setMaxSlippage(e.target.value)} />
           </div>
         )}
+        </>
+        )}
       </div>
 
-      {summaryParts.length > 0 && (
+      {isRuleBased && !isCustomQuery && (
+        <p className="strategy-warning">
+          Order size and stock targets come from the rule plan above. The selected form symbol is only used for warnings when it is not included in the query.
+        </p>
+      )}
+
+      {summaryParts.length > 0 && !isCustomQuery && (
         <div className="strategy-order-summary">
           <span className={`strategy-summary-side ${side}`}>{side.toUpperCase()}</span>
           <span>{summaryParts.join(' · ')}</span>
@@ -617,9 +1120,27 @@ const StrategySellForm: React.FC<Props> = ({
         </label>
       )}
 
-      <button type="submit" className="btn btn-primary strategy-submit" disabled={isSubmitting}>
-        {isSubmitting ? 'Saving...' : (submitButtonLabel || STRATEGY_HELP[strategy]?.button || 'Schedule Order')}
+      <button type="submit" className="btn btn-primary strategy-submit" disabled={!canSchedule}>
+        {isSubmitting
+          ? (submitProgress || 'Scheduling…')
+          : queryValidating
+            ? 'Checking query…'
+            : (submitButtonLabel || STRATEGY_HELP[strategy]?.button || 'Schedule Order')}
       </button>
+
+      {isSubmitting && submitProgress ? (
+        <p className="strategy-submit-progress" aria-live="polite">{submitProgress}</p>
+      ) : null}
+
+      {(submitStatus === 'success' || submitStatus === 'error') && submitStatusMessage ? (
+        <div className="strategy-submit-status">
+          <ErrorMessage
+            message={submitStatusMessage}
+            variant={submitStatus === 'success' ? 'success' : 'error'}
+            persistent={submitStatus === 'error'}
+          />
+        </div>
+      ) : null}
 
       {strategyGuideOpen && (
         <StrategyCatalogModal

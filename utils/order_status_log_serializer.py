@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from models.order_status_log import OrderStatusLog
 from models.scheduled_order import ScheduledOrder
+from utils.api_time import format_api_timestamp
 
 
 def status_log_from_scheduled_order(order: ScheduledOrder, status: str | None = None) -> OrderStatusLog:
@@ -41,7 +42,7 @@ def serialize_order_status_log(log: OrderStatusLog) -> dict:
         "status": log.status,
         "price": log.price,
         "order_type": log.order_type,
-        "timestamp": log.timestamp.isoformat() if log.timestamp else None,
+        "timestamp": format_api_timestamp(log.timestamp),
         "strategy_type": log.strategy_type,
         "requested_price": log.requested_price,
         "execution_price": log.execution_price,

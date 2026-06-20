@@ -9,6 +9,7 @@ import StockTable from './StockTable';
 import StockGrabberPage from './StockGrabberPage';
 import StockScreener from './StockScreener';
 import StrategyDetails from './StrategyDetails';
+import Settings from './Settings';
 import AppShell, { NavItem } from '../../components/layout/AppShell';
 import { pathToTab, TAB_TO_PATH } from '../../routes/control_pannel/dashboardPaths';
 
@@ -23,6 +24,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'StrategyDetails', label: 'Strategy Details', icon: '🧭' },
   { id: 'StockTable', label: 'Stock Table', icon: '📈' },
   { id: 'EDIS', label: 'EDIS', icon: '📝' },
+  { id: 'Settings', label: 'Settings', icon: '⚙️' },
   { id: 'Login', label: 'TMS Login', icon: '🔐' },
 ];
 
@@ -36,6 +38,7 @@ const PAGE_META: Record<string, { title: string; subtitle: string }> = {
   StockTable: { title: 'Stock Table', subtitle: 'Live market data and stock quotes' },
   StockScreener: { title: 'Stock Screener', subtitle: 'Filter and rank stocks using Nepse Alpha signals' },
   StockGrabber: { title: 'Stock Grabber', subtitle: 'Automated stock monitoring and order placement' },
+  Settings: { title: 'Settings', subtitle: 'Monitoring speed, defaults, and portal refresh behavior' },
 };
 
 const DashBoardPage: React.FC = () => {
@@ -103,6 +106,8 @@ const DashBoardPage: React.FC = () => {
         return <StockGrabberPage />;
       case 'StockScreener':
         return <StockScreener />;
+      case 'Settings':
+        return <Settings />;
       default:
         return <OrderStatus />;
     }

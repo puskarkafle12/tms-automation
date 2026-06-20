@@ -47,6 +47,13 @@
   color: var(--color-text-muted);
 }
 
+.tms-app-updated {
+  margin: 0.5rem 0 0;
+  font-size: 0.8125rem;
+  color: #4338ca;
+  font-weight: 500;
+}
+
 .tms-refresh-btn {
   flex-shrink: 0;
 }

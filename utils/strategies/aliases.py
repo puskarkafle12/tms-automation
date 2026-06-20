@@ -10,6 +10,8 @@ BUY_STRATEGIES: Set[str] = {
     "Mean Reversion Bounce Buy",
     "Order Book Strength Buy",
     "Time-Based Buy",
+    "Technical Buy",
+    "Custom Query Buy",
 }
 
 SELL_STRATEGIES: Set[str] = {
@@ -20,6 +22,8 @@ SELL_STRATEGIES: Set[str] = {
     "Technical Weakness Sell",
     "Emergency Exit by Top Buyer",
     "Time-Based Exit",
+    "Technical Sell",
+    "Custom Query Sell",
 }
 
 CANONICAL_STRATEGIES: Set[str] = BUY_STRATEGIES | SELL_STRATEGIES

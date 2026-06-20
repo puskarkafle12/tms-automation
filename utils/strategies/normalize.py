@@ -114,27 +114,52 @@ def normalize_nepse_alpha_payload(payload: Dict[str, Any]) -> ScriptDetails:
 
     details.all_time_high = safe_number(stats.get("all_time_high"))
     details.all_time_low = safe_number(stats.get("all_time_low"))
+    details.reference_ltp = safe_number(stats.get("ltp"))
     return details
 
 
-def get_script_details(symbol: str, *, force_refresh: bool = False) -> ScriptDetails:
+_DETAILS_FAILURE_TTL_SECONDS = 90
+
+
+def _cached_script_details(symbol: str, *, force_refresh: bool = False) -> tuple[ScriptDetails, bool]:
+    """Return (details, network_attempted). network_attempted is False on cache hit."""
     normalized = (symbol or "").strip().upper()
     if not normalized:
-        return ScriptDetails(available=False)
+        return ScriptDetails(available=False, fetch_error="Symbol is required"), False
 
     now = time.time()
     cached = _DETAILS_CACHE.get(normalized)
     if not force_refresh and cached and now < float(cached.get("expires_at") or 0):
-        return cached["details"]
+        return cached["details"], False
 
-    try:
-        payload = get_nepse_alpha_signals(normalized)
-        details = normalize_nepse_alpha_payload(payload)
-    except Exception:
-        details = ScriptDetails(available=False)
+    last_error: Optional[str] = None
+    details = ScriptDetails(available=False, fetch_error=None)
+    for attempt in range(2):
+        try:
+            payload = get_nepse_alpha_signals(
+                normalized,
+                force_refresh_key=attempt > 0,
+            )
+            details = normalize_nepse_alpha_payload(payload)
+            last_error = None
+            break
+        except Exception as exc:
+            last_error = str(exc)
+            details = ScriptDetails(available=False, fetch_error=last_error)
 
+    ttl = _DETAILS_TTL_SECONDS if details.available else _DETAILS_FAILURE_TTL_SECONDS
     _DETAILS_CACHE[normalized] = {
         "details": details,
-        "expires_at": now + _DETAILS_TTL_SECONDS,
+        "expires_at": now + ttl,
     }
+    return details, True
+
+
+def get_script_details(symbol: str, *, force_refresh: bool = False) -> ScriptDetails:
+    details, _ = _cached_script_details(symbol, force_refresh=force_refresh)
     return details
+
+
+def get_script_details_fetch_meta(symbol: str, *, force_refresh: bool = False) -> tuple[ScriptDetails, bool]:
+    """Return script details and whether a network fetch was attempted (cache miss)."""
+    return _cached_script_details(symbol, force_refresh=force_refresh)

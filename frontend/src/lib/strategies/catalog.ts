@@ -245,6 +245,78 @@ export const STRATEGY_CATALOG: StrategyCatalogEntry[] = [
     requiredData: ['Expiry time', 'Holdings', 'Expiry action'],
     example: 'Exit at 3:00 PM → sell to top buyer or LTP fallback.',
   }),
+  entry('Technical Buy', 'buy', {
+    purpose: 'Build graphical multi-stock technical buy rules.',
+    bestFor: 'Indicator-based entries with per-stock sizing.',
+    howItWorks: [
+      'Create one or more stock rule cards with conditions and order size.',
+      'Rules compile into Strategy Query Language and evaluate independently per symbol.',
+    ],
+    expectedBehavior: [
+      'Rule false → Monitoring.',
+      'Rule true with paper mode → matched without live order.',
+      'Rule true in live mode → buy per rule sizing.',
+    ],
+    requiredData: ['Live quote', 'Nepse Alpha technicals', 'Compiled rule plan'],
+    example: 'CZBIL RSI > 30 and MACD Bullish → buy 100 shares.',
+  }),
+  entry('Custom Query', 'buy', {
+    purpose: 'Author a custom multi-stock query in Strategy Query Language.',
+    bestFor: 'Advanced users who define multi-stock rules directly in query text.',
+    howItWorks: [
+      'Write one or more stock rules in the query editor.',
+      'Validate against cached DP holdings for sell queries before scheduling.',
+    ],
+    expectedBehavior: [
+      'Invalid syntax → validation errors.',
+      'SELL without holding → blocked before schedule.',
+      'Valid query → per-symbol evaluation and execution.',
+    ],
+    requiredData: ['Query text', 'Field registry', 'Holdings for SELL', 'Live and Alpha data'],
+    example: 'SIDE SELL RULE "Exit" FOR SYMBOL "BFC" { WHEN ltp >= 500 ORDER QUANTITY 10 }',
+  }),
+  entry('Custom Query Buy', 'buy', {
+    purpose: 'Author a custom multi-stock buy query in Strategy Query Language.',
+    bestFor: 'Advanced users who want full control over syntax and portfolio limits.',
+    howItWorks: [
+      'Write STRATEGY_VERSION query text with explicit FOR SYMBOL targets.',
+      'Validate, preview, then save in paper/shadow/live mode.',
+    ],
+    expectedBehavior: [
+      'Invalid syntax → validation errors.',
+      'Valid query → per-symbol evaluation and optional batch execution.',
+    ],
+    requiredData: ['Query text', 'Field registry', 'Live and Alpha data'],
+    example: 'FOR SYMBOL IN ("CZBIL","NABIL") WHEN RSI < 35 ORDER AMOUNT 20000.',
+  }),
+  entry('Technical Sell', 'sell', {
+    purpose: 'Build graphical multi-stock technical sell rules.',
+    bestFor: 'Confirmed weakness exits and partial profit booking.',
+    howItWorks: [
+      'Create stock cards with sell sizing and technical conditions.',
+      'Non-held symbols warn and skip instead of failing the whole plan.',
+    ],
+    expectedBehavior: [
+      'Symbol not held → warning and SKIPPED_NOT_HELD.',
+      'Matched held symbol → sell per rule sizing.',
+    ],
+    requiredData: ['Holdings', 'Live quote', 'Nepse Alpha technicals'],
+    example: 'CZBIL RSI < 70 and two consecutive drops → sell 100% holding.',
+  }),
+  entry('Custom Query Sell', 'sell', {
+    purpose: 'Author a custom multi-stock sell query in Strategy Query Language.',
+    bestFor: 'Complex exits across many symbols with different rules.',
+    howItWorks: [
+      'Each RULE block must declare FOR SYMBOL targets and sell sizing.',
+      'Holdings preflight produces warnings for symbols not currently held.',
+    ],
+    expectedBehavior: [
+      'Invalid symbol → error.',
+      'Valid but not held → warning, save allowed, execution skipped.',
+    ],
+    requiredData: ['Query text', 'Holdings', 'Live and Alpha data'],
+    example: 'CZBIL weakness exit and NABIL partial profit in one query.',
+  }),
 ];
 
 export const STRATEGY_CATALOG_BY_NAME = Object.fromEntries(

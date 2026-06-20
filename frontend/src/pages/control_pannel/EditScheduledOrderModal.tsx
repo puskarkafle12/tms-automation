@@ -35,6 +35,9 @@ export interface ScheduledOrderDetail {
   emergency_execution?: boolean;
   strategy_config?: Record<string, unknown>;
   editable?: boolean;
+  reference_ltp?: number | null;
+  trigger_price?: number | null;
+  drop_percent?: number | null;
 }
 
 interface Props {
@@ -94,6 +97,10 @@ const EditScheduledOrderModal: React.FC<Props> = ({ orderId, apiUrl, onClose, on
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [latestLtp, setLatestLtp] = useState<number | null>(null);
   const [holdingQty, setHoldingQty] = useState<number | null>(null);
+  const [baselineDropPercent, setBaselineDropPercent] = useState('10');
+  const [refreshBaseline, setRefreshBaseline] = useState(false);
+  const [refreshingReferences, setRefreshingReferences] = useState(false);
+  const [referenceRefreshError, setReferenceRefreshError] = useState('');
 
   useEffect(() => {
     const loadOrder = async () => {
@@ -112,6 +119,10 @@ const EditScheduledOrderModal: React.FC<Props> = ({ orderId, apiUrl, onClose, on
           throw new Error(`Order status "${loaded.status}" cannot be edited`);
         }
         setOrder(loaded);
+        const config = (loaded.strategy_config || {}) as Record<string, unknown>;
+        if (config.capture_reference_ltp) {
+          setBaselineDropPercent(String(loaded.drop_percent ?? config.drop_percent ?? '10'));
+        }
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to load scheduled order');
       } finally {
@@ -176,6 +187,20 @@ const EditScheduledOrderModal: React.FC<Props> = ({ orderId, apiUrl, onClose, on
     setIsSubmitting(true);
     setSubmitError('');
     try {
+      const config = (order.strategy_config || {}) as Record<string, unknown>;
+      const payload = { ...strategyPayload };
+      if (config.capture_reference_ltp) {
+        payload.strategy_config = {
+          ...(payload.strategy_config || {}),
+          capture_reference_ltp: true,
+          query_text: config.query_text,
+          drop_percent: Number(baselineDropPercent) || 10,
+          fixed_symbols: config.fixed_symbols,
+          expiration: config.expiration,
+          refresh_reference_ltp: refreshBaseline,
+          recalc_drop_percent_only: !refreshBaseline,
+        };
+      }
       const response = await fetch(`${apiUrl}/scheduled_orders/${order.order_id}`, {
         method: 'PUT',
         headers: {
@@ -187,7 +212,7 @@ const EditScheduledOrderModal: React.FC<Props> = ({ orderId, apiUrl, onClose, on
           script_name: order.script_name,
           order_type: side,
           security_details: order.security_details || {},
-          ...strategyPayload,
+          ...payload,
         }),
       });
       const data = await response.json().catch(() => ({}));
@@ -201,7 +226,46 @@ const EditScheduledOrderModal: React.FC<Props> = ({ orderId, apiUrl, onClose, on
     } finally {
       setIsSubmitting(false);
     }
-  }, [apiUrl, onClose, onSaved, order, side]);
+  }, [apiUrl, baselineDropPercent, onClose, onSaved, order, refreshBaseline, side]);
+
+  const hasBaseline = Boolean(order?.strategy_config && (order.strategy_config as Record<string, unknown>).capture_reference_ltp);
+  const hasFieldReferences = Boolean(
+    order?.strategy_config && (order.strategy_config as Record<string, unknown>).uses_field_references,
+  );
+
+  const refreshFieldReferences = useCallback(async () => {
+    if (!order) {
+      return;
+    }
+    setRefreshingReferences(true);
+    setReferenceRefreshError('');
+    try {
+      const response = await fetch(`${apiUrl}/scheduled_orders/${order.order_id}/references/refresh`, {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ scope: 'all', client_id: order.client_id }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const detail = data.detail;
+        const message =
+          typeof detail === 'object' && detail?.message
+            ? String(detail.message)
+            : String(detail || data.message || 'Failed to refresh references');
+        throw new Error(message);
+      }
+      if (data.order) {
+        setOrder(data.order as ScheduledOrderDetail);
+      }
+    } catch (err) {
+      setReferenceRefreshError(err instanceof Error ? err.message : 'Failed to refresh references');
+    } finally {
+      setRefreshingReferences(false);
+    }
+  }, [apiUrl, order]);
 
   return (
     <div className="edit-scheduled-order-backdrop" role="presentation" onClick={onClose}>
@@ -231,7 +295,58 @@ const EditScheduledOrderModal: React.FC<Props> = ({ orderId, apiUrl, onClose, on
         {submitError && <ErrorMessage message={submitError} variant="error" persistent />}
 
         {!loading && !error && order && prefill && (
-          <StrategySellForm
+          <>
+            {hasFieldReferences && (
+              <div className="edit-scheduled-order-baseline-panel">
+                <h4>Schedule references</h4>
+                <p>
+                  Captured field snapshots stay fixed during monitoring until refreshed. Live quote fields
+                  (e.g. ltp) continue updating on each scan.
+                </p>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  disabled={refreshingReferences}
+                  onClick={() => void refreshFieldReferences()}
+                >
+                  {refreshingReferences ? 'Refreshing…' : 'Refresh all references from live data'}
+                </button>
+                {referenceRefreshError && <ErrorMessage message={referenceRefreshError} variant="error" persistent />}
+              </div>
+            )}
+            {hasBaseline && (
+              <div className="edit-scheduled-order-baseline-panel">
+                <h4>Fixed baseline</h4>
+                <p>
+                  Reference LTP {order.reference_ltp ?? '—'} · Trigger {order.trigger_price ?? '—'}
+                </p>
+                <div className="form-group">
+                  <label htmlFor="editBaselineDropPercent">Drop %</label>
+                  <input
+                    id="editBaselineDropPercent"
+                    className="input"
+                    type="number"
+                    min="0.1"
+                    max="99"
+                    step="0.1"
+                    value={baselineDropPercent}
+                    onChange={(e) => setBaselineDropPercent(e.target.value)}
+                  />
+                </div>
+                <label className="strategy-checkbox">
+                  <input
+                    type="checkbox"
+                    checked={refreshBaseline}
+                    onChange={(e) => setRefreshBaseline(e.target.checked)}
+                  />
+                  Refresh reference LTP from live quote
+                </label>
+                <p className="edit-scheduled-order-baseline-note">
+                  Changing drop % recalculates trigger from the stored reference LTP unless refresh is checked.
+                </p>
+              </div>
+            )}
+            <StrategySellForm
             key={order.order_id}
             scriptName={order.script_name}
             side={side}
@@ -247,6 +362,7 @@ const EditScheduledOrderModal: React.FC<Props> = ({ orderId, apiUrl, onClose, on
             submitButtonLabel="Save Changes"
             onSubmit={submitUpdate}
           />
+          </>
         )}
       </div>
     </div>
@@ -254,3 +370,4 @@ const EditScheduledOrderModal: React.FC<Props> = ({ orderId, apiUrl, onClose, on
 };
 
 export default EditScheduledOrderModal;
+

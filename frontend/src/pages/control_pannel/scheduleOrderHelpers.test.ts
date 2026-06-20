@@ -1,4 +1,9 @@
-import { buildScheduleScriptOptions, mergeQuoteIntoStockDetail, mergeUniqueStockDetails } from './scheduleOrderHelpers';
+import {
+  buildScheduleScriptOptions,
+  mergeQuoteIntoStockDetail,
+  mergeUniqueStockDetails,
+  resolveScheduledOrderIdsForBulkDelete,
+} from './scheduleOrderHelpers';
 
 describe('buildScheduleScriptOptions', () => {
   const stockDetails = [
@@ -80,5 +85,27 @@ describe('mergeQuoteIntoStockDetail', () => {
     expect(merged.change).toBe(0);
     expect(merged.percentChange).toBe(0);
     expect(merged.lastTradedTime).toEqual([2026, 6, 16, 14, 59, 56]);
+  });
+});
+
+describe('resolveScheduledOrderIdsForBulkDelete', () => {
+  const orders = [
+    { order_id: 1, order_type: 'buy' },
+    { order_id: 2, order_type: 'sell' },
+    { order_id: 3, side: 'BUY' },
+  ];
+  const getSide = (order: { order_type?: string; side?: string }) =>
+    String(order.side || order.order_type || '').toUpperCase();
+
+  test('returns selected order ids only', () => {
+    expect(
+      resolveScheduledOrderIdsForBulkDelete(orders, 'selected', new Set([2, 3]), getSide),
+    ).toEqual([2, 3]);
+  });
+
+  test('returns all buy and sell order ids', () => {
+    expect(resolveScheduledOrderIdsForBulkDelete(orders, 'buy', new Set(), getSide)).toEqual([1, 3]);
+    expect(resolveScheduledOrderIdsForBulkDelete(orders, 'sell', new Set(), getSide)).toEqual([2]);
+    expect(resolveScheduledOrderIdsForBulkDelete(orders, 'all', new Set(), getSide)).toEqual([1, 2, 3]);
   });
 });

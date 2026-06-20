@@ -67,9 +67,9 @@ const StockDetails: React.FC<StockDetailsProps> = ({
 
   const percentChange = Number(stock.percentChange || 0);
   const changeTone = percentChange > 0 ? 'positive' : percentChange < 0 ? 'negative' : 'neutral';
-  const displayLtp = quoteLoading
-    ? 'Loading...'
-    : latestLtp && latestLtp > 0
+  const displayLtp = quoteLoading && !(Number(latestLtp) > 0) && !(Number(stock.ltp) > 0)
+    ? 'Refreshing…'
+    : Number(latestLtp) > 0
       ? formatNumber(latestLtp)
       : stock.ltp
         ? formatNumber(stock.ltp)
@@ -171,7 +171,9 @@ const MarketDepthTable: React.FC<{ title: string; rows: QuoteLevel[] }> = ({ tit
           </tbody>
         </table>
       ) : (
-        <p>Market depth unavailable</p>
+        <p className="stock-depth-unavailable">
+          Market depth unavailable (top buy/sell empty — usually outside live TMS session)
+        </p>
       )}
     </div>
   );

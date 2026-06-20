@@ -7,6 +7,33 @@ from sqlalchemy.orm import Session
 
 from models.order_log import OrderLog
 
+TRANSIENT_MONITOR_LOG_PREFIXES = (
+    "Price fetch failed",
+)
+
+
+def is_transient_monitor_log_line(line: str) -> bool:
+    stripped = (line or "").strip()
+    if not stripped:
+        return False
+    return any(
+        stripped.startswith(prefix) or stripped == prefix
+        for prefix in TRANSIENT_MONITOR_LOG_PREFIXES
+    )
+
+
+def strip_transient_monitor_log_lines(logs: Optional[str]) -> Optional[str]:
+    if not logs:
+        return logs
+    kept = [
+        line
+        for line in str(logs).splitlines()
+        if line.strip() and not is_transient_monitor_log_line(line)
+    ]
+    if not kept:
+        return None
+    return "\n".join(kept)
+
 
 async def store_or_update_logs(
     db: Session,
@@ -47,6 +74,9 @@ async def store_or_update_logs(
             logs=log_message,
         )
         db.add(log_entry)
+
+    if current_price is not None and current_price > 0:
+        log_entry.logs = strip_transient_monitor_log_lines(log_entry.logs)
 
     if commit:
         db.commit()

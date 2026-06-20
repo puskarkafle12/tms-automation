@@ -6,13 +6,18 @@ export type StrategyType =
   | 'Mean Reversion Bounce Buy'
   | 'Order Book Strength Buy'
   | 'Time-Based Buy'
+  | 'Technical Buy'
+  | 'Custom Query'
+  | 'Custom Query Buy'
   | 'Fixed Price Sell'
   | 'Capital Protection Sell'
   | 'Profit Ladder Sell'
   | 'Trailing Runner Sell'
   | 'Technical Weakness Sell'
   | 'Emergency Exit by Top Buyer'
-  | 'Time-Based Exit';
+  | 'Time-Based Exit'
+  | 'Technical Sell'
+  | 'Custom Query Sell';
 
 export const STRATEGY_ALIASES: Record<string, StrategyType> = {
   'Fixed Price': 'Fixed Price Buy',
@@ -37,6 +42,8 @@ export const BUY_STRATEGIES: StrategyType[] = [
   'Mean Reversion Bounce Buy',
   'Order Book Strength Buy',
   'Time-Based Buy',
+  'Technical Buy',
+  'Custom Query',
 ];
 
 export const SELL_STRATEGIES: StrategyType[] = [
@@ -47,6 +54,8 @@ export const SELL_STRATEGIES: StrategyType[] = [
   'Technical Weakness Sell',
   'Emergency Exit by Top Buyer',
   'Time-Based Exit',
+  'Technical Sell',
+  'Custom Query',
 ];
 
 export const DEFAULT_SMART_STRATEGY = {

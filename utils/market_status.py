@@ -33,13 +33,19 @@ def get_market_hours_status(now: Optional[datetime] = None) -> Dict[str, bool]:
 
 
 def format_nepal_datetime(now: Optional[datetime] = None) -> Dict[str, str]:
-    current = now or get_nepal_now()
-    return {
-        "iso": current.isoformat(),
-        "time": current.strftime("%I:%M:%S %p"),
-        "date": current.strftime("%a, %d %b %Y"),
-        "timezone": "Asia/Kathmandu",
-    }
+    from utils.api_time import format_api_timestamp
+
+    payload = format_api_timestamp(now or get_nepal_now())
+    if not payload:
+        return {
+            "utc": "",
+            "npt": "",
+            "time": "",
+            "date": "",
+            "display": "",
+            "timezone": "Asia/Kathmandu",
+        }
+    return payload
 
 
 def nepal_date_utc_bounds(nepal_date: date) -> tuple[datetime, datetime]:

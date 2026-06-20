@@ -1,13 +1,20 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import './ScheduleOrder.css';
 import StockDetails from './StockDetails';
-import ErrorMessage from '../../components/ErrorMessage';
 import ScriptNameAutocomplete, { ScriptOption } from '../../components/ScriptNameAutocomplete';
 import ScheduleMonitorBar from '../../components/ScheduleMonitorBar';
 import StrategySellForm, { STRATEGY_HELP } from './StrategySellForm';
 import type { StrategyPayload, StrategyType } from './StrategySellForm';
-import { buildScheduleScriptOptions, mergeQuoteIntoStockDetail, mergeUniqueStockDetails } from './scheduleOrderHelpers';
+import { buildScheduleScriptOptions, mergeQuoteIntoStockDetail, mergeUniqueStockDetails, formatApiErrorDetail, notifyScheduledOrdersChanged } from './scheduleOrderHelpers';
 import { fetchJson } from '../../utils/api';
+import {
+  extractSymbolsFromCompiledPlan,
+  extractPlanSide,
+  holdingsMapFromRows,
+  isCustomQueryStrategy,
+  isRuleBasedStrategy,
+  planUsesReference,
+} from '../../lib/strategies/rulePlanHelpers';
 import {
   getBuyScripCacheKey,
   getCachedScripSuggestions,
@@ -17,8 +24,14 @@ import {
 } from './scriptSuggestionCache';
 import { buildNepseAlphaChartUrl } from '../../lib/nepseAlpha';
 import NepseAlphaSymbolLink from '../../components/NepseAlphaSymbolLink';
+import ScreenerDropConfirmModal from '../../components/ScreenerDropConfirmModal';
+import {
+  mapExpiryActionLabel,
+  ScreenerDropScheduleInput,
+} from '../../api/screenerDrop.api';
 
 const getApiUrl = () => localStorage.getItem('apiUrl') || window.location.origin;
+const SCHEDULE_ORDER_DRAFT_KEY = 'tms-schedule-order-draft-v1';
 
 interface DPHolding {
   scrip?: string;
@@ -59,6 +72,7 @@ const ScheduleOrder: React.FC = () => {
   const [sellScriptRefreshMessage, setSellScriptRefreshMessage] = useState('');
   const [selectedStock, setSelectedStock] = useState<any | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitProgress, setSubmitProgress] = useState('');
   const [latestLtp, setLatestLtp] = useState<number | null>(null);
   const [quote, setQuote] = useState<any | null>(null);
   const [quoteLoading, setQuoteLoading] = useState(false);
@@ -73,6 +87,55 @@ const ScheduleOrder: React.FC = () => {
   const buyScripRequestId = useRef(0);
   const sellScripRequestId = useRef(0);
   const stockDetailsRef = useRef<any[]>([]);
+  const [baselineModalOpen, setBaselineModalOpen] = useState(false);
+  const [baselineScheduleInput, setBaselineScheduleInput] = useState<ScreenerDropScheduleInput | null>(null);
+  const draftRestoredRef = useRef(false);
+
+  useEffect(() => {
+    if (draftRestoredRef.current) {
+      return;
+    }
+    draftRestoredRef.current = true;
+    try {
+      const raw = localStorage.getItem(SCHEDULE_ORDER_DRAFT_KEY);
+      if (!raw) {
+        return;
+      }
+      const draft = JSON.parse(raw) as Partial<{
+        clientID: string;
+        scriptName: string;
+        selectedScriptSymbol: string;
+        price: string;
+        qty: string;
+        orderType: 'buy' | 'sell';
+        selectedStrategy: StrategyType;
+      }>;
+      if (draft.clientID) setClientID(draft.clientID);
+      if (draft.scriptName) setScriptName(draft.scriptName);
+      if (draft.selectedScriptSymbol) setSelectedScriptSymbol(draft.selectedScriptSymbol);
+      if (draft.price != null) setPrice(String(draft.price));
+      if (draft.qty != null) setQty(String(draft.qty));
+      if (draft.orderType === 'buy' || draft.orderType === 'sell') setOrderType(draft.orderType);
+      if (draft.selectedStrategy) setSelectedStrategy(draft.selectedStrategy);
+    } catch {
+      localStorage.removeItem(SCHEDULE_ORDER_DRAFT_KEY);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!draftRestoredRef.current) {
+      return;
+    }
+    localStorage.setItem(SCHEDULE_ORDER_DRAFT_KEY, JSON.stringify({
+      clientID,
+      scriptName,
+      selectedScriptSymbol,
+      price,
+      qty,
+      orderType,
+      selectedStrategy,
+    }));
+  }, [clientID, orderType, price, qty, scriptName, selectedScriptSymbol, selectedStrategy]);
 
   useEffect(() => {
     stockDetailsRef.current = stockDetails;
@@ -123,6 +186,28 @@ const ScheduleOrder: React.FC = () => {
     selectedStrategy === 'Fixed Price Buy' || selectedStrategy === 'Fixed Price Sell'
       ? ''
       : STRATEGY_HELP[selectedStrategy]?.helper || '';
+  const holdingsBySymbol = useMemo(
+    () => holdingsMapFromRows(sellHoldings),
+    [sellHoldings],
+  );
+  const isCustomQuerySelected = useMemo(
+    () => isCustomQueryStrategy(selectedStrategy),
+    [selectedStrategy],
+  );
+  const customQuerySideClass = isCustomQuerySelected
+    ? `custom-query-${orderType === 'sell' ? 'sell' : 'buy'}`
+    : '';
+
+  const handleStrategyChange = (nextStrategy: StrategyType) => {
+    setSelectedStrategy(isCustomQueryStrategy(nextStrategy) ? 'Custom Query' : nextStrategy);
+    if (isCustomQueryStrategy(nextStrategy)) {
+      setScriptName('');
+      setSelectedStock(null);
+      setPrice('');
+      setLatestLtp(null);
+      setQuote(null);
+    }
+  };
 
   const changeOrderSide = (nextSide: 'buy' | 'sell') => {
     setOrderType(nextSide);
@@ -262,7 +347,15 @@ const ScheduleOrder: React.FC = () => {
             broker_no: '',
           }));
           setLoggedInClients(sessions);
-          const defaultClientId = sessions[0]?.client_id || '';
+          const savedClientId = (() => {
+            try {
+              const raw = localStorage.getItem(SCHEDULE_ORDER_DRAFT_KEY);
+              return raw ? String(JSON.parse(raw)?.clientID || '') : '';
+            } catch {
+              return '';
+            }
+          })();
+          const defaultClientId = savedClientId || sessions[0]?.client_id || '';
           setClientID(defaultClientId);
           await Promise.all([fetchStockDetails(defaultClientId), fetchSellHoldings(defaultClientId)]);
         }
@@ -331,12 +424,12 @@ const ScheduleOrder: React.FC = () => {
       return;
     }
 
-    const requestId = quoteRequestId.current + 1;
-    quoteRequestId.current = requestId;
-    if (!options?.silent) {
+    const silent = Boolean(options?.silent);
+    let requestId = quoteRequestId.current;
+    if (!silent) {
+      requestId = quoteRequestId.current + 1;
+      quoteRequestId.current = requestId;
       setQuoteLoading(true);
-    }
-    if (!options?.silent) {
       setQuoteError('');
     }
 
@@ -396,7 +489,7 @@ const ScheduleOrder: React.FC = () => {
         }
       }
     } finally {
-      if (requestId === quoteRequestId.current) {
+      if (!silent && requestId === quoteRequestId.current) {
         setQuoteLoading(false);
       }
     }
@@ -489,26 +582,136 @@ const ScheduleOrder: React.FC = () => {
     setQty(String(holdingQty));
   };
 
+  const resolveSecurityDetails = useCallback((symbol: string) => {
+    const normalizedSymbol = symbol.trim().toUpperCase();
+    const stockDetail = stockDetails.find((stock) => stock.symbol === normalizedSymbol);
+    if (stockDetail) {
+      return stockDetail;
+    }
+    if (orderType === 'sell') {
+      const holding = sellHoldings.find((item) => {
+        const scrip = (item.scrip || '').trim().toUpperCase();
+        const name = (item.symbolName || '').trim().toUpperCase();
+        return scrip === normalizedSymbol || name === normalizedSymbol;
+      });
+      if (holding) {
+        return holding;
+      }
+    }
+    return { symbol: normalizedSymbol };
+  }, [orderType, sellHoldings, stockDetails]);
+
   const submitStrategyOrder = async (strategyPayload: StrategyPayload) => {
     setStatus('idle');
     setStatusMessage('');
 
-    if (!clientID || !scriptName) {
+    if (!clientID) {
+      setStatus('error');
+      setStatusMessage(`Select a client before scheduling a ${orderType} strategy.`);
+      return;
+    }
+
+    const ruleBased = isRuleBasedStrategy(strategyPayload.strategy_type);
+    const customQuery = isCustomQueryStrategy(strategyPayload.strategy_type);
+    const compiledPlan = strategyPayload.strategy_config?.compiled_plan as Record<string, unknown> | undefined;
+    const effectiveOrderType = customQuery
+      ? (extractPlanSide(compiledPlan) || orderType)
+      : orderType;
+    const scheduleSymbols = ruleBased
+      ? extractSymbolsFromCompiledPlan(compiledPlan)
+      : [scriptName.trim().toUpperCase()].filter(Boolean);
+
+    if (!scheduleSymbols.length) {
+      setStatus('error');
+      setStatusMessage(ruleBased ? 'Rule plan must include at least one symbol.' : `Select a script before scheduling a ${orderType} strategy.`);
+      return;
+    }
+
+    if (!ruleBased && !scriptName) {
       setStatus('error');
       setStatusMessage(`Select a client and script before scheduling a ${orderType} strategy.`);
       return;
     }
-    if (orderType === 'buy' && buyHighLimit !== null && strategyPayload.price > buyHighLimit) {
+    if (!ruleBased && orderType === 'buy' && buyHighLimit !== null && strategyPayload.price > buyHighLimit) {
       setStatus('error');
       setStatusMessage(`Buy price cannot exceed today's high (${buyHighLimit}).`);
       return;
     }
-    if (orderType === 'buy' && !selectedStock) {
+    if (!customQuery && ruleBased && (!strategyPayload.price || strategyPayload.price <= 0)) {
+      setStatus('error');
+      setStatusMessage('Reference price is required. It is prefilled from LTP — adjust if needed.');
+      return;
+    }
+
+    const symbolErrors: string[] = [];
+    for (const symbol of scheduleSymbols) {
+      if (effectiveOrderType === 'buy') {
+        const stock = stockDetails.find((item) => item.symbol === symbol);
+        if (!stock) {
+          symbolErrors.push(`${symbol} is not a valid listed scrip for this client.`);
+        }
+      } else {
+        const heldQty = holdingsBySymbol[symbol] ?? 0;
+        if (heldQty <= 0) {
+          symbolErrors.push(`${symbol} is not available in DP holdings.`);
+        }
+      }
+    }
+    if (customQuery && symbolErrors.length > 0) {
+      setStatus('error');
+      setStatusMessage(symbolErrors.join(' '));
+      return;
+    }
+    if (symbolErrors.length === scheduleSymbols.length) {
+      setStatus('error');
+      setStatusMessage(symbolErrors.join(' '));
+      return;
+    }
+
+    const baselineEnabled = Boolean(strategyPayload.strategy_config?.capture_reference_ltp)
+      && !planUsesReference(
+        compiledPlan,
+        String(strategyPayload.strategy_config?.query_text || ''),
+      );
+    if (baselineEnabled && orderType === 'buy') {
+      const config = strategyPayload.strategy_config || {};
+      const fixedSymbols = Array.isArray(config.fixed_symbols) && config.fixed_symbols.length
+        ? (config.fixed_symbols as string[])
+        : scheduleSymbols;
+      const expiration = (config.expiration || {}) as Record<string, unknown>;
+      const expiryTimeLocal = String(config.baseline_expiry_time_local || '');
+      if (!expiryTimeLocal) {
+        setStatus('error');
+        setStatusMessage('Expiration date/time is required for fixed baseline scheduling.');
+        return;
+      }
+      setBaselineScheduleInput({
+        clientId: clientID,
+        queryText: String(config.query_text || ''),
+        symbols: fixedSymbols.slice(0, 10),
+        dropPercent: Number(config.drop_percent) || 10,
+        expiryTimeLocal,
+        expirationAction: mapExpiryActionLabel(String(strategyPayload.expiry_action || 'Cancel strategy')),
+        maxSlippagePercent: strategyPayload.max_allowed_slippage_percent,
+        marketClosedPolicy: (expiration.market_closed_policy as ScreenerDropScheduleInput['marketClosedPolicy'])
+          || 'CANCEL_IF_MARKET_CLOSED',
+        strategyType: String(strategyPayload.strategy_type || 'Custom Query Buy'),
+        defaultQty: strategyPayload.qty,
+        oddLotAllowed: Boolean(strategyPayload.odd_lot_allowed),
+        securityDetailsBySymbol: Object.fromEntries(
+          fixedSymbols.slice(0, 10).map((symbol) => [symbol, resolveSecurityDetails(symbol)]),
+        ),
+      });
+      setBaselineModalOpen(true);
+      return;
+    }
+
+    if (!ruleBased && orderType === 'buy' && !selectedStock) {
       setStatus('error');
       setStatusMessage(`${scriptName} is not a valid listed scrip for this client.`);
       return;
     }
-    if (orderType === 'sell') {
+    if (!ruleBased && orderType === 'sell') {
       if (holdingLoading) {
         setStatus('error');
         setStatusMessage('Still verifying DP holdings. Please wait a moment.');
@@ -526,39 +729,188 @@ const ScheduleOrder: React.FC = () => {
       }
     }
 
-    setIsSubmitting(true);
+    if (ruleBased && scheduleSymbols.length > 1) {
+      const eligibleSymbols = scheduleSymbols.filter(
+        (symbol) => !symbolErrors.some((message) => message.startsWith(`${symbol} `)),
+      );
+      if (!eligibleSymbols.length) {
+        setStatus('error');
+        setStatusMessage(symbolErrors.join(' '));
+        return;
+      }
+      setIsSubmitting(true);
+      setSubmitProgress(`Checking ${eligibleSymbols.length} symbols before scheduling…`);
+      try {
+        const batch = await fetchJson<{
+          status: string;
+          scheduled: Array<{ order_id: number; symbol: string }>;
+          failed: Array<{ symbol: string; message: string }>;
+          ready: boolean;
+        }>('/api/strategy-plans/schedule-batch/wait', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            client_id: clientID,
+            symbols: eligibleSymbols,
+            order_type: orderType,
+            order_fields: {
+              ...strategyPayload,
+              order_type: orderType,
+              price: customQuery ? 0 : strategyPayload.price,
+            },
+            security_details_by_symbol: Object.fromEntries(
+              eligibleSymbols.map((symbol) => [symbol, resolveSecurityDetails(symbol)]),
+            ),
+          }),
+        }, 30000);
+        if (!batch.ok) {
+          setStatus('error');
+          setStatusMessage(batch.error || 'Batch scheduling failed.');
+          return;
+        }
+        notifyScheduledOrdersChanged();
+        const scheduledSymbols = batch.data.scheduled?.map((item) => item.symbol).filter(Boolean) || [];
+        const failedSymbols = batch.data.failed || [];
+        if (failedSymbols.length) {
+          setStatus('error');
+          setStatusMessage(
+            [
+              scheduledSymbols.length ? `Scheduled: ${scheduledSymbols.join(', ')}` : '',
+              `Rejected: ${failedSymbols.map((item) => `${item.symbol} (${item.message})`).join('; ')}`,
+            ].filter(Boolean).join(' · '),
+          );
+        } else {
+          setStatus('success');
+          setStatusMessage(
+            scheduledSymbols.length
+              ? `Scheduled ${scheduledSymbols.length} order(s): ${scheduledSymbols.join(', ')}.`
+              : 'No orders were scheduled.',
+          );
+        }
+        if (!customQuery) {
+          setPrice('');
+          setQty('');
+        }
+      } catch {
+        setStatus('error');
+        setStatusMessage('Failed to start batch scheduling. Check your API connection.');
+      } finally {
+        setIsSubmitting(false);
+        setSubmitProgress('');
+      }
+      return;
+    }
+
+    if (ruleBased) {
+      setIsSubmitting(true);
+      setSubmitProgress('Starting preflight checks…');
+      const preflightResults = await Promise.all(
+        scheduleSymbols.map(async (symbol) => {
+          const preflight = await fetchJson<{
+            ready: boolean;
+            message?: string;
+            status?: string;
+            errors?: Array<{ message: string }>;
+            warnings?: Array<{ message: string }>;
+          }>('/api/strategy-plans/preflight', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              query_text: String(strategyPayload.strategy_config?.query_text || ''),
+              compiled_plan: compiledPlan,
+              strategy_type: strategyPayload.strategy_type,
+              side: orderType,
+              form_symbol: symbol,
+              client_id: clientID,
+              capture_reference_ltp: Boolean(strategyPayload.strategy_config?.capture_reference_ltp),
+              drop_percent: Number(strategyPayload.strategy_config?.drop_percent) || 10,
+              fixed_symbols: strategyPayload.strategy_config?.fixed_symbols,
+            }),
+          }, 120000);
+          return { symbol, preflight };
+        }),
+      );
+      const failedPreflight = preflightResults.find(({ preflight }) => !preflight.ok || !preflight.data.ready);
+      if (failedPreflight) {
+        const { symbol, preflight } = failedPreflight;
+        if (!preflight.ok) {
+          setStatus('error');
+          setStatusMessage(preflight.error || `Preflight check failed for ${symbol}.`);
+        } else {
+          const detail = preflight.data.errors?.[0]?.message || preflight.data.message || `Cannot schedule ${symbol}.`;
+          setStatus('error');
+          setStatusMessage(detail);
+        }
+        setIsSubmitting(false);
+        setSubmitProgress('');
+        return;
+      }
+    } else {
+      setIsSubmitting(true);
+    }
 
     try {
-      const response = await fetch(`${getApiUrl()}/add_order/`, {
-        method: 'POST',
-        headers: {
-          Accept: 'application/json',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          client_id: clientID,
-          script_name: scriptName,
-          order_type: orderType,
-          security_details: selectedStock || {},
-          ...strategyPayload,
-        }),
-      });
+      const scheduled: string[] = [];
+      const failures: string[] = [];
 
-      if (response.ok) {
-        setStatus('success');
-        setStatusMessage(`${strategyPayload.strategy_type} scheduled for ${scriptName}.`);
-        setPrice('');
-        setQty('');
+      for (let index = 0; index < scheduleSymbols.length; index += 1) {
+        const symbol = scheduleSymbols[index];
+        setSubmitProgress(`Scheduling ${symbol} (${index + 1}/${scheduleSymbols.length})…`);
+        const precheckError = symbolErrors.find((message) => message.startsWith(`${symbol} `));
+        if (precheckError) {
+          failures.push(precheckError);
+          continue;
+        }
+        const securityDetails = resolveSecurityDetails(symbol);
+        const orderPayload = {
+          ...strategyPayload,
+          price: customQuery ? 0 : strategyPayload.price,
+        };
+        const response = await fetch(`${getApiUrl()}/add_order/`, {
+          method: 'POST',
+          headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            client_id: clientID,
+            script_name: symbol,
+            order_type: orderType,
+            security_details: securityDetails,
+            ...orderPayload,
+          }),
+        });
+
+        if (response.ok) {
+          scheduled.push(symbol);
+        } else {
+          const data = await response.json().catch(() => ({}));
+          failures.push(`${symbol}: ${formatApiErrorDetail(data.detail, data.message || 'Failed')}`);
+        }
+      }
+
+      if (scheduled.length) {
+        notifyScheduledOrdersChanged();
+        setStatus(failures.length ? 'error' : 'success');
+        setStatusMessage(
+          failures.length
+            ? `Scheduled ${strategyPayload.strategy_type} for ${scheduled.join(', ')}. Failed: ${failures.join('; ')}`
+            : `${strategyPayload.strategy_type} scheduled for ${scheduled.join(', ')}.`,
+        );
+        if (!failures.length) {
+          setPrice('');
+          setQty('');
+        }
       } else {
-        const data = await response.json().catch(() => ({}));
         setStatus('error');
-        setStatusMessage(data.detail || data.message || 'Failed to add order.');
+        setStatusMessage(failures.join('; ') || 'Failed to add order.');
       }
     } catch (error) {
       setStatus('error');
       setStatusMessage('Failed to add order. Check your API connection.');
     } finally {
       setIsSubmitting(false);
+      setSubmitProgress('');
     }
   };
 
@@ -566,11 +918,8 @@ const ScheduleOrder: React.FC = () => {
     <div className="schedule-order-page">
       <ScheduleMonitorBar key="schedule-monitor" />
 
-      {status === 'success' && <ErrorMessage message={statusMessage} variant="success" />}
-      {status === 'error' && <ErrorMessage message={statusMessage} variant="error" persistent />}
-
       <div className="schedule-order-layout">
-        <div className="schedule-order-form-panel panel">
+        <div className={`schedule-order-form-panel panel ${customQuerySideClass}`}>
           <h3 className="panel-title">Add Order</h3>
           {selectedStrategyDescription && (
             <p className="schedule-strategy-description">{selectedStrategyDescription}</p>
@@ -601,6 +950,7 @@ const ScheduleOrder: React.FC = () => {
                 )}
               </div>
 
+              {!isCustomQuerySelected && (
               <div className="form-group schedule-order-script-group">
                 <label htmlFor="scheduleScriptName">Script Name</label>
                 <ScriptNameAutocomplete
@@ -627,13 +977,14 @@ const ScheduleOrder: React.FC = () => {
                   <span className="schedule-order-hint">No sellable DP holdings found for {selectedClientLabel}.</span>
                 )}
               </div>
+              )}
             </div>
 
             <div className="schedule-strategy-wrap">
               <StrategySellForm
-                key={orderType}
-                scriptName={scriptName}
-                sideControl={(
+                key={isCustomQuerySelected ? 'custom-query' : orderType}
+                scriptName={isCustomQuerySelected ? undefined : scriptName}
+                sideControl={!isCustomQuerySelected ? (
                   <div className="form-group schedule-side-field">
                     <label>Side</label>
                     <div className="schedule-order-type-toggle">
@@ -653,27 +1004,36 @@ const ScheduleOrder: React.FC = () => {
                       </button>
                     </div>
                   </div>
-                )}
+                ) : null}
                 side={orderType}
-                currentLtp={latestLtp}
-                availableQty={orderType === 'sell' ? holdingQty : null}
-                averageBuyPrice={orderType === 'sell' ? averageBuyPrice : null}
-                topBuyPrice={quote?.topBuy?.find((row: any) => Number(row.price || 0) > 0)?.price || null}
-                topSellPrice={quote?.topSell?.find((row: any) => Number(row.price || 0) > 0)?.price || null}
+                currentLtp={isCustomQuerySelected ? null : latestLtp}
+                availableQty={orderType === 'sell' && !isCustomQuerySelected ? holdingQty : null}
+                averageBuyPrice={orderType === 'sell' && !isCustomQuerySelected ? averageBuyPrice : null}
+                topBuyPrice={isCustomQuerySelected ? null : (quote?.topBuy?.find((row: any) => Number(row.price || 0) > 0)?.price || null)}
+                topSellPrice={isCustomQuerySelected ? null : (quote?.topSell?.find((row: any) => Number(row.price || 0) > 0)?.price || null)}
                 initialQty={qty}
-                initialPrice={orderType === 'sell' && latestLtp ? String(latestLtp) : price}
-                securityDetails={selectedStock || quote?.security || null}
+                initialPrice={isCustomQuerySelected ? '' : (latestLtp && latestLtp > 0 ? String(Math.round(latestLtp)) : price)}
+                securityDetails={isCustomQuerySelected ? null : (selectedStock || quote?.security || null)}
                 isSubmitting={isSubmitting}
-                submitError={orderType === 'sell' ? holdingError || quoteError : quoteError}
-                onStrategyChange={setSelectedStrategy}
+                submitProgress={submitProgress}
+                submitError={orderType === 'sell' && !isCustomQuerySelected ? holdingError || quoteError : quoteError}
+                submitStatus={status}
+                submitStatusMessage={statusMessage}
+                clientId={clientID}
+                holdingsBySymbol={holdingsBySymbol}
+                initialStrategy={selectedStrategy}
+                draftKey="schedule-order"
+                aiPortalTargetId="custom-query-ai-side-panel"
+                onCustomQuerySideChange={(nextSide) => setOrderType(nextSide)}
+                onStrategyChange={handleStrategyChange}
                 onSubmit={submitStrategyOrder}
               />
             </div>
           </div>
         </div>
 
-        <div className="schedule-order-side-panel panel">
-          {selectedStock ? (
+        <div className={`schedule-order-side-panel panel ${customQuerySideClass}`}>
+          {!isCustomQuerySelected && selectedStock ? (
             <StockDetails
               stock={selectedStock}
               orderType={orderType}
@@ -688,16 +1048,18 @@ const ScheduleOrder: React.FC = () => {
               holdingError={holdingError}
               onFillFromHolding={fillSellQuantityFromHolding}
             />
-          ) : (
+          ) : !isCustomQuerySelected ? (
             <div className="schedule-order-empty-side">
               <span style={{ fontSize: '2rem' }} aria-hidden="true">📈</span>
               <p>Select a script name to view live stock details.</p>
             </div>
+          ) : (
+            <div className="schedule-order-ai-side" id="custom-query-ai-side-panel" />
           )}
         </div>
       </div>
 
-      {chartSymbol && (
+      {chartSymbol && !isCustomQuerySelected && (
         <div className="schedule-order-chart-panel panel">
           <div className="schedule-order-chart-header">
             <div>
@@ -714,6 +1076,31 @@ const ScheduleOrder: React.FC = () => {
           </div>
         </div>
       )}
+      <ScreenerDropConfirmModal
+        open={baselineModalOpen}
+        input={baselineScheduleInput}
+        onClose={() => {
+          setBaselineModalOpen(false);
+          setBaselineScheduleInput(null);
+        }}
+        onCommitted={({ scheduled, failed }) => {
+          if (scheduled.length) {
+            notifyScheduledOrdersChanged();
+          }
+          setStatus(failed.length ? 'error' : 'success');
+          setStatusMessage(
+            failed.length
+              ? `Scheduled baseline orders for ${scheduled.join(', ')}. Failed: ${failed.join('; ')}`
+              : `Baseline schedule created for ${scheduled.join(', ')}.`,
+          );
+          if (!failed.length) {
+            setScriptName('');
+            setSelectedScriptSymbol('');
+            setPrice('');
+            setQty('');
+          }
+        }}
+      />
     </div>
   );
 };

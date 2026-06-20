@@ -12,6 +12,7 @@ class OrderStatusLog(Base):
     qty = Column(Integer)
     status = Column(String)
     timestamp = Column(DateTime, default=func.now())
+    deleted_at = Column(DateTime, nullable=True)
     price = Column(Float)
     order_type = Column(String)
     strategy_type = Column(String)

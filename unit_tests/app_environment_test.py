@@ -29,8 +29,8 @@ class TestStrategyCatalogCoverage(unittest.TestCase):
             CANONICAL_STRATEGIES,
             set(HANDLERS) | {"Time-Based Buy", "Time-Based Exit"},
         )
-        self.assertEqual(len(BUY_STRATEGIES), 7)
-        self.assertEqual(len(SELL_STRATEGIES), 7)
+        self.assertEqual(len(BUY_STRATEGIES), 9)
+        self.assertEqual(len(SELL_STRATEGIES), 9)
 
 
 if __name__ == "__main__":

@@ -36,6 +36,6 @@ describe('StockDetails market depth', () => {
   test('shows market depth unavailable instead of empty/null table rows', () => {
     render(<StockDetails stock={stock} topBuy={[]} topSell={[]} />);
 
-    expect(screen.getAllByText('Market depth unavailable')).toHaveLength(2);
+    expect(screen.getAllByText(/Market depth unavailable/)).toHaveLength(2);
   });
 });

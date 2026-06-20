@@ -7,10 +7,12 @@ import 'react-datepicker/dist/react-datepicker.css';
 import DatePicker from 'react-datepicker';
 import { syncMonitoringStatus } from '../../hooks/monitoringSync';
 import {
+  apiTimestampToUtcMs,
   dateFromNepalDateString,
   formatNepalDateTime,
   nepalDateStringFromDate,
   offsetNepalDate,
+  setServerTodayNpt,
   todayNepalDate,
 } from '../../utils/nepalTime';
 import {
@@ -23,10 +25,32 @@ import { formatStrategyLabel } from '../../lib/strategies';
 import EditScheduledOrderModal from './EditScheduledOrderModal';
 import NepseAlphaSymbolLink from '../../components/NepseAlphaSymbolLink';
 import StrategyCatalogModal from '../../components/StrategyCatalogModal';
+import {
+  REFRESH_SCHEDULED_ORDERS_KEY,
+  SCHEDULED_ORDERS_CHANGED_EVENT,
+  deleteScheduledOrdersById,
+  notifyScheduledOrdersChanged,
+  resolveScheduledOrderIdsForBulkDelete,
+  type ScheduledBulkDeleteMode,
+} from './scheduleOrderHelpers';
+import { extractSymbolsFromCompiledPlan, getDisplayQtyForOrder } from '../../lib/strategies/rulePlanHelpers';
+import { formatShortRelativeTime } from '../../utils/relativeTime';
+import { fetchServerTime, serverUtcToMs } from '../../api/time.api';
+import type { ApiTimeValue } from '../../utils/nepalTime';
+import {
+  readUiPortalSettings,
+  subscribeUiPortalSettings,
+} from '../../lib/uiPortalSettings';
+import {
+  fetchPortalSettings,
+  savePortalSettings,
+  type PortalSettings,
+  type PortalSettingsLimits,
+} from '../../api/settings.api';
 
 type OrderTab = 'logs' | 'scheduled' | 'book' | 'history';
+type ScanIntervalUnit = 'seconds' | 'minutes' | 'hours';
 
-const CACHE_TTL_MS = 20 * 60 * 1000;
 const CORE_CACHE_STORAGE_KEY = 'tms-order-logs-core-v1';
 const TRADE_BOOK_CACHE_STORAGE_KEY = 'tms-order-logs-trade-book-v1';
 const HISTORY_CACHE_STORAGE_KEY = 'tms-order-logs-history-v1';
@@ -38,6 +62,12 @@ const HISTORY_RANGE_OPTIONS: { id: HistoryRangePreset; label: string }[] = [
   { id: 'forever', label: 'All Time' },
 ];
 
+const SCAN_INTERVAL_UNITS: Array<{ value: ScanIntervalUnit; label: string; multiplier: number }> = [
+  { value: 'seconds', label: 'Seconds', multiplier: 1 },
+  { value: 'minutes', label: 'Minutes', multiplier: 60 },
+  { value: 'hours', label: 'Hours', multiplier: 3600 },
+];
+
 interface ScheduledOrderRow {
   order_id: number;
   client_id: string;
@@ -46,7 +76,7 @@ interface ScheduledOrderRow {
   qty: number;
   status: string;
   order_type: string;
-  created_at?: string | null;
+  created_at?: ApiTimeValue;
   strategy_type?: string;
   side?: string;
   stop_loss_price?: number | null;
@@ -67,10 +97,26 @@ interface ScheduledOrderRow {
   requested_price?: number | null;
   expiry_time?: string | null;
   expiry_action?: string | null;
+  reference_ltp?: number | null;
+  trigger_price?: number | null;
+  reference_ltp_captured_at?: string | null;
+  drop_percent?: number | null;
   max_allowed_slippage_percent?: number | null;
   scanning_count?: number;
+  tms_scan_count?: number;
+  nepse_alpha_scan_count?: number;
   current_price?: number | null;
+  last_checked_ltp?: number | null;
+  last_scan_at?: ApiTimeValue;
+  failed_reason?: string | null;
+  cancelled_reason?: string | null;
   live_status?: string;
+  is_scanning?: boolean;
+  display_error?: string | null;
+  last_monitor_message?: string | null;
+  monitor_logs?: string | null;
+  monitor_phase?: string;
+  monitoring_active?: boolean;
   actionRequired?: boolean;
   editable?: boolean;
   executed_at?: string | null;
@@ -103,15 +149,48 @@ const StockClientCell: React.FC<{ symbol: string; clientLabel: string }> = ({ sy
   </div>
 );
 
-const formatScanCount = (value: number | null | undefined): number => {
-  return Math.max(0, Math.round(Number(value) || 0));
+const formatScanCount = (value: number | null | undefined): string => {
+  return String(Math.max(0, Math.round(Number(value) || 0)));
 };
 
 const formatLiveScanStatus = (order: ScheduledOrderRow): string => {
+  if (order.is_scanning) {
+    return 'scanning';
+  }
+  if (order.display_error) {
+    return order.display_error;
+  }
   if (order.live_status) {
     return order.live_status;
   }
   return order.status || 'pending';
+};
+
+const ScheduledOrderStatusCell: React.FC<{ order: ScheduledOrderRow }> = ({ order }) => {
+  if (order.is_scanning) {
+    const count = order.tms_scan_count ?? order.scanning_count ?? 0;
+    return (
+      <span className="scheduled-order-status scanning" title="Actively scanning">
+        <span className="scheduled-order-status-dot" aria-hidden="true" />
+        <span className="scheduled-order-status-count">{formatScanCount(count)}</span>
+      </span>
+    );
+  }
+
+  if (order.display_error) {
+    return (
+      <span className="scheduled-order-status error" title={order.display_error}>
+        {order.display_error}
+      </span>
+    );
+  }
+
+  const fallback = order.live_status || order.status || 'pending';
+  return (
+    <span className="scheduled-order-status idle" title={fallback}>
+      {fallback}
+    </span>
+  );
 };
 
 const isRealValue = (value: unknown): boolean => {
@@ -136,9 +215,7 @@ const formatStrategyType = (strategy: unknown, sideValue: unknown): string => {
   return formatStrategyLabel(String(strategy || ''), side);
 };
 
-const formatDateTime = (value: string | null | undefined) => {
-  return formatNepalDateTime(value);
-};
+const formatDateTime = (value: ApiTimeValue) => formatNepalDateTime(value);
 
 const formatCurrency = (value: number | string | null | undefined) => {
   if (value == null || value === '' || Number.isNaN(Number(value))) return '';
@@ -157,8 +234,8 @@ const formatTradeSide = (value: unknown) => {
   return value != null && value !== '' ? String(value) : '-';
 };
 
-const isCacheFresh = (fetchedAt: number | null | undefined) =>
-  fetchedAt != null && Date.now() - fetchedAt < CACHE_TTL_MS;
+const isCacheFresh = (fetchedAt: number | null | undefined, ttlMs: number) =>
+  fetchedAt != null && Date.now() - fetchedAt < ttlMs;
 
 const tradeBookClientKey = (clientIds: string[]) => [...clientIds].sort().join(',');
 
@@ -194,7 +271,50 @@ const addDetail = (items: Array<{ label: string; value: string }>, label: string
   }
 };
 
-const getStrategyDetails = (order: ScheduledOrderRow) => {
+const addLiveMonitoringDetails = (
+  details: Array<{ label: string; value: string }>,
+  order: ScheduledOrderRow,
+  now = Date.now(),
+) => {
+  addDetail(details, 'Monitor Phase', order.monitor_phase);
+  addDetail(
+    details,
+    'Monitor Running',
+    order.monitoring_active === true ? 'Yes' : order.monitoring_active === false ? 'No' : undefined,
+  );
+  addDetail(details, 'Live Status', formatLiveScanStatus(order));
+  addDetail(
+    details,
+    'Scanning Active',
+    order.is_scanning ? 'Yes' : order.is_scanning === false ? 'No' : undefined,
+  );
+  addDetail(details, 'Status Detail', order.display_error);
+  addDetail(details, 'TMS Price Scans', order.tms_scan_count ?? order.scanning_count, formatScanCount);
+  addDetail(details, 'Nepse Alpha Scans', order.nepse_alpha_scan_count, formatScanCount);
+  addDetail(details, 'Live LTP', order.current_price ?? order.last_checked_ltp, formatCurrency);
+  if (order.last_scan_at) {
+    const absolute = formatDateTime(order.last_scan_at);
+    const relative = formatShortRelativeTime(order.last_scan_at, now ?? undefined);
+    details.push({
+      label: 'Last Scan',
+      value: relative ? `${absolute} (${relative})` : absolute,
+    });
+  }
+  addDetail(details, 'Last Monitor Log', order.last_monitor_message);
+  if (order.monitor_logs) {
+    const recentLogs = order.monitor_logs
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .slice(-12)
+      .join('\n');
+    if (recentLogs) {
+      details.push({ label: 'Recent Monitor Logs', value: recentLogs });
+    }
+  }
+};
+
+const getStrategyDetails = (order: ScheduledOrderRow, now: number | null = null) => {
   const side = getOrderSide(order);
   const strategy = formatStrategyType(order.strategy_type, side);
   const details: Array<{ label: string; value: string }> = [];
@@ -202,8 +322,8 @@ const getStrategyDetails = (order: ScheduledOrderRow) => {
   addDetail(details, 'Strategy', strategy);
   addDetail(details, 'Side', side);
   addDetail(details, 'Stock', order.script_name);
-  addDetail(details, 'Quantity', order.qty);
-  addDetail(details, 'Status', order.status || order.live_status);
+  addDetail(details, 'Quantity', getDisplayQtyForOrder(order));
+  addDetail(details, 'Status', order.status);
   addDetail(details, 'Created At', order.created_at, formatDateTime);
 
   if (strategy === 'Fixed Price Buy') {
@@ -245,7 +365,58 @@ const getStrategyDetails = (order: ScheduledOrderRow) => {
   } else if (strategy === 'Emergency Exit by Top Buyer') {
     addDetail(details, 'Execution Rule', 'Sell immediately using Top Buy if available.');
     addDetail(details, 'Max Allowed Slippage', order.max_allowed_slippage_percent, formatPercent);
+  } else if (
+    strategy === 'Technical Buy'
+    || strategy === 'Technical Sell'
+    || strategy === 'Custom Query Buy'
+    || strategy === 'Custom Query Sell'
+  ) {
+    const config = (order.strategy_config || {}) as Record<string, unknown>;
+    const compiledPlan = config.compiled_plan as Record<string, unknown> | undefined;
+    const symbols = extractSymbolsFromCompiledPlan(compiledPlan);
+    const isCustomQuery = strategy === 'Custom Query Buy' || strategy === 'Custom Query Sell';
+    if (!isCustomQuery) {
+      addDetail(details, 'Reference Price', order.price, formatCurrency);
+    }
+    addDetail(details, 'Plan Symbols', symbols.length ? symbols.join(', ') : order.script_name);
+    addDetail(details, 'Execution Mode', config.execution_mode || 'live');
+    addDetail(details, 'Max Allowed Slippage', order.max_allowed_slippage_percent, formatPercent);
+    const baseline = config.schedule_baseline as Record<string, unknown> | undefined;
+    if (baseline || order.reference_ltp != null) {
+      addDetail(details, 'Reference LTP', order.reference_ltp ?? baseline?.reference_ltp, formatCurrency);
+      addDetail(details, 'Trigger Price', order.trigger_price ?? baseline?.trigger_price, formatCurrency);
+      addDetail(
+        details,
+        'Drop %',
+        order.drop_percent ?? baseline?.drop_percent,
+        (value) => (value == null ? '-' : `${value}%`),
+      );
+      addDetail(
+        details,
+        'Reference Captured At',
+        order.reference_ltp_captured_at ?? baseline?.reference_ltp_captured_at,
+        formatDateTime,
+      );
+    }
+    if (Array.isArray(config.fixed_symbols) && config.fixed_symbols.length) {
+      addDetail(details, 'Fixed Symbols', (config.fixed_symbols as string[]).join(', '));
+    }
+    if (order.expiry_time) {
+      addDetail(details, 'Expiry Time', order.expiry_time, formatDateTime);
+      addDetail(details, 'Expiry Action', order.expiry_action || 'CANCEL');
+    }
+    if (typeof config.query_text === 'string' && config.query_text.trim()) {
+      details.push({ label: 'Strategy Query', value: config.query_text.trim() });
+    }
+    if (order.failed_reason) {
+      addDetail(details, 'Failed Reason', order.failed_reason);
+    }
+    if (order.cancelled_reason) {
+      addDetail(details, 'Cancelled Reason', order.cancelled_reason);
+    }
   }
+
+  addLiveMonitoringDetails(details, order, now ?? undefined);
 
   addDetail(details, 'Execution Price', order.execution_price, formatCurrency);
   addDetail(details, 'Execution Price Source', order.execution_price_source);
@@ -255,8 +426,8 @@ const getStrategyDetails = (order: ScheduledOrderRow) => {
 
 const TABS: { id: OrderTab; label: string; icon: string }[] = [
   { id: 'scheduled', label: 'Scheduled', icon: '📅' },
-  { id: 'logs', label: 'Order Logs', icon: '📋' },
   { id: 'book', label: 'Trade Book', icon: '📖' },
+  { id: 'logs', label: 'Order Logs', icon: '📋' },
   { id: 'history', label: 'History', icon: '🕐' },
 ];
 
@@ -293,8 +464,8 @@ const COMPLETED_STATUS_RANK = new Set([
 ]);
 
 const orderTimestamp = (order: any) => {
-  const timestamp = new Date(order?.timestamp || order?.created_at || 0).getTime();
-  return Number.isFinite(timestamp) ? timestamp : 0;
+  const timestamp = apiTimestampToUtcMs(order?.timestamp ?? order?.created_at ?? null);
+  return timestamp ?? 0;
 };
 
 const isCompletedStatus = (status: unknown) => {
@@ -302,8 +473,21 @@ const isCompletedStatus = (status: unknown) => {
   return COMPLETED_STATUS_RANK.has(normalized);
 };
 
+const getScanUnitConfig = (unit: ScanIntervalUnit) =>
+  SCAN_INTERVAL_UNITS.find((item) => item.value === unit) || SCAN_INTERVAL_UNITS[0];
+
+const splitScanInterval = (seconds: number): { value: number; unit: ScanIntervalUnit } => {
+  if (seconds >= 3600 && seconds % 3600 === 0) {
+    return { value: seconds / 3600, unit: 'hours' };
+  }
+  if (seconds >= 60 && seconds % 60 === 0) {
+    return { value: seconds / 60, unit: 'minutes' };
+  }
+  return { value: seconds, unit: 'seconds' };
+};
+
 const GetOrderStatus: React.FC = () => {
-  const [orderedDate, setOrderedDate] = useState<string>(todayNepalDate);
+  const [orderedDate, setOrderedDate] = useState<string>('');
   const [selectedClientId, setSelectedClientId] = useState('');
   const [scriptName, setScriptName] = useState('');
   const scriptNameRef = useRef(scriptName);
@@ -322,6 +506,7 @@ const GetOrderStatus: React.FC = () => {
   const [isHistoryLoading, setIsHistoryLoading] = useState(false);
   const [isTradeBookLoading, setIsTradeBookLoading] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isClearingLogs, setIsClearingLogs] = useState(false);
   const [hasLoaded, setHasLoaded] = useState(false);
   const [tradeBookLoaded, setTradeBookLoaded] = useState(false);
   const [historyLoaded, setHistoryLoaded] = useState(false);
@@ -332,16 +517,81 @@ const GetOrderStatus: React.FC = () => {
   const [loggedInClientIDs, setLoggedInClientIDs] = useState<string[]>([]);
   const [clientSessions, setClientSessions] = useState<ClientSession[]>([]);
   const [activeTab, setActiveTab] = useState<OrderTab>('scheduled');
+  const [uiPortalSettings, setUiPortalSettings] = useState(readUiPortalSettings);
+  const liveRefreshMs = uiPortalSettings.orderLogsLiveRefreshSeconds * 1000;
+  const backgroundCacheTtlMs = uiPortalSettings.orderLogsBackgroundRefreshMinutes * 60 * 1000;
+  useEffect(() => subscribeUiPortalSettings(setUiPortalSettings), []);
   const [dialogVisible, setDialogVisible] = useState(false);
   const [dialogMessage, setDialogMessage] = useState('');
   const [dialogAction, setDialogAction] = useState<() => void>(() => {});
-  const [strategyDetailsOrder, setStrategyDetailsOrder] = useState<ScheduledOrderRow | null>(null);
+  const [selectedScheduledIds, setSelectedScheduledIds] = useState<Set<number>>(new Set());
+  const [isBulkDeleting, setIsBulkDeleting] = useState(false);
+  const [isBulkCancellingTrades, setIsBulkCancellingTrades] = useState(false);
+  const [strategyDetailsOrderId, setStrategyDetailsOrderId] = useState<number | null>(null);
+  const [strategyDetailsFallback, setStrategyDetailsFallback] = useState<ScheduledOrderRow | null>(null);
+  const [strategyDetailsNow, setStrategyDetailsNow] = useState<number | null>(null);
   const [strategyCatalogGuide, setStrategyCatalogGuide] = useState<{ name: string; side: 'buy' | 'sell' } | null>(null);
   const [editingOrderId, setEditingOrderId] = useState<number | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [serverSettings, setServerSettings] = useState<PortalSettings | null>(null);
+  const [settingsLimits, setSettingsLimits] = useState<PortalSettingsLimits | null>(null);
+  const [scanIntervalValue, setScanIntervalValue] = useState(5);
+  const [scanIntervalUnit, setScanIntervalUnit] = useState<ScanIntervalUnit>('seconds');
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [settingsLoading, setSettingsLoading] = useState(false);
+  const [settingsError, setSettingsError] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
   const [clientsFetched, setClientsFetched] = useState(false);
   const apiUrl = localStorage.getItem('apiUrl') || window.location.origin;
+
+  const loadServerSettings = useCallback(async () => {
+    setSettingsLoading(true);
+    setSettingsError('');
+    try {
+      const response = await fetchPortalSettings();
+      const split = splitScanInterval(response.settings.monitor_interval_seconds);
+      setServerSettings(response.settings);
+      setSettingsLimits(response.limits);
+      setScanIntervalValue(split.value);
+      setScanIntervalUnit(split.unit);
+    } catch {
+      setSettingsError('Could not load schedule settings.');
+    } finally {
+      setSettingsLoading(false);
+    }
+  }, []);
+
+  const openSettings = () => {
+    setSettingsOpen(true);
+    void loadServerSettings();
+  };
+
+  const saveScheduleSettings = async () => {
+    const unit = getScanUnitConfig(scanIntervalUnit);
+    const rawSeconds = Math.round(Number(scanIntervalValue || 0) * unit.multiplier);
+    const limits = settingsLimits?.monitor_interval_seconds || { min: 3, max: 300 };
+    const nextSeconds = Math.max(limits.min, Math.min(limits.max, rawSeconds));
+    setSettingsSaving(true);
+    setSettingsError('');
+    try {
+      const response = await savePortalSettings({
+        ...(serverSettings || {}),
+        monitor_interval_seconds: nextSeconds,
+      });
+      const split = splitScanInterval(response.settings.monitor_interval_seconds);
+      setServerSettings(response.settings);
+      setSettingsLimits(response.limits);
+      setScanIntervalValue(split.value);
+      setScanIntervalUnit(split.unit);
+      setSettingsOpen(false);
+      setSuccessMessage('Schedule settings saved');
+    } catch {
+      setSettingsError('Failed to save schedule settings.');
+    } finally {
+      setSettingsSaving(false);
+    }
+  };
 
   const fetchLoggedInClientIDs = useCallback(async () => {
     try {
@@ -387,6 +637,25 @@ const GetOrderStatus: React.FC = () => {
     (clientId: string) => clientLabelMap.get(clientId) || clientId,
     [clientLabelMap],
   );
+
+  const openStrategyDetails = useCallback((order: ScheduledOrderRow) => {
+    setStrategyDetailsOrderId(order.order_id);
+    setStrategyDetailsFallback(order);
+    setStrategyDetailsNow(Date.now());
+  }, []);
+
+  const closeStrategyDetails = useCallback(() => {
+    setStrategyDetailsOrderId(null);
+    setStrategyDetailsFallback(null);
+  }, []);
+
+  const strategyDetailsOrder = useMemo(() => {
+    if (strategyDetailsOrderId == null) {
+      return null;
+    }
+    return scheduledOrders.find((order) => order.order_id === strategyDetailsOrderId)
+      ?? strategyDetailsFallback;
+  }, [scheduledOrders, strategyDetailsFallback, strategyDetailsOrderId]);
 
   const activeClientIds = useMemo(
     () => (selectedClientId ? [selectedClientId] : loggedInClientIDs),
@@ -452,9 +721,20 @@ const GetOrderStatus: React.FC = () => {
       });
       if (response.ok) {
         const data = await response.json();
+        if (data.server_time) {
+          setServerTodayNpt(data.server_time.date || data.server_time.today_npt || '');
+          const utcMs = serverUtcToMs(data.server_time);
+          if (utcMs != null) {
+            setStrategyDetailsNow(utcMs);
+          }
+        }
         const nextOrderLogs = data.order_logs || [];
+        const monitorPhase = data.monitor_phase;
+        const monitoringActive = data.monitoring_active;
         const nextScheduledOrders = (data.scheduled_orders || []).map((order: ScheduledOrderRow) => ({
           ...order,
+          monitor_phase: monitorPhase,
+          monitoring_active: monitoringActive,
           actionRequired: true,
         }));
         setOrderLogs(nextOrderLogs);
@@ -530,7 +810,7 @@ const GetOrderStatus: React.FC = () => {
         !force
         && tradeBookLoaded
         && cached?.clientKey === clientKey
-        && isCacheFresh(cached.fetchedAt)
+        && isCacheFresh(cached.fetchedAt, backgroundCacheTtlMs)
       ) {
         return { open: orderBook, daily: dailyOrderBook };
       }
@@ -575,6 +855,7 @@ const GetOrderStatus: React.FC = () => {
       }
     },
     [
+      backgroundCacheTtlMs,
       dailyOrderBook,
       fetchDailyOrderBook,
       fetchOrderBook,
@@ -610,7 +891,7 @@ const GetOrderStatus: React.FC = () => {
         open?: any[];
         daily?: any[];
       };
-      if (!isCacheFresh(cached.fetchedAt)) {
+      if (!isCacheFresh(cached.fetchedAt, backgroundCacheTtlMs)) {
         return;
       }
       setOrderBook(cached.open || []);
@@ -636,7 +917,7 @@ const GetOrderStatus: React.FC = () => {
         key?: string;
         rows?: any[];
       };
-      if (!isCacheFresh(cached.fetchedAt) || !cached.key) {
+      if (!isCacheFresh(cached.fetchedAt, backgroundCacheTtlMs) || !cached.key) {
         return;
       }
       historyCacheRef.current = {
@@ -662,7 +943,7 @@ const GetOrderStatus: React.FC = () => {
         orderLogs?: any[];
         scheduledOrders?: ScheduledOrderRow[];
       };
-      if (!isCacheFresh(cached.fetchedAt)) {
+      if (!isCacheFresh(cached.fetchedAt, backgroundCacheTtlMs)) {
         return;
       }
       setOrderLogs(cached.orderLogs || []);
@@ -677,7 +958,7 @@ const GetOrderStatus: React.FC = () => {
 
   const loadCoreData = useCallback(
     async (force = false) => {
-      if (!force && isCacheFresh(coreCacheRef.current) && hasLoaded) {
+      if (!force && isCacheFresh(coreCacheRef.current, backgroundCacheTtlMs) && hasLoaded) {
         setIsLoading(false);
         return;
       }
@@ -724,6 +1005,7 @@ const GetOrderStatus: React.FC = () => {
       }
     },
     [
+      backgroundCacheTtlMs,
       fetchOrderStatusLogs,
       hasLoaded,
       orderLogs,
@@ -738,7 +1020,7 @@ const GetOrderStatus: React.FC = () => {
       const cacheKey = buildHistoryCacheKey(activeClientIds, preset);
       const cached = historyCacheRef.current;
 
-      if (!force && cached?.key === cacheKey && isCacheFresh(cached.fetchedAt)) {
+      if (!force && cached?.key === cacheKey && isCacheFresh(cached.fetchedAt, backgroundCacheTtlMs)) {
         setOrderHistory(cached.rows);
         setHistoryLoaded(true);
         return;
@@ -787,6 +1069,7 @@ const GetOrderStatus: React.FC = () => {
     },
     [
       activeClientIds,
+      backgroundCacheTtlMs,
       buildHistoryCacheKey,
       fetchTradebookHistory,
       historyFromDate,
@@ -795,6 +1078,19 @@ const GetOrderStatus: React.FC = () => {
       persistHistoryCache,
     ],
   );
+
+  useEffect(() => {
+    void fetchServerTime().then((payload) => {
+      setServerTodayNpt(payload.today_npt);
+      setOrderedDate((current) => current || payload.today_npt);
+      setHistoryFromDate((current) => current || offsetNepalDate(payload.today_npt, { days: 7 }));
+      setHistoryToDate((current) => current || payload.today_npt);
+      const utcMs = serverUtcToMs(payload.now);
+      if (utcMs != null) {
+        setStrategyDetailsNow(utcMs);
+      }
+    });
+  }, []);
 
   useEffect(() => {
     if (!clientsFetched) {
@@ -814,6 +1110,60 @@ const GetOrderStatus: React.FC = () => {
     loadTradeBooks,
   ]);
 
+  const refreshScheduledOrders = useCallback(() => {
+    coreCacheRef.current = null;
+    setActiveTab('scheduled');
+    void loadCoreData(true);
+  }, [loadCoreData]);
+
+  useEffect(() => {
+    if (!clientsFetched) {
+      return undefined;
+    }
+    if (sessionStorage.getItem(REFRESH_SCHEDULED_ORDERS_KEY)) {
+      sessionStorage.removeItem(REFRESH_SCHEDULED_ORDERS_KEY);
+      refreshScheduledOrders();
+    }
+    const handler = () => refreshScheduledOrders();
+    window.addEventListener(SCHEDULED_ORDERS_CHANGED_EVENT, handler);
+    return () => window.removeEventListener(SCHEDULED_ORDERS_CHANGED_EVENT, handler);
+  }, [clientsFetched, refreshScheduledOrders]);
+
+  useEffect(() => {
+    if (activeTab !== 'scheduled' && activeTab !== 'logs' && strategyDetailsOrderId == null) {
+      return undefined;
+    }
+    const intervalMs = strategyDetailsOrderId != null ? 3000 : liveRefreshMs;
+    const interval = window.setInterval(() => {
+      void loadCoreData(true);
+    }, intervalMs);
+    return () => window.clearInterval(interval);
+  }, [activeTab, loadCoreData, liveRefreshMs, strategyDetailsOrderId]);
+
+  useEffect(() => {
+    if (strategyDetailsOrderId == null) {
+      return undefined;
+    }
+    const tick = window.setInterval(() => {
+      setStrategyDetailsNow((current) => (current == null ? current : current + 1000));
+    }, 1000);
+    return () => window.clearInterval(tick);
+  }, [strategyDetailsOrderId]);
+
+  useEffect(() => {
+    if (strategyDetailsOrderId == null || strategyCatalogGuide) {
+      return undefined;
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeStrategyDetails();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [closeStrategyDetails, strategyCatalogGuide, strategyDetailsOrderId]);
+
   useEffect(() => {
     const interval = window.setInterval(() => {
       void loadCoreData(true);
@@ -821,9 +1171,9 @@ const GetOrderStatus: React.FC = () => {
       if (historyRangePreset !== 'custom') {
         void loadHistoryData(true);
       }
-    }, CACHE_TTL_MS);
+    }, backgroundCacheTtlMs);
     return () => window.clearInterval(interval);
-  }, [activeClientIds, historyRangePreset, loadCoreData, loadHistoryData, loadTradeBooks]);
+  }, [activeClientIds, backgroundCacheTtlMs, historyRangePreset, loadCoreData, loadHistoryData, loadTradeBooks]);
 
   const handleRefresh = async (e?: React.FormEvent) => {
     e?.preventDefault();
@@ -855,8 +1205,57 @@ const GetOrderStatus: React.FC = () => {
     }
   };
 
+  const handleClearOrderLogs = useCallback(async () => {
+    const clientIds = activeClientIds;
+    if (!clientIds.length) {
+      setErrorMessage('No client is available to clear logs for.');
+      return;
+    }
+
+    setIsClearingLogs(true);
+    setErrorMessage('');
+    setSuccessMessage('');
+    try {
+      const params = new URLSearchParams();
+      params.set('client_ids', clientIds.join(','));
+      const response = await fetch(`${apiUrl}/order_status_logs/clear?${params.toString()}`, {
+        method: 'DELETE',
+      });
+      if (!response.ok) {
+        const detail = await response.text();
+        throw new Error(detail || `Clear logs request failed (${response.status})`);
+      }
+      setOrderLogs([]);
+      coreCacheRef.current = null;
+      try {
+        sessionStorage.removeItem(CORE_CACHE_STORAGE_KEY);
+      } catch {
+        // Ignore storage errors.
+      }
+      await loadCoreData(true);
+      setSuccessMessage('Order logs cleared.');
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : 'Failed to clear order logs.');
+    } finally {
+      setIsClearingLogs(false);
+      setDialogVisible(false);
+    }
+  }, [activeClientIds, apiUrl, loadCoreData]);
+
+  const confirmClearOrderLogs = useCallback(() => {
+    const clientLabel = selectedClientId ? getClientLabel(selectedClientId) : `${activeClientIds.length} client(s)`;
+    setDialogMessage(`Clear all visible order logs for ${clientLabel}? This will hide them from the UI but keep them marked deleted in the database.`);
+    setDialogAction(() => () => {
+      void handleClearOrderLogs();
+    });
+    setDialogVisible(true);
+  }, [activeClientIds.length, getClientLabel, handleClearOrderLogs, selectedClientId]);
+
   const handleTabChange = (tab: OrderTab) => {
     setActiveTab(tab);
+    if (tab !== 'scheduled') {
+      setSelectedScheduledIds(new Set());
+    }
   };
 
   const handleHistoryPresetChange = (preset: HistoryRangePreset) => {
@@ -898,7 +1297,7 @@ const GetOrderStatus: React.FC = () => {
   const handleCancelOrder = async (clientId: string, exchangeSecurityID: number) => {
     if (!clientId) {
       setErrorMessage('Cannot cancel order because client ID is missing.');
-      return;
+      return false;
     }
     try {
       const response = await fetch(
@@ -906,16 +1305,152 @@ const GetOrderStatus: React.FC = () => {
         { method: 'DELETE' },
       );
       if (response.ok) {
-        setSuccessMessage('Order cancelled successfully');
-        tradeBookCacheRef.current = null;
-        await loadTradeBooks(activeClientIds, true);
-      } else {
-        setErrorMessage('Failed to cancel order');
+        return true;
       }
+      setErrorMessage('Failed to cancel order');
+      return false;
     } catch {
       setErrorMessage('Error cancelling order');
+      return false;
     }
   };
+
+  const cancellableOpenTrades = useMemo(
+    () => orderBook.filter((row) => row.client_id && row.exchangeOrderId),
+    [orderBook],
+  );
+
+  const confirmCancelAllOpenTrades = () => {
+    if (!cancellableOpenTrades.length) {
+      setErrorMessage('No open orders to cancel.');
+      return;
+    }
+    setDialogMessage(`Cancel all ${cancellableOpenTrades.length} open order(s)?`);
+    setDialogAction(() => () => {
+      void handleCancelAllOpenTrades();
+      setDialogVisible(false);
+    });
+    setDialogVisible(true);
+  };
+
+  const handleCancelAllOpenTrades = async () => {
+    if (!cancellableOpenTrades.length) {
+      setErrorMessage('No open orders to cancel.');
+      return;
+    }
+    setIsBulkCancellingTrades(true);
+    setErrorMessage('');
+    setSuccessMessage('');
+    let cancelled = 0;
+    const failures: string[] = [];
+    for (const row of cancellableOpenTrades) {
+      const ok = await handleCancelOrder(String(row.client_id), Number(row.exchangeOrderId));
+      if (ok) {
+        cancelled += 1;
+      } else {
+        failures.push(String(row.exchangeOrderId));
+      }
+    }
+    tradeBookCacheRef.current = null;
+    await loadTradeBooks(activeClientIds, true);
+    if (cancelled && failures.length) {
+      setErrorMessage(`Cancelled ${cancelled} open order(s). Failed: ${failures.length}.`);
+    } else if (failures.length) {
+      setErrorMessage('Failed to cancel open orders.');
+    } else {
+      setSuccessMessage(`Cancelled ${cancelled} open order(s).`);
+    }
+    setIsBulkCancellingTrades(false);
+  };
+
+  const handleToggleScheduledRow = useCallback((rowId: string | number, selected: boolean) => {
+    const orderId = Number(rowId);
+    if (!Number.isFinite(orderId)) return;
+    setSelectedScheduledIds((prev) => {
+      const next = new Set(prev);
+      if (selected) {
+        next.add(orderId);
+      } else {
+        next.delete(orderId);
+      }
+      return next;
+    });
+  }, []);
+
+  const handleToggleAllScheduledRows = useCallback((selected: boolean, rowIds: Array<string | number>) => {
+    setSelectedScheduledIds((prev) => {
+      const next = new Set(prev);
+      rowIds.forEach((rowId) => {
+        const orderId = Number(rowId);
+        if (!Number.isFinite(orderId)) return;
+        if (selected) {
+          next.add(orderId);
+        } else {
+          next.delete(orderId);
+        }
+      });
+      return next;
+    });
+  }, []);
+
+  const runBulkDeleteScheduledOrders = useCallback(async (orderIds: number[]) => {
+    if (!orderIds.length) {
+      setErrorMessage('No scheduled orders selected for deletion.');
+      return;
+    }
+    setIsBulkDeleting(true);
+    setErrorMessage('');
+    setSuccessMessage('');
+    try {
+      const { deletedIds, failedIds } = await deleteScheduledOrdersById(apiUrl, orderIds);
+      if (deletedIds.length) {
+        setScheduledOrders((prev) => prev.filter((order) => !deletedIds.includes(order.order_id)));
+        setSelectedScheduledIds((prev) => {
+          const next = new Set(prev);
+          deletedIds.forEach((id) => next.delete(id));
+          return next;
+        });
+        notifyScheduledOrdersChanged();
+      }
+      if (failedIds.length && deletedIds.length) {
+        setErrorMessage(`Deleted ${deletedIds.length} order(s). Failed to delete ${failedIds.length}.`);
+      } else if (failedIds.length) {
+        setErrorMessage('Failed to delete selected scheduled orders.');
+      } else {
+        setSuccessMessage(`Deleted ${deletedIds.length} scheduled order(s).`);
+      }
+    } catch {
+      setErrorMessage('Error deleting scheduled orders.');
+    } finally {
+      setIsBulkDeleting(false);
+      setDialogVisible(false);
+    }
+  }, [apiUrl]);
+
+  const confirmBulkDeleteScheduledOrders = useCallback((mode: ScheduledBulkDeleteMode) => {
+    const orderIds = resolveScheduledOrderIdsForBulkDelete(
+      scheduledOrders,
+      mode,
+      selectedScheduledIds,
+      (order) => getOrderSide(order),
+    );
+    if (!orderIds.length) {
+      setErrorMessage('No scheduled orders match that delete action.');
+      return;
+    }
+    const label = mode === 'selected'
+      ? `${orderIds.length} selected scheduled order(s)`
+      : mode === 'buy'
+        ? `all ${orderIds.length} buy scheduled order(s)`
+        : mode === 'sell'
+          ? `all ${orderIds.length} sell scheduled order(s)`
+          : `all ${orderIds.length} scheduled order(s)`;
+    setDialogMessage(`Are you sure you want to delete ${label}?`);
+    setDialogAction(() => () => {
+      void runBulkDeleteScheduledOrders(orderIds);
+    });
+    setDialogVisible(true);
+  }, [runBulkDeleteScheduledOrders, scheduledOrders, selectedScheduledIds]);
 
   const handleAction = async (row: any, actionType: string) => {
     if (actionType === 'Edit') {
@@ -931,6 +1466,12 @@ const GetOrderStatus: React.FC = () => {
           });
           if (response.ok) {
             setScheduledOrders((prev) => prev.filter((order) => order.order_id !== row.order_id));
+            setSelectedScheduledIds((prev) => {
+              const next = new Set(prev);
+              next.delete(Number(row.order_id));
+              return next;
+            });
+            notifyScheduledOrdersChanged();
             setSuccessMessage('Scheduled order deleted');
           } else {
             setErrorMessage('Failed to delete scheduled order');
@@ -945,8 +1486,15 @@ const GetOrderStatus: React.FC = () => {
     } else if (actionType === 'Cancel') {
       setDialogMessage('Are you sure you want to cancel this order?');
       setDialogAction(() => () => {
-        handleCancelOrder(row.client_id, row.exchangeOrderId);
-        setDialogVisible(false);
+        void (async () => {
+          const ok = await handleCancelOrder(row.client_id, row.exchangeOrderId);
+          if (ok) {
+            setSuccessMessage('Order cancelled successfully');
+            tradeBookCacheRef.current = null;
+            await loadTradeBooks(activeClientIds, true);
+          }
+          setDialogVisible(false);
+        })();
       });
       setDialogVisible(true);
     }
@@ -966,7 +1514,7 @@ const GetOrderStatus: React.FC = () => {
             <button
               type="button"
               className={`strategy-chip ${side === 'BUY' ? 'buy' : side === 'SELL' ? 'sell' : ''}`}
-              onClick={() => setStrategyDetailsOrder(order)}
+              onClick={() => openStrategyDetails(order)}
               title="Show details"
               aria-label={`Show details for ${strategyLabel}`}
             >
@@ -975,11 +1523,11 @@ const GetOrderStatus: React.FC = () => {
             </button>
           ),
           created_at: formatDateTime(order.created_at || order.target_reached_at || ''),
-          qty: formatScanCount(order.qty),
-          status: formatLiveScanStatus(order),
+          qty: formatScanCount(getDisplayQtyForOrder(order)),
+          status: <ScheduledOrderStatusCell order={order} />,
         };
       }),
-    [getClientLabel, scheduledOrders],
+    [getClientLabel, openStrategyDetails, scheduledOrders],
   );
 
   const orderLogRows = useMemo(
@@ -1001,7 +1549,7 @@ const GetOrderStatus: React.FC = () => {
             client_id: order.client_id || '',
             script_name: order.script_name || '',
             price: Number(order.requested_price ?? order.price ?? 0),
-            qty: Number(order.qty || 0),
+            qty: Number(getDisplayQtyForOrder(order)),
             status: order.status || '',
             order_type: String(order.order_type || side).toLowerCase(),
             strategy_type: order.strategy_type || strategyLabel,
@@ -1026,7 +1574,7 @@ const GetOrderStatus: React.FC = () => {
               <button
                 type="button"
                 className={`strategy-chip ${side === 'BUY' ? 'buy' : side === 'SELL' ? 'sell' : ''}`}
-                onClick={() => setStrategyDetailsOrder(detailOrder)}
+                onClick={() => openStrategyDetails(detailOrder)}
                 title="Show details"
                 aria-label={`Show details for ${strategyLabel}`}
               >
@@ -1038,7 +1586,7 @@ const GetOrderStatus: React.FC = () => {
             price: formatCurrency(order.execution_price ?? order.price),
           };
         }),
-    [getClientLabel, orderLogs],
+    [getClientLabel, openStrategyDetails, orderLogs],
   );
 
   const decorateTmsRows = useCallback(
@@ -1159,6 +1707,28 @@ const GetOrderStatus: React.FC = () => {
             )}
             <button
               type="button"
+              className="order-logs-settings-btn"
+              onClick={openSettings}
+              aria-label="Open schedule settings"
+              title="Schedule settings"
+            >
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path
+                  d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                />
+                <path
+                  d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3a2 2 0 1 1 4 0v.09A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.2.38.57.6 1 .6h.6a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1.4Z"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </button>
+            <button
+              type="button"
               className={`order-logs-refresh-btn ${isRefreshing ? 'spinning' : ''}`}
               onClick={() => void handleRefresh()}
               disabled={isRefreshing}
@@ -1220,16 +1790,27 @@ const GetOrderStatus: React.FC = () => {
 
             <div className="form-group">
               <label htmlFor="orderedDate">Ordered Date</label>
-              <DatePicker
-                id="orderedDate"
-                selected={dateFromNepalDateString(orderedDate)}
-                onChange={handleDateChange}
-                dateFormat="yyyy-MM-dd"
-                placeholderText="Select a date"
-                className="input order-logs-datepicker"
-                wrapperClassName="order-logs-datepicker-wrap"
-                isClearable
-              />
+              <div className="order-logs-date-field">
+                <DatePicker
+                  id="orderedDate"
+                  selected={dateFromNepalDateString(orderedDate)}
+                  onChange={handleDateChange}
+                  dateFormat="yyyy-MM-dd"
+                  placeholderText="Select a date"
+                  className="input order-logs-datepicker order-logs-datepicker--with-today"
+                  wrapperClassName="order-logs-datepicker-wrap"
+                />
+                <button
+                  type="button"
+                  className={`order-logs-date-today${orderedDate === todayNepalDate() ? ' active' : ''}`}
+                  onClick={() => setOrderedDate(todayNepalDate())}
+                  title="Jump to today (Nepal time)"
+                  aria-label="Set ordered date to today"
+                >
+                  <span className="order-logs-date-today-icon" aria-hidden="true">📅</span>
+                  <span className="order-logs-date-today-label">Today</span>
+                </button>
+              </div>
             </div>
           </div>
         </form>
@@ -1261,8 +1842,90 @@ const GetOrderStatus: React.FC = () => {
               <span className="order-logs-section-range">{historyDateRangeLabel}</span>
             )}
           </h3>
-          <span className="badge badge-muted">{current.count} record(s)</span>
+          <div className="order-logs-content-header-actions">
+            <span className="badge badge-muted">{current.count} record(s)</span>
+            {activeTab === 'logs' && (
+              <button
+                type="button"
+                className="order-logs-clear-btn"
+                onClick={confirmClearOrderLogs}
+                disabled={isClearingLogs || activeClientIds.length === 0}
+                aria-label="Clear order logs"
+                title={activeClientIds.length > 0 ? 'Clear order logs' : 'No clients available'}
+              >
+                <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <path
+                    d="M4 7h16"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                  />
+                  <path
+                    d="M9 7V5.5A1.5 1.5 0 0 1 10.5 4h3A1.5 1.5 0 0 1 15 5.5V7"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                  />
+                  <path
+                    d="M7 7l1 13a1.5 1.5 0 0 0 1.5 1.4h5a1.5 1.5 0 0 0 1.5-1.4l1-13"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                  <path
+                    d="M10 11v6M14 11v6"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                  />
+                </svg>
+              </button>
+            )}
+          </div>
         </div>
+
+        {activeTab === 'scheduled' && scheduledOrders.length > 0 && (
+          <div className="order-logs-scheduled-bulk">
+            <span className="order-logs-scheduled-bulk-count">
+              {selectedScheduledIds.size} selected
+            </span>
+            <div className="order-logs-scheduled-bulk-actions">
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                disabled={selectedScheduledIds.size === 0 || isBulkDeleting}
+                onClick={() => confirmBulkDeleteScheduledOrders('selected')}
+              >
+                Delete selected
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                disabled={isBulkDeleting}
+                onClick={() => confirmBulkDeleteScheduledOrders('buy')}
+              >
+                Delete all buy
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                disabled={isBulkDeleting}
+                onClick={() => confirmBulkDeleteScheduledOrders('sell')}
+              >
+                Delete all sell
+              </button>
+              <button
+                type="button"
+                className="btn btn-danger btn-sm"
+                disabled={isBulkDeleting}
+                onClick={() => confirmBulkDeleteScheduledOrders('all')}
+              >
+                Delete all
+              </button>
+            </div>
+          </div>
+        )}
 
         {activeTab === 'history' && (
           <div className="order-logs-history-toolbar">
@@ -1339,7 +2002,19 @@ const GetOrderStatus: React.FC = () => {
             <section className="order-logs-trade-section">
               <div className="order-logs-trade-section-header">
                 <h4>Open Trades</h4>
-                <span className="badge badge-muted">{openTradeRows.length} record(s)</span>
+                <div className="order-logs-trade-section-actions">
+                  <span className="badge badge-muted">{openTradeRows.length} record(s)</span>
+                  {cancellableOpenTrades.length > 0 ? (
+                    <button
+                      type="button"
+                      className="btn btn-danger btn-sm"
+                      disabled={isBulkCancellingTrades}
+                      onClick={confirmCancelAllOpenTrades}
+                    >
+                      Cancel all open
+                    </button>
+                  ) : null}
+                </div>
               </div>
               <CommonTable
                 data={openTradeRows}
@@ -1366,6 +2041,11 @@ const GetOrderStatus: React.FC = () => {
             onAction={activeTab === 'scheduled' ? handleAction : undefined}
             columns={current.columns}
             emptyMessage={current.empty}
+            selectable={activeTab === 'scheduled'}
+            selectedRowIds={selectedScheduledIds}
+            rowIdKey="order_id"
+            onToggleRow={handleToggleScheduledRow}
+            onToggleAll={handleToggleAllScheduledRows}
           />
         )}
       </div>
@@ -1379,7 +2059,7 @@ const GetOrderStatus: React.FC = () => {
       )}
 
       {strategyDetailsOrder && (
-        <div className="strategy-details-backdrop" role="presentation" onClick={() => setStrategyDetailsOrder(null)}>
+        <div className="strategy-details-backdrop" role="presentation" onClick={closeStrategyDetails}>
           <div className="strategy-details-modal" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
             <div className="strategy-details-header">
               <div>
@@ -1388,15 +2068,21 @@ const GetOrderStatus: React.FC = () => {
                   <NepseAlphaSymbolLink symbol={strategyDetailsOrder.script_name} />
                 </p>
               </div>
-              <button type="button" className="strategy-details-close" onClick={() => setStrategyDetailsOrder(null)} aria-label="Close strategy details">
+              <button type="button" className="strategy-details-close" onClick={closeStrategyDetails} aria-label="Close strategy details">
                 ×
               </button>
             </div>
             <dl className="strategy-details-list">
-              {getStrategyDetails(strategyDetailsOrder).map((item) => (
+              {getStrategyDetails(strategyDetailsOrder, strategyDetailsNow).map((item) => (
                 <div key={item.label} className="strategy-details-row">
                   <dt>{item.label}</dt>
-                  <dd>{item.value}</dd>
+                  <dd>
+                    {item.label === 'Strategy Query' ? (
+                      <pre className="strategy-details-query">{item.value}</pre>
+                    ) : (
+                      item.value
+                    )}
+                  </dd>
                 </div>
               ))}
             </dl>
@@ -1438,6 +2124,91 @@ const GetOrderStatus: React.FC = () => {
             void loadCoreData(true);
           }}
         />
+      )}
+
+      {settingsOpen && (
+        <div className="order-logs-settings-backdrop" role="presentation" onClick={() => setSettingsOpen(false)}>
+          <div
+            className="order-logs-settings-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="orderLogsSettingsTitle"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="order-logs-settings-header">
+              <div>
+                <h3 id="orderLogsSettingsTitle">Schedule Settings</h3>
+                <p>Change the server scan interval for scheduled orders.</p>
+              </div>
+              <button
+                type="button"
+                className="order-logs-settings-close"
+                onClick={() => setSettingsOpen(false)}
+                aria-label="Close schedule settings"
+              >
+                ×
+              </button>
+            </div>
+
+            {settingsError ? <ErrorMessage message={settingsError} variant="error" /> : null}
+
+            <div className="order-logs-settings-field">
+              <label htmlFor="scanIntervalValue">Scan every</label>
+              <div className="order-logs-settings-interval">
+                <input
+                  id="scanIntervalValue"
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  className="input"
+                  value={scanIntervalValue}
+                  disabled={settingsLoading || settingsSaving}
+                  onChange={(event) => {
+                    const nextValue = event.target.value.replace(/[^0-9]/g, '');
+                    setScanIntervalValue(nextValue === '' ? 0 : Number(nextValue));
+                  }}
+                />
+                <select
+                  className="select"
+                  value={scanIntervalUnit}
+                  disabled={settingsLoading || settingsSaving}
+                  onChange={(event) => setScanIntervalUnit(event.target.value as ScanIntervalUnit)}
+                >
+                  {SCAN_INTERVAL_UNITS.map((unit) => (
+                    <option key={unit.value} value={unit.value}>
+                      {unit.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <p>
+                Saved as seconds on the server and applied to every scheduled order monitor.
+                {settingsLimits
+                  ? ` Allowed range: ${settingsLimits.monitor_interval_seconds.min}-${settingsLimits.monitor_interval_seconds.max} seconds.`
+                  : ''}
+              </p>
+            </div>
+
+            <div className="order-logs-settings-actions">
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => setSettingsOpen(false)}
+                disabled={settingsSaving}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => void saveScheduleSettings()}
+                disabled={settingsLoading || settingsSaving}
+              >
+                {settingsSaving ? 'Saving...' : 'Save'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

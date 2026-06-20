@@ -1,29 +1,11 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import './MarketStatusBar.css';
 import { fetchMarketStatus, MarketStatus } from '../../api/market.api';
+import { serverUtcToMs } from '../../api/time.api';
+import { formatNepalClockFromUtcMs, setServerTodayNpt } from '../../utils/nepalTime';
+import { readUiPortalSettings, subscribeUiPortalSettings } from '../../lib/uiPortalSettings';
 
-const POLL_INTERVAL_MS = 5000;
-
-const formatNepalClock = () => {
-  const now = new Date();
-  const time = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'Asia/Kathmandu',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: true,
-  }).format(now);
-
-  const date = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'Asia/Kathmandu',
-    weekday: 'short',
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric',
-  }).format(now);
-
-  return { time, date };
-};
+const CLOCK_TICK_MS = 1000;
 
 const buildStatusTitle = (status: MarketStatus | null) => {
   if (!status) {
@@ -52,43 +34,73 @@ const buildStatusTitle = (status: MarketStatus | null) => {
 };
 
 const MarketStatusBar: React.FC = () => {
-  const [clock, setClock] = useState(formatNepalClock);
   const [status, setStatus] = useState<MarketStatus | null>(null);
+  const [, setClockTick] = useState(0);
+  const [statusPollMs, setStatusPollMs] = useState(() => readUiPortalSettings().marketStatusPollSeconds * 1000);
+  const serverUtcRef = useRef<number | null>(null);
+  const anchorMsRef = useRef<number>(Date.now());
+
+  useEffect(() => subscribeUiPortalSettings((settings) => {
+    setStatusPollMs(settings.marketStatusPollSeconds * 1000);
+  }), []);
+
+  const syncClockAnchor = useCallback((data: MarketStatus) => {
+    const utcMs = serverUtcToMs(data.server_time);
+    if (utcMs == null) {
+      return;
+    }
+    serverUtcRef.current = utcMs;
+    anchorMsRef.current = Date.now();
+  }, []);
 
   const loadStatus = useCallback(async () => {
     try {
       const data = await fetchMarketStatus();
       setStatus(data);
+      syncClockAnchor(data);
+      if (data.today_npt) {
+        setServerTodayNpt(data.today_npt);
+      }
     } catch {
       setStatus(null);
     }
-  }, []);
-
-  useEffect(() => {
-    const timer = setInterval(() => setClock(formatNepalClock()), 1000);
-    return () => clearInterval(timer);
-  }, []);
+  }, [syncClockAnchor]);
 
   useEffect(() => {
     void loadStatus();
     const poll = window.setInterval(() => {
       void loadStatus();
-    }, POLL_INTERVAL_MS);
+    }, statusPollMs);
     return () => window.clearInterval(poll);
-  }, [loadStatus]);
+  }, [loadStatus, statusPollMs]);
+
+  useEffect(() => {
+    const tick = window.setInterval(() => {
+      setClockTick((value) => value + 1);
+    }, CLOCK_TICK_MS);
+    return () => window.clearInterval(tick);
+  }, []);
+
+  const liveUtcMs = serverUtcRef.current == null
+    ? null
+    : serverUtcRef.current + (Date.now() - anchorMsRef.current);
+  const liveClock = liveUtcMs == null ? null : formatNepalClockFromUtcMs(liveUtcMs);
 
   const isMarketOpen = status?.market_live ?? false;
   const isPreOpen = status?.market_phase === 'pre_open';
   const statusClass = isMarketOpen ? 'live' : isPreOpen ? 'pre-open' : 'closed';
   const statusLabel = isMarketOpen ? 'Market Open' : isPreOpen ? 'Pre Open' : 'Market Closed';
+  const clockTime = liveClock?.time || status?.nepal_time_formatted || status?.server_time?.time || '--:--:--';
+  const clockDate = liveClock?.date || status?.nepal_date_formatted || status?.server_time?.date || '';
+  const clockTitle = liveClock?.display || status?.nepal_time_display || 'Nepal Time (NPT)';
 
   return (
     <div className="market-status-bar">
       <div className="market-status-clock">
-        <span className="market-status-time" title="Nepal Time (NPT)">
-          {clock.time} NPT
+        <span className="market-status-time" title={clockTitle}>
+          {clockTime} NPT
         </span>
-        <span className="market-status-date">{clock.date}</span>
+        <span className="market-status-date">{clockDate}</span>
       </div>
       <span
         className={`market-status-pill ${statusClass}`}

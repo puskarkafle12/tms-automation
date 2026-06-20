@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import '../pages/control_pannel/OrderLogs.css';
 import '../pages/control_pannel/StrategyDetails.css';
 import { getStrategyCatalogEntry } from '../lib/strategies/catalog';
@@ -14,6 +14,17 @@ interface Props {
 const StrategyCatalogModal: React.FC<Props> = ({ strategyName, side = 'buy', onClose }) => {
   const label = formatStrategyLabel(strategyName, side);
   const entry = getStrategyCatalogEntry(label, side);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [onClose]);
 
   return (
     <div className="strategy-details-backdrop" role="presentation" onClick={onClose}>

@@ -59,13 +59,19 @@ def evaluate_strategy(
 
     if decision.mutate:
         config_payload = dict(getattr(db_order, "strategy_config", None) or {})
+        order_column_keys = {
+            "target_reached",
+            "target_reached_at",
+            "highest_tracked_price",
+            "highest_tracked_at",
+            "below_stop_loss_check_count",
+            "consecutive_drop_count",
+        }
         for key, value in decision.mutate.items():
-            if hasattr(db_order, key):
+            if key in order_column_keys and hasattr(db_order, key):
                 setattr(db_order, key, value)
-            if key in {"sold_target1", "sold_target2", "break_even_armed"}:
-                config_payload[key] = value
-        if config_payload:
-            db_order.strategy_config = config_payload
+            config_payload[key] = value
+        db_order.strategy_config = config_payload
 
     return decision
 

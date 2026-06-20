@@ -12,6 +12,7 @@ from models.logged_in_user import LoggedInUsers
 from models.tms_password_backup import TmsPasswordBackup
 from models.user import User
 from utils.tms_captcha_solver.imgto_txt import solve_captcha
+from utils.tms_broker import normalize_broker_no
 from utils.base_functions import (
     NEPSE_INTRADAY_LIMIT_PERCENT,
     calculate_high_price,
@@ -47,6 +48,7 @@ class TmsUser:
         resume_previous_ltp=0.0,
         resume_stable_rate=None,
     ):
+        broker_no = normalize_broker_no(str(broker_no or ""))
         self.final_order_quantity = 20
         self.order_quantity=10
         self.client_id = username

@@ -1,38 +1,26 @@
-import sys
 from typing import Dict
 
-from fastapi import Depends
 from database import get_db_session
 from models.logged_in_user import LoggedInUsers
-from utils.base_functions import load_users
-from utils.tms import TmsUser
-from sqlalchemy.orm import Session
+from utils.tms_client_resolver import get_tms_user_for_client
 
 
-
-# Create an instance of Tms
-
-async def load_tms_users_instances(client_ids,tms_instances:Dict):
+async def load_tms_users_instances(client_ids, tms_instances: Dict):
     db = get_db_session()
     try:
-        tms_users = db.query(LoggedInUsers).filter(LoggedInUsers.client_id.in_(client_ids)).all()
+        sessions = (
+            db.query(LoggedInUsers)
+            .filter(LoggedInUsers.client_id.in_(client_ids), LoggedInUsers.status == "logged_in")
+            .all()
+        )
+        session_ids = {row.client_id for row in sessions}
+        for client_id in client_ids:
+            if client_id in tms_instances or client_id not in session_ids:
+                continue
+            try:
+                tms_instances[client_id] = await get_tms_user_for_client(client_id, db)
+            except Exception:
+                tms_instances.pop(client_id, None)
     finally:
         db.close()
-    for tms_user in tms_users:
-        if tms_user.client_id not in tms_instances.keys():
-            tms_user_instance = TmsUser(
-                broker_no=tms_user.broker_no,
-                username=tms_user.client_id,
-                tokens=tms_user.tokens
-            )
-            try:
-                await tms_user_instance.try_token_login()
-            except:
-                try:
-                    tms_instances.pop(tms_user.client_id)
-                except:
-                    continue
-            tms_instances[tms_user.client_id] = tms_user_instance
     return tms_instances
-
-        

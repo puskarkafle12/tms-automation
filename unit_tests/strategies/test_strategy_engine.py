@@ -12,16 +12,19 @@ from utils.strategies.handlers import (
     evaluate_order_book_strength_buy,
     evaluate_profit_ladder_sell,
     evaluate_quality_pullback_recovery_buy,
+    evaluate_rule_based_strategy,
     evaluate_smart_pullback_buy,
     evaluate_technical_weakness_sell,
     evaluate_time_based_buy,
     evaluate_time_based_exit,
     evaluate_trailing_runner_sell,
 )
+from utils.strategies.registry import decision_to_execute_dict, evaluate_strategy
 from utils.strategies.helpers import get_buy_pressure, is_rising, range_position
 from utils.strategies.risk_guard import can_place_order
 from utils.strategies.scoring import calculate_buy_score, score_decision
 from utils.strategies.types import AccountState, MarketSnapshot, OrderBookLevel, OrderContext, ScannerMemory, ScriptDetails, StrategyConfig
+from utils.strategy_builder.strategy_parser import parse_strategy_query
 def _snapshot(**kwargs) -> MarketSnapshot:
     defaults = dict(
         symbol="CZBIL",
@@ -317,6 +320,132 @@ class TestWrappers(unittest.TestCase):
         )
         decision = evaluate_time_based_exit(ctx, _snapshot(ltp=198), ScannerMemory(), _details())
         self.assertEqual(decision.action, "TRACK")
+
+
+class TestRuleBased(unittest.TestCase):
+    def test_rule_based_technical_buy_executes_in_live_mode(self):
+        query = """
+STRATEGY_VERSION 1
+SIDE BUY
+RULE "CZBIL RSI Buy" FOR SYMBOL "CZBIL" {
+    WHEN technical_rsi_14 > 30
+    ORDER QUANTITY 100
+    EXECUTE ONCE
+}
+"""
+        compiled = parse_strategy_query(query).model_dump()
+        decision = evaluate_rule_based_strategy(
+            _ctx(
+                strategy_type="Technical Buy",
+                canonical_strategy="Technical Buy",
+                side="buy",
+                config=StrategyConfig(extra={"compiled_plan": compiled, "execution_mode": "live"}),
+            ),
+            _snapshot(),
+            ScannerMemory(),
+            _details(rsi_14=35.0),
+        )
+        self.assertEqual(decision.action, "EXECUTE")
+        self.assertEqual(decision.qty, 100)
+
+    def test_rule_based_technical_buy_paper_mode_tracks(self):
+        query = """
+STRATEGY_VERSION 1
+SIDE BUY
+RULE "CZBIL RSI Buy" FOR SYMBOL "CZBIL" {
+    WHEN technical_rsi_14 > 30
+    ORDER QUANTITY 100
+    EXECUTE ONCE
+}
+"""
+        compiled = parse_strategy_query(query).model_dump()
+        decision = evaluate_rule_based_strategy(
+            _ctx(
+                strategy_type="Technical Buy",
+                canonical_strategy="Technical Buy",
+                side="buy",
+                config=StrategyConfig(extra={"compiled_plan": compiled, "execution_mode": "paper"}),
+            ),
+            _snapshot(),
+            ScannerMemory(),
+            _details(rsi_14=35.0),
+        )
+        self.assertEqual(decision.action, "TRACK")
+        self.assertIn("paper", decision.tracking_status or "")
+
+
+class TestRuleBasedRegistry(unittest.TestCase):
+    def _db_order(self, *, execution_mode: str = "live"):
+        query = """
+STRATEGY_VERSION 1
+SIDE BUY
+RULE "CZBIL RSI Buy" FOR SYMBOL "CZBIL" {
+    WHEN technical_rsi_14 > 30
+    ORDER QUANTITY 100
+    EXECUTE ONCE
+}
+"""
+        compiled = parse_strategy_query(query).model_dump()
+        order = type("Order", (), {})()
+        order.strategy_type = "Technical Buy"
+        order.order_type = "buy"
+        order.side = "buy"
+        order.symbol = "CZBIL"
+        order.script_name = "CZBIL"
+        order.qty = 100
+        order.remaining_quantity = 100
+        order.price = 0
+        order.stop_loss_price = None
+        order.stop_limit_price = None
+        order.book_profit_price = None
+        order.profit_target_price = None
+        order.trailing_drop_percent = 3.0
+        order.stable_band_percent = 0.2
+        order.minimum_wait_minutes = 5
+        order.activation_price = None
+        order.protected_price = None
+        order.average_buy_price = None
+        order.partial_legs = []
+        order.executed_legs = []
+        order.target_reached = False
+        order.target_reached_at = None
+        order.highest_tracked_price = None
+        order.expiry_time = None
+        order.expiry_action = None
+        order.max_allowed_slippage_percent = 1.0
+        order.emergency_execution = False
+        order.scan_price_history = []
+        order.scan_volume_history = []
+        order.strategy_config = {"compiled_plan": compiled, "execution_mode": execution_mode}
+        order.below_stop_loss_check_count = 0
+        order.last_checked_ltp = None
+        return order
+
+    def test_evaluate_strategy_live_execute(self):
+        decision = evaluate_strategy(
+            self._db_order(execution_mode="live"),
+            _snapshot(),
+            ScannerMemory(),
+            _details(rsi_14=35.0),
+            account=AccountState(available_balance=50000),
+        )
+        self.assertEqual(decision.action, "EXECUTE")
+        payload = decision_to_execute_dict(decision)
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertEqual(payload["action"], "execute")
+        self.assertEqual(payload["qty"], 100)
+
+    def test_evaluate_strategy_risk_guard_blocks_duplicate(self):
+        decision = evaluate_strategy(
+            self._db_order(execution_mode="live"),
+            _snapshot(),
+            ScannerMemory(),
+            _details(rsi_14=35.0),
+            account=AccountState(active_orders_same_symbol_side=1),
+        )
+        self.assertEqual(decision.action, "NO_TRADE")
+        self.assertIsNone(decision_to_execute_dict(decision))
 
 
 class TestRiskGuard(unittest.TestCase):

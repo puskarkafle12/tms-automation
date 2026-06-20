@@ -3,10 +3,13 @@
 # --- Frontend (cached when package-lock unchanged) ---
 FROM node:20-bookworm AS frontend-build
 
+ENV NPM_CONFIG_UPDATE_NOTIFIER=false
+
 WORKDIR /frontend
 COPY frontend/package*.json ./
 RUN --mount=type=cache,target=/root/.npm,sharing=locked \
-    npm ci
+    npm ci \
+    && npx --yes update-browserslist-db@latest
 COPY frontend/ ./
 RUN npm run build
 
@@ -99,7 +102,10 @@ LABEL org.opencontainers.image.revision=$GIT_COMMIT \
       org.opencontainers.image.deps-version=$DEPS_VERSION
 
 ENV APP_GIT_COMMIT=$GIT_COMMIT \
-    APP_SOURCE_VERSION=$SOURCE_VERSION
+    APP_SOURCE_VERSION=$SOURCE_VERSION \
+    APP_BUILD_DATE=$BUILD_DATE
+
+RUN if [ "$BUILD_DATE" != "unknown" ]; then echo "$BUILD_DATE" > /app/.deployed_at; fi
 
 EXPOSE 80
 

@@ -18,6 +18,18 @@
   box-shadow: 0 12px 28px rgba(15, 23, 42, 0.06);
 }
 
+.schedule-order-form-panel.custom-query-buy,
+.schedule-order-side-panel.custom-query-buy {
+  background: #f8fefa;
+  border-color: rgba(34, 197, 94, 0.22);
+}
+
+.schedule-order-form-panel.custom-query-sell,
+.schedule-order-side-panel.custom-query-sell {
+  background: #fffafa;
+  border-color: rgba(239, 68, 68, 0.2);
+}
+
 .schedule-strategy-description {
   margin: 0.2rem 0 0.85rem;
   padding: 0.55rem 0.65rem;
@@ -169,6 +181,19 @@
   gap: 0.5rem;
   padding: 2rem 1rem;
   text-align: center;
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+}
+
+.schedule-order-ai-side {
+  min-height: 100%;
+}
+
+.schedule-order-ai-side-loading {
+  display: flex;
+  min-height: 160px;
+  align-items: center;
+  justify-content: center;
   color: var(--color-text-muted);
   font-size: 0.875rem;
 }

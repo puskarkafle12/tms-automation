@@ -3,9 +3,12 @@ import {
   historyRangeLabel,
   resolveHistoryDateRange,
 } from './orderHistoryRange';
-import { todayNepalDate } from './nepalTime';
+import { setServerTodayNpt, todayNepalDate } from './nepalTime';
 
 describe('orderHistoryRange', () => {
+  beforeAll(() => {
+    setServerTodayNpt('2026-06-20');
+  });
   test('forever range ends today, not in the future', () => {
     const today = todayNepalDate();
     const range = resolveHistoryDateRange('forever', '', '');

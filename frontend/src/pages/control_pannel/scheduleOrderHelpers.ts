@@ -1,5 +1,47 @@
 import { ScriptOption } from '../../components/ScriptNameAutocomplete';
 
+export const REFRESH_SCHEDULED_ORDERS_KEY = 'tms-refresh-scheduled-orders';
+export const SCHEDULED_ORDERS_CHANGED_EVENT = 'tms:scheduled-orders-changed';
+
+export function notifyScheduledOrdersChanged(): void {
+  try {
+    sessionStorage.setItem(REFRESH_SCHEDULED_ORDERS_KEY, String(Date.now()));
+  } catch {
+    // Ignore storage errors.
+  }
+  window.dispatchEvent(new Event(SCHEDULED_ORDERS_CHANGED_EVENT));
+}
+
+export function formatApiErrorDetail(detail: unknown, fallback = 'Request failed'): string {
+  if (typeof detail === 'string' && detail.trim()) {
+    return detail;
+  }
+  if (detail && typeof detail === 'object' && !Array.isArray(detail)) {
+    const record = detail as Record<string, unknown>;
+    if (typeof record.message === 'string' && record.message.trim()) {
+      return record.message;
+    }
+    if (typeof record.detail === 'string' && record.detail.trim()) {
+      return record.detail;
+    }
+  }
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((item) => {
+        if (typeof item === 'string') return item;
+        if (item && typeof item === 'object' && 'msg' in item) {
+          return String((item as { msg?: string }).msg || '');
+        }
+        return '';
+      })
+      .filter(Boolean);
+    if (messages.length) {
+      return messages.join('; ');
+    }
+  }
+  return fallback;
+}
+
 export interface HoldingForOptions {
   scrip?: string;
   symbolName?: string;
@@ -98,3 +140,48 @@ export const mergeQuoteIntoStockDetail = (stock: any, quote: any) => {
     lastTradedTime,
   };
 };
+
+export type ScheduledBulkDeleteMode = 'selected' | 'all' | 'buy' | 'sell';
+
+export function resolveScheduledOrderIdsForBulkDelete(
+  orders: Array<{ order_id: number; order_type?: string; side?: string }>,
+  mode: ScheduledBulkDeleteMode,
+  selectedIds: Set<number>,
+  getSide: (order: { order_type?: string; side?: string }) => string,
+): number[] {
+  if (mode === 'selected') {
+    return orders.filter((order) => selectedIds.has(order.order_id)).map((order) => order.order_id);
+  }
+  if (mode === 'buy') {
+    return orders.filter((order) => getSide(order) === 'BUY').map((order) => order.order_id);
+  }
+  if (mode === 'sell') {
+    return orders.filter((order) => getSide(order) === 'SELL').map((order) => order.order_id);
+  }
+  return orders.map((order) => order.order_id);
+}
+
+export async function deleteScheduledOrdersById(
+  apiUrl: string,
+  orderIds: number[],
+): Promise<{ deletedIds: number[]; failedIds: number[] }> {
+  const deletedIds: number[] = [];
+  const failedIds: number[] = [];
+  await Promise.all(
+    orderIds.map(async (orderId) => {
+      try {
+        const response = await fetch(`${apiUrl}/delete_scheduled_order/?order_id=${orderId}`, {
+          method: 'DELETE',
+        });
+        if (response.ok) {
+          deletedIds.push(orderId);
+        } else {
+          failedIds.push(orderId);
+        }
+      } catch {
+        failedIds.push(orderId);
+      }
+    }),
+  );
+  return { deletedIds, failedIds };
+}

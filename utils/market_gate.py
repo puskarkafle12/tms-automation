@@ -1,5 +1,6 @@
 from typing import Dict, Optional
 
+from config.app_environment import is_testing
 from utils.market_status import MARKET_HOURS_LABEL, is_market_hours_open, parse_session_check_response
 from utils.tms import TmsUser
 
@@ -21,8 +22,9 @@ async def _check_tms_session(tms_users_instances: Dict[str, TmsUser]) -> tuple[b
 
 async def resolve_market_gate(tms_users_instances: Optional[Dict[str, TmsUser]] = None) -> dict:
     users = tms_users_instances or {}
+    market_open = is_market_hours_open()
 
-    if not is_market_hours_open():
+    if not market_open and not is_testing():
         return {
             "can_scan": False,
             "can_execute": False,
@@ -32,6 +34,16 @@ async def resolve_market_gate(tms_users_instances: Optional[Dict[str, TmsUser]] 
         }
 
     session_active, session_message = await _check_tms_session(users)
+
+    if is_testing() and not market_open:
+        return {
+            "can_scan": True,
+            "can_execute": True,
+            "phase": "active",
+            "message": "Test mode — scanning outside market hours",
+            "session_active": session_active,
+        }
+
     if not session_active:
         return {
             "can_scan": False,

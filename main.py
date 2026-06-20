@@ -33,6 +33,7 @@ from schemas.schemas import (
 from utils.base_functions import is_within_time_range, truncate_to_one_decimal_place
 from utils.base_functions import summarize_login_message, get_persisted_collateral
 from utils.lot_size import get_board_lot_size, is_regular_lot_qty, normalize_sell_qty
+from utils.log_sender import is_transient_monitor_log_line
 from utils.order_status_log_serializer import serialize_order_status_log, status_log_from_scheduled_order
 from utils.scheduled_monitor_control import (
     get_scheduler_display_status,
@@ -49,6 +50,7 @@ from sqlalchemy.orm import Session
 from datetime import datetime
 
 from utils.tms_user_loader import load_tms_users_instances
+from utils.api_time import format_api_timestamp, get_server_time_payload
 from utils.market_status import (
     format_nepal_datetime,
     get_market_hours_status,
@@ -59,11 +61,15 @@ from utils.market_status import (
     parse_session_check_response,
 )
 import config.tms_config as tms_config
+from config.app_build_info import get_app_build_info
 from utils.external_data_sources.nepse_alpha.ai_query import ScreenerAiError, execute_ai_screener_with_retries
 from utils.external_data_sources.nepse_alpha.query_parser import ScreenerQueryError, parse_screener_query
 from utils.external_data_sources.nepse_alpha.screener import get_field_catalog, get_screener_query_spec, run_stock_screener
+from utils.stock_screener_symbols import resolve_screener_symbols, screener_universe_label
+from utils.strategy_builder.api import router as strategy_builder_router
 
 app = FastAPI(debug=True)
+app.include_router(strategy_builder_router)
 SECRET_KEY = "your_secret_key_here"
 FRONTEND_BUILD_DIR = Path(__file__).resolve().parent / "frontend" / "build"
 
@@ -84,13 +90,16 @@ async def invalidate_cached_tms_user(client_id: str) -> None:
         await cached.close()
 
 async def get_cached_tms_user(user: User, *, request_per_sec: float = 5) -> TmsUser:
+    from utils.tms_broker import normalize_broker_no
+
+    broker_no = normalize_broker_no(user.broker_no)
     now = monotonic_time.monotonic()
     cached = tms_user_cache.get(user.client_id)
     touched = tms_user_cache_touched.get(user.client_id, 0)
     if (
         cached
         and now - touched < tms_user_cache_ttl
-        and str(cached.broker_no) == str(user.broker_no)
+        and str(cached.broker_no) == str(broker_no)
         and cached.password == user.password
         and cached.session is not None
         and not cached.session.closed
@@ -102,7 +111,7 @@ async def get_cached_tms_user(user: User, *, request_per_sec: float = 5) -> TmsU
         await invalidate_cached_tms_user(user.client_id)
 
     tms_user = TmsUser(
-        broker_no=user.broker_no,
+        broker_no=broker_no,
         username=user.client_id,
         password=user.password,
         request_per_sec=request_per_sec,
@@ -134,7 +143,10 @@ async def close_cached_tms_users() -> None:
 @app.on_event("startup")
 async def ensure_database_indexes() -> None:
     global scheduled_supervisor_task
+    from config.portal_settings import load_portal_settings
+
     await asyncio.to_thread(ensure_performance_indexes)
+    await asyncio.to_thread(load_portal_settings)
     scheduled_supervisor_task = asyncio.create_task(scheduled_monitor_supervisor_loop())
 
 async def _run_stock_grabber_task(
@@ -351,6 +363,26 @@ async def read_root():
     return {"message": "Hello, FastAPI"}
 
 
+@app.get("/app-info/")
+async def get_app_info():
+    info = get_app_build_info()
+    deployed = info.get("deployed_at")
+    if deployed:
+        try:
+            parsed = datetime.fromisoformat(str(deployed).replace("Z", "+00:00"))
+            formatted = format_api_timestamp(parsed)
+            if formatted:
+                info["deployed_at"] = formatted
+        except ValueError:
+            pass
+    return info
+
+
+@app.get("/api/time/")
+async def get_api_time():
+    return get_server_time_payload()
+
+
 @app.get("/market-status/")
 async def get_market_status(db: Session = Depends(get_db)):
     global market_status_cache
@@ -423,9 +455,12 @@ async def get_market_status(db: Session = Depends(get_db)):
         market_phase = "closed"
 
     payload = {
-        "nepal_time": nepal["iso"],
+        "server_time": nepal,
+        "today_npt": nepal["date"],
+        "nepal_time": nepal["npt"],
         "nepal_time_formatted": nepal["time"],
         "nepal_date_formatted": nepal["date"],
+        "nepal_time_display": nepal["display"],
         "timezone": nepal["timezone"],
         "is_trading_day": hours["is_trading_day"],
         "is_pre_open": hours["is_pre_open"],
@@ -594,16 +629,63 @@ def _compute_scheduled_live_status(
     monitoring_active: bool,
     monitor_phase: str,
     scanning_count: int,
-) -> str:
-    if not monitoring_active:
-        return "monitor stopped"
+    last_monitor_message: str | None = None,
+    current_price: float | None = None,
+) -> dict:
+    has_valid_price = current_price is not None and float(current_price) > 0
+
+    if not monitoring_active or monitor_phase == "stopped":
+        return {
+            "live_status": "monitor stopped",
+            "is_scanning": False,
+            "display_error": "Monitor stopped",
+        }
+
     if monitor_phase == "waiting_hours":
-        return "waiting for market"
+        return {
+            "live_status": "waiting for market",
+            "is_scanning": False,
+            "display_error": None,
+        }
+
     if monitor_phase == "waiting_session":
-        return "waiting for TMS session"
-    if scanning_count > 0:
-        return f"scanning ({scanning_count})"
-    return "scanning"
+        return {
+            "live_status": "waiting for TMS session",
+            "is_scanning": False,
+            "display_error": None,
+        }
+
+    is_scanning = monitor_phase in ("active", "armed") and has_valid_price
+    display_error = None
+
+    if not has_valid_price and last_monitor_message:
+        detail = last_monitor_message.strip().splitlines()[-1]
+        if detail.startswith("TRACKING:"):
+            detail = detail.replace("TRACKING:", "", 1).strip()
+        display_error = detail[:120] if detail else None
+
+    if is_scanning:
+        live_status = "scanning"
+    elif display_error:
+        live_status = display_error
+    else:
+        live_status = "scanning"
+
+    return {
+        "live_status": live_status,
+        "is_scanning": is_scanning,
+        "display_error": display_error if not is_scanning else None,
+    }
+
+
+def _last_monitor_log_line(scan_log, *, current_price: float | None = None) -> str | None:
+    if not scan_log or not scan_log.logs:
+        return None
+    lines = [line.strip() for line in str(scan_log.logs).splitlines() if line.strip()]
+    has_valid_price = current_price is not None and float(current_price) > 0
+    if has_valid_price:
+        lines = [line for line in lines if not is_transient_monitor_log_line(line)]
+    return lines[-1] if lines else None
 
 
 def _order_status_log_from_order(order: ScheduledOrder, status: Optional[str] = None) -> OrderStatusLog:
@@ -632,6 +714,9 @@ def _is_scheduled_order_editable(order: ScheduledOrder) -> bool:
 
 
 def _serialize_scheduled_order(order: ScheduledOrder) -> dict:
+    def ts(value):
+        return format_api_timestamp(value)
+
     return {
         "order_id": order.order_id,
         "client_id": order.client_id,
@@ -657,9 +742,9 @@ def _serialize_scheduled_order(order: ScheduledOrder) -> dict:
         "consecutive_drop_checks": order.consecutive_drop_checks,
         "activation_price": order.activation_price,
         "target_reached": order.target_reached,
-        "target_reached_at": order.target_reached_at.isoformat() if order.target_reached_at else None,
+        "target_reached_at": ts(order.target_reached_at),
         "highest_tracked_price": order.highest_tracked_price,
-        "highest_tracked_at": order.highest_tracked_at.isoformat() if order.highest_tracked_at else None,
+        "highest_tracked_at": ts(order.highest_tracked_at),
         "protected_price": order.protected_price,
         "average_buy_price": order.average_buy_price,
         "partial_legs": order.partial_legs,
@@ -667,47 +752,75 @@ def _serialize_scheduled_order(order: ScheduledOrder) -> dict:
         "execution_price": order.execution_price,
         "execution_price_source": order.execution_price_source,
         "execution_reason": order.execution_reason,
-        "executed_at": order.executed_at.isoformat() if order.executed_at else None,
+        "executed_at": ts(order.executed_at),
         "cancelled_reason": order.cancelled_reason,
         "failed_reason": order.failed_reason,
-        "expiry_time": order.expiry_time.isoformat() if order.expiry_time else None,
+        "expiry_time": ts(order.expiry_time),
         "expiry_action": order.expiry_action,
+        "reference_ltp": order.reference_ltp,
+        "trigger_price": order.trigger_price,
+        "reference_ltp_captured_at": ts(order.reference_ltp_captured_at),
+        "drop_percent": order.drop_percent,
         "max_allowed_slippage_percent": order.max_allowed_slippage_percent,
         "emergency_execution": order.emergency_execution,
         "user_allocation": order.user_allocation,
         "last_checked_ltp": order.last_checked_ltp,
-        "last_checked_at": order.last_checked_at.isoformat() if order.last_checked_at else None,
+        "last_checked_at": ts(order.last_checked_at),
         "below_stop_loss_check_count": order.below_stop_loss_check_count,
         "consecutive_drop_count": order.consecutive_drop_count,
         "strategy_config": order.strategy_config,
         "scan_price_history": order.scan_price_history,
         "scan_volume_history": order.scan_volume_history,
         "editable": _is_scheduled_order_editable(order),
-        "created_at": order.created_at.isoformat() if order.created_at else None,
-        "updated_at": order.updated_at.isoformat() if order.updated_at else None,
-        "last_updated": order.last_updated.isoformat() if order.last_updated else None,
+        "created_at": ts(order.created_at),
+        "updated_at": ts(order.updated_at),
+        "last_updated": ts(order.last_updated),
     }
 
 
 def _validate_strategy_order(order_data: OrderCreateRequest) -> None:
-    from utils.strategies.aliases import canonical_strategy_name
+    from utils.strategies.aliases import BUY_STRATEGIES, SELL_STRATEGIES, canonical_strategy_name
 
     strategy = (order_data.strategy_type or "Fixed Price").strip()
     canonical = canonical_strategy_name(strategy, order_data.order_type or "buy")
     side = (order_data.order_type or "buy").lower()
+    if side == "buy" and canonical not in BUY_STRATEGIES:
+        raise HTTPException(status_code=400, detail=f"{canonical} is not a valid BUY strategy.")
+    if side == "sell" and canonical not in SELL_STRATEGIES:
+        raise HTTPException(status_code=400, detail=f"{canonical} is not a valid SELL strategy.")
+
+    strategy_config = order_data.strategy_config or {}
+    rule_plan = strategy_config.get("compiled_plan") or strategy_config.get("rule_plan")
+    is_rule_based = canonical in {
+        "Technical Buy", "Technical Sell", "Custom Query Buy", "Custom Query Sell",
+    }
+    if is_rule_based and not rule_plan and not strategy_config.get("query_text"):
+        raise HTTPException(status_code=400, detail="Rule-based strategies require a compiled plan or query text.")
     security_details = order_data.security_details or {}
     odd_lot_allowed = bool(security_details.get("odd_lot_allowed") or security_details.get("oddLotAllowed"))
     lot_size = get_board_lot_size(security_details)
-    if order_data.qty <= 0:
+    if order_data.qty <= 0 and not is_rule_based:
         raise HTTPException(status_code=400, detail="Quantity must be greater than zero.")
+    if is_rule_based and order_data.qty <= 0:
+        from utils.strategy_builder.constants import DEFAULT_RULE_ORDER_QUANTITY
+        from utils.strategy_builder.plan_helpers import extract_planned_quantity_from_compiled_plan
+
+        plan_qty = None
+        if isinstance(rule_plan, dict):
+            plan_qty = extract_planned_quantity_from_compiled_plan(
+                rule_plan,
+                order_data.script_name,
+            )
+        order_data.qty = plan_qty or DEFAULT_RULE_ORDER_QUANTITY
     if (
-        not odd_lot_allowed
+        not is_rule_based
+        and not odd_lot_allowed
         and order_data.order_type.lower() == "buy"
         and not is_regular_lot_qty(order_data.qty, lot_size)
     ):
         raise HTTPException(status_code=400, detail=f"Quantity must be a board-lot multiple of {lot_size} kitta.")
     if order_data.order_type.lower() == "buy":
-        if not odd_lot_allowed and order_data.qty < lot_size:
+        if not is_rule_based and not odd_lot_allowed and order_data.qty < lot_size:
             raise HTTPException(
                 status_code=400,
                 detail=f"Amount is not enough to buy minimum board lot of {lot_size} kitta.",
@@ -998,6 +1111,182 @@ async def cancel_order(client_id: str, exchange_order_id: str, db: Session = Dep
         raise HTTPException(status_code=500, detail=str(e))
 
 
+async def _apply_schedule_baseline_if_requested(order_data: OrderCreateRequest, db: Session) -> None:
+    from utils.tms_client_resolver import get_tms_user_for_client
+    from utils.strategy_builder.schedule_baseline import (
+        ScheduleBaselineError,
+        apply_fixed_trigger_to_compiled_plan,
+        capture_symbol_baseline_from_tms,
+        compile_baseline_strategy_config,
+        merge_baseline_into_order_fields,
+        normalize_expiration_config,
+        reject_self_referential_drop_query,
+        validate_expiration_timestamp,
+    )
+    from utils.strategy_builder.screener_drop_schedule import recalculate_trigger_from_reference
+    from utils.strategy_builder.strategy_parser import parse_strategy_query
+
+    strategy_config = dict(order_data.strategy_config or {})
+    query_text = str(strategy_config.get("query_text") or "")
+
+    from utils.strategy_builder.reference_dependencies import plan_uses_reference
+    from utils.strategy_builder.strategy_models import StrategyPlanAST
+
+    compiled_plan = strategy_config.get("compiled_plan")
+    if compiled_plan and plan_uses_reference(StrategyPlanAST.model_validate(compiled_plan)):
+        strategy_config["uses_field_references"] = True
+        order_data.strategy_config = strategy_config
+        if query_text:
+            reject_self_referential_drop_query(query_text)
+        return
+
+    if strategy_config.get("schedule_baseline") and strategy_config.get("compiled_plan"):
+        if not strategy_config.get("refresh_reference_ltp"):
+            merge_baseline_into_order_fields(order_data, strategy_config["schedule_baseline"])
+            if query_text:
+                reject_self_referential_drop_query(query_text)
+            return
+
+    if (
+        strategy_config.get("capture_reference_ltp")
+        and strategy_config.get("recalc_drop_percent_only")
+        and order_data.reference_ltp
+        and query_text
+    ):
+        symbol = (order_data.script_name or order_data.symbol or "").strip().upper()
+        drop_percent = float(strategy_config.get("drop_percent") or order_data.drop_percent or 10.0)
+        trigger_price = recalculate_trigger_from_reference(float(order_data.reference_ltp), drop_percent)
+        plan = parse_strategy_query(query_text)
+        compiled = apply_fixed_trigger_to_compiled_plan(
+            plan.model_dump(),
+            symbol=symbol,
+            trigger_price=trigger_price,
+        )
+        baseline = dict(strategy_config.get("schedule_baseline") or {})
+        baseline.update(
+            {
+                "symbol": symbol,
+                "reference_ltp": float(order_data.reference_ltp),
+                "drop_percent": drop_percent,
+                "trigger_price": trigger_price,
+            }
+        )
+        strategy_config["compiled_plan"] = compiled
+        strategy_config["schedule_baseline"] = baseline
+        strategy_config["drop_percent"] = drop_percent
+        order_data.strategy_config = strategy_config
+        order_data.trigger_price = trigger_price
+        order_data.drop_percent = drop_percent
+        return
+
+    if not strategy_config.get("capture_reference_ltp"):
+        if query_text:
+            reject_self_referential_drop_query(query_text)
+        return
+
+    validate_expiration_timestamp(order_data.expiry_time)
+    if not query_text:
+        raise HTTPException(status_code=400, detail="Strategy query text is required for baseline capture.")
+
+    symbol = (order_data.script_name or order_data.symbol or "").strip().upper()
+    if not symbol:
+        raise HTTPException(status_code=400, detail="Script name is required for baseline capture.")
+
+    drop_percent = float(strategy_config.get("drop_percent") or 10.0)
+    fixed_symbols = strategy_config.get("fixed_symbols")
+    if isinstance(fixed_symbols, list) and fixed_symbols:
+        if symbol not in {str(item).strip().upper() for item in fixed_symbols}:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{symbol} is not in the fixed symbol list for this schedule.",
+            )
+
+    try:
+        tms_user = await get_tms_user_for_client(order_data.client_id, db)
+        baseline = await capture_symbol_baseline_from_tms(
+            tms_user,
+            symbol,
+            drop_percent=drop_percent,
+        )
+    except ScheduleBaselineError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    expiration = strategy_config.get("expiration")
+    if order_data.expiry_time and isinstance(expiration, dict):
+        expiration = {**expiration, "expires_at": order_data.expiry_time.isoformat()}
+
+    order_data.strategy_config = compile_baseline_strategy_config(
+        query_text=query_text,
+        symbol=symbol,
+        baseline=baseline,
+        expiration=expiration if isinstance(expiration, dict) else None,
+        fixed_symbols=fixed_symbols if isinstance(fixed_symbols, list) else [symbol],
+    )
+    merge_baseline_into_order_fields(order_data, baseline)
+    if not order_data.expiry_action:
+        order_data.expiry_action = "CANCEL"
+
+
+async def _persist_order_field_references(db: Session, order: ScheduledOrder, order_data: OrderCreateRequest) -> None:
+    strategy_config = dict(order_data.strategy_config or {})
+    compiled_plan = strategy_config.get("compiled_plan")
+    if not compiled_plan:
+        return
+    from utils.strategy_builder.reference_dependencies import plan_uses_reference
+    from utils.strategy_builder.reference_capture import ReferenceCaptureError
+    from utils.strategy_builder.reference_schedule import capture_and_attach_field_references
+    from utils.strategy_builder.strategy_models import StrategyPlanAST
+    from utils.tms_client_resolver import get_tms_user_for_client
+
+    plan = StrategyPlanAST.model_validate(compiled_plan)
+    if not plan_uses_reference(plan):
+        return
+    try:
+        tms_user = await get_tms_user_for_client(order_data.client_id, db)
+        order.strategy_config = await capture_and_attach_field_references(
+            db=db,
+            tms_user=tms_user,
+            order_id=order.order_id,
+            symbol=order.script_name,
+            plan=plan,
+            strategy_config=strategy_config,
+        )
+    except ReferenceCaptureError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail={"code": exc.code, "message": str(exc)}) from exc
+
+
+async def _enforce_rule_based_schedule_preflight(order_data: OrderCreateRequest, db: Session) -> None:
+    from utils.strategies.aliases import canonical_strategy_name
+    from utils.strategy_builder.schedule_preflight import run_schedule_preflight
+
+    canonical = canonical_strategy_name(order_data.strategy_type or "", order_data.order_type or "buy")
+    if canonical not in {"Technical Buy", "Technical Sell", "Custom Query Buy", "Custom Query Sell"}:
+        return
+
+    strategy_config = order_data.strategy_config or {}
+    result = await run_schedule_preflight(
+        query_text=str(strategy_config.get("query_text") or ""),
+        compiled_plan=strategy_config.get("compiled_plan"),
+        strategy_type=order_data.strategy_type,
+        client_id=order_data.client_id,
+        script_name=order_data.script_name,
+        db=db,
+        capture_reference_ltp=bool(strategy_config.get("capture_reference_ltp")),
+        drop_percent=float(strategy_config.get("drop_percent") or 10),
+        fixed_symbols=strategy_config.get("fixed_symbols"),
+    )
+    if not result.get("ready"):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": result.get("message") or "Cannot schedule this monitored query.",
+                "status": result.get("status"),
+                "errors": result.get("errors") or [],
+            },
+        )
+
+
 @app.post("/add_order/")
 async def add_order(order_data: OrderCreateRequest, db: Session = Depends(get_db)):
     incoming_security_details = order_data.security_details or {}
@@ -1010,30 +1299,44 @@ async def add_order(order_data: OrderCreateRequest, db: Session = Depends(get_db
         ),
     }
     _validate_strategy_order(order_data)
+    await _enforce_rule_based_schedule_preflight(order_data, db)
+    await _apply_schedule_baseline_if_requested(order_data, db)
     user = db.query(User).filter(User.client_id == order_data.client_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
     if order_data.order_type.lower() == "buy":
-        tms_user_instance = await get_cached_tms_user(user)
-        script_high = await _get_script_high(tms_user_instance, order_data.script_name)
-        if script_high is not None:
-            order_price = truncate_to_one_decimal_place(order_data.price)
-            day_high = truncate_to_one_decimal_place(script_high)
-            if order_price > day_high:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"Buy price ({order_price}) cannot exceed today's high "
-                        f"({day_high}) for {order_data.script_name}."
-                    ),
-                )
+        from utils.strategies.aliases import canonical_strategy_name
+
+        canonical = canonical_strategy_name(order_data.strategy_type or "Fixed Price", "buy")
+        is_rule_based_buy = canonical in {"Technical Buy", "Custom Query Buy"}
+        if not is_rule_based_buy:
+            tms_user_instance = await get_cached_tms_user(user)
+            script_high = await _get_script_high(tms_user_instance, order_data.script_name)
+            if script_high is not None:
+                order_price = truncate_to_one_decimal_place(order_data.price)
+                day_high = truncate_to_one_decimal_place(script_high)
+                if order_price > day_high:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Buy price ({order_price}) cannot exceed today's high "
+                            f"({day_high}) for {order_data.script_name}."
+                        ),
+                    )
     elif order_data.order_type.lower() == "sell":
         tms_user_instance = await get_cached_tms_user(user)
-        await _validate_sell_lot_against_holdings(order_data, tms_user_instance)
+        from utils.strategies.aliases import canonical_strategy_name
+
+        canonical = canonical_strategy_name(order_data.strategy_type or "Fixed Price", "sell")
+        is_rule_based_sell = canonical in {"Technical Sell", "Custom Query Sell"}
+        if not is_rule_based_sell:
+            await _validate_sell_lot_against_holdings(order_data, tms_user_instance)
 
     order = ScheduledOrder(order_data)
     db.add(order)
+    db.flush()
+    await _persist_order_field_references(db, order, order_data)
     db.commit()
     return {"message": "Order added successfully"}
 
@@ -1133,6 +1436,8 @@ async def _validate_scheduled_order_payload(order_data: OrderCreateRequest, db: 
         ),
     }
     _validate_strategy_order(order_data)
+    await _enforce_rule_based_schedule_preflight(order_data, db)
+    await _apply_schedule_baseline_if_requested(order_data, db)
     user = db.query(User).filter(User.client_id == order_data.client_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -1161,9 +1466,42 @@ async def create_scheduled_order(order_data: OrderCreateRequest, db: Session = D
     await _validate_scheduled_order_payload(order_data, db)
     order = ScheduledOrder(order_data)
     db.add(order)
+    db.flush()
+    await _persist_order_field_references(db, order, order_data)
     db.commit()
     db.refresh(order)
     return {"message": "Scheduled order created", "order": _serialize_scheduled_order(order)}
+
+
+@app.post("/scheduled_orders/{order_id}/references/refresh")
+async def refresh_scheduled_order_references(
+    order_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    order = db.query(ScheduledOrder).filter(ScheduledOrder.order_id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    payload = await request.json()
+    scope = str(payload.get("scope") or "all")
+    from utils.strategy_builder.reference_refresh import ReferenceRefreshError, refresh_field_references
+
+    try:
+        result = await refresh_field_references(
+            db,
+            order_id,
+            scope=scope,
+            rule_name=payload.get("rule_name"),
+            symbol=payload.get("symbol"),
+            fields=payload.get("fields"),
+            refreshed_by=payload.get("client_id") or order.client_id,
+        )
+        db.commit()
+        db.refresh(order)
+        return {"message": "References refreshed", **result, "order": _serialize_scheduled_order(order)}
+    except ReferenceRefreshError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail={"code": exc.code, "message": str(exc)}) from exc
 
 
 @app.put("/scheduled_orders/{order_id}")
@@ -1200,17 +1538,131 @@ async def clear_scheduled_orders(db: Session = Depends(get_db)):
 
 @app.post("/update_monitor_interval")
 async def update_monitor_interval(request: Request):
+    from config.portal_settings import (
+        MAX_SCAN_INTERVAL_SECONDS,
+        MIN_SCAN_INTERVAL_SECONDS,
+        save_portal_settings,
+    )
+
     data = await request.json()
     monitor_interval = data.get("monitor_interval")
-    if monitor_interval is not None:
-        tms_config.monitor_interval = monitor_interval
-        return {"message": "Monitor interval updated successfully", "new_interval": tms_config.monitor_interval}
-    else:
-        return {"error": "monitor_interval not provided"}, 400
-        
+    if monitor_interval is None:
+        return JSONResponse({"error": "monitor_interval not provided"}, status_code=400)
+    try:
+        value = int(monitor_interval)
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "monitor_interval must be a number"}, status_code=400)
+    if value < MIN_SCAN_INTERVAL_SECONDS or value > MAX_SCAN_INTERVAL_SECONDS:
+        return JSONResponse(
+            {
+                "error": f"monitor_interval must be between {MIN_SCAN_INTERVAL_SECONDS} and {MAX_SCAN_INTERVAL_SECONDS}",
+            },
+            status_code=400,
+        )
+    settings = save_portal_settings({"monitor_interval_seconds": value})
+    return {
+        "message": "Monitor interval updated successfully",
+        "new_interval": settings["monitor_interval_seconds"],
+        "monitor_interval": settings["monitor_interval_seconds"],
+    }
+
+
 @app.get("/get_monitor_interval")
 async def get_monitor_interval():
-    return {"monitor_interval": tms_config.monitor_interval}
+    from config.portal_settings import get_portal_settings
+
+    settings = get_portal_settings()
+    return {"monitor_interval": settings["monitor_interval_seconds"]}
+
+
+@app.get("/api/portal-settings/")
+async def read_portal_settings():
+    from config.portal_settings import (
+        MAX_MAX_DATA_AGE_SECONDS,
+        MAX_MAX_PRICE_FETCH_CONCURRENCY,
+        MAX_MONITOR_TICK_SECONDS,
+        MAX_NEPSE_ALPHA_INTERVAL_SECONDS,
+        MAX_SCAN_INTERVAL_SECONDS,
+        MIN_MAX_DATA_AGE_SECONDS,
+        MIN_MAX_PRICE_FETCH_CONCURRENCY,
+        MIN_MONITOR_TICK_SECONDS,
+        MIN_NEPSE_ALPHA_INTERVAL_SECONDS,
+        MIN_SCAN_INTERVAL_SECONDS,
+        get_portal_settings,
+    )
+
+    return {
+        "settings": get_portal_settings(),
+        "limits": {
+            "monitor_interval_seconds": {
+                "min": MIN_SCAN_INTERVAL_SECONDS,
+                "max": MAX_SCAN_INTERVAL_SECONDS,
+            },
+            "default_max_data_age_seconds": {
+                "min": MIN_MAX_DATA_AGE_SECONDS,
+                "max": MAX_MAX_DATA_AGE_SECONDS,
+            },
+            "nepse_alpha_interval_seconds": {
+                "min": MIN_NEPSE_ALPHA_INTERVAL_SECONDS,
+                "max": MAX_NEPSE_ALPHA_INTERVAL_SECONDS,
+            },
+            "monitor_tick_seconds": {
+                "min": MIN_MONITOR_TICK_SECONDS,
+                "max": MAX_MONITOR_TICK_SECONDS,
+            },
+            "max_price_fetch_concurrency": {
+                "min": MIN_MAX_PRICE_FETCH_CONCURRENCY,
+                "max": MAX_MAX_PRICE_FETCH_CONCURRENCY,
+            },
+        },
+    }
+
+
+@app.put("/api/portal-settings/")
+async def update_portal_settings(request: Request):
+    from config.portal_settings import (
+        MAX_MAX_DATA_AGE_SECONDS,
+        MAX_MAX_PRICE_FETCH_CONCURRENCY,
+        MAX_MONITOR_TICK_SECONDS,
+        MAX_NEPSE_ALPHA_INTERVAL_SECONDS,
+        MAX_SCAN_INTERVAL_SECONDS,
+        MIN_MAX_DATA_AGE_SECONDS,
+        MIN_MAX_PRICE_FETCH_CONCURRENCY,
+        MIN_MONITOR_TICK_SECONDS,
+        MIN_NEPSE_ALPHA_INTERVAL_SECONDS,
+        MIN_SCAN_INTERVAL_SECONDS,
+        save_portal_settings,
+    )
+
+    data = await request.json()
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="Invalid settings payload.")
+    settings = save_portal_settings(data)
+    return {
+        "settings": settings,
+        "limits": {
+            "monitor_interval_seconds": {
+                "min": MIN_SCAN_INTERVAL_SECONDS,
+                "max": MAX_SCAN_INTERVAL_SECONDS,
+            },
+            "default_max_data_age_seconds": {
+                "min": MIN_MAX_DATA_AGE_SECONDS,
+                "max": MAX_MAX_DATA_AGE_SECONDS,
+            },
+            "nepse_alpha_interval_seconds": {
+                "min": MIN_NEPSE_ALPHA_INTERVAL_SECONDS,
+                "max": MAX_NEPSE_ALPHA_INTERVAL_SECONDS,
+            },
+            "monitor_tick_seconds": {
+                "min": MIN_MONITOR_TICK_SECONDS,
+                "max": MAX_MONITOR_TICK_SECONDS,
+            },
+            "max_price_fetch_concurrency": {
+                "min": MIN_MAX_PRICE_FETCH_CONCURRENCY,
+                "max": MAX_MAX_PRICE_FETCH_CONCURRENCY,
+            },
+        },
+    }
     
 @app.get("/order_status_logs/")
 async def get_order_status_logs(
@@ -1232,6 +1684,7 @@ async def get_order_status_logs(
         try:
             parsed_date = datetime.strptime(ordered_date, "%Y-%m-%d").date()
             start_utc, end_utc = nepal_date_utc_bounds(parsed_date)
+            query = query.filter(OrderStatusLog.deleted_at.is_(None))
             query = query.filter(
                 cast(OrderStatusLog.timestamp, DateTime) >= start_utc)
             query = query.filter(
@@ -1240,6 +1693,7 @@ async def get_order_status_logs(
             return {"error": "Invalid date format. Please use YYYY-MM-DD."}
     else:
         start_utc, end_utc = nepal_date_utc_bounds(get_nepal_now().date())
+        query = query.filter(OrderStatusLog.deleted_at.is_(None))
         query = query.filter(cast(OrderStatusLog.timestamp, DateTime) >= start_utc)
         query = query.filter(
             cast(OrderStatusLog.timestamp, DateTime) < end_utc)
@@ -1268,6 +1722,19 @@ async def get_order_status_logs(
     for order in scheduled_orders:
         scan_log = scan_logs.get((order.client_id, order.script_name))
         scanning_count = int(scan_log.scanning_count or 0) if scan_log else 0
+        current_price_val = (
+            float(scan_log.current_price)
+            if scan_log and scan_log.current_price is not None
+            else None
+        )
+        last_monitor_message = _last_monitor_log_line(scan_log, current_price=current_price_val)
+        live_status_fields = _compute_scheduled_live_status(
+            monitoring_active=tms_config.is_running,
+            monitor_phase=monitor_phase,
+            scanning_count=scanning_count,
+            last_monitor_message=last_monitor_message,
+            current_price=current_price_val,
+        )
         scheduled_payload.append({
             "order_id": order.order_id,
             "client_id": order.client_id,
@@ -1278,7 +1745,7 @@ async def get_order_status_logs(
             "order_type": order.order_type,
             "strategy_type": order.strategy_type or "Fixed Price",
             "side": order.side or order.order_type,
-            "created_at": order.created_at.isoformat() if order.created_at else None,
+            "created_at": format_api_timestamp(order.created_at),
             "remaining_quantity": order.remaining_quantity,
             "stop_loss_price": order.stop_loss_price,
             "stop_limit_price": order.stop_limit_price,
@@ -1291,29 +1758,35 @@ async def get_order_status_logs(
             "activation_price": order.activation_price,
             "average_buy_price": order.average_buy_price,
             "highest_tracked_price": order.highest_tracked_price,
-            "target_reached_at": order.target_reached_at.isoformat() if order.target_reached_at else None,
+            "target_reached_at": format_api_timestamp(order.target_reached_at),
             "execution_price": order.execution_price,
             "execution_price_source": order.execution_price_source,
             "execution_reason": order.execution_reason,
-            "executed_at": order.executed_at.isoformat() if order.executed_at else None,
-            "expiry_time": order.expiry_time.isoformat() if order.expiry_time else None,
+            "executed_at": format_api_timestamp(order.executed_at),
+            "expiry_time": format_api_timestamp(order.expiry_time),
             "expiry_action": order.expiry_action,
+            "reference_ltp": order.reference_ltp,
+            "trigger_price": order.trigger_price,
+            "reference_ltp_captured_at": format_api_timestamp(order.reference_ltp_captured_at),
+            "drop_percent": order.drop_percent,
             "max_allowed_slippage_percent": order.max_allowed_slippage_percent,
             "user_allocation": order.user_allocation,
             "partial_legs": order.partial_legs,
+            "requested_price": order.price,
+            "last_checked_ltp": order.last_checked_ltp,
             "strategy_config": order.strategy_config,
+            "nepse_alpha_scan_count": int((order.strategy_config or {}).get("nepse_alpha_scan_count") or 0),
+            "tms_scan_count": int((order.strategy_config or {}).get("tms_scan_count") or scanning_count),
             "security_details": order.security_details or {},
             "editable": _is_scheduled_order_editable(order),
             "failed_reason": order.failed_reason,
             "cancelled_reason": order.cancelled_reason,
             "scanning_count": scanning_count,
-            "current_price": int(round(scan_log.current_price)) if scan_log and scan_log.current_price is not None else None,
-            "last_scan_at": scan_log.timestamp.isoformat() if scan_log and scan_log.timestamp else None,
-            "live_status": _compute_scheduled_live_status(
-                monitoring_active=tms_config.is_running,
-                monitor_phase=monitor_phase,
-                scanning_count=scanning_count,
-            ),
+            "current_price": int(round(current_price_val)) if current_price_val is not None else None,
+            "last_scan_at": format_api_timestamp(scan_log.timestamp if scan_log else None),
+            **live_status_fields,
+            "last_monitor_message": last_monitor_message,
+            "monitor_logs": scan_log.logs if scan_log and scan_log.logs else None,
         })
 
     combined_results = {
@@ -1322,15 +1795,40 @@ async def get_order_status_logs(
         "monitoring_active": tms_config.is_running,
         "monitor_phase": monitor_phase,
         "monitor_status_message": tms_config.scheduled_status_message,
-        "scheduled_started_at": (
-            tms_config.scheduled_started_at.isoformat()
-            if tms_config.scheduled_started_at
-            else None
-        ),
+        "scheduled_started_at": format_api_timestamp(tms_config.scheduled_started_at),
         "monitor_interval": tms_config.monitor_interval,
+        "server_time": get_server_time_payload()["now"],
     }
 
     return combined_results
+
+
+@app.delete("/order_status_logs/clear")
+async def clear_order_status_logs(client_ids: str = Query(...), db: Session = Depends(get_db)):
+    if not client_ids or not client_ids.strip():
+        raise HTTPException(status_code=400, detail="Client IDs cannot be empty.")
+
+    parsed_client_ids = [item.strip() for item in client_ids.split(",") if item.strip()]
+    if not parsed_client_ids:
+        raise HTTPException(status_code=400, detail="Client IDs cannot be empty.")
+
+    try:
+        updated_count = (
+            db.query(OrderStatusLog)
+            .filter(OrderStatusLog.client_id.in_(parsed_client_ids))
+            .filter(OrderStatusLog.deleted_at.is_(None))
+            .update({OrderStatusLog.deleted_at: datetime.utcnow()}, synchronize_session=False)
+        )
+        db.commit()
+        if updated_count == 0:
+            raise HTTPException(status_code=404, detail="No order logs found for the specified client IDs.")
+        return {"message": f"Cleared {updated_count} order log(s).", "deleted_count": updated_count}
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to clear order logs: {exc}")
 
 
 # @app.websocket("/ws")
@@ -1498,28 +1996,14 @@ async def stock_screener_fields():
     }
 
 
-async def _resolve_screener_symbols(client_id: Optional[str], symbols: Optional[List[str]], db: Session) -> List[str]:
-    resolved = [symbol.strip().upper() for symbol in (symbols or []) if symbol and symbol.strip()]
-
-    if client_id:
-        user = db.query(User).filter(User.client_id == client_id).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-        try:
-            tms_user = await get_cached_tms_user(user)
-            securities = await tms_user.get_securities()
-            resolved = sorted({
-                str(item.get("symbol") or "").strip().upper()
-                for item in securities
-                if str(item.get("symbol") or "").strip()
-            })
-        except LoginFailedException as e:
-            await invalidate_cached_tms_user(client_id)
-            raise HTTPException(status_code=401, detail=str(e)) from e
-
-    if not resolved:
-        raise HTTPException(status_code=400, detail="Provide client_id or a non-empty symbols list")
-    return resolved
+async def _resolve_screener_symbols_for_request(body, db: Session) -> List[str]:
+    return await resolve_screener_symbols(
+        universe=getattr(body, "universe", "nepse") or "nepse",
+        client_id=body.client_id,
+        client_ids=body.client_ids,
+        symbols=body.symbols,
+        db=db,
+    )
 
 
 @app.post("/stock_screener/parse")
@@ -1535,7 +2019,7 @@ async def stock_screener_parse(body: StockScreenerRequest):
 
 @app.post("/stock_screener/screen")
 async def stock_screener_screen(body: StockScreenerRequest, db: Session = Depends(get_db)):
-    symbols = await _resolve_screener_symbols(body.client_id, body.symbols, db)
+    symbols = await _resolve_screener_symbols_for_request(body, db)
 
     filters = [item.model_dump() for item in body.filters]
     rank_by = body.rank_by
@@ -1567,6 +2051,12 @@ async def stock_screener_screen(body: StockScreenerRequest, db: Session = Depend
 
     if parsed_query:
         payload["parsed_query"] = parsed_query
+    payload["universe"] = body.universe
+    payload["universe_label"] = screener_universe_label(
+        body.universe,
+        client_id=body.client_id,
+        symbol_count=len(symbols),
+    )
     return payload
 
 
@@ -1576,7 +2066,7 @@ async def stock_screener_ai_screen(body: StockScreenerAiRequest, db: Session = D
     if not message:
         raise HTTPException(status_code=400, detail="Message is required")
 
-    symbols = await _resolve_screener_symbols(body.client_id, body.symbols, db)
+    symbols = await _resolve_screener_symbols_for_request(body, db)
 
     async def _run(parsed_query: dict) -> dict:
         return await run_stock_screener(
@@ -1605,6 +2095,12 @@ async def stock_screener_ai_screen(body: StockScreenerAiRequest, db: Session = D
         logging.exception("AI screener failed for message=%r", message[:120])
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
+    payload["universe"] = body.universe
+    payload["universe_label"] = screener_universe_label(
+        body.universe,
+        client_id=body.client_id,
+        symbol_count=len(symbols),
+    )
     return payload
 
 

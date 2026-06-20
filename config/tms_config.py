@@ -10,6 +10,10 @@ end_time = time(hour=15, minute=0)
 is_running = False
 check_orders_task: Optional[asyncio.Task] = None
 monitor_interval = 5
+monitor_tick_seconds = 1
+nepse_alpha_interval_seconds = 1800
+enable_scan_staggering = True
+max_price_fetch_concurrency = 5
 
 scheduled_started_at: Optional[datetime] = None
 scheduled_phase: str = "stopped"
