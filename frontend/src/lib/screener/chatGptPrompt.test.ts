@@ -31,6 +31,13 @@ describe('buildChatGptScreenerPromptForCopy', () => {
     expect(prompt).not.toContain('"filterable_field_count"');
   });
 
+  it('prefers best-effort single-pass guidance', () => {
+    const prompt = buildChatGptScreenerPromptForCopy(SAMPLE_FIELDS);
+    expect(prompt).toContain('Single-pass');
+    expect(prompt).toContain('Limitation:');
+    expect(prompt).toContain('close, not exact');
+  });
+
   it('is much shorter than the full reference prompt', () => {
     const compact = buildChatGptScreenerPromptForCopy(SAMPLE_FIELDS);
     const full = buildChatGptScreenerPrompt(SAMPLE_FIELDS);

@@ -119,15 +119,15 @@ class StrategyBuilderApiHelpersTest(unittest.TestCase):
     def test_llm_prompt_has_strict_output_contract(self):
         prompt = build_strategy_query_llm_prompt(side="buy", form_symbol="CZBIL")
         for token in (
-            "Output exactly one Strategy Query Language document, or exactly one refusal sentence.",
-            "Valid query output must start with STRATEGY_VERSION 1",
-            "Do not output markdown fences",
-            "Do not output placeholders",
+            "RESPONSE FORMAT",
+            "single-pass",
+            "STATUS: OK",
+            "STATUS: ERROR",
+            "Limitation:",
+            "close, not exact",
+            "Never answer with only a refusal sentence",
             "Use only exact uppercase quoted script symbols",
-            "Function arguments must be named",
-            'operator="gte", not operator=gte',
-            "Use positive numeric literals only",
-            "This query is not supported — <name> is not available.",
+            "This query is not supported —",
         ):
             self.assertIn(token, prompt, f"missing strict output contract token: {token}")
 
@@ -144,7 +144,7 @@ class StrategyBuilderApiHelpersTest(unittest.TestCase):
             self.assertIn(token, prompt, f"missing depth execution guidance: {token}")
         self.assertIn("Depth functions must use named args", prompt)
         self.assertIn('operator="gte". Unquoted operator=gte is parsed as a field and is invalid.', prompt)
-        self.assertIn("Do NOT output a query containing forbidden fields", prompt)
+        self.assertIn("Do NOT output forbidden fields or functions in the Query block", prompt)
 
     def test_llm_prompt_lists_runtime_functions(self):
         prompt = build_strategy_query_llm_prompt(side="buy")

@@ -123,40 +123,71 @@ def _unsupported_section() -> str:
     )
 
 
+def _response_format_section(*, side: str) -> str:
+    side_upper = (side or "buy").upper()
+    return f"""RESPONSE FORMAT — single-pass: produce the best valid answer on the first reply.
+
+When the request CAN be satisfied or approximated (default — use this whenever possible):
+STATUS: OK
+Summary:
+- 2-4 bullets: what the rule does, key filters, execution mode
+- Limitation: (required when you dropped, substituted, or could not match part of the request) We don't have <missing>; this plan uses <substitute> — close, not exact.
+Query:
+```
+STRATEGY_VERSION 1
+SIDE {side_upper}
+...
+```
+
+When the request CANNOT be satisfied at all (only these cases):
+STATUS: ERROR
+Reason:
+- Start with: This query is not supported —
+- Use for: missing explicit symbol list, wrong SIDE, or no parseable rule at all
+- If the user asked for multiple stocks but did not paste exact NEPSE codes, ask them to paste symbols — do NOT invent symbols
+Do NOT include a Query block when STATUS is ERROR.
+
+Parsing rules:
+- Output exactly one STATUS block per turn.
+- Prefer STATUS: OK with a registered substitute over STATUS: ERROR when the user asked for an unsupported indicator/field.
+- Put Strategy Query Language only inside the Query fenced block on STATUS: OK."""
+
+
 def _strict_output_contract_section() -> str:
     return """STRICT OUTPUT CONTRACT — this is the final gate before answering:
-1. Output exactly one Strategy Query Language document, or exactly one refusal sentence.
-2. Valid query output must start with STRATEGY_VERSION 1 on the first non-empty line and SIDE BUY or SIDE SELL on the next non-empty line.
-3. Do not output markdown fences, headings, bullets, JSON, YAML, comments, explanations, apologies, or prose around the query.
-4. Do not output placeholders such as <symbol>, SYMBOL, YOUR_SYMBOL, target_price, trigger_price, quantity, or TODO.
-5. Do not guess missing numbers. Every RULE must include explicit ORDER sizing; do not omit ORDER and expect a runtime default.
-6. Use only exact uppercase quoted script symbols supplied by the user or the current form symbol. Lowercase symbols such as "nabil" are rejected.
-7. Use only exact field keys from FIELD REGISTRY. Field keys are lowercase snake_case and case-sensitive.
-8. Use only exact function names from SUPPORTED FUNCTIONS. Function names are uppercase and case-sensitive.
-9. Function arguments must be named. Operator argument values must be quoted strings: operator="gte", not operator=gte.
-10. Enum values must match ENUM TEXT VALUES exactly, including case, e.g. "Bullish", "Bearish", "above", "below".
-11. For unavailable requests, output only: This query is not supported — <name> is not available.
-12. Never produce a query that contains a forbidden, unknown, or approximate field/function/strategy name."""
+1. Always start with STATUS: OK or STATUS: ERROR (see RESPONSE FORMAT). Never answer with only a refusal sentence.
+2. On STATUS: OK, the Query block must contain a complete Strategy Query Language document starting with STRATEGY_VERSION 1 and SIDE BUY or SIDE SELL.
+3. On STATUS: ERROR, include Reason bullets only — no Query block, no STRATEGY_VERSION document.
+4. Do not output JSON, YAML, SQL, Python, or commentary outside the STATUS wrapper.
+5. Do not output placeholders such as <symbol>, SYMBOL, YOUR_SYMBOL, target_price, trigger_price, quantity, or TODO.
+6. Do not guess missing numbers or symbols. Every RULE must include explicit ORDER sizing and explicit FOR SYMBOL target(s).
+7. Use only exact uppercase quoted script symbols supplied by the user or the current form symbol. Lowercase symbols such as "nabil" are rejected.
+8. Use only exact field keys from FIELD REGISTRY. Field keys are lowercase snake_case and case-sensitive.
+9. Use only exact function names from SUPPORTED FUNCTIONS. Function names are uppercase and case-sensitive.
+10. Function arguments must be named. Operator argument values must be quoted strings: operator="gte", not operator=gte.
+11. Enum values must match ENUM TEXT VALUES exactly, including case, e.g. "Bullish", "Bearish", "above", "below".
+12. Substitute registered alternatives for unsupported requests when possible; note gaps in a Limitation Summary bullet — do not fail just because one requested indicator is missing."""
 
 
 def _hard_rules_section() -> str:
     return """HARD RULES — follow without exception:
-1. Use ONLY field keys from FIELD REGISTRY and functions from SUPPORTED FUNCTIONS.
+1. Use ONLY field keys from FIELD REGISTRY and functions from SUPPORTED FUNCTIONS in the Query block.
 2. If the user asks for ADX or any unlisted indicator/field/function:
-   - Respond with a clear refusal: "This query is not supported — <name> is not available."
-   - Do NOT output a Strategy Query Language plan that references those fields or functions.
-   - Suggest the closest registered alternative (e.g. technical_rsi_14 instead of ADX, registered depth fields instead of raw order-book names).
+   - Prefer STATUS: OK with the closest registered substitute (e.g. technical_rsi_14 instead of ADX).
+   - Add a Limitation Summary bullet: We don't have <name>; used <substitute> — close, not exact.
+   - Use STATUS: ERROR only if no reasonable substitute exists and no valid rule can be built.
 3. Never invent field names, SQL, Python, or indicators outside the registries.
 4. Every RULE must declare FOR SYMBOL targets and include ORDER sizing.
 5. A RULE must include at least one of: USE STRATEGY "...", WHEN <expr>, or ELIGIBILITY + SIGNAL.
 6. USE STRATEGY may combine with optional ELIGIBILITY / WHEN / SIGNAL / REQUIRE gates (gates run first).
 7. Never nest Custom Query / Technical Buy/Sell inside USE STRATEGY — those are rule-based types, not delegatable.
-8. Symbols must be exact uppercase NEPSE/TMS script codes in double quotes, copied only from the user's requested symbols or the current form symbol.
-9. For multi-symbol requests, use FOR SYMBOL IN ("NABIL", "EBL") or separate RULE blocks; never invent, lowercase, or rename symbols.
-10. Use quoted operator strings inside function calls: operator="gte" / "lte" / "gt" / "lt" / "eq" / "neq".
-11. Use positive numeric literals only; do not write negative numbers like -3. Prefer equivalent comparisons such as field < 0.
-12. SELL queries must stay within the user's sellable DP holdings. If the user has not provided the holding quantity, ask for it before generating a sell quantity. Use SELL ALL_AVAILABLE or SELL PERCENT_OF_HOLDING only when the user explicitly wants those modes.
-13. Output only valid Strategy Query Language text unless the user explicitly asks for an explanation."""
+8. Symbols must be exact uppercase NEPSE/TMS script codes in double quotes, copied only from symbols the user explicitly pasted or the current form symbol.
+9. Multi-symbol: use FOR SYMBOL IN ("NABIL", "EBL") only with codes the user pasted. If the user says "50 stocks" without listing codes, respond STATUS: ERROR and ask them to paste exact NEPSE symbols — never invent symbols.
+10. Do not refuse with vague errors. Name the real blocker or give the closest valid query with a Limitation bullet.
+11. Use quoted operator strings inside function calls: operator="gte" / "lte" / "gt" / "lt" / "eq" / "neq".
+12. Use positive numeric literals only; do not write negative numbers like -3. Prefer equivalent comparisons such as field < 0.
+13. SELL queries must stay within the user's sellable DP holdings. If the user has not provided the holding quantity, ask for it before generating a sell quantity. Use SELL ALL_AVAILABLE or SELL PERCENT_OF_HOLDING only when the user explicitly wants those modes.
+14. Single-pass: aim to return STATUS: OK with the best query on the first reply. Follow RESPONSE FORMAT every time."""
 
 
 def _data_sources_section() -> str:
@@ -410,6 +441,11 @@ preview, and schedule preflight — use only keys listed in FIELD REGISTRY, SUPP
 Goal: produce a valid STRATEGY_VERSION 1 query for SIDE {side_upper}.{form_note}
 
 ================================================================================
+RESPONSE FORMAT (mandatory — copy this shape exactly)
+================================================================================
+{_response_format_section(side=side_upper)}
+
+================================================================================
 STRICT OUTPUT CONTRACT
 ================================================================================
 {_strict_output_contract_section()}
@@ -591,9 +627,9 @@ FORBIDDEN / UNSUPPORTED — REFUSE THESE
 ================================================================================
 {_unsupported_section()}
 
-If the user asks for unavailable indicators, respond that the query is not supported and suggest
-the closest registered alternative (e.g. technical_rsi_14 instead of ADX, registered depth fields/functions for depth).
-Do NOT output a query containing forbidden fields or functions.
+If the user asks for unavailable indicators, prefer STATUS: OK with the closest registered substitute and a Limitation Summary bullet.
+Use STATUS: ERROR only when no valid Strategy Query Language plan can be built.
+Do NOT output forbidden fields or functions in the Query block.
 
 ================================================================================
 SCHEDULING PREFLIGHT (monitored orders)
@@ -822,6 +858,8 @@ COMMON MISTAKES (avoid)
 - Inventing depth field names instead of market_depth_available, best_bid, best_ask, top_buy_quantity, top_sell_quantity, etc.
 - Inventing symbols not provided by the user or current form
 - Using unquoted/lowercase symbols instead of exact uppercase quoted script codes
+- Answering with a bare refusal sentence instead of STATUS: ERROR with Reason bullets
+- Vague refusals such as "symbols for 50 stocks are not available" instead of naming the missing symbol list or field
 
-Output only the final Strategy Query Language text. No markdown fences. No explanation unless asked.
+After the user request below, respond using RESPONSE FORMAT only.
 """

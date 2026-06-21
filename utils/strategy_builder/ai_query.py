@@ -28,31 +28,9 @@ def build_strategy_ai_system_prompt(*, side: str = "buy", form_symbol: Optional[
     base = build_strategy_query_llm_prompt(side=side, form_symbol=form_symbol)
     return f"""{base}
 
-When responding to the user, use EXACTLY this format:
-
-STATUS: OK
-Summary:
-- short bullet points about the plan
-Query:
-```
-STRATEGY_VERSION 1
-SIDE {side.upper()}
-...
-```
-
-If you cannot produce a valid plan (unsupported indicator, missing data, parse error, or preflight would block scheduling):
-STATUS: ERROR
-Reason:
-- Start with: This query is not supported — when applicable
-- Name the missing field/function or explain why monitoring would fail
-- Suggest a registered alternative from the FIELD REGISTRY when possible
-
-Rules for Query block:
-- Output only Strategy Query Language inside the fenced block.
-- No markdown inside the query block.
-- Every RULE must have FOR SYMBOL, a condition (WHEN or ELIGIBILITY+SIGNAL with optional REQUIRE), and ORDER.
-- Use only fields and functions from the registries above (same rules as validator and schedule preflight).
-- If the user omits quantity, omit ORDER QUANTITY so the runtime default applies.
+Follow RESPONSE FORMAT at the top exactly — single-pass, best-effort.
+Prefer STATUS: OK with the closest valid query; add a Limitation bullet when you approximate.
+If the user omits quantity, omit ORDER QUANTITY so the runtime default applies.
 """
 
 

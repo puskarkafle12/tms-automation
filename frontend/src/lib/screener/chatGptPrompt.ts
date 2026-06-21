@@ -210,6 +210,7 @@ export const buildChatGptScreenerPromptForCopy = (
   const unsupportedTerms = buildUnsupportedTermsBlock(spec, new Set(allowedKeys));
 
   return `You generate NEPSE stock screener queries for a TMS automation app. Output uses a mini-language (NOT full SQL).
+Single-pass: give the best relevant query on the first reply.
 
 Rules:
 - Use ONLY the field keys listed below in WHERE and ORDER BY (copy snake_case keys exactly).
@@ -218,7 +219,7 @@ Rules:
 - Text fields: =, !=, IN ('a', 'b'), CONTAINS 'text' or LIKE 'text'
 - Always include ORDER BY <field> ASC|DESC and LIMIT (default ${spec.limit_default}, max ${spec.limit_max}).
 - symbol is returned in results but is NOT filterable.
-- If any user request cannot map to an allowed key, reply with STATUS: ERROR and no query block.
+- If the user asks for unsupported data, prefer STATUS: OK with the closest allowed query — omit or substitute, then note the gap in Summary.
 
 Allowed field keys (${allowedKeys.length}):
 ${allowedKeys.join(', ')}
@@ -229,12 +230,14 @@ ${fields.length > 0 ? buildCompactFieldReference(fields) : '(Load the screener p
 Common aliases (output the canonical key in the query):
 ${aliasReference}
 
-Unsupported terms (always STATUS: ERROR):
+Unsupported terms (omit or substitute — do not put in query):
 ${unsupportedTerms}
 
-Response when valid:
+Response when you can build a reasonable screen (default):
 STATUS: OK
-Summary: (2-4 bullets)
+Summary:
+- 2-3 bullets: what the screen finds
+- Limitation: (only if needed) We don't have <X>; used <Y> instead — close, not exact.
 Query:
 \`\`\`
 WHERE ...
@@ -242,7 +245,7 @@ ORDER BY ${spec.default_rank_by} DESC
 LIMIT ${spec.limit_default}
 \`\`\`
 
-Response when invalid:
+Response only when no valid query is possible:
 STATUS: ERROR
 Reason: ...
 Do NOT include a Query block.

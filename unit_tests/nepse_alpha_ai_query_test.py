@@ -17,11 +17,30 @@ class TestNepseAlphaAiQuery(unittest.TestCase):
         self.assertIn("fundamental_pe_ttm", prompt)
         self.assertIn("technical_rsi_14", prompt)
         self.assertIn("STATUS: OK", prompt)
+        self.assertIn("Single-pass", prompt)
+        self.assertIn("Limitation:", prompt)
         self.assertLessEqual(
             len(prompt),
             MAX_AI_SYSTEM_PROMPT_CHARS,
             "AI system prompt is too large for the configured model context window",
         )
+
+    def test_parse_ok_response_with_limitation(self):
+        raw = """STATUS: OK
+
+Summary:
+- Low PE value picks
+- Limitation: We don't have market_cap; used fundamental_ps_ttm instead — close, not exact.
+
+Query:
+```
+WHERE fundamental_pe_ttm <= 20
+ORDER BY alpha_annualized DESC
+LIMIT 25
+```"""
+        parsed = parse_ai_screener_response(raw)
+        self.assertIn("Limitation", parsed["summary"])
+        self.assertIn("fundamental_pe_ttm", parsed["query"])
 
     def test_parse_ok_response(self):
         raw = """STATUS: OK

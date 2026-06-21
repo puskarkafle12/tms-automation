@@ -28,7 +28,7 @@ TEXT_FIELD_HINTS = {
 # Keep system prompt bounded; override via env if your model allows more.
 MAX_AI_SYSTEM_PROMPT_CHARS = 12_000
 
-MAX_AI_SCREENER_RETRIES = int(os.getenv("NVIDIA_AI_MAX_RETRIES", "5"))
+MAX_AI_SCREENER_RETRIES = int(os.getenv("NVIDIA_AI_MAX_RETRIES", "3"))
 
 
 class ScreenerAiError(Exception):
@@ -70,38 +70,42 @@ def build_ai_system_prompt() -> str:
         f"{key}({hint})" for key, hint in TEXT_FIELD_HINTS.items() if key in allowed_keys
     )
 
-    return f"""You are a STRICT query generator for a NEPSE stock screener (Nepse Alpha).
-Output ONLY the response format at the end. WHERE / ORDER BY / LIMIT only — not full SQL.
+    return f"""You are a NEPSE stock screener query generator (Nepse Alpha). Single-pass: answer once with the best valid query you can build.
+
+GOAL: The user may ask anything. Return the most relevant runnable screen using ONLY allowed fields below.
+Prefer STATUS: OK with a close approximation. Use STATUS: ERROR only when no valid query is possible.
 
 RULES:
-1. Use ONLY ALLOWED_KEYS below ({len(allowed_keys)} keys). Exact snake_case. Unknown column -> STATUS: ERROR.
-2. No OR, no parentheses, no JOIN, no comparing two fields. symbol is not filterable.
-3. Numeric keys: > >= < <= = != <> BETWEEN. Text keys: = != <> IN (...) CONTAINS LIKE.
-4. Always include ORDER BY and LIMIT (default {spec['limit_default']}, max {spec['limit_max']}).
-5. Prefer filters likely to return results; on retry fix the failure and relax filters if zero rows.
+1. Use ONLY ALLOWED_KEYS ({len(allowed_keys)} keys). Exact snake_case. No OR, parentheses, JOIN, or comparing two fields. symbol is not filterable.
+2. Numeric keys: > >= < <= = != <> BETWEEN. Text keys: = != <> IN (...) CONTAINS LIKE.
+3. Always include ORDER BY and LIMIT (default {spec['limit_default']}, max {spec['limit_max']}).
+4. Map user terms via ALIASES. If the user asks for unsupported data, do NOT fail — omit that filter, substitute the closest allowed field, and explain in Summary.
+5. Use practical thresholds so the screen can return results on the first try.
+6. Never invent field keys. Never filter by symbol.
 
 NUMERIC_KEYS: {", ".join(numeric_keys)}
 TEXT_KEYS: {", ".join(text_keys)}
 TEXT_HINTS: {text_hints or "none"}
 ALIASES(user term=canonical): {"; ".join(alias_pairs[:60]) or "none"}
-UNSUPPORTED: {", ".join(spec["unsupported_user_terms"])}
+UNSUPPORTED (substitute or omit — do not use in query): {", ".join(spec["unsupported_user_terms"][:12])}
 ALLOWED_KEYS: {", ".join(allowed_keys)}
 
-VALID:
-STATUS: OK
+RESPONSE (pick one):
+
+STATUS: OK  ← default whenever a reasonable query is possible
 Summary:
-- bullets
+- 2-3 short bullets: what this screen finds and how it ranks
+- Limitation: (required when you dropped or substituted anything) We don't have <missing>; this uses <substitute> — close, not exact.
 Query:
 ```
 WHERE ...
 ORDER BY field_key DESC
-LIMIT 25
+LIMIT {spec['limit_default']}
 ```
 
-INVALID:
-STATUS: ERROR
+STATUS: ERROR  ← rare; only when no valid query can be built at all
 Reason:
-- explanation
+- one short bullet explaining the blocker
 """
 
 
@@ -129,10 +133,10 @@ Previous query:
 ```
 
 Instructions:
-- Return STATUS: OK with a fixed query that addresses the failure.
-- Stay relevant to the original user request.
-- Use only allowed field keys from the system catalog.
+- Return STATUS: OK with the best corrected query in one shot.
+- Stay relevant to the original user request; substitute closest allowed fields when needed.
 - If zero rows before: relax filters slightly so related stocks can match.
+- Add a Limitation bullet when you approximated or dropped unsupported parts.
 - Do not repeat the same invalid query.
 """
 
