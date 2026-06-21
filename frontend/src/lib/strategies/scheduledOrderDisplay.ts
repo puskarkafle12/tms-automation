@@ -1,3 +1,4 @@
+import { formatEstimatePriceDisplay, formatNumericEstimatePrice } from './previewFormatters';
 import { formatOrderQuantityDisplay } from './rulePlanHelpers';
 
 export interface SchedulePreviewSnapshot {
@@ -42,19 +43,15 @@ export function formatScheduledTriggerPrice(order: ScheduledOrderLike): string {
   const price = order.trigger_price ?? snapshot?.estimated_trigger_price;
   if (price == null || Number(price) <= 0) {
     if (snapshot?.estimated_trigger_price_display && snapshot.estimated_trigger_price_display !== '—') {
-      return snapshot.estimated_trigger_price_display;
+      return formatEstimatePriceDisplay(snapshot.estimated_trigger_price_display, {
+        isExact: snapshot?.is_exact_trigger_price,
+      });
     }
     return '—';
   }
-  const formatted = `Rs. ${Number(price).toLocaleString(undefined, {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  })}`;
-  const exact = snapshot?.is_exact_trigger_price;
-  if (exact === false || exact == null) {
-    return `${formatted} (est.)`;
-  }
-  return formatted;
+  return formatNumericEstimatePrice(Number(price), {
+    isExact: snapshot?.is_exact_trigger_price === true,
+  });
 }
 
 export function formatScheduledQuantitySummary(order: ScheduledOrderLike): string {

@@ -14,7 +14,7 @@ from utils.strategy_builder.schedule_preview_capture import snapshots_complete_f
 
 logger = logging.getLogger(__name__)
 
-PARALLEL_LIMIT = 8
+PARALLEL_LIMIT = 12
 SCHEDULE_RETRY_ATTEMPTS = 3
 SCHEDULE_RETRY_BACKOFF_SECONDS = 0.75
 TRANSIENT_SCHEDULE_ERROR_MARKERS = (

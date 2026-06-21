@@ -7,5 +7,6 @@
 - Make small targeted changes.
 - Summarize the plan before editing.
 - Run only necessary tests.
+- For large logs/files/tool outputs, prefer Headroom compression before reading full output when practical (`/Users/puskarkafle/.cache/codex-headroom-venv/bin/headroom`).
 - Do not delete Docker volumes, reset the database, drop tables, or remove user data.
 - Keep responses concise.

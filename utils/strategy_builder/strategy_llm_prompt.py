@@ -125,7 +125,13 @@ def _unsupported_section() -> str:
 
 def _response_format_section(*, side: str) -> str:
     side_upper = (side or "buy").upper()
-    return f"""RESPONSE FORMAT — single-pass: produce the best valid answer on the first reply.
+    return f"""RESPONSE FORMAT — single-pass: produce the safest valid answer on the first reply.
+
+Decision path:
+1. If the user gave enough concrete inputs for at least one valid rule, return STATUS: OK.
+2. If part of the request is unsupported but a registered substitute can still express the main intent, return STATUS: OK and name the substitution in Summary.
+3. Return STATUS: ERROR only when SIDE is wrong, quantity/holding mode is missing for SELL, or no valid rule/condition can be built.
+4. If the user asks for "top N", "best N", "N stocks", or a basket without giving all symbols, do NOT ask them to paste symbols. Build the best valid ranked query using the current form symbol when available, symbols already present in the prompt/request, or fallback symbol "CZBIL" with a Limitation bullet.
 
 When the request CAN be satisfied or approximated (default — use this whenever possible):
 STATUS: OK
@@ -143,8 +149,8 @@ When the request CANNOT be satisfied at all (only these cases):
 STATUS: ERROR
 Reason:
 - Start with: This query is not supported —
-- Use for: missing explicit symbol list, wrong SIDE, or no parseable rule at all
-- If the user asked for multiple stocks but did not paste exact NEPSE codes, ask them to paste symbols — do NOT invent symbols
+- Use only for wrong SIDE, missing SELL quantity/holding mode, or no parseable trading rule/condition at all
+- Do not return ERROR only because the user requested multiple/top N stocks without pasting every symbol; produce a valid ranked/current-symbol query instead
 Do NOT include a Query block when STATUS is ERROR.
 
 Parsing rules:
@@ -160,20 +166,21 @@ def _strict_output_contract_section() -> str:
 3. On STATUS: ERROR, include Reason bullets only — no Query block, no STRATEGY_VERSION document.
 4. Do not output JSON, YAML, SQL, Python, or commentary outside the STATUS wrapper.
 5. Do not output placeholders such as <symbol>, SYMBOL, YOUR_SYMBOL, target_price, trigger_price, quantity, or TODO.
-6. Do not guess missing numbers or symbols. Every RULE must include explicit ORDER sizing and explicit FOR SYMBOL target(s).
-7. Use only exact uppercase quoted script symbols supplied by the user or the current form symbol. Lowercase symbols such as "nabil" are rejected.
+6. Do not guess missing numbers, timestamps, holdings, or quantities. Every RULE must include explicit ORDER sizing and explicit FOR SYMBOL target(s).
+7. Use exact uppercase quoted script symbols. Prefer user-supplied symbols or the current form symbol; if neither exists, use "CZBIL" as a parser-safe fallback and add a Limitation bullet.
 8. Use only exact field keys from FIELD REGISTRY. Field keys are lowercase snake_case and case-sensitive.
 9. Use only exact function names from SUPPORTED FUNCTIONS. Function names are uppercase and case-sensitive.
 10. Function arguments must be named. Operator argument values must be quoted strings: operator="gte", not operator=gte.
 11. Enum values must match ENUM TEXT VALUES exactly, including case, e.g. "Bullish", "Bearish", "above", "below".
-12. Substitute registered alternatives for unsupported requests when possible; note gaps in a Limitation Summary bullet — do not fail just because one requested indicator is missing."""
+12. Substitute registered alternatives for unsupported requests when possible; note gaps in a Limitation Summary bullet — do not fail just because one requested indicator is missing.
+13. Before answering, verify every field/function in the Query block appears in FIELD REGISTRY or SUPPORTED FUNCTIONS, every string enum is quoted, and every RULE has FOR SYMBOL plus ORDER."""
 
 
 def _hard_rules_section() -> str:
     return """HARD RULES — follow without exception:
 1. Use ONLY field keys from FIELD REGISTRY and functions from SUPPORTED FUNCTIONS in the Query block.
 2. If the user asks for ADX or any unlisted indicator/field/function:
-   - Prefer STATUS: OK with the closest registered substitute (e.g. technical_rsi_14 instead of ADX).
+   - Prefer STATUS: OK with the closest registered substitute that preserves the trading intent (e.g. technical_rsi_14, technical_macd, volatility, or technical_volume_trend).
    - Add a Limitation Summary bullet: We don't have <name>; used <substitute> — close, not exact.
    - Use STATUS: ERROR only if no reasonable substitute exists and no valid rule can be built.
 3. Never invent field names, SQL, Python, or indicators outside the registries.
@@ -181,13 +188,14 @@ def _hard_rules_section() -> str:
 5. A RULE must include at least one of: USE STRATEGY "...", WHEN <expr>, or ELIGIBILITY + SIGNAL.
 6. USE STRATEGY may combine with optional ELIGIBILITY / WHEN / SIGNAL / REQUIRE gates (gates run first).
 7. Never nest Custom Query / Technical Buy/Sell inside USE STRATEGY — those are rule-based types, not delegatable.
-8. Symbols must be exact uppercase NEPSE/TMS script codes in double quotes, copied only from symbols the user explicitly pasted or the current form symbol.
-9. Multi-symbol: use FOR SYMBOL IN ("NABIL", "EBL") only with codes the user pasted. If the user says "50 stocks" without listing codes, respond STATUS: ERROR and ask them to paste exact NEPSE symbols — never invent symbols.
+8. Symbols must be exact uppercase NEPSE/TMS script codes in double quotes. Prefer symbols the user explicitly pasted or the current form symbol; use "CZBIL" only as a fallback when no symbol context exists.
+9. Multi-symbol/top-N requests: when symbols are pasted, use FOR SYMBOL IN (...). When symbols are not pasted, do not refuse; use the current form symbol if available, otherwise use "CZBIL". Add a Limitation bullet that the request asked for N stocks but the generated query targets the available/fallback symbol. If a ranked candidate pool is available in the request, add RANK MATCHES BY <field> DESC LIMIT <N> ORDERS.
 10. Do not refuse with vague errors. Name the real blocker or give the closest valid query with a Limitation bullet.
 11. Use quoted operator strings inside function calls: operator="gte" / "lte" / "gt" / "lt" / "eq" / "neq".
 12. Use positive numeric literals only; do not write negative numbers like -3. Prefer equivalent comparisons such as field < 0.
-13. SELL queries must stay within the user's sellable DP holdings. If the user has not provided the holding quantity, ask for it before generating a sell quantity. Use SELL ALL_AVAILABLE or SELL PERCENT_OF_HOLDING only when the user explicitly wants those modes.
-14. Single-pass: aim to return STATUS: OK with the best query on the first reply. Follow RESPONSE FORMAT every time."""
+13. SELL queries must stay within the user's sellable DP holdings. If the user has not provided a sell quantity, holding quantity, ALL_AVAILABLE instruction, or percent-of-holding instruction, return STATUS: ERROR; do not invent a sell amount.
+14. Single-pass: aim to return STATUS: OK with the best query on the first reply. Follow RESPONSE FORMAT every time.
+15. Final self-check before output: remove any unsupported requested part instead of inventing syntax; if removal changes the intent, mention it in a Limitation bullet. Never answer with "paste the symbols" when a valid current-symbol query can be produced."""
 
 
 def _data_sources_section() -> str:
@@ -234,7 +242,8 @@ A query that parses but cannot be monitored will NOT be placed. Preflight requir
 When writing queries:
 - Prefer fields you can see in the FIELD REGISTRY below.
 - For multi-symbol rules, every symbol must pass data checks independently.
-- If the user asks for data the portal cannot supply, refuse and explain what is missing.
+- If the user asks for data the portal cannot supply, use a registered substitute when it still gives a useful strategy; otherwise return STATUS: ERROR and explain what is missing.
+- For "top N" or "N stocks" requests, prefer RANK MATCHES BY with LIMIT N ORDERS plus the strongest valid rule filters. Do not stop with a symbol-list refusal when a current-symbol or ranked query can be generated.
 - Every RULE must include explicit ORDER sizing (for example ORDER QUANTITY 10). Do not omit ORDER.
 - Per-symbol different classic strategies: use separate RULE blocks (one USE STRATEGY per symbol or per symbol group).
 
@@ -256,7 +265,7 @@ Schedule-time field references (preferred for pullback / fixed baseline rules):
 - Live ltp (and other live fields) stay dynamic on every scan; REFERENCE(field=...) stays fixed until explicitly refreshed.
 - Do NOT guess numeric LTP, symbols, quantities, or expiration timestamps.
 - Expiration (expires_at, expiration_action) is configured outside the query in schedule settings, not with EXPIRES_AT query syntax.
-- SELL schedules should not guess quantity. If the user does not tell you the sellable holding amount, ask first or choose an all-available/percent-of-holding style only when explicitly requested.
+- SELL schedules should not guess quantity. If the user does not tell you the sellable holding amount, use STATUS: ERROR unless they explicitly requested all-available or percent-of-holding.
 
 Legacy schedule-time drop baseline (older orders only):
 - Some existing orders use capture_reference_ltp with literal compiled triggers; new queries should prefer REFERENCE(field=ltp) instead."""
@@ -773,12 +782,13 @@ RULE "Top Buyer Partial" FOR SYMBOL "CZBIL" {{
 Example 12 — REFERENCE schedule baseline (no USE STRATEGY):
 STRATEGY_VERSION 1
 SIDE BUY
-RULE "Top 20 Pullback" FOR SYMBOL IN ("NABIL", "EBL", "SCB") {{
+RANK MATCHES BY technical_rsi_14 ASC, volume DESC LIMIT 20 ORDERS
+RULE "Ranked Pullback" FOR SYMBOL "CZBIL" {{
     ELIGIBILITY ltp <= REFERENCE(field=ltp) * 0.90
     SIGNAL technical_rsi_14 BETWEEN 30 AND 45 AND technical_macd = "Bullish"
     REQUIRE volume > 0
     ORDER QUANTITY {DEFAULT_RULE_ORDER_QUANTITY}
-    EXECUTE ONCE PER SYMBOL
+    EXECUTE ONCE
 }}
 
 Example 13 — USE STRATEGY multi-symbol buy basket:
@@ -853,13 +863,13 @@ COMMON MISTAKES (avoid)
 - WRONG strategy param names (use TARGET_PRICE not trigger_price; use REFERENCE(field=ltp) not reference_ltp field)
 - Missing ORDER clause even when USE STRATEGY is present
 - Referencing Nepse Alpha fields without confirming symbols are listed in FOR SYMBOL
+- Refusing top-N requests only because the user did not paste every symbol; use a ranked/current-symbol query when possible
 - Expecting scheduling when TMS client is not logged in or live/Nepse Alpha data is missing
 - Using UNIVERSE_PERCENTILE or SECTOR_PERCENTILE in scheduled single-symbol orders
 - Inventing depth field names instead of market_depth_available, best_bid, best_ask, top_buy_quantity, top_sell_quantity, etc.
-- Inventing symbols not provided by the user or current form
 - Using unquoted/lowercase symbols instead of exact uppercase quoted script codes
 - Answering with a bare refusal sentence instead of STATUS: ERROR with Reason bullets
-- Vague refusals such as "symbols for 50 stocks are not available" instead of naming the missing symbol list or field
+- Vague refusals such as "symbols for 50 stocks are not available" when the prompt already has a current form symbol or enough ranking/filter information
 
 After the user request below, respond using RESPONSE FORMAT only.
 """

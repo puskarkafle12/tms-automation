@@ -71,16 +71,46 @@ export interface PreviewRow {
   warnings?: PreviewWarning[];
 }
 
+const ESTIMATE_SUFFIX_PATTERN = /\s*\(est\.\)\s*$/i;
+
+export function formatEstimatePriceDisplay(
+  display: string,
+  options?: { isExact?: boolean },
+): string {
+  const trimmed = String(display || '').trim();
+  if (!trimmed || trimmed === '—') {
+    return trimmed || '—';
+  }
+  const hasEstimateSuffix = ESTIMATE_SUFFIX_PATTERN.test(trimmed);
+  if (options?.isExact) {
+    return hasEstimateSuffix ? trimmed.replace(ESTIMATE_SUFFIX_PATTERN, '') : trimmed;
+  }
+  if (hasEstimateSuffix) {
+    return trimmed;
+  }
+  return `${trimmed} (est.)`;
+}
+
+export function formatNumericEstimatePrice(
+  price: number,
+  options?: { isExact?: boolean },
+): string {
+  const formatted = `Rs. ${Number(price).toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+  return formatEstimatePriceDisplay(formatted, options);
+}
+
 export function formatPriceBoundary(row: PreviewRow): string {
   const trigger = row.trigger;
   if (!trigger) {
     return row.trigger_ltp != null ? `Rs. ${Number(row.trigger_ltp).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '—';
   }
   if (trigger.estimated_price_display && trigger.estimated_price_display !== '—') {
-    if (trigger.is_exact_price) {
-      return trigger.estimated_price_display;
-    }
-    return `${trigger.estimated_price_display} (est.)`;
+    return formatEstimatePriceDisplay(trigger.estimated_price_display, {
+      isExact: trigger.is_exact_price,
+    });
   }
   if (trigger.estimated_price_available === false && trigger.kind === 'derived_price_boundary') {
     return 'Unavailable';

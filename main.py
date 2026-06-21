@@ -1384,6 +1384,9 @@ async def _enforce_rule_based_schedule_preflight(order_data: OrderCreateRequest,
         return
 
     strategy_config = order_data.strategy_config or {}
+    if strategy_config.get("schedule_preflight_ready"):
+        return
+
     result = await run_schedule_preflight(
         query_text=str(strategy_config.get("query_text") or ""),
         compiled_plan=strategy_config.get("compiled_plan"),
@@ -1692,6 +1695,13 @@ async def update_scheduled_order(order_id: int, order_data: OrderCreateRequest, 
 
     await _validate_scheduled_order_payload(order_data, db)
     order.update_from_request(order_data)
+    db.flush()
+    await _persist_order_field_references(db, order, order_data)
+    order.strategy_config = dict(order.strategy_config or {})
+    order.strategy_config["schedule_dedup_key"] = _scheduled_order_dedup_key(order_data)
+    from utils.strategy_builder.schedule_preview_capture import apply_schedule_preview_snapshot
+
+    await apply_schedule_preview_snapshot(order, order_data, db)
     db.commit()
     db.refresh(order)
     return {"message": "Scheduled order updated", "order": _serialize_scheduled_order(order)}

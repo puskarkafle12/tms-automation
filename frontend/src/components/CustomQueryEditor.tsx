@@ -9,7 +9,7 @@ import {
   formatQuantityCell,
   type PreviewRow,
 } from '../lib/strategies/previewFormatters';
-import { buildSchedulePreflightKey, getCustomQueryPreviewReadyLabel, isSchedulePreviewReady, describeSchedulePreviewBlockReason } from '../lib/strategies/rulePlanHelpers';
+import { buildPreviewKey, buildSchedulePreflightKey, getCustomQueryPreviewReadyLabel, isSchedulePreviewReady, describeSchedulePreviewBlockReason } from '../lib/strategies/rulePlanHelpers';
 import './CustomQueryEditor.css';
 
 interface ValidationIssue {
@@ -151,6 +151,8 @@ const CustomQueryEditor: React.FC<Props> = ({
   const lastPreviewKeyRef = useRef('');
   const [schedulePreflightKey, setSchedulePreflightKey] = useState('');
   const skipNextAutoPreviewRef = useRef(false);
+  const immediatePreviewRef = useRef(Boolean((initialQuery ?? '').trim()));
+  const prevClientIdRef = useRef(clientId);
   const [validateDebounceMs, setValidateDebounceMs] = useState(
     () => readUiPortalSettings().customQueryValidateDebounceMs,
   );
@@ -158,6 +160,22 @@ const CustomQueryEditor: React.FC<Props> = ({
   useEffect(() => subscribeUiPortalSettings((settings) => {
     setValidateDebounceMs(settings.customQueryValidateDebounceMs);
   }), []);
+
+  const previewContext = useCallback(() => ({
+    side,
+    strategyType,
+    formSymbol,
+    clientId,
+    holdingsBySymbol,
+    knownBuySymbols,
+  }), [clientId, formSymbol, holdingsBySymbol, knownBuySymbols, side, strategyType]);
+
+  useEffect(() => {
+    if (!prevClientIdRef.current && clientId && queryText.trim() && !validationRef.current) {
+      immediatePreviewRef.current = true;
+    }
+    prevClientIdRef.current = clientId;
+  }, [clientId, queryText]);
 
   useLayoutEffect(() => {
     if (!aiPortalTargetId) {
@@ -236,15 +254,7 @@ const CustomQueryEditor: React.FC<Props> = ({
       return;
     }
 
-    const previewKey = JSON.stringify({
-      query: trimmed,
-      side,
-      strategyType,
-      formSymbol: formSymbol || '',
-      clientId: clientId || '',
-      holdingsCount: holdingsBySymbol ? Object.keys(holdingsBySymbol).length : 0,
-      knownSymbolsCount: knownBuySymbols?.length || 0,
-    });
+    const previewKey = buildPreviewKey({ queryText: trimmed, ...previewContext() });
     const nextSchedulePreflightKey = buildSchedulePreflightKey({
       queryText: trimmed,
       side,
@@ -253,6 +263,12 @@ const CustomQueryEditor: React.FC<Props> = ({
       formSymbol,
     });
     if (lastPreviewKeyRef.current === previewKey && validationRef.current) {
+      // A textarea edit sets validating=true before debounce; if the preview key
+      // is unchanged we must clear that flag or the schedule button stays disabled.
+      onValidatingChangeRef.current?.(false);
+      setBusy(false);
+      setAutoValidating(false);
+      setPreviewStatus('');
       return;
     }
 
@@ -323,7 +339,7 @@ const CustomQueryEditor: React.FC<Props> = ({
         onValidatingChangeRef.current?.(false);
       }
     }
-  }, [clientId, formSymbol, holdingsBySymbol, knownBuySymbols, side, strategyType]);
+  }, [previewContext]);
 
   useEffect(() => {
     if (!busy && !aiBusy) {
@@ -343,9 +359,14 @@ const CustomQueryEditor: React.FC<Props> = ({
       skipNextAutoPreviewRef.current = false;
       return undefined;
     }
+    let delay = validateDebounceMs;
+    if (immediatePreviewRef.current) {
+      delay = 0;
+      immediatePreviewRef.current = false;
+    }
     const timer = window.setTimeout(() => {
       void runPreview(queryText);
-    }, validateDebounceMs);
+    }, delay);
     return () => {
       window.clearTimeout(timer);
       previewAbortRef.current?.abort();
@@ -375,15 +396,7 @@ const CustomQueryEditor: React.FC<Props> = ({
   };
 
   const applyValidationResult = useCallback((text: string, data: ValidationResponse) => {
-    const previewKey = JSON.stringify({
-      query: text.trim(),
-      side,
-      strategyType,
-      formSymbol: formSymbol || '',
-      clientId: clientId || '',
-      holdingsCount: holdingsBySymbol ? Object.keys(holdingsBySymbol).length : 0,
-      knownSymbolsCount: knownBuySymbols?.length || 0,
-    });
+    const previewKey = buildPreviewKey({ queryText: text, ...previewContext() });
     const nextSchedulePreflightKey = buildSchedulePreflightKey({
       queryText: text.trim(),
       side,
@@ -394,12 +407,16 @@ const CustomQueryEditor: React.FC<Props> = ({
     lastPreviewKeyRef.current = previewKey;
     setSchedulePreflightKey(nextSchedulePreflightKey);
     setValidation(data);
+    setBusy(false);
+    setAutoValidating(false);
+    setPreviewStatus('');
+    onValidatingChangeRef.current?.(false);
     if (!data.valid && data.errors?.length) {
       setError(data.errors[0].message);
     } else {
       setError('');
     }
-  }, [clientId, formSymbol, holdingsBySymbol, knownBuySymbols, side, strategyType]);
+  }, [clientId, formSymbol, previewContext, side, strategyType]);
 
   const askAi = async (event: React.MouseEvent<HTMLButtonElement>) => {
     event.preventDefault();
@@ -518,6 +535,26 @@ const CustomQueryEditor: React.FC<Props> = ({
     && validation.compiled_plan
     && isSchedulePreviewReady(validation, validation.compiled_plan),
   );
+  const [previewReadyQueryKey, setPreviewReadyQueryKey] = useState('');
+  const trimmedQueryText = queryText.trim();
+
+  useEffect(() => {
+    if (schedulePreviewReady && trimmedQueryText) {
+      setPreviewReadyQueryKey(trimmedQueryText);
+    }
+  }, [schedulePreviewReady, trimmedQueryText]);
+
+  useEffect(() => {
+    if (previewReadyQueryKey && trimmedQueryText !== previewReadyQueryKey) {
+      setPreviewReadyQueryKey('');
+    }
+  }, [previewReadyQueryKey, trimmedQueryText]);
+
+  const showPreviewReadyLabel = Boolean(
+    previewReadyQueryKey
+    && previewReadyQueryKey === trimmedQueryText
+    && validation?.compiled_plan,
+  );
   const aiPanel = (
     <div className="custom-query-ai-panel">
       <label htmlFor="strategyAiPrompt">Ask AI to generate strategy query</label>
@@ -563,14 +600,18 @@ const CustomQueryEditor: React.FC<Props> = ({
         className="custom-query-textarea"
         rows={16}
         value={queryText}
+        onPaste={() => {
+          immediatePreviewRef.current = true;
+        }}
         onChange={(event) => {
           aiAbortRef.current?.abort();
           aiAbortRef.current = null;
-          const nextValue = event.target.value;
-          if (nextValue.trim()) {
-            onValidatingChangeRef.current?.(true);
+          const nativeEvent = event.nativeEvent as InputEvent;
+          const inputType = nativeEvent?.inputType || '';
+          if (inputType === 'insertFromPaste' || inputType === 'insertFromDrop') {
+            immediatePreviewRef.current = true;
           }
-          setQueryText(nextValue);
+          setQueryText(event.target.value);
         }}
       />
       <div className="custom-query-actions">
@@ -584,7 +625,11 @@ const CustomQueryEditor: React.FC<Props> = ({
             Preview details ({previewRows.length})
           </button>
         ) : null}
-        {autoValidating || busy ? (
+        {showPreviewReadyLabel && validation ? (
+          <span className="custom-query-preview-ok">
+            {getCustomQueryPreviewReadyLabel(validation, validation.compiled_plan)}
+          </span>
+        ) : autoValidating || busy ? (
           <span className="custom-query-validating">{previewStatus || 'Loading preview...'}</span>
         ) : schedulePreviewReady && validation ? (
           <span className="custom-query-preview-ok">

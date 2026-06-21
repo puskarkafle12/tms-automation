@@ -77,9 +77,11 @@ interface Props {
   scriptListLoading?: boolean;
   holdingsLoading?: boolean;
   initialStrategy?: StrategyType;
+  strategyTypeLocked?: boolean;
   draftKey?: string;
   aiPortalTargetId?: string;
   onCustomQuerySideChange?: (side: 'buy' | 'sell') => void;
+  onCustomQueryTextChange?: (queryText: string) => void;
   onStrategyChange?: (strategy: StrategyType) => void;
   onSubmit: (payload: StrategyPayload) => Promise<void> | void;
 }
@@ -110,9 +112,11 @@ const StrategySellForm: React.FC<Props> = ({
   scriptListLoading = false,
   holdingsLoading = false,
   initialStrategy,
+  strategyTypeLocked = false,
   draftKey,
   aiPortalTargetId,
   onCustomQuerySideChange,
+  onCustomQueryTextChange,
   onStrategyChange,
   onSubmit,
 }) => {
@@ -122,7 +126,7 @@ const StrategySellForm: React.FC<Props> = ({
   const isRuleBuilder = strategy === 'Technical Buy' || strategy === 'Technical Sell';
   const isCustomQuery = isCustomQueryStrategy(strategy);
   const isRuleBased = isRuleBuilder || isCustomQuery;
-  const [ruleQueryText, setRuleQueryText] = useState('');
+  const [ruleQueryText, setRuleQueryText] = useState(() => prefill?.ruleQueryText ?? '');
   const [compiledPlan, setCompiledPlan] = useState<Record<string, unknown> | undefined>(undefined);
   const [planValidationError, setPlanValidationError] = useState('');
   const [queryValidating, setQueryValidating] = useState(false);
@@ -135,6 +139,7 @@ const StrategySellForm: React.FC<Props> = ({
     warnings?: Array<{ code?: string; message?: string }>;
   } | null>(null);
   const [schedulePreflightKey, setSchedulePreflightKey] = useState('');
+  const [readyBannerQueryKey, setReadyBannerQueryKey] = useState('');
   const [strategyGuideOpen, setStrategyGuideOpen] = useState(false);
   const [qty, setQty] = useState(initialQty);
   const [price, setPrice] = useState(initialPrice);
@@ -324,7 +329,7 @@ const StrategySellForm: React.FC<Props> = ({
       return;
     }
     if (prefill.strategy) {
-      setStrategy(prefill.strategy as StrategyType);
+      setStrategy(prefill.strategy);
     }
     if (prefill.qty != null) setQty(prefill.qty);
     if (prefill.price != null) setPrice(prefill.price);
@@ -354,6 +359,7 @@ const StrategySellForm: React.FC<Props> = ({
     if (prefill.allowSplitEmergencyExit != null) setAllowSplitEmergencyExit(prefill.allowSplitEmergencyExit);
     if (prefill.emergencyExecution != null) setEmergencyExecution(prefill.emergencyExecution);
     if (prefill.emergencyConfirmed != null) setEmergencyConfirmed(prefill.emergencyConfirmed);
+    if (prefill.ruleQueryText != null) setRuleQueryText(String(prefill.ruleQueryText));
   }, [prefill]);
 
   const priceSource = useMemo(() => {
@@ -501,11 +507,82 @@ const StrategySellForm: React.FC<Props> = ({
     wrappedStrategyType,
   ]);
 
+  const customQueryPreflightParams = useMemo(() => ({
+    queryText: ruleQueryText,
+    side: (queryPlanSide || side) as 'buy' | 'sell',
+    strategyType: 'Custom Query',
+    clientId,
+    formSymbol: scriptName,
+  }), [clientId, queryPlanSide, ruleQueryText, scriptName, side]);
+
+  const customQueryScheduleReady = useMemo(() => {
+    if (!isCustomQuery || !ruleQueryText.trim() || !compiledPlan || !queryValidation) {
+      return false;
+    }
+    if (!isSchedulePreflightKeyCurrent(schedulePreflightKey, customQueryPreflightParams)) {
+      return false;
+    }
+    return isQueryValidationReady(queryValidation, compiledPlan)
+      && isSchedulePreflightReady(schedulePreflight)
+      && isSchedulePreviewReady(queryValidation, compiledPlan);
+  }, [
+    compiledPlan,
+    customQueryPreflightParams,
+    isCustomQuery,
+    queryValidation,
+    ruleQueryText,
+    schedulePreflight,
+    schedulePreflightKey,
+  ]);
+
+  const customQueryScheduleBlockReason = useMemo((): string | null => {
+    if (!isCustomQuery) {
+      return null;
+    }
+    if (!ruleQueryText.trim()) {
+      return 'Enter a strategy query.';
+    }
+    if (customQueryScheduleReady) {
+      return null;
+    }
+    if (!isSchedulePreflightKeyCurrent(schedulePreflightKey, customQueryPreflightParams)) {
+      return 'Wait for strategy validation to finish.';
+    }
+    if (!queryValidation || !compiledPlan) {
+      return 'Wait for strategy validation to finish.';
+    }
+    if (!isQueryValidationReady(queryValidation, compiledPlan)) {
+      const validationMessage = resolveValidationMessage(queryValidation) || planValidationError;
+      return validationMessage || 'Strategy query is not ready to schedule.';
+    }
+    if (!isSchedulePreflightReady(schedulePreflight)) {
+      return schedulePreflight?.errors?.[0]?.message
+        || schedulePreflight?.message
+        || 'Schedule preflight is still running or failed.';
+    }
+    if (!isSchedulePreviewReady(queryValidation, compiledPlan)) {
+      return describeSchedulePreviewBlockReason(queryValidation, compiledPlan)
+        || 'Est. trigger prices are still loading. Wait for preview to finish for all symbols.';
+    }
+    return null;
+  }, [
+    compiledPlan,
+    customQueryPreflightParams,
+    customQueryScheduleReady,
+    isCustomQuery,
+    planValidationError,
+    queryValidation,
+    resolveValidationMessage,
+    ruleQueryText,
+    schedulePreflight,
+    schedulePreflightKey,
+  ]);
+
   const scheduleBlockReason = useMemo(() => {
     if (!clientId) {
       return 'Select a logged-in client before scheduling.';
     }
-    if (queryValidating) {
+    if (queryValidating && !customQueryScheduleReady) {
       return 'Validation in progress…';
     }
     if (validationError) {
@@ -516,38 +593,7 @@ const StrategySellForm: React.FC<Props> = ({
     }
 
     if (isCustomQuery) {
-      if (!ruleQueryText.trim()) {
-        return 'Enter a strategy query.';
-      }
-      if (!isSchedulePreflightKeyCurrent(schedulePreflightKey, {
-        queryText: ruleQueryText,
-        side: queryPlanSide || side,
-        strategyType: 'Custom Query',
-        clientId,
-        formSymbol: scriptName,
-      })) {
-        return 'Wait for strategy validation to finish.';
-      }
-      if (!queryValidation || !compiledPlan) {
-        return 'Wait for strategy validation to finish.';
-      }
-      if (!isQueryValidationReady(queryValidation, compiledPlan)) {
-        const validationMessage = resolveValidationMessage(queryValidation) || planValidationError;
-        if (validationMessage) {
-          return validationMessage;
-        }
-        return 'Strategy query is not ready to schedule.';
-      }
-      if (!isSchedulePreflightReady(schedulePreflight)) {
-        return schedulePreflight?.errors?.[0]?.message
-          || schedulePreflight?.message
-          || 'Schedule preflight is still running or failed.';
-      }
-      if (!isSchedulePreviewReady(queryValidation, compiledPlan)) {
-        return describeSchedulePreviewBlockReason(queryValidation, compiledPlan)
-          || 'Est. trigger prices are still loading. Wait for preview to finish for all symbols.';
-      }
-      return '';
+      return customQueryScheduleBlockReason || '';
     }
 
     if (isRuleBased) {
@@ -573,16 +619,13 @@ const StrategySellForm: React.FC<Props> = ({
     availableQty,
     clientId,
     compiledPlan,
+    customQueryScheduleBlockReason,
+    customQueryScheduleReady,
     holdingsLoading,
     isCustomQuery,
     isRuleBased,
     planValidationError,
-    queryPlanSide,
-    queryValidation,
     queryValidating,
-    ruleQueryText,
-    schedulePreflight,
-    schedulePreflightKey,
     scriptName,
     side,
     submitError,
@@ -637,6 +680,28 @@ const StrategySellForm: React.FC<Props> = ({
     }
   }, [amountPlan.quantity, quantityMode]);
 
+  const trimmedRuleQueryText = ruleQueryText.trim();
+
+  useEffect(() => {
+    if (customQueryScheduleReady && trimmedRuleQueryText) {
+      setReadyBannerQueryKey(trimmedRuleQueryText);
+    }
+  }, [customQueryScheduleReady, trimmedRuleQueryText]);
+
+  useEffect(() => {
+    if (!readyBannerQueryKey || !trimmedRuleQueryText) {
+      return;
+    }
+    if (trimmedRuleQueryText !== readyBannerQueryKey) {
+      setReadyBannerQueryKey('');
+      onCustomQueryTextChange?.(ruleQueryText);
+    }
+  }, [onCustomQueryTextChange, readyBannerQueryKey, ruleQueryText, trimmedRuleQueryText]);
+
+  const showCustomQueryReadyBanner = isCustomQuery
+    && Boolean(readyBannerQueryKey)
+    && readyBannerQueryKey === trimmedRuleQueryText;
+
   const handleCustomPlanChange = useCallback((payload: {
     queryText: string;
     compiledPlan?: Record<string, unknown>;
@@ -676,38 +741,14 @@ const StrategySellForm: React.FC<Props> = ({
       setLocalError(scheduleBlockReason);
       return;
     }
-    if (validationError) {
-      setLocalError(validationError);
-      return;
-    }
-    if (planValidationError) {
-      setLocalError(planValidationError);
-      return;
-    }
-    if (isCustomQuery && queryValidating) {
-      setLocalError('Strategy query is still validating. Please wait a moment.');
-      return;
-    }
     let activeCompiledPlan = compiledPlan;
     const resolvedCustomSide = extractPlanSide(activeCompiledPlan) || queryPlanSide || side;
-    const customQueryReady = isCustomQuery
-      && ruleQueryText.trim()
-      && compiledPlan
-      && isSchedulePreflightKeyCurrent(schedulePreflightKey, {
-        queryText: ruleQueryText,
-        side: queryPlanSide || side,
-        strategyType: 'Custom Query',
-        clientId,
-        formSymbol: scriptName,
-      })
-      && isQueryValidationReady(queryValidation, compiledPlan)
-      && isSchedulePreflightReady(schedulePreflight)
-      && isSchedulePreviewReady(queryValidation, compiledPlan);
-    if (customQueryReady) {
+    if (isCustomQuery) {
+      if (!customQueryScheduleReady) {
+        setLocalError(customQueryScheduleBlockReason || 'Strategy is not ready to schedule yet.');
+        return;
+      }
       activeCompiledPlan = compiledPlan;
-    } else if (isCustomQuery && ruleQueryText.trim()) {
-      setLocalError(scheduleBlockReason || 'Strategy is not ready to schedule yet.');
-      return;
     } else if (isRuleBuilder && !activeCompiledPlan && ruleQueryText.trim()) {
       const result = await fetchJson<{
         valid: boolean;
@@ -848,7 +889,13 @@ const StrategySellForm: React.FC<Props> = ({
         <div className="form-group strategy-field">
           <label htmlFor="strategyType">Strategy</label>
           <div className="strategy-select-wrap">
-            <select id="strategyType" className="select" value={strategy} onChange={(e) => handleStrategyChange(e.target.value as StrategyType)}>
+            <select
+              id="strategyType"
+              className="select"
+              value={strategy}
+              disabled={strategyTypeLocked}
+              onChange={(e) => handleStrategyChange(e.target.value as StrategyType)}
+            >
               {strategies.map((item) => <option key={item} value={item}>{item}</option>)}
             </select>
             <button
@@ -1164,7 +1211,7 @@ const StrategySellForm: React.FC<Props> = ({
           {scheduleBlockReason}
         </p>
       ) : null}
-      {!isSubmitting && !scheduleBlockReason && isCustomQuery ? (
+      {showCustomQueryReadyBanner ? (
         <p className="strategy-submit-progress strategy-submit-progress-ready" aria-live="polite">
           Ready to schedule this custom query.
         </p>
@@ -1175,7 +1222,7 @@ const StrategySellForm: React.FC<Props> = ({
           <ErrorMessage
             message={submitStatusMessage}
             variant={submitStatus === 'success' ? 'success' : 'error'}
-            persistent={submitStatus === 'error'}
+            persistent={submitStatus === 'error' || (isCustomQuery && submitStatus === 'success')}
           />
         </div>
       ) : null}

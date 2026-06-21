@@ -1,4 +1,5 @@
 import {
+  buildPreviewKey,
   DEFAULT_RULE_PLANNED_QTY,
   describeSchedulePreviewBlockReason,
   extractPlannedQtyFromCompiledPlan,
@@ -140,5 +141,39 @@ describe('rulePlanHelpers', () => {
       },
     };
     expect(isSchedulePreviewReady(validation, compiledPlan)).toBe(true);
+  });
+
+  test('buildPreviewKey only includes side-relevant ancillary fields', () => {
+    const buyKey = buildPreviewKey({
+      queryText: 'RULE "Test" FOR SYMBOL IN ("NABIL") { WHEN ltp > 0 ORDER QUANTITY 1 }',
+      side: 'buy',
+      strategyType: 'Custom Query',
+      holdingsBySymbol: { NABIL: 100 },
+      knownBuySymbols: ['NABIL', 'EBL'],
+    });
+    const buyKeyNoHoldings = buildPreviewKey({
+      queryText: 'RULE "Test" FOR SYMBOL IN ("NABIL") { WHEN ltp > 0 ORDER QUANTITY 1 }',
+      side: 'buy',
+      strategyType: 'Custom Query',
+      knownBuySymbols: ['NABIL', 'EBL'],
+    });
+    expect(buyKey).toBe(buyKeyNoHoldings);
+    expect(buyKey).toContain('knownSymbolsCount');
+
+    const sellKey = buildPreviewKey({
+      queryText: 'RULE "Test" FOR SYMBOL IN ("NABIL") { WHEN ltp > 0 ORDER QUANTITY 1 }',
+      side: 'sell',
+      strategyType: 'Custom Query',
+      holdingsBySymbol: { NABIL: 100 },
+      knownBuySymbols: ['NABIL', 'EBL'],
+    });
+    const sellKeyNoSymbols = buildPreviewKey({
+      queryText: 'RULE "Test" FOR SYMBOL IN ("NABIL") { WHEN ltp > 0 ORDER QUANTITY 1 }',
+      side: 'sell',
+      strategyType: 'Custom Query',
+      holdingsBySymbol: { NABIL: 100 },
+    });
+    expect(sellKey).toBe(sellKeyNoSymbols);
+    expect(sellKey).toContain('holdingsCount');
   });
 });

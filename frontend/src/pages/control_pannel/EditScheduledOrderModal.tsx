@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import StrategySellForm, { StrategyPayload } from './StrategySellForm';
 import type { StrategyFormPrefill } from './strategyValidation';
-import { formatStrategyLabel } from '../../lib/strategies';
+import { formatStrategyLabel, type StrategyType } from '../../lib/strategies';
+import { holdingsMapFromRows, isCustomQueryStrategy } from '../../lib/strategies/rulePlanHelpers';
 import { isoToNepalDateTimeLocal } from '../../utils/nepalTime';
 import ErrorMessage from '../../components/ErrorMessage';
 import NepseAlphaSymbolLink from '../../components/NepseAlphaSymbolLink';
@@ -50,6 +51,15 @@ interface Props {
 const toInput = (value: number | null | undefined) =>
   value == null || Number.isNaN(Number(value)) ? '' : String(value);
 
+const toEditStrategyType = (order: ScheduledOrderDetail): StrategyType => {
+  const orderSide = (order.order_type || order.side || 'buy').toLowerCase() === 'sell' ? 'sell' : 'buy';
+  const label = formatStrategyLabel(order.strategy_type || '', orderSide);
+  if (isCustomQueryStrategy(label)) {
+    return 'Custom Query';
+  }
+  return label as StrategyType;
+};
+
 const buildPrefill = (order: ScheduledOrderDetail): StrategyFormPrefill => {
   const legs = order.partial_legs || [];
   const firstLeg = legs[0];
@@ -57,7 +67,8 @@ const buildPrefill = (order: ScheduledOrderDetail): StrategyFormPrefill => {
   const config = order.strategy_config || {};
 
   return {
-    strategy: formatStrategyLabel(order.strategy_type || '', order.order_type || order.side || ''),
+    strategy: toEditStrategyType(order),
+    ruleQueryText: String(config.query_text || ''),
     qty: toInput(order.qty),
     price: toInput(order.price),
     stopLossPrice: toInput(order.stop_loss_price),
@@ -101,6 +112,8 @@ const EditScheduledOrderModal: React.FC<Props> = ({ orderId, apiUrl, onClose, on
   const [refreshBaseline, setRefreshBaseline] = useState(false);
   const [refreshingReferences, setRefreshingReferences] = useState(false);
   const [referenceRefreshError, setReferenceRefreshError] = useState('');
+  const [holdingsBySymbol, setHoldingsBySymbol] = useState<Record<string, number>>({});
+  const [knownBuySymbols, setKnownBuySymbols] = useState<string[]>([]);
 
   useEffect(() => {
     const loadOrder = async () => {
@@ -132,6 +145,12 @@ const EditScheduledOrderModal: React.FC<Props> = ({ orderId, apiUrl, onClose, on
     void loadOrder();
   }, [apiUrl, orderId]);
 
+  const prefill = useMemo(() => (order ? buildPrefill(order) : null), [order]);
+  const side = ((order?.order_type || order?.side || 'buy') as string).toLowerCase() === 'sell' ? 'sell' : 'buy';
+  const isCustomQueryOrder = Boolean(
+    order && isCustomQueryStrategy(formatStrategyLabel(order.strategy_type || '', side)),
+  );
+
   useEffect(() => {
     if (!order?.client_id || !order.script_name) {
       return;
@@ -159,6 +178,8 @@ const EditScheduledOrderModal: React.FC<Props> = ({ orderId, apiUrl, onClose, on
           });
           if (holdingsResponse.ok) {
             const holdings = await holdingsResponse.json();
+            const holdingsMap = holdingsMapFromRows(holdings || []);
+            setHoldingsBySymbol(holdingsMap);
             const symbol = order.script_name.trim().toUpperCase();
             const match = (holdings || []).find((holding: { scrip?: string; symbolName?: string; currentBalance?: number }) => {
               const scrip = String(holding.scrip || '').trim().toUpperCase();
@@ -170,15 +191,26 @@ const EditScheduledOrderModal: React.FC<Props> = ({ orderId, apiUrl, onClose, on
             }
           }
         }
+
+        if (isCustomQueryStrategy(formatStrategyLabel(order.strategy_type || '', side))) {
+          const scriptsResponse = await fetch(
+            `${apiUrl}/get_script_details?client_id=${encodeURIComponent(order.client_id)}`,
+            { headers: { Accept: 'application/json' } },
+          );
+          if (scriptsResponse.ok) {
+            const scripts = await scriptsResponse.json();
+            const symbols = (scripts || [])
+              .map((item: { symbol?: string }) => String(item.symbol || '').trim().toUpperCase())
+              .filter(Boolean);
+            setKnownBuySymbols(symbols);
+          }
+        }
       } catch {
         // quote/holdings are optional for edit
       }
     };
     void loadContext();
-  }, [apiUrl, order]);
-
-  const prefill = useMemo(() => (order ? buildPrefill(order) : null), [order]);
-  const side = ((order?.order_type || order?.side || 'buy') as string).toLowerCase() === 'sell' ? 'sell' : 'buy';
+  }, [apiUrl, order, side]);
 
   const submitUpdate = useCallback(async (strategyPayload: StrategyPayload) => {
     if (!order) {
@@ -193,7 +225,7 @@ const EditScheduledOrderModal: React.FC<Props> = ({ orderId, apiUrl, onClose, on
         payload.strategy_config = {
           ...(payload.strategy_config || {}),
           capture_reference_ltp: true,
-          query_text: config.query_text,
+          query_text: payload.strategy_config?.query_text ?? config.query_text,
           drop_percent: Number(baselineDropPercent) || 10,
           fixed_symbols: config.fixed_symbols,
           expiration: config.expiration,
@@ -270,7 +302,7 @@ const EditScheduledOrderModal: React.FC<Props> = ({ orderId, apiUrl, onClose, on
   return (
     <div className="edit-scheduled-order-backdrop" role="presentation" onClick={onClose}>
       <div
-        className="edit-scheduled-order-modal"
+        className={`edit-scheduled-order-modal${isCustomQueryOrder ? ' edit-scheduled-order-modal-wide' : ''}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby="edit-scheduled-order-title"
@@ -278,10 +310,13 @@ const EditScheduledOrderModal: React.FC<Props> = ({ orderId, apiUrl, onClose, on
       >
         <div className="edit-scheduled-order-header">
           <div>
-            <h3 id="edit-scheduled-order-title">Edit Scheduled Order</h3>
+            <h3 id="edit-scheduled-order-title">
+              {isCustomQueryOrder ? 'Edit Custom Query Order' : 'Edit Scheduled Order'}
+            </h3>
             {order && (
               <p>
                 <NepseAlphaSymbolLink symbol={order.script_name} /> · {order.client_id} · #{order.order_id}
+                {isCustomQueryOrder ? ' · Edit the strategy query below, then save.' : ''}
               </p>
             )}
           </div>
@@ -359,9 +394,19 @@ const EditScheduledOrderModal: React.FC<Props> = ({ orderId, apiUrl, onClose, on
             isSubmitting={isSubmitting}
             submitError={submitError}
             prefill={prefill}
-            submitButtonLabel="Save Changes"
+            clientId={order.client_id}
+            holdingsBySymbol={holdingsBySymbol}
+            knownBuySymbols={knownBuySymbols}
+            initialStrategy={prefill.strategy}
+            strategyTypeLocked={isCustomQueryOrder}
+            draftKey={`edit-scheduled-order:${order.order_id}`}
+            aiPortalTargetId={isCustomQueryOrder ? 'edit-custom-query-ai-panel' : undefined}
+            submitButtonLabel={isCustomQueryOrder ? 'Save Query Changes' : 'Save Changes'}
             onSubmit={submitUpdate}
           />
+          {isCustomQueryOrder ? (
+            <div className="edit-scheduled-order-ai-side" id="edit-custom-query-ai-panel" />
+          ) : null}
           </>
         )}
       </div>

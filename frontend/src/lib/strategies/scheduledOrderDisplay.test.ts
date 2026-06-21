@@ -17,8 +17,22 @@ describe('scheduledOrderDisplay', () => {
       },
     };
     expect(formatScheduledTriggerPrice(order)).toContain('392.50');
-    expect(formatScheduledTriggerPrice(order)).toContain('(est.)');
+    expect(formatScheduledTriggerPrice(order)).toBe('Rs. 392.50 (est.)');
+    expect(formatScheduledTriggerPrice(order)).not.toMatch(/\(est\.\).*\(est\.\)/);
     expect(readSchedulePreviewSnapshot(order)?.trigger_strategy_text).toContain('52-week range position');
+  });
+
+  test('uses stored display text without duplicating estimate suffix', () => {
+    const order = {
+      trigger_price: null,
+      strategy_config: {
+        schedule_preview_snapshot: {
+          estimated_trigger_price_display: 'Rs. 504.49 (est.)',
+          is_exact_trigger_price: false,
+        },
+      },
+    };
+    expect(formatScheduledTriggerPrice(order)).toBe('Rs. 504.49 (est.)');
   });
 
   test('shows quantity summary from stored snapshot', () => {

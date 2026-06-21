@@ -37,6 +37,31 @@ export function buildSchedulePreflightKey(params: {
   });
 }
 
+/** Cache key for preview API — only includes holdings/symbol lists when they affect validation. */
+export function buildPreviewKey(params: {
+  queryText: string;
+  side: 'buy' | 'sell';
+  strategyType: string;
+  formSymbol?: string;
+  clientId?: string;
+  holdingsBySymbol?: Record<string, number>;
+  knownBuySymbols?: string[];
+}): string {
+  const base: Record<string, string | number> = {
+    query: params.queryText.trim(),
+    side: params.side,
+    strategyType: params.strategyType,
+    formSymbol: params.formSymbol || '',
+    clientId: params.clientId || '',
+  };
+  if (params.side === 'sell') {
+    base.holdingsCount = params.holdingsBySymbol ? Object.keys(params.holdingsBySymbol).length : 0;
+  } else {
+    base.knownSymbolsCount = params.knownBuySymbols?.length || 0;
+  }
+  return JSON.stringify(base);
+}
+
 export function isSchedulePreflightKeyCurrent(
   schedulePreflightKey: string,
   params: {

@@ -90,6 +90,30 @@ const ScheduleOrder: React.FC = () => {
   const [baselineModalOpen, setBaselineModalOpen] = useState(false);
   const [baselineScheduleInput, setBaselineScheduleInput] = useState<ScreenerDropScheduleInput | null>(null);
   const draftRestoredRef = useRef(false);
+  const feedbackQueryKeyRef = useRef('');
+
+  const bindSubmitFeedbackToQuery = useCallback((
+    queryText: string,
+    nextStatus: 'success' | 'error',
+    message: string,
+  ) => {
+    feedbackQueryKeyRef.current = queryText.trim();
+    setStatus(nextStatus);
+    setStatusMessage(message);
+  }, []);
+
+  const clearSubmitFeedbackIfQueryChanged = useCallback((queryText: string) => {
+    const key = queryText.trim();
+    if (feedbackQueryKeyRef.current && key !== feedbackQueryKeyRef.current) {
+      feedbackQueryKeyRef.current = '';
+      setStatus('idle');
+      setStatusMessage('');
+    }
+  }, []);
+
+  const customQueryFeedbackKey = useCallback((strategyPayload: StrategyPayload) => (
+    String(strategyPayload.strategy_config?.query_text || '').trim()
+  ), []);
 
   useEffect(() => {
     if (draftRestoredRef.current) {
@@ -602,8 +626,11 @@ const ScheduleOrder: React.FC = () => {
   }, [orderType, sellHoldings, stockDetails]);
 
   const submitStrategyOrder = async (strategyPayload: StrategyPayload) => {
-    setStatus('idle');
-    setStatusMessage('');
+    const customQuery = isCustomQueryStrategy(strategyPayload.strategy_type);
+    if (!customQuery) {
+      setStatus('idle');
+      setStatusMessage('');
+    }
 
     if (!clientID) {
       setStatus('error');
@@ -612,7 +639,6 @@ const ScheduleOrder: React.FC = () => {
     }
 
     const ruleBased = isRuleBasedStrategy(strategyPayload.strategy_type);
-    const customQuery = isCustomQueryStrategy(strategyPayload.strategy_type);
     const compiledPlan = strategyPayload.strategy_config?.compiled_plan as Record<string, unknown> | undefined;
     const effectiveOrderType = customQuery
       ? (extractPlanSide(compiledPlan) || orderType)
@@ -744,7 +770,9 @@ const ScheduleOrder: React.FC = () => {
         setStatusMessage('Schedule preflight is not complete. Wait for validation to finish before scheduling.');
         return;
       }
-      const batchTimeoutMs = Math.min(300000, Math.max(60000, eligibleSymbols.length * 8000));
+      const batchTimeoutMs = canReusePreflight
+        ? Math.min(120000, Math.max(20000, eligibleSymbols.length * 2500))
+        : Math.min(300000, Math.max(60000, eligibleSymbols.length * 8000));
       setIsSubmitting(true);
       setSubmitProgress(
         canReusePreflight
@@ -815,8 +843,9 @@ const ScheduleOrder: React.FC = () => {
             ].filter(Boolean).join(' · '),
           );
         } else {
-          setStatus('success');
-          setStatusMessage(
+          bindSubmitFeedbackToQuery(
+            customQueryFeedbackKey(strategyPayload),
+            'success',
             scheduledSymbols.length
               ? `Scheduled ${scheduledSymbols.length} order(s): ${scheduledSymbols.join(', ')}.`
               : 'No orders were scheduled.',
@@ -838,47 +867,50 @@ const ScheduleOrder: React.FC = () => {
 
     if (ruleBased) {
       setIsSubmitting(true);
-      setSubmitProgress('Starting preflight checks…');
-      const preflightResults = await Promise.all(
-        scheduleSymbols.map(async (symbol) => {
-          const preflight = await fetchJson<{
-            ready: boolean;
-            message?: string;
-            status?: string;
-            errors?: Array<{ message: string }>;
-            warnings?: Array<{ message: string }>;
-          }>('/api/strategy-plans/preflight', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              query_text: String(strategyPayload.strategy_config?.query_text || ''),
-              compiled_plan: compiledPlan,
-              strategy_type: strategyPayload.strategy_type,
-              side: orderType,
-              form_symbol: symbol,
-              client_id: clientID,
-              capture_reference_ltp: Boolean(strategyPayload.strategy_config?.capture_reference_ltp),
-              drop_percent: Number(strategyPayload.strategy_config?.drop_percent) || 10,
-              fixed_symbols: strategyPayload.strategy_config?.fixed_symbols,
-            }),
-          }, 120000);
-          return { symbol, preflight };
-        }),
-      );
-      const failedPreflight = preflightResults.find(({ preflight }) => !preflight.ok || !preflight.data.ready);
-      if (failedPreflight) {
-        const { symbol, preflight } = failedPreflight;
-        if (!preflight.ok) {
-          setStatus('error');
-          setStatusMessage(preflight.error || `Preflight check failed for ${symbol}.`);
-        } else {
-          const detail = preflight.data.errors?.[0]?.message || preflight.data.message || `Cannot schedule ${symbol}.`;
-          setStatus('error');
-          setStatusMessage(detail);
+      const canReusePreflight = Boolean(strategyPayload.strategy_config?.schedule_preflight_ready);
+      if (!(customQuery && canReusePreflight)) {
+        setSubmitProgress('Starting preflight checks…');
+        const preflightResults = await Promise.all(
+          scheduleSymbols.map(async (symbol) => {
+            const preflight = await fetchJson<{
+              ready: boolean;
+              message?: string;
+              status?: string;
+              errors?: Array<{ message: string }>;
+              warnings?: Array<{ message: string }>;
+            }>('/api/strategy-plans/preflight', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                query_text: String(strategyPayload.strategy_config?.query_text || ''),
+                compiled_plan: compiledPlan,
+                strategy_type: strategyPayload.strategy_type,
+                side: orderType,
+                form_symbol: symbol,
+                client_id: clientID,
+                capture_reference_ltp: Boolean(strategyPayload.strategy_config?.capture_reference_ltp),
+                drop_percent: Number(strategyPayload.strategy_config?.drop_percent) || 10,
+                fixed_symbols: strategyPayload.strategy_config?.fixed_symbols,
+              }),
+            }, 120000);
+            return { symbol, preflight };
+          }),
+        );
+        const failedPreflight = preflightResults.find(({ preflight }) => !preflight.ok || !preflight.data.ready);
+        if (failedPreflight) {
+          const { symbol, preflight } = failedPreflight;
+          if (!preflight.ok) {
+            setStatus('error');
+            setStatusMessage(preflight.error || `Preflight check failed for ${symbol}.`);
+          } else {
+            const detail = preflight.data.errors?.[0]?.message || preflight.data.message || `Cannot schedule ${symbol}.`;
+            setStatus('error');
+            setStatusMessage(detail);
+          }
+          setIsSubmitting(false);
+          setSubmitProgress('');
+          return;
         }
-        setIsSubmitting(false);
-        setSubmitProgress('');
-        return;
       }
     } else {
       setIsSubmitting(true);
@@ -933,8 +965,9 @@ const ScheduleOrder: React.FC = () => {
 
       if (scheduled.length) {
         notifyScheduledOrdersChanged();
-        setStatus(failures.length ? 'error' : 'success');
-        setStatusMessage(
+        bindSubmitFeedbackToQuery(
+          customQueryFeedbackKey(strategyPayload),
+          failures.length ? 'error' : 'success',
           [
             scheduled.length ? `Scheduled ${strategyPayload.strategy_type} for ${scheduled.join(', ')}.` : '',
             skipped.length ? `Skipped duplicates: ${skipped.join('; ')}` : '',
@@ -1074,6 +1107,7 @@ const ScheduleOrder: React.FC = () => {
                 draftKey="schedule-order"
                 aiPortalTargetId="custom-query-ai-side-panel"
                 onCustomQuerySideChange={(nextSide) => setOrderType(nextSide)}
+                onCustomQueryTextChange={clearSubmitFeedbackIfQueryChanged}
                 onStrategyChange={handleStrategyChange}
                 onSubmit={submitStrategyOrder}
               />

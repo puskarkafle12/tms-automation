@@ -1,5 +1,7 @@
 import {
   formatCurrentRequired,
+  formatEstimatePriceDisplay,
+  formatNumericEstimatePrice,
   formatPriceBoundary,
   formatQuantityCell,
   type PreviewRow,
@@ -18,9 +20,15 @@ describe('previewFormatters', () => {
         target_display: '95.00%',
       },
     };
-    expect(formatPriceBoundary(row)).toContain('392.50');
+    expect(formatPriceBoundary(row)).toBe('Rs. 392.50 (est.)');
+    expect(formatPriceBoundary(row)).not.toMatch(/\(est\.\).*\(est\.\)/);
     expect(formatCurrentRequired(row)).toContain('81.80%');
     expect(formatCurrentRequired(row)).toContain('95.00%');
+  });
+
+  test('does not duplicate estimate suffix when backend already includes it', () => {
+    expect(formatEstimatePriceDisplay('Rs. 195.80 (est.)')).toBe('Rs. 195.80 (est.)');
+    expect(formatNumericEstimatePrice(195.8)).toBe('Rs. 195.80 (est.)');
   });
 
   test('shows unavailable quantity when holding missing', () => {

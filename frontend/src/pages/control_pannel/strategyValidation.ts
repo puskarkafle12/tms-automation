@@ -6,7 +6,7 @@ export type { StrategyType } from '../../lib/strategies';
 export { BUY_STRATEGIES, SELL_STRATEGIES, formatStrategyLabel } from '../../lib/strategies';
 
 export interface StrategyFormPrefill {
-  strategy?: StrategyType | string;
+  strategy?: StrategyType;
   qty?: string;
   price?: string;
   stopLossPrice?: string;
@@ -35,6 +35,7 @@ export interface StrategyFormPrefill {
   allowSplitEmergencyExit?: boolean;
   emergencyExecution?: boolean;
   emergencyConfirmed?: boolean;
+  ruleQueryText?: string;
 }
 
 export interface StrategyPayload {
