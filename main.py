@@ -13,7 +13,7 @@ from fastapi import FastAPI, HTTPException, Depends, Query, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 import websockets
 from database import ensure_performance_indexes, get_db
-from sqlalchemy import cast, DateTime, or_, and_
+from sqlalchemy import cast, DateTime, or_, and_, text
 from exceptions.login_exceptions import LoginFailedException
 from models.frontend_user import FrontendUser
 from models.logged_in_user import LoggedInUsers
@@ -53,7 +53,7 @@ import uvicorn
 import jwt
 from fastapi import FastAPI, Request, HTTPException
 from sqlalchemy.orm import Session
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 from utils.tms_user_loader import load_tms_users_instances
 from utils.api_time import format_api_timestamp, get_server_time_payload
@@ -135,6 +135,394 @@ async def get_cached_tms_user(user: User, *, request_per_sec: float = 5) -> TmsU
     tms_user_cache[user.client_id] = tms_user
     tms_user_cache_touched[user.client_id] = now
     return tms_user
+
+
+TRADEBOOK_CACHE_REFRESH_DAYS = 2
+TRADEBOOK_HISTORY_START_DATE = date(2010, 10, 1)
+
+
+def _parse_trade_date(value) -> Optional[date]:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text_value = str(value).strip()
+    if not text_value:
+        return None
+    for separator in ("T", " "):
+        if separator in text_value:
+            text_value = text_value.split(separator, 1)[0]
+            break
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%d-%m-%Y", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(text_value, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _trade_float(value, default: float = 0.0) -> float:
+    try:
+        if value is None or value == "":
+            return default
+        return float(str(value).replace(",", ""))
+    except (TypeError, ValueError):
+        return default
+
+
+def _trade_symbol(row: dict) -> str:
+    return str(
+        row.get("symbol")
+        or row.get("script_name")
+        or row.get("securitySymbol")
+        or (row.get("security") or {}).get("symbol")
+        or ""
+    ).strip().upper()
+
+
+def _trade_side(row: dict) -> str:
+    raw = str(row.get("buyOrSell") or row.get("side") or row.get("order_type") or "").strip().upper()
+    if raw in {"1", "BUY", "B"} or "BUY" in raw:
+        return "BUY"
+    if raw in {"2", "SELL", "S"} or "SELL" in raw:
+        return "SELL"
+    return raw
+
+
+def _trade_price(row: dict) -> float:
+    return _trade_float(row.get("tradePrice") or row.get("orderPrice") or row.get("price"))
+
+
+def _trade_qty(row: dict) -> float:
+    return _trade_float(row.get("tradedQuantity") or row.get("quantity") or row.get("qty"))
+
+
+def _trade_date(row: dict) -> Optional[date]:
+    return _parse_trade_date(row.get("tradeTime") or row.get("orderTime") or row.get("created_at") or row.get("date"))
+
+
+def _trade_uid(client_id: str, row: dict) -> str:
+    trade_id = str(row.get("exchangeTradeId") or "").strip()
+    order_id = str(row.get("exchangeOrderId") or "").strip()
+    if trade_id or order_id:
+        return f"{client_id}:{trade_id}:{order_id}"
+    return f"{client_id}:{_trade_symbol(row)}:{_trade_side(row)}:{_trade_date(row)}:{_trade_price(row)}:{_trade_qty(row)}"
+
+
+def _date_label(start: Optional[date], end: Optional[date]) -> str:
+    if not start:
+        return "-"
+    start_text = f"{start.year}-{start.month}-{start.day}"
+    if not end:
+        return f"{start_text} - Open"
+    return f"{start_text} - {end.year}-{end.month}-{end.day}"
+
+
+def _holding_days(start: Optional[date], end: Optional[date]) -> Optional[int]:
+    if not start:
+        return None
+    finish = end or date.today()
+    return max(0, (finish - start).days)
+
+
+def _iter_week_ranges(start: date, end: date):
+    current = start
+    while current <= end:
+        week_end = min(current + timedelta(days=6), end)
+        yield current, week_end
+        current = week_end + timedelta(days=1)
+
+
+def _should_refresh_trade_range(db: Session, client_id: str, start: date, end: date, force: bool = False) -> bool:
+    if force:
+        return True
+    refreshed_at = db.execute(
+        text(
+            """
+            SELECT refreshed_at
+            FROM tradebook_history_refreshes
+            WHERE client_id = :client_id AND from_date = :from_date AND to_date = :to_date
+            """
+        ),
+        {"client_id": client_id, "from_date": start, "to_date": end},
+    ).scalar()
+    if not refreshed_at:
+        return True
+    if isinstance(refreshed_at, str):
+        refreshed_at = datetime.fromisoformat(refreshed_at)
+    return datetime.utcnow() - refreshed_at >= timedelta(days=TRADEBOOK_CACHE_REFRESH_DAYS)
+
+
+def _cache_trade_rows(db: Session, client_id: str, rows: List[dict], start: date, end: date) -> None:
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        traded_on = _trade_date(row)
+        symbol = _trade_symbol(row)
+        side = _trade_side(row)
+        qty = _trade_qty(row)
+        if not traded_on or not symbol or side not in {"BUY", "SELL"} or qty <= 0:
+            continue
+        db.execute(
+            text(
+                """
+                INSERT INTO tradebook_history_cache (
+                    client_id, trade_uid, symbol, side, trade_date, trade_price, quantity, raw_row, fetched_at, updated_at
+                )
+                VALUES (
+                    :client_id, :trade_uid, :symbol, :side, :trade_date, :trade_price, :quantity,
+                    CAST(:raw_row AS JSON), NOW(), NOW()
+                )
+                ON CONFLICT (trade_uid) DO UPDATE SET
+                    symbol = EXCLUDED.symbol,
+                    side = EXCLUDED.side,
+                    trade_date = EXCLUDED.trade_date,
+                    trade_price = EXCLUDED.trade_price,
+                    quantity = EXCLUDED.quantity,
+                    raw_row = EXCLUDED.raw_row,
+                    updated_at = NOW()
+                """
+            ),
+            {
+                "client_id": client_id,
+                "trade_uid": _trade_uid(client_id, row),
+                "symbol": symbol,
+                "side": side,
+                "trade_date": traded_on,
+                "trade_price": _trade_price(row),
+                "quantity": qty,
+                "raw_row": json.dumps({**row, "client_id": client_id}),
+            },
+        )
+    for chunk_start, chunk_end in _iter_week_ranges(start, end):
+        db.execute(
+            text(
+                """
+                INSERT INTO tradebook_history_refreshes (client_id, from_date, to_date, refreshed_at)
+                VALUES (:client_id, :from_date, :to_date, NOW())
+                ON CONFLICT (client_id, from_date, to_date) DO UPDATE SET refreshed_at = NOW()
+                """
+            ),
+            {"client_id": client_id, "from_date": chunk_start, "to_date": chunk_end},
+        )
+    db.commit()
+
+
+def _stale_trade_ranges(db: Session, client_id: str, start: date, end: date, force: bool = False) -> List[tuple[date, date]]:
+    ranges: List[tuple[date, date]] = []
+    current_start: Optional[date] = None
+    current_end: Optional[date] = None
+    for chunk_start, chunk_end in _iter_week_ranges(start, end):
+        if not _should_refresh_trade_range(db, client_id, chunk_start, chunk_end, force=force):
+            if current_start and current_end:
+                ranges.append((current_start, current_end))
+                current_start = None
+                current_end = None
+            continue
+        if current_start is None:
+            current_start = chunk_start
+        current_end = chunk_end
+    if current_start and current_end:
+        ranges.append((current_start, current_end))
+    return ranges
+
+
+async def _refresh_tradebook_cache(
+    db: Session,
+    tms_user: TmsUser,
+    client_id: str,
+    start: date,
+    end: date,
+    force: bool = False,
+) -> None:
+    for chunk_start, chunk_end in _stale_trade_ranges(db, client_id, start, end, force=force):
+        rows = await tms_user.get_tradebook_history(chunk_start.isoformat(), chunk_end.isoformat())
+        _cache_trade_rows(db, client_id, rows, chunk_start, chunk_end)
+
+
+def _cached_trade_rows(db: Session, client_id: str, start: date, end: date) -> List[dict]:
+    result = db.execute(
+        text(
+            """
+            SELECT raw_row
+            FROM tradebook_history_cache
+            WHERE client_id = :client_id
+              AND trade_date BETWEEN :from_date AND :to_date
+            ORDER BY trade_date DESC, id DESC
+            """
+        ),
+        {"client_id": client_id, "from_date": start, "to_date": end},
+    )
+    rows: List[dict] = []
+    for (raw_row,) in result:
+        if isinstance(raw_row, str):
+            row = json.loads(raw_row)
+        elif isinstance(raw_row, dict):
+            row = raw_row
+        else:
+            continue
+        trade_date = _trade_date(row)
+        if trade_date:
+            row["tradeDate"] = trade_date.isoformat()
+        rows.append(row)
+    return rows
+
+
+def _build_trade_positions(rows: List[dict], current_prices: Optional[Dict[str, float]] = None) -> List[dict]:
+    lots: Dict[str, List[dict]] = {}
+    positions: List[dict] = []
+    current_prices = current_prices or {}
+    sorted_rows = sorted(rows, key=lambda row: (_trade_date(row) or date.min, str(row.get("tradeTime") or "")))
+
+    for row in sorted_rows:
+        symbol = _trade_symbol(row)
+        side = _trade_side(row)
+        qty = _trade_qty(row)
+        price = _trade_price(row)
+        traded_on = _trade_date(row)
+        if not symbol or side not in {"BUY", "SELL"} or qty <= 0 or price <= 0:
+            continue
+        if side == "BUY":
+            lots.setdefault(symbol, []).append({
+                "qty": qty,
+                "price": price,
+                "date": traded_on,
+                "client_id": row.get("client_id", ""),
+            })
+            continue
+
+        remaining = qty
+        while remaining > 0 and lots.get(symbol):
+            lot = lots[symbol][0]
+            matched_qty = min(remaining, lot["qty"])
+            buy_price = lot["price"]
+            profit_loss = (price - buy_price) * matched_qty
+            buy_date = lot.get("date")
+            positions.append({
+                "symbol": symbol,
+                "client_id": row.get("client_id", ""),
+                "tradeDate": traded_on.isoformat() if traded_on else "",
+                "dateRange": _date_label(buy_date, traded_on),
+                "holdingDays": _holding_days(buy_date, traded_on),
+                "quantity": matched_qty,
+                "buyPrice": buy_price,
+                "sellPrice": price,
+                "profitLoss": profit_loss,
+                "status": "Closed",
+            })
+            lot["qty"] -= matched_qty
+            remaining -= matched_qty
+            if lot["qty"] <= 0.00001:
+                lots[symbol].pop(0)
+
+    for symbol, symbol_lots in lots.items():
+        market_price = current_prices.get(symbol)
+        for lot in symbol_lots:
+            if lot["qty"] <= 0:
+                continue
+            profit_loss = ((market_price or lot["price"]) - lot["price"]) * lot["qty"]
+            positions.append({
+                "symbol": symbol,
+                "client_id": lot.get("client_id", ""),
+                "tradeDate": lot.get("date").isoformat() if lot.get("date") else "",
+                "dateRange": _date_label(lot.get("date"), None),
+                "holdingDays": _holding_days(lot.get("date"), None),
+                "quantity": lot["qty"],
+                "buyPrice": lot["price"],
+                "sellPrice": market_price,
+                "profitLoss": profit_loss,
+                "status": "Open",
+            })
+
+    positions.sort(key=lambda row: (row.get("status") != "Open", row.get("dateRange") or ""))
+    return positions
+
+
+def _portfolio_cost_basis(positions: List[dict]) -> Dict[str, dict]:
+    basis: Dict[str, dict] = {}
+    for position in positions:
+        if position.get("status") != "Open":
+            continue
+        symbol = str(position.get("symbol") or "").upper()
+        qty = _trade_float(position.get("quantity"))
+        buy_price = _trade_float(position.get("buyPrice"))
+        if not symbol or qty <= 0 or buy_price <= 0:
+            continue
+        item = basis.setdefault(symbol, {"quantity": 0.0, "cost": 0.0, "first_buy_date": None})
+        item["quantity"] += qty
+        item["cost"] += qty * buy_price
+        buy_date = _parse_trade_date(str(position.get("dateRange") or "").split(" - ", 1)[0])
+        if buy_date and (item["first_buy_date"] is None or buy_date < item["first_buy_date"]):
+            item["first_buy_date"] = buy_date
+    for item in basis.values():
+        item["average_buy_price"] = item["cost"] / item["quantity"] if item["quantity"] else None
+    return basis
+
+
+def _cached_trade_date_bounds(db: Session, client_id: str) -> tuple[Optional[date], Optional[date]]:
+    row = db.execute(
+        text(
+            """
+            SELECT MIN(trade_date), MAX(trade_date)
+            FROM tradebook_history_cache
+            WHERE client_id = :client_id
+            """
+        ),
+        {"client_id": client_id},
+    ).first()
+    if not row:
+        return None, None
+    return row[0], row[1]
+
+
+def _trade_cache_covers_history(db: Session, client_id: str) -> bool:
+    row = db.execute(
+        text(
+            """
+            SELECT MIN(trade_date) AS min_trade_date, MAX(trade_date) AS max_trade_date
+            FROM tradebook_history_cache
+            WHERE client_id = :client_id
+            """
+        ),
+        {"client_id": client_id},
+    ).first()
+    if not row or row[0] is None or row[1] is None:
+        return False
+    return row[0] <= TRADEBOOK_HISTORY_START_DATE and row[1] >= date.today() - timedelta(days=1)
+
+
+async def _ensure_full_trade_history_cache(db: Session, tms_user: TmsUser, client_id: str) -> None:
+    if _trade_cache_covers_history(db, client_id):
+        return
+    await _refresh_tradebook_cache(
+        db,
+        tms_user,
+        client_id,
+        TRADEBOOK_HISTORY_START_DATE,
+        date.today(),
+        force=False,
+    )
+
+
+async def _refresh_trade_cache_background(
+    client_id: str,
+    from_date: date,
+    to_date: date,
+) -> None:
+    db = get_db_session()
+    try:
+        user = db.query(User).filter(User.client_id == client_id).first()
+        if not user:
+            return
+        tms_user = await get_cached_tms_user(user)
+        await _refresh_tradebook_cache(db, tms_user, client_id, from_date, to_date, force=True)
+    except Exception:
+        return
+    finally:
+        db.close()
+
 
 @app.on_event("shutdown")
 async def close_cached_tms_users() -> None:
@@ -406,6 +794,7 @@ async def get_market_status(db: Session = Depends(get_db)):
 
     tms_session_active = False
     tms_session_message = "DNA logged off"
+    dna_status = None
     market_live_from_api = None
     client_id = None
     broker_no = None
@@ -418,9 +807,7 @@ async def get_market_status(db: Session = Depends(get_db)):
         .first()
     )
 
-    if not hours["market_hours_open"]:
-        tms_session_message = outside_market_hours_message()
-    elif logged_in and logged_in.tokens:
+    if logged_in and logged_in.tokens:
         client_id = logged_in.client_id
         broker_no = logged_in.broker_no
         temp_tms_user = None
@@ -439,6 +826,7 @@ async def get_market_status(db: Session = Depends(get_db)):
                 parsed = parse_session_check_response(session_payload)
                 tms_session_active = parsed["session_active"]
                 tms_session_message = parsed["session_message"]
+                dna_status = parsed.get("dna_status")
                 market_live_from_api = parsed["market_live_from_api"]
                 session_data = parsed["session_data"]
         except TimeoutError:
@@ -452,6 +840,8 @@ async def get_market_status(db: Session = Depends(get_db)):
                 await temp_tms_user.close()
     elif hours["market_hours_open"]:
         tms_session_message = "No TMS client logged in"
+    else:
+        tms_session_message = outside_market_hours_message()
 
     market_live = is_market_live(hours, tms_session_active)
 
@@ -479,6 +869,7 @@ async def get_market_status(db: Session = Depends(get_db)):
         "market_phase": market_phase,
         "tms_session_active": tms_session_active,
         "tms_session_message": tms_session_message,
+        "dna_status": dna_status,
         "market_live": market_live,
         "market_live_from_api": market_live_from_api,
         "client_id": client_id,
@@ -2060,6 +2451,7 @@ async def get_tradebook_history(
     client_id: str,
     from_date: str,
     to_date: str,
+    force_refresh: bool = False,
     db: Session = Depends(get_db),
 ):
     user = db.query(User).filter(User.client_id == client_id).first()
@@ -2067,9 +2459,25 @@ async def get_tradebook_history(
         raise HTTPException(status_code=404, detail="User not found")
 
     try:
+        start = date.fromisoformat(from_date)
+        end = date.fromisoformat(to_date)
+        if start > end:
+            return {"rows": [], "positions": []}
         tms_user = await get_cached_tms_user(user)
-        history_rows = await tms_user.get_tradebook_history(from_date, to_date)
-        return history_rows
+        history_rows = _cached_trade_rows(db, client_id, start, end)
+        full_start, full_end = _cached_trade_date_bounds(db, client_id)
+        positions_source = _cached_trade_rows(db, client_id, full_start, full_end) if full_start and full_end else history_rows
+        if history_rows and not force_refresh:
+            if _should_refresh_trade_range(db, client_id, start, end, force=False):
+                asyncio.create_task(_refresh_trade_cache_background(client_id, start, end))
+            positions = _build_trade_positions(positions_source)
+            return {"rows": history_rows, "positions": positions}
+        await _refresh_tradebook_cache(db, tms_user, client_id, start, end, force=force_refresh)
+        history_rows = _cached_trade_rows(db, client_id, start, end)
+        full_start, full_end = _cached_trade_date_bounds(db, client_id)
+        positions_source = _cached_trade_rows(db, client_id, full_start, full_end) if full_start and full_end else history_rows
+        positions = _build_trade_positions(positions_source)
+        return {"rows": history_rows, "positions": positions}
     except LoginFailedException as e:
         await invalidate_cached_tms_user(client_id)
         raise HTTPException(status_code=401, detail=str(e))
@@ -2086,7 +2494,36 @@ async def get_dp_holdings(client_id: str, db: Session = Depends(get_db)):
     try:
         tms_user = await get_cached_tms_user(user)
         dp_holdings = await tms_user.get_user_stock_details()  # Await the async call
-        return dp_holdings
+        await _ensure_full_trade_history_cache(db, tms_user, client_id)
+        cached_start, cached_end = _cached_trade_date_bounds(db, client_id)
+        current_prices = {
+            str(holding.get("scrip") or holding.get("symbolName") or "").strip().upper(): _trade_float(
+                holding.get("ltp") or holding.get("previousCloseprice")
+            )
+            for holding in dp_holdings or []
+        }
+        history_rows = _cached_trade_rows(db, client_id, cached_start, cached_end) if cached_start and cached_end else []
+        positions = _build_trade_positions(history_rows, current_prices)
+        basis = _portfolio_cost_basis(positions)
+        enriched_holdings = []
+        for holding in dp_holdings or []:
+            symbol = str(holding.get("scrip") or holding.get("symbolName") or "").strip().upper()
+            item = basis.get(symbol)
+            if item:
+                avg_buy = item.get("average_buy_price")
+                quantity = _trade_float(holding.get("currentBalance"))
+                ltp = _trade_float(holding.get("ltp") or holding.get("previousCloseprice"))
+                holding["averageBuyPrice"] = avg_buy
+                holding["buyValue"] = (avg_buy or 0) * quantity
+                holding["actualProfitLoss"] = (ltp - (avg_buy or ltp)) * quantity if avg_buy else None
+                holding["buyPriceSource"] = "history_db"
+                first_buy_date = item.get("first_buy_date")
+                holding["holdingDays"] = _holding_days(first_buy_date, None) if first_buy_date else None
+                holding["dateRange"] = _date_label(first_buy_date, None) if first_buy_date else "-"
+            else:
+                holding["buyPriceSource"] = "missing_history_db"
+            enriched_holdings.append(holding)
+        return enriched_holdings
     except LoginFailedException as e:
         await invalidate_cached_tms_user(client_id)
         raise HTTPException(status_code=401, detail=str(e))

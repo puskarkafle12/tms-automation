@@ -131,7 +131,7 @@ Decision path:
 1. If the user gave enough concrete inputs for at least one valid rule, return STATUS: OK.
 2. If part of the request is unsupported but a registered substitute can still express the main intent, return STATUS: OK and name the substitution in Summary.
 3. Return STATUS: ERROR only when SIDE is wrong, quantity/holding mode is missing for SELL, or no valid rule/condition can be built.
-4. If the user asks for "top N", "best N", "N stocks", or a basket without giving all symbols, do NOT ask them to paste symbols. Build the best valid ranked query using the current form symbol when available, symbols already present in the prompt/request, or fallback symbol "CZBIL" with a Limitation bullet.
+4. If the user asks for "top N", "best N", "N stocks", or a basket, first look for an "Available symbol universe" or pasted symbols in the user message. Use those symbols with FOR SYMBOL IN (...) and RANK MATCHES BY ... LIMIT N ORDERS. Only fall back to the current form symbol for clearly single-symbol requests.
 
 When the request CAN be satisfied or approximated (default — use this whenever possible):
 STATUS: OK
@@ -150,7 +150,7 @@ STATUS: ERROR
 Reason:
 - Start with: This query is not supported —
 - Use only for wrong SIDE, missing SELL quantity/holding mode, or no parseable trading rule/condition at all
-- Do not return ERROR only because the user requested multiple/top N stocks without pasting every symbol; produce a valid ranked/current-symbol query instead
+- Do not return ERROR only because the user requested multiple/top N stocks. If the user message contains an available symbol universe, use it. If no universe exists, produce a clear single-symbol fallback with a Limitation bullet rather than pretending it is true market-wide top-N.
 Do NOT include a Query block when STATUS is ERROR.
 
 Parsing rules:
@@ -167,7 +167,7 @@ def _strict_output_contract_section() -> str:
 4. Do not output JSON, YAML, SQL, Python, or commentary outside the STATUS wrapper.
 5. Do not output placeholders such as <symbol>, SYMBOL, YOUR_SYMBOL, target_price, trigger_price, quantity, or TODO.
 6. Do not guess missing numbers, timestamps, holdings, or quantities. Every RULE must include explicit ORDER sizing and explicit FOR SYMBOL target(s).
-7. Use exact uppercase quoted script symbols. Prefer user-supplied symbols or the current form symbol; if neither exists, use "CZBIL" as a parser-safe fallback and add a Limitation bullet.
+7. Use only exact uppercase quoted script symbols. For top-N requests, prefer an available symbol universe or user-supplied symbols over the current form symbol. Use a single fallback symbol only when no universe exists and say it is not true market-wide top-N.
 8. Use only exact field keys from FIELD REGISTRY. Field keys are lowercase snake_case and case-sensitive.
 9. Use only exact function names from SUPPORTED FUNCTIONS. Function names are uppercase and case-sensitive.
 10. Function arguments must be named. Operator argument values must be quoted strings: operator="gte", not operator=gte.
@@ -189,7 +189,7 @@ def _hard_rules_section() -> str:
 6. USE STRATEGY may combine with optional ELIGIBILITY / WHEN / SIGNAL / REQUIRE gates (gates run first).
 7. Never nest Custom Query / Technical Buy/Sell inside USE STRATEGY — those are rule-based types, not delegatable.
 8. Symbols must be exact uppercase NEPSE/TMS script codes in double quotes. Prefer symbols the user explicitly pasted or the current form symbol; use "CZBIL" only as a fallback when no symbol context exists.
-9. Multi-symbol/top-N requests: when symbols are pasted, use FOR SYMBOL IN (...). When symbols are not pasted, do not refuse; use the current form symbol if available, otherwise use "CZBIL". Add a Limitation bullet that the request asked for N stocks but the generated query targets the available/fallback symbol. If a ranked candidate pool is available in the request, add RANK MATCHES BY <field> DESC LIMIT <N> ORDERS.
+9. Multi-symbol/top-N requests: when symbols or an available symbol universe are present, use FOR SYMBOL IN (...) and add RANK MATCHES BY <field> DESC LIMIT <N> ORDERS. When no universe is present, do not claim the query finds N market-wide stocks; use the current/fallback symbol and add a Limitation bullet.
 10. Do not refuse with vague errors. Name the real blocker or give the closest valid query with a Limitation bullet.
 11. Use quoted operator strings inside function calls: operator="gte" / "lte" / "gt" / "lt" / "eq" / "neq".
 12. Use positive numeric literals only; do not write negative numbers like -3. Prefer equivalent comparisons such as field < 0.
@@ -428,6 +428,166 @@ def _strategy_delegation_section(*, side: str = "buy") -> str:
             ]
         )
     return "\n".join(lines)
+
+
+def _compact_field_key_list() -> str:
+    keys = [str(field.get("key")) for field in supported_catalog_fields() if field.get("key")]
+    return ", ".join(sorted(keys))
+
+
+def _compact_function_list() -> str:
+    return ", ".join(sorted(RUNTIME_FUNCTIONS))
+
+
+def _copy_prompt_current_symbol(side_upper: str, form_symbol: Optional[str]) -> str:
+    symbol = (form_symbol or "CZBIL").upper()
+    if form_symbol:
+        return (
+            f'The current order form symbol is "{symbol}". Use it for single-symbol order rules when the user does not provide another symbol.'
+        )
+    return (
+        "No form symbol was provided in this copied prompt. For order rules, use CZBIL only as an example "
+        "single-symbol target and mention that the user should replace it or provide a symbol universe."
+    )
+
+
+def build_strategy_query_copy_prompt(*, side: str = "buy", form_symbol: Optional[str] = None) -> str:
+    """Compact external prompt meant for copying into ChatGPT."""
+
+    side_upper = (side or "buy").upper()
+    sizing = _buy_sizing_modes() if side_upper == "BUY" else _sell_sizing_modes()
+    current_symbol_note = _copy_prompt_current_symbol(side_upper, form_symbol)
+
+    return f"""You generate Strategy Query Language for a Nepal TMS automation portal.
+The user will paste a plain-English trading request after this prompt.
+
+Your job: return the closest valid query in one shot and clearly choose the right query type.
+
+Output format:
+STATUS: OK
+Summary:
+- 2-4 short bullets explaining the rule
+- Limitation: only if you had to approximate something
+Query:
+```
+STRATEGY_VERSION 1
+SIDE {side_upper}
+...
+```
+
+Avoid STATUS: ERROR. If the request is unclear, return a useful default with a Limitation bullet.
+
+Choose the right query type:
+- Screener query discovers/ranks stocks across the market. Use it for "top N", "best N", "good N stocks", or "N NEPSE stocks" when no symbol universe is provided.
+- Strategy Query Language schedules/monitors orders. It can rank only the symbols already listed in `FOR SYMBOL IN (...)`; `RANK MATCHES BY ... LIMIT N ORDERS` does not discover symbols by itself.
+- If the user asks for true top-N NEPSE discovery without symbols, return a SCREENER query, not a fake single-symbol strategy.
+- If the user provides symbols, or asks about the current form symbol, return Strategy Query Language.
+
+Strategy symbol behavior:
+- Every Strategy RULE needs `FOR SYMBOL` or `FOR SYMBOL IN`.
+- {current_symbol_note}
+- If the user does provide uppercase symbols, use `FOR SYMBOL IN ("NABIL", "EBL")`.
+- If the user asks for top-N orders and also provides a symbol universe, use `FOR SYMBOL IN (...)` with those symbols and add `RANK MATCHES BY <field> DESC LIMIT N ORDERS`.
+- If the user does not specify quantity, use `ORDER QUANTITY {DEFAULT_RULE_ORDER_QUANTITY}`.
+- Use only the field keys and functions listed below. If a requested indicator is missing, use the closest available field and mention it in Limitation.
+- Never output SQL, Python, JSON, placeholders, or invented field names.
+
+Strategy Query Language syntax:
+```
+STRATEGY_VERSION 1
+SIDE {side_upper}
+RULE "Trading Quality Buy" FOR SYMBOL "{(form_symbol or "CZBIL").upper()}" {{
+    ELIGIBILITY volume > 0
+    SIGNAL technical_rsi_14 BETWEEN 30 AND 55 AND technical_macd = "Bullish"
+    REQUIRE market_depth_available = TRUE
+    ORDER QUANTITY {DEFAULT_RULE_ORDER_QUANTITY}
+    CONFIRM TRUE_FOR 2 SCANS
+    TRIGGER LEVEL
+    EXECUTE ONCE
+}}
+```
+
+Rule syntax:
+- `RULE "Name" FOR SYMBOL "CZBIL" {{ ... }}`
+- `RULE "Name" FOR SYMBOL IN ("CZBIL", "NABIL") {{ ... }}`
+- Conditions: `WHEN <expr>` or `ELIGIBILITY <expr>` + `SIGNAL <expr>` with optional `REQUIRE <expr>`
+- Comparisons: `= != > >= < <=`, `BETWEEN a AND b`, `IN (...)`
+- Logic: `AND`, `OR`, `NOT`, parentheses
+- Confirmation: `CONFIRM IMMEDIATE`, `CONFIRM TRUE_FOR 2 SCANS`, `CONFIRM MATCHES 2 OF LAST 3 SCANS`
+- Trigger: `TRIGGER LEVEL` or `TRIGGER ON_CROSS`
+- Execution: `EXECUTE ONCE`, `EXECUTE ONCE PER SYMBOL`, `EXECUTE ONCE PER MARKET DAY`
+- Order sizing for SIDE {side_upper}: {sizing}
+
+Screener query syntax:
+- Use only screener field keys shown in the screener page prompt when available.
+- Common shape:
+```
+WHERE technical_rsi_14 BETWEEN 30 AND 55
+  AND technical_macd = 'Bullish'
+ORDER BY alpha_annualized DESC
+LIMIT 50
+```
+- If exact screener fields are not listed in this prompt, still output a simple screener query and add a Limitation saying it must be checked against the screener field list.
+
+Useful BUY fields:
+- quality/fundamental: fundamental_roe_ttm, fundamental_eps_ttm, fundamental_pbv, fundamental_pe_ttm
+- technical: technical_rsi_14, technical_macd, technical_sma_20, technical_sma_50, technical_volume_trend
+- live/liquidity: ltp, open, high, low, volume, change_percent, market_depth_available, spread_percent, top_buy_quantity, top_sell_quantity, buy_sell_quantity_ratio
+- range/risk: position_in_52_week_range_percent, distance_from_52_week_high_percent, distance_from_52_week_low_percent, volatility_risk_score
+
+Available field keys:
+{_compact_field_key_list()}
+
+Available functions:
+{_compact_function_list()}
+
+Examples:
+
+True top 50 NEPSE discovery when no symbols are provided (SCREENER query):
+STATUS: OK
+Summary:
+- Screens for liquid bullish trading candidates.
+- Ranks the market and returns 50 rows.
+- Limitation: This is a screener query for discovery, not an order-scheduling Strategy Query Language document.
+Query:
+```
+WHERE technical_rsi_14 BETWEEN 30 AND 55
+  AND technical_macd = 'Bullish'
+ORDER BY alpha_annualized DESC
+LIMIT 50
+```
+
+Top 50 orders from an explicit symbol universe (Strategy Query Language):
+```
+STRATEGY_VERSION 1
+SIDE BUY
+RANK MATCHES BY volume DESC, buy_sell_quantity_ratio DESC LIMIT 50 ORDERS
+RULE "Top Trading Quality" FOR SYMBOL IN ("NABIL", "EBL", "GBIME") {{
+    ELIGIBILITY volume > 0 AND technical_rsi_14 BETWEEN 30 AND 55
+    SIGNAL technical_macd = "Bullish" AND ltp >= open
+    REQUIRE market_depth_available = TRUE
+    ORDER QUANTITY {DEFAULT_RULE_ORDER_QUANTITY}
+    CONFIRM TRUE_FOR 2 SCANS
+    TRIGGER LEVEL
+    EXECUTE ONCE
+}}
+```
+
+Pullback buy:
+```
+STRATEGY_VERSION 1
+SIDE BUY
+RULE "Pullback Buy" FOR SYMBOL "{(form_symbol or "CZBIL").upper()}" {{
+    ELIGIBILITY ltp <= REFERENCE(field=ltp) * 0.95
+    SIGNAL technical_rsi_14 BETWEEN 30 AND 45 AND technical_macd = "Bullish"
+    ORDER QUANTITY {DEFAULT_RULE_ORDER_QUANTITY}
+    EXECUTE ONCE
+}}
+```
+
+Now answer the user's request using only STATUS + Summary + Query.
+User request:
+[PASTE REQUEST HERE]"""
 
 
 def build_strategy_query_llm_prompt(*, side: str = "buy", form_symbol: Optional[str] = None) -> str:

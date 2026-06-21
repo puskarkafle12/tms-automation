@@ -1070,3 +1070,13 @@
   align-items: center;
   gap: 0.5rem;
 }
+
+.order-logs-page .positive {
+  color: #047857;
+  font-weight: 700;
+}
+
+.order-logs-page .negative {
+  color: #b91c1c;
+  font-weight: 700;
+}

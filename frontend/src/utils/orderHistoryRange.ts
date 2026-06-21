@@ -36,3 +36,18 @@ export const historyRangeLabel = (
   const { fromDate, toDate } = resolveHistoryDateRange(preset, customFrom, customTo);
   return `${fromDate} to ${toDate}`;
 };
+
+export const isDateWithinHistoryRange = (
+  value: string | null | undefined,
+  fromDate: string,
+  toDate: string,
+) => {
+  if (!value) {
+    return false;
+  }
+  const day = value.slice(0, 10);
+  if (!day) {
+    return false;
+  }
+  return day >= fromDate && day <= toDate;
+};

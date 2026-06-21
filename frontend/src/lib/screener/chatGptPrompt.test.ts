@@ -33,9 +33,19 @@ describe('buildChatGptScreenerPromptForCopy', () => {
 
   it('prefers best-effort single-pass guidance', () => {
     const prompt = buildChatGptScreenerPromptForCopy(SAMPLE_FIELDS);
-    expect(prompt).toContain('Single-pass');
+    expect(prompt).toContain('one shot');
     expect(prompt).toContain('Limitation:');
     expect(prompt).toContain('close, not exact');
+  });
+
+  it('does not include a hard error template in the copy prompt', () => {
+    const prompt = buildChatGptScreenerPromptForCopy(SAMPLE_FIELDS);
+    expect(prompt).toContain('Avoid STATUS: ERROR');
+    expect(prompt).toContain('top 50 good stocks');
+    expect(prompt).toContain('true market-wide discovery');
+    expect(prompt).toContain('Do not output Strategy Query Language');
+    expect(prompt).not.toContain('Response only when no valid query is possible');
+    expect(prompt).not.toContain('This screener is not supported');
   });
 
   it('is much shorter than the full reference prompt', () => {

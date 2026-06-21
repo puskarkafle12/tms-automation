@@ -4,6 +4,7 @@ import './Table.css';
 interface TableRow {
   [key: string]: any;
   color?: string; // Optional color property for row coloring
+  sortValues?: Record<string, string | number | null | undefined>;
 }
 
 interface CommonTableProps {
@@ -24,6 +25,17 @@ const COLUMN_LABEL_OVERRIDES: Record<string, string> = {
   order_type: 'Side',
   created_at: 'Created',
   strategy_type: 'Strategy',
+  averageBuyPrice: 'Buy Price',
+  buyPrice: 'Buy Price',
+  sellPrice: 'Sell Price',
+  buyValue: 'Buy Value',
+  valueAsOfLTP: 'Current Value',
+  profitLoss: 'P/L',
+  dailyGain: 'Daily Gain',
+  totalProfit: 'Total Profit',
+  percentChange: '%',
+  holdingDays: 'Holding Days',
+  dateRange: 'Buy - Sell',
 };
 
 const formatColumnLabel = (column: string) =>
@@ -33,6 +45,26 @@ const formatColumnLabel = (column: string) =>
     .replace(/_/g, ' ')
     .replace(/\b\w/g, (char) => char.toUpperCase())
     .trim();
+
+const rowToneClass = (color?: string) => {
+  const normalized = String(color || '').trim().toLowerCase();
+  if (!normalized) return undefined;
+  if (normalized.includes('green')) return 'common-table-row-profit';
+  if (normalized.includes('red')) return 'common-table-row-loss';
+  if (normalized.includes('yellow')) return 'common-table-row-flat';
+  return undefined;
+};
+
+const normalizeSortValue = (value: unknown): string | number => {
+  if (value == null || value === '') return '';
+  if (typeof value === 'number') return value;
+  if (typeof value === 'boolean') return value ? 1 : 0;
+  if (React.isValidElement(value)) return String((value.props as { children?: React.ReactNode })?.children ?? '');
+  if (typeof value === 'object') return JSON.stringify(value);
+  const text = String(value).trim();
+  const numeric = Number(text.replace(/,/g, '').replace(/[^\d.-]/g, ''));
+  return Number.isFinite(numeric) && text.match(/^-?[\d,]+(\.\d+)?$/) ? numeric : text.toLowerCase();
+};
 
 const CommonTable: React.FC<CommonTableProps> = ({
   data,
@@ -52,8 +84,12 @@ const CommonTable: React.FC<CommonTableProps> = ({
   const sortedData = React.useMemo(() => {
     if (!sortConfig) return data;
     const sortedArray = [...data].sort((a, b) => {
-      if (a[sortConfig.key] < b[sortConfig.key]) return sortConfig.direction === 'asc' ? -1 : 1;
-      if (a[sortConfig.key] > b[sortConfig.key]) return sortConfig.direction === 'asc' ? 1 : -1;
+      const aValue = a.sortValues?.[sortConfig.key] ?? a[sortConfig.key];
+      const bValue = b.sortValues?.[sortConfig.key] ?? b[sortConfig.key];
+      const left = normalizeSortValue(aValue);
+      const right = normalizeSortValue(bValue);
+      if (left < right) return sortConfig.direction === 'asc' ? -1 : 1;
+      if (left > right) return sortConfig.direction === 'asc' ? 1 : -1;
       return 0;
     });
     return sortedArray;
@@ -175,7 +211,7 @@ const CommonTable: React.FC<CommonTableProps> = ({
           </thead>
           <tbody>
             {sortedData.map((row, rowIndex) => (
-              <tr key={rowIndex} style={{ backgroundColor: row.color }}>
+              <tr key={rowIndex} className={rowToneClass(row.color)}>
                 {selectable ? (
                   <td className="common-table-select-col">
                     <input

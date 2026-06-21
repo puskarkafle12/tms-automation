@@ -12,7 +12,7 @@ from schemas.schemas import OrderCreateRequest
 from utils.strategy_builder.strategy_fields import get_field_catalog, get_supported_functions
 from utils.strategy_builder.strategy_parser import StrategyQueryError, extract_symbols_from_query, format_strategy_query, parse_strategy_query
 from utils.strategy_builder.strategy_validator import validate_strategy_plan
-from utils.strategy_builder.strategy_llm_prompt import build_strategy_query_llm_prompt
+from utils.strategy_builder.strategy_llm_prompt import build_strategy_query_copy_prompt
 from utils.strategy_builder.ai_query import StrategyQueryAiError, execute_strategy_query_ai_with_retries
 
 router = APIRouter(prefix="/api", tags=["strategy-builder"])
@@ -85,6 +85,37 @@ class CustomQueryBatchScheduleRequest(BaseModel):
     skip_preflight: bool = False
 
 
+def _append_ai_symbol_context(message: str, known_symbols: Optional[List[str]], form_symbol: Optional[str]) -> str:
+    symbols: List[str] = []
+    seen: set[str] = set()
+    for symbol in known_symbols or []:
+        clean = str(symbol or "").strip().upper()
+        if clean and clean not in seen:
+            seen.add(clean)
+            symbols.append(clean)
+    if not symbols:
+        return message
+
+    shown = symbols[:100]
+    lines = [
+        message.rstrip(),
+        "",
+        "Available symbol universe for this order form:",
+        ", ".join(f'"{symbol}"' for symbol in shown),
+    ]
+    if len(symbols) > len(shown):
+        lines.append(f"(Only the first {len(shown)} symbols are shown from {len(symbols)} available symbols.)")
+    if form_symbol:
+        lines.append(f'Current form symbol: "{str(form_symbol).strip().upper()}".')
+    lines.extend(
+        [
+            "If the user asks for top N / best N / N NEPSE stocks, use FOR SYMBOL IN with this available universe and RANK MATCHES BY ... LIMIT N ORDERS.",
+            "Do not collapse a top-N request to only the current form symbol when this universe is available.",
+        ]
+    )
+    return "\n".join(lines)
+
+
 @router.get("/strategy-builder/fields")
 async def strategy_builder_fields():
     return {"fields": get_field_catalog(), "functions": get_supported_functions()}
@@ -104,7 +135,7 @@ async def strategy_builder_functions():
 
 @router.get("/strategy-builder/llm-prompt")
 async def strategy_builder_llm_prompt(side: str = "buy", form_symbol: Optional[str] = None):
-    return {"prompt": build_strategy_query_llm_prompt(side=side, form_symbol=form_symbol)}
+    return {"prompt": build_strategy_query_copy_prompt(side=side, form_symbol=form_symbol)}
 
 
 @router.get("/strategy-builder/symbols")
@@ -165,6 +196,7 @@ async def generate_strategy_query(body: StrategyAiGenerateRequest, db: Session =
             f"{message.strip()}\n\n"
             f"Refine or replace this draft query if helpful:\n```\n{body.current_query.strip()}\n```"
         )
+    message = _append_ai_symbol_context(message, body.known_symbols, body.form_symbol)
     try:
         return await execute_strategy_query_ai_with_retries(
             message,
@@ -175,7 +207,7 @@ async def generate_strategy_query(body: StrategyAiGenerateRequest, db: Session =
             db=db,
             holdings_by_symbol=body.holdings_by_symbol,
             known_symbols=body.known_symbols,
-            require_schedule_preflight=True,
+            require_schedule_preflight=False,
         )
     except StrategyQueryAiError as exc:
         raise HTTPException(

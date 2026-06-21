@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import './DpHolding.css';
 import ErrorMessage from '../../components/ErrorMessage';
 import NepseAlphaSymbolLink from '../../components/NepseAlphaSymbolLink';
+import Dropdown from '../../components/Dropdown';
+import CommonTable from '../../components/table/Table';
 import StrategySellForm, { StrategyPayload } from './StrategySellForm';
 import { getBoardLotSize, normalizeSellQty } from './lotSize';
 
@@ -17,6 +19,12 @@ interface DPHolding {
   previousCloseprice?: number;
   ltp?: number;
   currentBalance?: number;
+  averageBuyPrice?: number;
+  buyValue?: number;
+  actualProfitLoss?: number | null;
+  buyPriceSource?: string;
+  holdingDays?: number | null;
+  dateRange?: string;
 }
 
 interface ClientSession {
@@ -84,11 +92,36 @@ const formatValue = (value: unknown) => {
   return '-';
 };
 
+const formatHoldingDuration = (days: number | null | undefined) => {
+  const totalDays = Math.max(0, Math.floor(Number(days || 0)));
+  if (!totalDays) {
+    return '-';
+  }
+
+  if (totalDays < 30) {
+    return `${totalDays}d`;
+  }
+
+  const years = Math.floor(totalDays / 365);
+  const remainingAfterYears = totalDays % 365;
+  const months = Math.floor(remainingAfterYears / 30);
+  const remainingDays = remainingAfterYears % 30;
+
+  const parts: string[] = [];
+  if (years > 0) parts.push(`${years}y`);
+  if (months > 0) parts.push(`${months}m`);
+  if (remainingDays > 0 || parts.length === 0) parts.push(`${remainingDays}d`);
+
+  return parts.join(' ');
+};
+
 const processHoldings = (holdings: DPHolding[]) =>
   holdings.map((holding) => {
-    const gainedProfit = (holding.valueAsOfLTP || 0) - (holding.valueAsOfPreviousClosePrice || 0);
-    const percentChange = holding.valueAsOfPreviousClosePrice
-      ? ((gainedProfit / holding.valueAsOfPreviousClosePrice) * 100).toFixed(1)
+    const fallbackProfit = (holding.valueAsOfLTP || 0) - (holding.valueAsOfPreviousClosePrice || 0);
+    const gainedProfit = typeof holding.actualProfitLoss === 'number' ? holding.actualProfitLoss : fallbackProfit;
+    const baseValue = holding.buyValue || holding.valueAsOfPreviousClosePrice || 0;
+    const percentChange = baseValue
+      ? ((gainedProfit / baseValue) * 100).toFixed(1)
       : '0.0';
 
     return {
@@ -96,9 +129,9 @@ const processHoldings = (holdings: DPHolding[]) =>
       percentChange,
       gainedProfit,
       color:
-        (holding.valueAsOfLTP || 0) > (holding.valueAsOfPreviousClosePrice || 0)
+        gainedProfit > 0
           ? 'lightgreen'
-          : (holding.valueAsOfLTP || 0) < (holding.valueAsOfPreviousClosePrice || 0)
+          : gainedProfit < 0
             ? 'red'
             : 'lightyellow',
     };
@@ -119,12 +152,18 @@ const combineHoldings = (holdings: DPHolding[]): CombinedHolding[] => {
       existing.valueAsOfLTP = (existing.valueAsOfLTP || 0) + (holding.valueAsOfLTP || 0);
       existing.valueAsOfPreviousClosePrice =
         (existing.valueAsOfPreviousClosePrice || 0) + (holding.valueAsOfPreviousClosePrice || 0);
-      existing.gainedProfit = (existing.valueAsOfLTP || 0) - (existing.valueAsOfPreviousClosePrice || 0);
-      existing.percentChange = existing.valueAsOfPreviousClosePrice
-        ? (((existing.gainedProfit || 0) / existing.valueAsOfPreviousClosePrice) * 100).toFixed(1)
+      existing.buyValue = (existing.buyValue || 0) + (holding.buyValue || 0);
+      existing.actualProfitLoss = (existing.actualProfitLoss || 0) + (holding.actualProfitLoss || 0);
+      existing.gainedProfit = existing.actualProfitLoss || ((existing.valueAsOfLTP || 0) - (existing.valueAsOfPreviousClosePrice || 0));
+      existing.percentChange = existing.buyValue
+        ? (((existing.gainedProfit || 0) / existing.buyValue) * 100).toFixed(1)
         : '0.0';
       existing.ltp = holding.ltp || existing.ltp;
       existing.previousCloseprice = holding.previousCloseprice || existing.previousCloseprice;
+      existing.averageBuyPrice = existing.currentBalance
+        ? (existing.buyValue || 0) / existing.currentBalance
+        : existing.averageBuyPrice;
+      existing.holdingDays = Math.max(Number(existing.holdingDays || 0), Number(holding.holdingDays || 0)) || null;
     } else {
       bySymbol.set(symbol, {
         ...holding,
@@ -471,13 +510,88 @@ const DPHoldings: React.FC = () => {
     (acc, row) => {
       acc.valueAsOfPreviousClosePrice += row.valueAsOfPreviousClosePrice || 0;
       acc.valueAsOfLTP += row.valueAsOfLTP || 0;
+      acc.buyValue += row.buyValue || 0;
+      acc.actualProfitLoss += typeof row.actualProfitLoss === 'number' ? row.actualProfitLoss : 0;
+      acc.dailyGain += (row.valueAsOfLTP || 0) - (row.valueAsOfPreviousClosePrice || 0);
       return acc;
     },
-    { valueAsOfPreviousClosePrice: 0, valueAsOfLTP: 0, profit: 0 },
+    { valueAsOfPreviousClosePrice: 0, valueAsOfLTP: 0, buyValue: 0, actualProfitLoss: 0, dailyGain: 0, profit: 0 },
   );
-  totals.profit = totals.valueAsOfLTP - totals.valueAsOfPreviousClosePrice;
+  totals.profit = totals.buyValue > 0 ? totals.actualProfitLoss : totals.valueAsOfLTP - totals.valueAsOfPreviousClosePrice;
 
   const isProfit = totals.profit >= 0;
+  const isDailyGain = totals.dailyGain >= 0;
+  const portfolioRows = visibleHoldings.map((holding, index) => {
+    const dailyGain = (holding.valueAsOfLTP || 0) - (holding.valueAsOfPreviousClosePrice || 0);
+    const totalProfit = typeof holding.actualProfitLoss === 'number' ? holding.actualProfitLoss : null;
+    const averageBuyPrice = holding.averageBuyPrice ?? null;
+    const ltp = holding.ltp ?? null;
+    const currentValue = holding.valueAsOfLTP ?? null;
+    const balance = holding.currentBalance ?? null;
+    return {
+      scrip: (
+        <strong>
+          <NepseAlphaSymbolLink symbol={holdingSymbol(holding)}>
+            {formatValue(holding.scrip || holdingSymbol(holding))}
+          </NepseAlphaSymbolLink>
+          {holding.symbolName && holding.symbolName !== holding.scrip && (
+            <span className="dp-holdings-symbol-name">{holding.symbolName}</span>
+          )}
+        </strong>
+      ),
+      ...(holdingMode === 'combined' ? { users: (holding as CombinedHolding).clientCount || 1 } : {}),
+      averageBuyPrice: averageBuyPrice == null ? '-' : formatValue(averageBuyPrice),
+      ltp: ltp == null ? '-' : formatValue(ltp),
+      valueAsOfLTP: currentValue == null ? '-' : formatValue(currentValue),
+      dailyGain: (
+        <span className={dailyGain >= 0 ? 'positive' : 'negative'}>
+          {dailyGain >= 0 ? '+' : '-'}{formatCurrency(Math.abs(dailyGain))}
+        </span>
+      ),
+      totalProfit: totalProfit == null ? '-' : (
+        <span className={totalProfit >= 0 ? 'positive' : 'negative'}>
+          {totalProfit >= 0 ? '+' : '-'}{formatCurrency(Math.abs(totalProfit))}
+        </span>
+      ),
+      percentChange: `${holding.percentChange}%`,
+      balance: balance == null ? '-' : formatValue(balance),
+      holdingDays: formatHoldingDuration(holding.holdingDays),
+      action: (
+        <button
+          type="button"
+          className="table-action-btn dp-sell-btn"
+          onClick={() => openSellDialog(holding)}
+        >
+          Sell
+        </button>
+      ),
+      color: holding.color,
+      sortValues: {
+        averageBuyPrice: averageBuyPrice ?? '',
+        ltp: ltp ?? '',
+        valueAsOfLTP: currentValue ?? '',
+        dailyGain,
+        totalProfit: totalProfit ?? '',
+        percentChange: Number(String(holding.percentChange || 0).replace(/[^0-9.-]/g, '')) || 0,
+        balance: balance ?? '',
+        holdingDays: holding.holdingDays ?? '',
+      },
+      rowKey: `${holdingSymbol(holding)}-${index}`,
+    };
+  });
+  const portfolioColumns = [
+    'scrip',
+    ...(holdingMode === 'combined' ? ['users'] : []),
+    'balance',
+    'averageBuyPrice',
+    'ltp',
+    'valueAsOfLTP',
+    'dailyGain',
+    'totalProfit',
+    'percentChange',
+    'holdingDays',
+    'action',
+  ];
 
   return (
     <div className="dp-holdings-page">
@@ -485,9 +599,9 @@ const DPHoldings: React.FC = () => {
         <div className="dp-holdings-hero-content">
           <div className="dp-holdings-hero-icon" aria-hidden="true">📊</div>
           <div>
-            <h2 className="dp-holdings-hero-title">DP Holdings</h2>
+            <h2 className="dp-holdings-hero-title">Portfolio</h2>
             <p className="dp-holdings-hero-subtitle">
-              View depository participant holdings and portfolio value for logged-in clients.
+              View holdings, buy cost, current value, and profit or loss for logged-in clients.
             </p>
           </div>
         </div>
@@ -518,35 +632,26 @@ const DPHoldings: React.FC = () => {
               className={holdingMode === 'combined' ? 'active' : ''}
               onClick={() => setHoldingMode('combined')}
             >
-              Combined Holding
+              Combined Portfolio
             </button>
           </div>
         </div>
 
         <div className="dp-holdings-form">
           {holdingMode === 'single' ? (
-            <div className="form-group">
-              <label htmlFor="dpClientId">User</label>
-              <select
-                id="dpClientId"
-                className="select"
-                value={clientID}
-                onChange={(e) => setClientID(e.target.value)}
-                disabled={loggedInClientIDs.length === 0}
-                required
-              >
-                {loggedInClientIDs.length === 0 ? (
-                  <option value="">No logged-in clients</option>
-                ) : (
-                  loggedInClients.map((client) => (
-                    <option key={client.client_id} value={client.client_id}>{clientLabel(client)}</option>
-                  ))
-                )}
-              </select>
-              {loggedInClientIDs.length === 0 && (
-                <span className="dp-holdings-hint">Log in via TMS Login tab first.</span>
-              )}
-            </div>
+            <Dropdown
+              id="dpClientId"
+              label="User"
+              value={clientID}
+              onChange={setClientID}
+              disabled={loggedInClientIDs.length === 0}
+              placeholder={loggedInClientIDs.length === 0 ? 'No logged-in clients' : 'Select a user'}
+              hint={loggedInClientIDs.length === 0 ? 'Log in via TMS Login tab first.' : undefined}
+              options={loggedInClients.map((client) => ({
+                value: client.client_id,
+                label: clientLabel(client),
+              }))}
+            />
           ) : (
             <div className="form-group dp-combined-user-picker">
               <label>Combined Users</label>
@@ -581,17 +686,19 @@ const DPHoldings: React.FC = () => {
             <span className="dp-holdings-stat-value">{visibleHoldings.length}</span>
           </div>
           <div className="dp-holdings-stat-card">
-            <span className="dp-holdings-stat-label">Prev. Close Value</span>
-            <span className="dp-holdings-stat-value">Rs. {formatCurrency(totals.valueAsOfPreviousClosePrice)}</span>
+            <span className="dp-holdings-stat-label">Daily Gain</span>
+            <span className={`dp-holdings-stat-value ${isDailyGain ? 'positive' : 'negative'}`}>
+              {isDailyGain ? '+' : '-'}{formatCurrency(Math.abs(totals.dailyGain))}
+            </span>
           </div>
           <div className="dp-holdings-stat-card">
             <span className="dp-holdings-stat-label">Current Value (LTP)</span>
             <span className="dp-holdings-stat-value">Rs. {formatCurrency(totals.valueAsOfLTP)}</span>
           </div>
           <div className={`dp-holdings-stat-card ${isProfit ? 'profit' : 'loss'}`}>
-            <span className="dp-holdings-stat-label">Total P/L</span>
+            <span className="dp-holdings-stat-label">Total Profit</span>
             <span className={`dp-holdings-stat-value ${isProfit ? 'positive' : 'negative'}`}>
-              {isProfit ? '+' : '-'}Rs. {formatCurrency(Math.abs(totals.profit))}
+              {isProfit ? '+' : '-'}{formatCurrency(Math.abs(totals.profit))}
             </span>
           </div>
         </div>
@@ -599,7 +706,7 @@ const DPHoldings: React.FC = () => {
 
       <div className="dp-holdings-content panel">
         <div className="dp-holdings-content-header">
-          <h3 className="panel-title">Holdings Table</h3>
+          <h3 className="panel-title">Portfolio Table</h3>
           {clientID && hasFetched && !isLoading && (
             <span className="badge badge-muted">
               {holdingMode === 'combined' ? `${selectedCombinedClients.length} users` : clientID}
@@ -614,72 +721,26 @@ const DPHoldings: React.FC = () => {
           </div>
         ) : visibleHoldings.length > 0 ? (
           <div className="dp-holdings-table-shell">
-            <div className="common-table-wrap">
-              <table className="common-table dp-holdings-table">
-                <thead>
-                  <tr>
-                    <th>Scrip</th>
-                    {holdingMode === 'combined' && <th>Users</th>}
-                    <th>LTP</th>
-                    <th>Prev. Close</th>
-                    <th>LTP Value</th>
-                    <th>P/L</th>
-                    <th>%</th>
-                    <th>Balance</th>
-                    <th>Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {visibleHoldings.map((holding, index) => (
-                    <tr key={`${holdingSymbol(holding)}-${index}`} style={{ backgroundColor: holding.color }}>
-                      <td>
-                        <strong>
-                          <NepseAlphaSymbolLink symbol={holdingSymbol(holding)}>
-                            {formatValue(holding.scrip)}
-                          </NepseAlphaSymbolLink>
-                        </strong>
-                        {holding.symbolName && holding.symbolName !== holding.scrip && (
-                          <span className="dp-holdings-symbol-name">{holding.symbolName}</span>
-                        )}
-                      </td>
-                      {holdingMode === 'combined' && (
-                        <td>{(holding as CombinedHolding).clientCount || 1}</td>
-                      )}
-                      <td>{formatValue(holding.ltp)}</td>
-                      <td>{formatValue(holding.previousCloseprice)}</td>
-                      <td>{formatValue(holding.valueAsOfLTP)}</td>
-                      <td className={(holding.gainedProfit || 0) >= 0 ? 'positive' : 'negative'}>
-                        {formatValue(holding.gainedProfit)}
-                      </td>
-                      <td>{holding.percentChange}%</td>
-                      <td>{formatValue(holding.currentBalance)}</td>
-                      <td>
-                        <button
-                          type="button"
-                          className="table-action-btn dp-sell-btn"
-                          onClick={() => openSellDialog(holding)}
-                        >
-                          Sell
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <CommonTable
+              data={portfolioRows}
+              columns={portfolioColumns}
+              emptyMessage="No portfolio holdings found."
+            />
             <div className={`dp-holdings-totals ${isProfit ? 'profit' : 'loss'}`} role="row">
               <div className="dp-holdings-total-item">
-                <span className="dp-holdings-total-label">Total Prev. Close</span>
-                <span className="dp-holdings-total-value">Rs. {formatCurrency(totals.valueAsOfPreviousClosePrice)}</span>
+                <span className="dp-holdings-total-label">Daily Gain</span>
+                <span className={`dp-holdings-total-value ${isDailyGain ? 'positive' : 'negative'}`}>
+                  {isDailyGain ? '+' : '-'}{formatCurrency(Math.abs(totals.dailyGain))}
+                </span>
               </div>
               <div className="dp-holdings-total-item">
                 <span className="dp-holdings-total-label">Total LTP Value</span>
                 <span className="dp-holdings-total-value">Rs. {formatCurrency(totals.valueAsOfLTP)}</span>
               </div>
               <div className="dp-holdings-total-item dp-holdings-total-item-pl">
-                <span className="dp-holdings-total-label">Net P/L</span>
+                <span className="dp-holdings-total-label">Total Profit</span>
                 <span className={`dp-holdings-total-value ${isProfit ? 'positive' : 'negative'}`}>
-                  {isProfit ? '+' : ''}Rs. {formatCurrency(Math.abs(totals.profit))}
+                  {isProfit ? '+' : ''}{formatCurrency(Math.abs(totals.profit))}
                 </span>
               </div>
             </div>

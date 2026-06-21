@@ -18,7 +18,7 @@ const EDIS_URL = 'https://bulk-ipo.onrender.com/#edis';
 const NAV_ITEMS: NavItem[] = [
   { id: 'OrderStatus', label: 'Order Logs', icon: '📋' },
   { id: 'ScheduleOrder', label: 'Schedule Order', icon: '📅' },
-  { id: 'DPHoldings', label: 'DP Holdings', icon: '📊' },
+  { id: 'DPHoldings', label: 'Portfolio', icon: '📊' },
   { id: 'StockScreener', label: 'Stock Screener', icon: '🔎' },
   { id: 'StockGrabber', label: 'Stock Grabber', icon: '⚡' },
   { id: 'StrategyDetails', label: 'Strategy Details', icon: '🧭' },
@@ -34,7 +34,7 @@ const PAGE_META: Record<string, { title: string; subtitle: string }> = {
   StrategyDetails: { title: 'Strategy Details', subtitle: 'Simple guide for buy and sell strategy logic' },
   OrderStatus: { title: 'Order Logs', subtitle: 'View order history and status updates' },
   CheckOrders: { title: 'Check Orders', subtitle: 'Monitor and verify pending orders' },
-  DPHoldings: { title: 'DP Holdings', subtitle: 'Depository participant holdings overview' },
+  DPHoldings: { title: 'Portfolio', subtitle: 'Holdings, buy cost, and profit/loss overview' },
   StockTable: { title: 'Stock Table', subtitle: 'Live market data and stock quotes' },
   StockScreener: { title: 'Stock Screener', subtitle: 'Filter and rank stocks using Nepse Alpha signals' },
   StockGrabber: { title: 'Stock Grabber', subtitle: 'Automated stock monitoring and order placement' },

@@ -209,15 +209,16 @@ export const buildChatGptScreenerPromptForCopy = (
   const aliasReference = buildAliasReference(spec);
   const unsupportedTerms = buildUnsupportedTermsBlock(spec, new Set(allowedKeys));
 
-  return `You generate NEPSE stock screener queries for a TMS automation app. Output uses a mini-language (NOT full SQL).
-Single-pass: give the safest valid query on the first reply.
+  return `You generate NEPSE stock screener queries for a TMS automation app.
+Use this stock screener mini-language for true market-wide discovery like "top 50 NEPSE good stocks".
+Return the closest valid query in one shot.
 
 Decision path:
-1. If the main request maps to allowed fields, return STATUS: OK.
-2. If one requested field is unsupported but the main screen still works without it or with a close allowed substitute, return STATUS: OK and explain the gap in Summary.
-3. If the user asks for "top N", "best N", or "N stocks", return STATUS: OK using ORDER BY with LIMIT N, even when there is no WHERE filter.
-4. If the user asks for symbol/name/ticker filtering, omit that filter and return the closest valid screen with a Limitation note.
-5. Return STATUS: ERROR only when the field catalog is empty or the requested logic needs unsupported syntax such as OR/math/field-to-field comparison and cannot be approximated.
+1. Return STATUS: OK with the closest allowed screen.
+2. For "top N", "best N", or "N stocks", use ORDER BY with LIMIT N, even with no WHERE filter.
+3. Omit unsupported symbol/name/ticker filters and explain the Limitation.
+4. Use this prompt for true top-N discovery; do not output Strategy Query Language.
+5. Avoid STATUS: ERROR. If the request is unclear, return a useful default ranked screen with a Limitation note.
 
 Rules:
 - Use ONLY the field keys listed below in WHERE and ORDER BY (copy snake_case keys exactly).
@@ -241,7 +242,7 @@ ${aliasReference}
 Unsupported terms (omit or substitute — do not put in query):
 ${unsupportedTerms}
 
-Response when you can build a reasonable screen (default):
+Response format:
 STATUS: OK
 Summary:
 - 2-3 bullets: what the screen finds
@@ -252,12 +253,10 @@ ORDER BY ${spec.default_rank_by} DESC
 LIMIT ${spec.limit_default}
 \`\`\`
 
-Response only when no valid query is possible:
-STATUS: ERROR
-Reason:
-- Start with: This screener is not supported —
-- Use only for an empty field catalog or unsupported syntax that cannot be safely approximated.
-Do NOT include a Query block.
+Top-N examples:
+- "top 50 good stocks" -> ORDER BY ${spec.default_rank_by} DESC / LIMIT 50
+- "symbol NABIL" -> omit symbol filter; symbol is display-only.
+- Do not output Strategy Query Language: no STRATEGY_VERSION, SIDE, RULE, FOR SYMBOL, or ORDER QUANTITY.
 ${exampleBlock}
 User request:
 [PASTE WHAT YOU WANT TO SCREEN FOR HERE]`;
@@ -297,10 +296,11 @@ export const buildChatGptScreenerPrompt = (
   const resultColumnList = spec.result_columns.map((col) => `\`${col}\``).join(', ');
 
   return `You are a practical query generator for a **NEPSE stock screener** powered by **Nepse Alpha** data.
-Your output is pasted into a TMS automation app that parses a **custom mini-language** (NOT full SQL).
+Your output is pasted into a TMS automation app that parses a **stock screener mini-language** (NOT Strategy Query Language and NOT full SQL).
+This is the correct prompt for true market-wide discovery such as "top 50 NEPSE good stocks".
 
 The field list below is loaded **live from the backend API** (\`GET /stock_screener/fields\`).
-You must use **only** the exact column keys listed here. If a requested column is not listed, omit/substitute it when the remaining request is still useful; use STATUS: ERROR only when no valid screen can be built.
+You must use **only** the exact column keys listed here. If a requested column is not listed, omit/substitute it and return the closest useful screen.
 
 ---
 
@@ -314,7 +314,8 @@ You must use **only** the exact column keys listed here. If a requested column i
 6. **Type rules** — Numeric fields: \`>\`, \`>=\`, \`<\`, \`<=\`, \`=\`, \`!=\`, \`<>\`, \`BETWEEN\`. Text fields: \`=\`, \`!=\`, \`<>\`, \`IN (...)\`, \`CONTAINS\`, \`LIKE\`.
 7. **Always include** \`ORDER BY <allowed_key> ASC|DESC\` and \`LIMIT <1-${spec.limit_max}>\` (default LIMIT ${spec.limit_default}).
 8. **Top-N default** — For "top N", "best N", or "N stocks", use \`ORDER BY ${spec.default_rank_by} DESC\` and \`LIMIT N\` unless the user names a better allowed ranking field.
-9. **ERROR only when needed** — Use \`STATUS: ERROR\` only for an unloaded field catalog or unsupported OR/math/field-to-field comparison that cannot be approximated. If no filter maps but ranking is possible, return the default ranked screen.
+9. **Avoid errors** — If no filter maps but ranking is possible, return the default ranked screen. Use \`STATUS: ERROR\` only when the live field catalog is empty.
+10. **Do not output Strategy Query Language** — No \`STRATEGY_VERSION\`, \`SIDE\`, \`RULE\`, \`FOR SYMBOL\`, or \`ORDER QUANTITY\` in screener responses.
 
 ---
 
@@ -377,13 +378,13 @@ ${fieldSections || '**ERROR: Field catalog not loaded.** Return STATUS: ERROR be
 
 ---
 
-## 8. TERMS THAT DO **NOT** EXIST (omit/substitute, or ERROR if nothing useful remains)
+## 8. TERMS THAT DO **NOT** EXIST (omit/substitute)
 
 If the user asks to filter/sort by any of these, they are **not** in the Nepse Alpha screener API:
 
 ${buildUnsupportedTermsBlock(spec, allowedKeySet)}
 
-For unsupported terms: omit or substitute them when other valid filters remain, and add a Limitation bullet. If the unsupported term is the whole request but ranking is still useful, return the default ranked screen instead of ERROR.
+For unsupported terms: omit or substitute them and add a Limitation bullet. If the unsupported term is the whole request but ranking is still useful, return the default ranked screen.
 
 Always avoid in the Query block: comparing two fields (\`ltp < fifty_two_week_low\`), math on fields, \`OR\` logic, nested parentheses, and \`WHERE symbol = ...\`. If possible, approximate with allowed filters and explain the limitation.
 
@@ -430,12 +431,13 @@ LIMIT ${spec.limit_default}
 
 Output **exactly one** fenced query block. Keys must match section 2 exactly.
 
-### When the request CANNOT be satisfied:
+### Fallback when the request is unclear or unsupported:
 \`\`\`
-STATUS: ERROR
+STATUS: OK
 
-Reason:
-- This screener is not supported — (only for empty field catalog or unsupported syntax that cannot be approximated)
+Summary:
+- Ranks stocks using the default allowed ranking field.
+- Limitation: The requested filter could not be mapped exactly; used default ranking instead — close, not exact.
 
 Invalid request detail:
 - (what the user asked for)
@@ -443,7 +445,11 @@ Invalid request detail:
 Closest allowed API keys:
 - (list from section 2, or "none")
 
-Do NOT include a Query block when STATUS is ERROR.
+Query:
+\`\`\`
+ORDER BY ${spec.default_rank_by} DESC
+LIMIT ${spec.limit_default}
+\`\`\`
 \`\`\`
 
 ---
@@ -484,7 +490,7 @@ LIMIT ${spec.limit_default}
 4. For "top N", "best N", or "N stocks", choose LIMIT N and rank by the best matching allowed field; use ${spec.default_rank_by} DESC when unsure.
 5. Pick operators from **section 5** matching the field **type** in **section 4**.
 6. If at least one useful intent maps, or a default ranked screen is useful → STATUS: OK + one query using **only** canonical keys from section 2.
-7. Use STATUS: ERROR only when the field catalog is empty or forbidden syntax cannot be approximated without creating a misleading query.
+7. Use STATUS: ERROR only when the live field catalog is empty.
 8. Final self-check: every field name in your query appears in section 2, text values are single-quoted, ORDER BY has ASC or DESC, and LIMIT is a number from 1 to ${spec.limit_max}.
 
 ---

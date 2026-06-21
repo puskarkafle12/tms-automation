@@ -17,6 +17,7 @@ import {
 } from '../../utils/nepalTime';
 import {
   FOREVER_FROM_DATE,
+  isDateWithinHistoryRange,
   historyRangeLabel,
   HistoryRangePreset,
   resolveHistoryDateRange,
@@ -62,7 +63,7 @@ type ScanIntervalUnit = 'seconds' | 'minutes' | 'hours';
 
 const CORE_CACHE_STORAGE_KEY = 'tms-order-logs-core-v1';
 const TRADE_BOOK_CACHE_STORAGE_KEY = 'tms-order-logs-trade-book-v1';
-const HISTORY_CACHE_STORAGE_KEY = 'tms-order-logs-history-v1';
+const HISTORY_CACHE_STORAGE_KEY = 'tms-order-logs-history-v2';
 const TRADEBOOK_HISTORY_MAX_ATTEMPTS = 3;
 const TRADEBOOK_HISTORY_RETRY_DELAY_MS = 750;
 
@@ -238,6 +239,25 @@ const formatCurrency = (value: number | string | null | undefined) => {
 const formatTradeAmount = (value: number | string | null | undefined) => {
   if (value == null || value === '' || Number.isNaN(Number(value))) return '-';
   return Number(value).toLocaleString('en-NP', { maximumFractionDigits: 2 });
+};
+
+const formatHoldingDuration = (days: number | null | undefined) => {
+  const totalDays = Math.max(0, Math.floor(Number(days || 0)));
+  if (!totalDays) {
+    return '-';
+  }
+  if (totalDays < 30) {
+    return `${totalDays}d`;
+  }
+  const years = Math.floor(totalDays / 365);
+  const remainingAfterYears = totalDays % 365;
+  const months = Math.floor(remainingAfterYears / 30);
+  const remainingDays = remainingAfterYears % 30;
+  const parts: string[] = [];
+  if (years > 0) parts.push(`${years}y`);
+  if (months > 0) parts.push(`${months}m`);
+  if (remainingDays > 0 || parts.length === 0) parts.push(`${remainingDays}d`);
+  return parts.join(' ');
 };
 
 const formatTradeSide = (value: unknown) => {
@@ -654,7 +674,7 @@ const GetOrderStatus: React.FC = () => {
   );
 
   const fetchTradebookHistory = useCallback(
-    async (selectedClientId: string, fromDate: string, toDate: string) => {
+    async (selectedClientId: string, fromDate: string, toDate: string, force = false) => {
       if (!selectedClientId) {
         return [];
       }
@@ -663,6 +683,9 @@ const GetOrderStatus: React.FC = () => {
         from_date: fromDate,
         to_date: toDate,
       });
+      if (force) {
+        params.set('force_refresh', 'true');
+      }
       const requestUrl = `${apiUrl}/tradebook_history?${params.toString()}`;
       let lastError = 'Trade history request failed';
 
@@ -681,9 +704,14 @@ const GetOrderStatus: React.FC = () => {
             }
             throw new Error(lastError);
           }
-          const rows = await response.json();
+          const payload = await response.json();
+          const rows = Array.isArray(payload)
+            ? payload
+            : (Array.isArray(payload.positions) && payload.positions.length > 0
+              ? payload.positions
+              : payload.rows || []);
           return Array.isArray(rows)
-            ? rows.map((row) => ({ ...row, client_id: selectedClientId }))
+            ? rows.map((row) => ({ ...row, client_id: row.client_id || selectedClientId }))
             : [];
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
@@ -1017,20 +1045,23 @@ const GetOrderStatus: React.FC = () => {
 
         try {
           const historyResults = await Promise.all(
-            activeClientIds.map((id) => fetchTradebookHistory(id, fromDate, toDate)),
+            activeClientIds.map((id) => fetchTradebookHistory(id, fromDate, toDate, force)),
           );
           if (requestId !== historyRequestIdRef.current) {
             return;
           }
           const rows = historyResults.flat().sort((left, right) => {
-            const leftTime = new Date(left.tradeTime || 0).getTime();
-            const rightTime = new Date(right.tradeTime || 0).getTime();
+            const leftTime = new Date(left.tradeDate || left.tradeTime || left.dateRange || 0).getTime();
+            const rightTime = new Date(right.tradeDate || right.tradeTime || right.dateRange || 0).getTime();
             return rightTime - leftTime;
           });
           historyCacheRef.current = { key: cacheKey, rows, fetchedAt: Date.now() };
           setOrderHistory(rows);
           setHistoryLoaded(true);
           persistHistoryCache({ key: cacheKey, rows });
+          if (!rows.length) {
+            setErrorMessage('');
+          }
         } catch {
           if (requestId !== historyRequestIdRef.current) {
             return;
@@ -1676,18 +1707,48 @@ const GetOrderStatus: React.FC = () => {
       orderHistory.map((row) => {
         const symbol = row.symbol || row.script_name || '';
         const clientId = row.client_id || '';
+        const profitLoss = Number(row.profitLoss || 0);
+        const holdingDays = row.holdingDays == null ? null : Number(row.holdingDays || 0);
+        const dateRangeValue = String(row.dateRange || '');
+        const fallbackTradeDate = row.tradeDate
+          || dateRangeValue.split(' - ', 1)[0]
+          || row.tradeTime
+          || '';
         return {
-          tradeTime: row.tradeTime || '-',
           stock: <StockClientCell symbol={symbol} clientLabel={getClientLabel(clientId)} />,
-          buyOrSell: formatTradeSide(row.buyOrSell),
-          tradePrice: formatTradeAmount(row.tradePrice),
-          tradedQuantity: row.tradedQuantity ?? '-',
-          exchangeOrderId: row.exchangeOrderId || '-',
-          exchangeTradeId: row.exchangeTradeId || '',
+          tradeDate: fallbackTradeDate,
+          dateRange: row.dateRange || '-',
+          holdingDays: formatHoldingDuration(holdingDays),
+          quantity: formatScanCount(row.quantity),
+          buyPrice: formatTradeAmount(row.buyPrice),
+          sellPrice: row.sellPrice == null ? '-' : formatTradeAmount(row.sellPrice),
+          profitLoss: (
+            <span className={profitLoss >= 0 ? 'positive' : 'negative'}>
+              {profitLoss >= 0 ? '+' : '-'}Rs. {formatTradeAmount(Math.abs(profitLoss))}
+            </span>
+          ),
+          status: row.status || '-',
+          sortValues: {
+            dateRange: row.buyDate || row.dateRange || '',
+            holdingDays: holdingDays ?? '',
+            quantity: Number(row.quantity || 0),
+            buyPrice: Number(row.buyPrice || 0),
+            sellPrice: Number(row.sellPrice || 0),
+            profitLoss,
+            status: String(row.status || ''),
+          },
         };
       }),
     [getClientLabel, orderHistory],
   );
+
+  const visibleHistoryRows = useMemo(() => {
+    const { fromDate, toDate } = resolveHistoryDateRange(historyRangePreset, historyFromDate, historyToDate);
+    return orderHistoryRows.filter((row) => {
+      const tradeDate = row.tradeDate || row.dateRange || '';
+      return isDateWithinHistoryRange(String(tradeDate), fromDate, toDate);
+    });
+  }, [historyFromDate, historyRangePreset, historyToDate, orderHistoryRows]);
 
   const tabData: Record<OrderTab, { count: number; columns: string[]; rows: any[]; empty: string }> = {
     logs: {
@@ -1719,13 +1780,13 @@ const GetOrderStatus: React.FC = () => {
         : 'Loading trade book from TMS...',
     },
     history: {
-      count: orderHistory.length,
+      count: visibleHistoryRows.length,
       columns: getVisibleColumns(
-        orderHistoryRows,
-        ['tradeTime', 'stock', 'buyOrSell', 'tradePrice', 'tradedQuantity', 'exchangeOrderId'],
-        ['exchangeTradeId', 'displayName', 'clientMemberCode'],
+        visibleHistoryRows,
+        ['stock', 'dateRange', 'holdingDays', 'quantity', 'buyPrice', 'sellPrice', 'profitLoss', 'status'],
+        [],
       ),
-      rows: orderHistoryRows,
+      rows: visibleHistoryRows,
       empty: isHistoryLoading || !historyLoaded
         ? 'Loading trade history...'
         : 'No trade history found for the selected date range.',
@@ -1742,7 +1803,7 @@ const GetOrderStatus: React.FC = () => {
           <div>
             <h2 className="panel-title">Order Logs</h2>
             <p className="panel-subtitle">
-              All sections load on open and stay cached in your browser for 20 minutes. Use Refresh to fetch now.
+              All sections load on open and refresh from the server when needed.
             </p>
           </div>
           <div className="order-logs-header-actions">
@@ -2020,7 +2081,7 @@ const GetOrderStatus: React.FC = () => {
             )}
             <div className="order-logs-history-toolbar-actions">
               <p className="order-logs-history-hint">
-                Cached for 20 minutes. Use Apply or the refresh icon to fetch now.
+                Cached on the server for 2 days. Use Apply or the refresh icon to fetch now.
               </p>
               <button
                 type="button"

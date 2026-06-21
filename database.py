@@ -86,6 +86,30 @@ def ensure_performance_indexes():
         "CREATE INDEX IF NOT EXISTS ix_scheduled_orders_strategy_status ON scheduled_orders (strategy_type, status)",
         "CREATE INDEX IF NOT EXISTS ix_order_logs_client_script ON order_logs (client_id, script_name)",
         "CREATE INDEX IF NOT EXISTS ix_order_status_logs_timestamp_client_script ON order_status_logs (timestamp, client_id, script_name)",
+        """CREATE TABLE IF NOT EXISTS tradebook_history_cache (
+            id SERIAL PRIMARY KEY,
+            client_id VARCHAR NOT NULL,
+            trade_uid VARCHAR NOT NULL UNIQUE,
+            symbol VARCHAR,
+            side VARCHAR,
+            trade_date DATE,
+            trade_price FLOAT,
+            quantity FLOAT,
+            raw_row JSON,
+            fetched_at TIMESTAMP DEFAULT NOW(),
+            updated_at TIMESTAMP DEFAULT NOW()
+        )""",
+        "CREATE INDEX IF NOT EXISTS ix_tradebook_history_cache_client_date ON tradebook_history_cache (client_id, trade_date)",
+        "CREATE INDEX IF NOT EXISTS ix_tradebook_history_cache_client_symbol ON tradebook_history_cache (client_id, symbol)",
+        """CREATE TABLE IF NOT EXISTS tradebook_history_refreshes (
+            id SERIAL PRIMARY KEY,
+            client_id VARCHAR NOT NULL,
+            from_date DATE NOT NULL,
+            to_date DATE NOT NULL,
+            refreshed_at TIMESTAMP DEFAULT NOW(),
+            CONSTRAINT uq_tradebook_history_refresh UNIQUE (client_id, from_date, to_date)
+        )""",
+        "CREATE INDEX IF NOT EXISTS ix_tradebook_history_refreshes_client_range ON tradebook_history_refreshes (client_id, from_date, to_date)",
         "ALTER TABLE order_status_logs ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP",
         """CREATE TABLE IF NOT EXISTS portal_settings (
             id INTEGER PRIMARY KEY,

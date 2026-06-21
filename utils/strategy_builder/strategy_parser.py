@@ -724,6 +724,18 @@ def _format_strategy_param_line(name: str, value: Any) -> str:
 
 def format_strategy_query(plan: StrategyPlanAST) -> str:
     lines = [f"STRATEGY_VERSION {plan.version}", f"SIDE {plan.side}", ""]
+    if plan.rank and plan.rank.fields:
+        rank_parts = []
+        for item in plan.rank.fields:
+            field = item.get("field")
+            if not field:
+                continue
+            direction = str(item.get("direction") or "desc").upper()
+            rank_parts.append(f"{field} {direction}")
+        if rank_parts:
+            suffix = f" LIMIT {int(plan.rank.limit)} ORDERS" if plan.rank.limit is not None else ""
+            lines.append(f"RANK MATCHES BY {', '.join(rank_parts)}{suffix}")
+            lines.append("")
     if plan.position_protection:
         lines.append("POSITION_PROTECTION {")
         if plan.position_protection.fixed_stop_loss_price is not None:

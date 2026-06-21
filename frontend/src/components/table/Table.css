@@ -3,26 +3,35 @@
   border-collapse: separate;
   border-spacing: 0;
   font-size: 0.875rem;
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
+  background: linear-gradient(180deg, #fffdf8 0%, #fffaf1 100%);
+  border: 1px solid rgba(148, 127, 92, 0.22);
   border-radius: var(--radius-md);
   overflow: hidden;
+  box-shadow: 0 1px 2px rgba(31, 41, 55, 0.04), 0 10px 24px rgba(120, 91, 44, 0.06);
 }
 
 .common-table th,
 .common-table td {
-  padding: 0.75rem 1rem;
-  border-bottom: 1px solid var(--color-border);
+  padding: 0.72rem 0.95rem;
+  border-bottom: 1px solid rgba(148, 127, 92, 0.16);
   text-align: left;
+  vertical-align: middle;
 }
 
 .common-table th {
-  background: var(--color-bg);
+  background: linear-gradient(180deg, #fff7e8 0%, #f8efe0 100%);
   font-weight: 600;
   font-size: 0.75rem;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--color-text-muted);
+  letter-spacing: 0.03em;
+  color: #6b5b45;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+
+.common-table tbody tr {
+  transition: background-color 140ms ease, box-shadow 140ms ease;
 }
 
 .common-table tbody tr:last-child td {
@@ -30,11 +39,39 @@
 }
 
 .common-table tbody tr:hover {
-  background: #f8fafc;
+  background: #fff6e8;
+  box-shadow: inset 3px 0 0 rgba(180, 132, 55, 0.24);
+}
+
+.common-table tbody tr.common-table-row-profit {
+  background: rgba(34, 197, 94, 0.055);
+}
+
+.common-table tbody tr.common-table-row-profit:hover {
+  background: rgba(34, 197, 94, 0.095);
+  box-shadow: inset 3px 0 0 rgba(22, 163, 74, 0.28);
+}
+
+.common-table tbody tr.common-table-row-loss {
+  background: rgba(239, 68, 68, 0.05);
+}
+
+.common-table tbody tr.common-table-row-loss:hover {
+  background: rgba(239, 68, 68, 0.085);
+  box-shadow: inset 3px 0 0 rgba(220, 38, 38, 0.24);
+}
+
+.common-table tbody tr.common-table-row-flat {
+  background: rgba(245, 158, 11, 0.05);
+}
+
+.common-table tbody tr.common-table-row-flat:hover {
+  background: rgba(245, 158, 11, 0.085);
+  box-shadow: inset 3px 0 0 rgba(217, 119, 6, 0.22);
 }
 
 .common-table-link {
-  color: #2563eb;
+  color: #1d4ed8;
   font-weight: 700;
   text-decoration: none;
 }
@@ -57,7 +94,7 @@
 }
 
 .common-table button {
-  padding: 0.375rem 0.75rem;
+  padding: 0.38rem 0.72rem;
   border: none;
   border-radius: var(--radius-sm);
   background: var(--color-primary);
@@ -74,6 +111,7 @@
 .common-table-wrap {
   width: 100%;
   overflow-x: auto;
+  border-radius: var(--radius-md);
 }
 
 .common-table-empty {
@@ -83,8 +121,8 @@
   justify-content: center;
   padding: 2.5rem 1.5rem;
   text-align: center;
-  background: var(--color-bg);
-  border: 1px dashed var(--color-border-strong);
+  background: #fffaf1;
+  border: 1px dashed rgba(148, 127, 92, 0.35);
   border-radius: var(--radius-md);
 }
 

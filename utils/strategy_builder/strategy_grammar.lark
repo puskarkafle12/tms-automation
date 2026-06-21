@@ -32,8 +32,8 @@ defaults_block: "DEFAULTS" block_body
 portfolio_limits_block: "PORTFOLIO_LIMITS" block_body
 rank_block: "RANK" "MATCHES" "BY" rank_field ("," rank_field)* rank_limit?
 
-rank_field: IDENTIFIER order_dir?
-order_dir: "ASC" | "DESC"
+rank_field: IDENTIFIER ORDER_DIR?
+ORDER_DIR: "ASC" | "DESC"
 rank_limit: "LIMIT" NUMBER "ORDERS"
 
 rule: "RULE" STRING "FOR" "SYMBOL" symbol_target block_body

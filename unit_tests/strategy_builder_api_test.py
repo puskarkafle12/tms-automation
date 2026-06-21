@@ -1,8 +1,13 @@
 import unittest
 
 from utils.strategy_builder.constants import DEFAULT_RULE_ORDER_QUANTITY
-from utils.strategy_builder.strategy_llm_prompt import build_strategy_query_llm_prompt, supported_catalog_fields
-from utils.strategy_builder.strategy_parser import StrategyQueryError, parse_strategy_query
+from utils.strategy_builder.api import _append_ai_symbol_context
+from utils.strategy_builder.strategy_llm_prompt import (
+    build_strategy_query_copy_prompt,
+    build_strategy_query_llm_prompt,
+    supported_catalog_fields,
+)
+from utils.strategy_builder.strategy_parser import StrategyQueryError, format_strategy_query, parse_strategy_query
 from utils.strategy_builder.strategy_validator import validate_strategy_plan
 
 
@@ -79,6 +84,24 @@ class StrategyBuilderApiHelpersTest(unittest.TestCase):
         self.assertIn("SIDE BUY", prompt)
         self.assertIn("CZBIL", prompt)
         self.assertIn("FOR SYMBOL", prompt)
+
+    def test_copy_prompt_is_external_and_top_n_friendly(self):
+        prompt = build_strategy_query_copy_prompt(side="buy", form_symbol="CZBIL")
+        self.assertIn("plain-English trading request", prompt)
+        self.assertIn('FOR SYMBOL "CZBIL"', prompt)
+        self.assertIn("True top 50 NEPSE discovery", prompt)
+        self.assertIn("SCREENER query", prompt)
+        self.assertIn("Avoid STATUS: ERROR", prompt)
+        self.assertIn('FOR SYMBOL IN ("NABIL", "EBL", "GBIME")', prompt)
+        self.assertNotIn("Paste the 50 symbols", prompt)
+        self.assertNotIn("exact uppercase NEPSE symbol list", prompt)
+
+    def test_ai_symbol_context_guides_top_n_generation(self):
+        message = _append_ai_symbol_context("buy top 2 good stocks", ["nabil", "EBL"], "CZBIL")
+        self.assertIn('Available symbol universe for this order form:', message)
+        self.assertIn('"NABIL", "EBL"', message)
+        self.assertIn("FOR SYMBOL IN", message)
+        self.assertIn("Do not collapse a top-N request", message)
 
     def test_llm_prompt_includes_latest_grammar_and_fields(self):
         prompt = build_strategy_query_llm_prompt(side="sell", form_symbol="CZBIL")
@@ -173,6 +196,16 @@ class StrategyBuilderApiHelpersTest(unittest.TestCase):
         )
         self.assertEqual(plan.side, "BUY")
         self.assertEqual(plan.rules[0].symbols, ["CZBIL"])
+
+    def test_format_query_preserves_rank_block(self):
+        plan = parse_strategy_query(
+            'STRATEGY_VERSION 1\nSIDE BUY\nRANK MATCHES BY volume DESC LIMIT 3 ORDERS\n'
+            'RULE "A" FOR SYMBOL IN ("NABIL", "EBL") {\n'
+            "WHEN volume > 0\nORDER QUANTITY 10\n}"
+        )
+        formatted = format_strategy_query(plan)
+        self.assertIn("RANK MATCHES BY volume DESC LIMIT 3 ORDERS", formatted)
+        self.assertLess(formatted.index("RANK MATCHES"), formatted.index('RULE "A"'))
 
     def test_generated_strict_buy_sell_queries_parse_and_validate(self):
         cases = _strict_query_cases()
