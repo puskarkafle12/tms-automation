@@ -309,9 +309,15 @@ def _match_text(actual: Any, operator: str, expected: Any) -> bool:
     return False
 
 
-def record_matches_filters(record: Dict[str, Any], filters: List[Dict[str, Any]]) -> bool:
+def record_matches_filters(
+    record: Dict[str, Any],
+    filters: List[Dict[str, Any]],
+    *,
+    field_catalog: Optional[List[Dict[str, Any]]] = None,
+) -> bool:
     if not filters:
         return True
+    catalog = field_catalog or FIELD_CATALOG
     for item in filters:
         field = str(item.get("field") or "").strip()
         if not field:
@@ -319,7 +325,7 @@ def record_matches_filters(record: Dict[str, Any], filters: List[Dict[str, Any]]
         operator = str(item.get("operator") or "gte")
         expected = item.get("value")
         actual = record.get(field)
-        field_type = next((entry["type"] for entry in FIELD_CATALOG if entry["key"] == field), "number")
+        field_type = next((entry["type"] for entry in catalog if entry["key"] == field), "number")
         if field_type == "number":
             if not _match_numeric(actual, operator, _coerce_filter_value(expected)):
                 return False

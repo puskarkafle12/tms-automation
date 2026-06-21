@@ -11,6 +11,7 @@ interface CommonTableProps {
   data: TableRow[];
   onAction?: (row: TableRow, actionType: string) => void;
   columns?: string[];
+  columnLabels?: Record<string, string>;
   emptyMessage?: string;
   columnLinks?: Record<string, (row: TableRow) => string | undefined>;
   selectable?: boolean;
@@ -38,8 +39,9 @@ const COLUMN_LABEL_OVERRIDES: Record<string, string> = {
   dateRange: 'Buy - Sell',
 };
 
-const formatColumnLabel = (column: string) =>
-  COLUMN_LABEL_OVERRIDES[column]
+const formatColumnLabel = (column: string, columnLabels?: Record<string, string>) =>
+  columnLabels?.[column]
+  || COLUMN_LABEL_OVERRIDES[column]
   || column
     .replace(/([A-Z])/g, ' $1')
     .replace(/_/g, ' ')
@@ -70,6 +72,7 @@ const CommonTable: React.FC<CommonTableProps> = ({
   data,
   onAction,
   columns,
+  columnLabels,
   emptyMessage,
   columnLinks,
   selectable = false,
@@ -200,7 +203,7 @@ const CommonTable: React.FC<CommonTableProps> = ({
               ) : null}
               {columnsToRender.map((column, index) => (
                 <th key={index} onClick={() => handleSort(column)}>
-                  {formatColumnLabel(column)}
+                  {formatColumnLabel(column, columnLabels)}
                   {sortConfig && sortConfig.key === column ? (
                     <span className="common-table-sort">{sortConfig.direction === 'asc' ? ' ↑' : ' ↓'}</span>
                   ) : null}

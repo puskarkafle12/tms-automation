@@ -7,7 +7,7 @@ import './Dashboard.css';
 import DPHoldings from './DpHolding';
 import StockTable from './StockTable';
 import StockGrabberPage from './StockGrabberPage';
-import StockScreener from './StockScreener';
+import StockAnalysis from './StockAnalysis';
 import StrategyDetails from './StrategyDetails';
 import Settings from './Settings';
 import AppShell, { NavItem } from '../../components/layout/AppShell';
@@ -19,7 +19,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'OrderStatus', label: 'Order Logs', icon: '📋' },
   { id: 'ScheduleOrder', label: 'Schedule Order', icon: '📅' },
   { id: 'DPHoldings', label: 'Portfolio', icon: '📊' },
-  { id: 'StockScreener', label: 'Stock Screener', icon: '🔎' },
+  { id: 'StockAnalysis', label: 'Market Analysis', icon: '🔎' },
   { id: 'StockGrabber', label: 'Stock Grabber', icon: '⚡' },
   { id: 'StrategyDetails', label: 'Strategy Details', icon: '🧭' },
   { id: 'StockTable', label: 'Stock Table', icon: '📈' },
@@ -36,7 +36,7 @@ const PAGE_META: Record<string, { title: string; subtitle: string }> = {
   CheckOrders: { title: 'Check Orders', subtitle: 'Monitor and verify pending orders' },
   DPHoldings: { title: 'Portfolio', subtitle: 'Holdings, buy cost, and profit/loss overview' },
   StockTable: { title: 'Stock Table', subtitle: 'Live market data and stock quotes' },
-  StockScreener: { title: 'Stock Screener', subtitle: 'Filter and rank stocks using Nepse Alpha signals' },
+  StockAnalysis: { title: 'Market Analysis', subtitle: 'Combined Merolagani + Nepse Alpha screener, new IPO tracking, and stored market data' },
   StockGrabber: { title: 'Stock Grabber', subtitle: 'Automated stock monitoring and order placement' },
   Settings: { title: 'Settings', subtitle: 'Monitoring speed, defaults, and portal refresh behavior' },
 };
@@ -104,8 +104,8 @@ const DashBoardPage: React.FC = () => {
         return <StockTable />;
       case 'StockGrabber':
         return <StockGrabberPage />;
-      case 'StockScreener':
-        return <StockScreener />;
+      case 'StockAnalysis':
+        return <StockAnalysis />;
       case 'Settings':
         return <Settings />;
       default:

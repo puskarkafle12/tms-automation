@@ -165,6 +165,49 @@ def ensure_performance_indexes():
             refreshed_by VARCHAR
         )""",
         "CREATE INDEX IF NOT EXISTS ix_scheduled_field_reference_audits_ref ON scheduled_field_reference_audits (reference_id)",
+        """CREATE TABLE IF NOT EXISTS merolagani_daily_snapshots (
+            id SERIAL PRIMARY KEY,
+            snapshot_date DATE NOT NULL UNIQUE,
+            symbol_count INTEGER NOT NULL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT NOW()
+        )""",
+        """CREATE TABLE IF NOT EXISTS merolagani_daily_stocks (
+            id SERIAL PRIMARY KEY,
+            snapshot_date DATE NOT NULL,
+            symbol VARCHAR NOT NULL,
+            data JSON NOT NULL,
+            created_at TIMESTAMP DEFAULT NOW(),
+            CONSTRAINT uq_merolagani_daily_stock UNIQUE (snapshot_date, symbol)
+        )""",
+        "CREATE INDEX IF NOT EXISTS ix_merolagani_daily_stocks_date ON merolagani_daily_stocks (snapshot_date)",
+        "CREATE INDEX IF NOT EXISTS ix_merolagani_daily_stocks_symbol ON merolagani_daily_stocks (symbol)",
+        """CREATE TABLE IF NOT EXISTS market_symbol_registry (
+            symbol VARCHAR PRIMARY KEY,
+            first_seen_date DATE NOT NULL,
+            last_seen_date DATE NOT NULL,
+            is_watchlist BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT NOW(),
+            updated_at TIMESTAMP DEFAULT NOW()
+        )""",
+        """CREATE TABLE IF NOT EXISTS market_screener_cache (
+            symbol VARCHAR PRIMARY KEY,
+            merolagani_data JSON,
+            nepse_alpha_data JSON,
+            combined_data JSON,
+            merolagani_fetched_at TIMESTAMP,
+            nepse_alpha_fetched_at TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT NOW()
+        )""",
+        """CREATE TABLE IF NOT EXISTS market_data_refresh_log (
+            id SERIAL PRIMARY KEY,
+            refresh_type VARCHAR NOT NULL,
+            status VARCHAR NOT NULL,
+            symbol_count INTEGER,
+            message TEXT,
+            started_at TIMESTAMP,
+            completed_at TIMESTAMP DEFAULT NOW()
+        )""",
+        "CREATE INDEX IF NOT EXISTS ix_market_data_refresh_log_type ON market_data_refresh_log (refresh_type, completed_at DESC)",
     ]
     with engine.begin() as connection:
         for statement in statements:

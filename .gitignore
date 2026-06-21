@@ -8,6 +8,7 @@ test.py
 *.log
 *.json
 *.jsonl
+*.csv
 node_modules
 # Ignore everything in the alembic folder
 alembic/*

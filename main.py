@@ -68,10 +68,24 @@ from utils.market_status import (
 )
 import config.tms_config as tms_config
 from config.app_build_info import get_app_build_info
-from utils.external_data_sources.nepse_alpha.ai_query import ScreenerAiError, execute_ai_screener_with_retries
-from utils.external_data_sources.nepse_alpha.query_parser import ScreenerQueryError, parse_screener_query
-from utils.external_data_sources.nepse_alpha.screener import get_field_catalog, get_screener_query_spec, run_stock_screener
-from utils.stock_screener_symbols import resolve_screener_symbols, screener_universe_label
+from utils.external_data_sources.nepse_alpha.ai_query import ScreenerAiError
+from utils.external_data_sources.nepse_alpha.query_parser import ScreenerQueryError
+from utils.market_data.analysis_ai_query import execute_combined_ai_screener
+from utils.market_data.combined_screener import (
+    get_combined_field_catalog,
+    get_combined_query_spec,
+    parse_combined_screener_query,
+    run_combined_screener_from_db,
+)
+from utils.market_data.daily_snapshot import run_daily_merolagani_snapshot
+from utils.market_data.nepse_alpha_bulk import (
+    bootstrap_cache_from_daily_snapshot,
+    enrich_merolagani_from_daily_snapshot,
+    ensure_market_cache_ready,
+    refresh_screener_cache,
+)
+from utils.market_data.repository import get_cache_status, get_new_symbols, get_table_display_metadata, load_table_rows
+from utils.market_data.symbols import resolve_analysis_symbols, screener_universe_label
 from utils.strategy_builder.api import router as strategy_builder_router
 from utils.strategy_builder.reference_display import (
     display_values_for_scheduled_order,
@@ -86,6 +100,7 @@ FRONTEND_BUILD_DIR = Path(__file__).resolve().parent / "frontend" / "build"
 # Store running tasks and updates
 running_tasks: Dict[str, asyncio.Task] = {}
 scheduled_supervisor_task: Optional[asyncio.Task] = None
+market_data_scheduler_task: Optional[asyncio.Task] = None
 running_grabbers: Dict[str, TmsUser] = {}
 stock_grabber_updates: Dict[str, List[Dict]] = {}
 tms_user_cache: Dict[str, TmsUser] = {}
@@ -526,11 +541,17 @@ async def _refresh_trade_cache_background(
 
 @app.on_event("shutdown")
 async def close_cached_tms_users() -> None:
-    global scheduled_supervisor_task
+    global scheduled_supervisor_task, market_data_scheduler_task
     if scheduled_supervisor_task is not None and not scheduled_supervisor_task.done():
         scheduled_supervisor_task.cancel()
         try:
             await scheduled_supervisor_task
+        except asyncio.CancelledError:
+            pass
+    if market_data_scheduler_task is not None and not market_data_scheduler_task.done():
+        market_data_scheduler_task.cancel()
+        try:
+            await market_data_scheduler_task
         except asyncio.CancelledError:
             pass
     scheduled_supervisor_task = None
@@ -540,12 +561,14 @@ async def close_cached_tms_users() -> None:
 
 @app.on_event("startup")
 async def ensure_database_indexes() -> None:
-    global scheduled_supervisor_task
+    global scheduled_supervisor_task, market_data_scheduler_task
     from config.portal_settings import load_portal_settings
+    from utils.market_data.scheduler import market_data_scheduler_loop
 
     await asyncio.to_thread(ensure_performance_indexes)
     await asyncio.to_thread(load_portal_settings)
     scheduled_supervisor_task = asyncio.create_task(scheduled_monitor_supervisor_loop())
+    market_data_scheduler_task = asyncio.create_task(market_data_scheduler_loop())
 
 async def _run_stock_grabber_task(
     tms_user: TmsUser,
@@ -2621,14 +2644,14 @@ async def get_script_details(client_id: str, db: Session = Depends(get_db)):
 @app.get("/stock_screener/fields")
 async def stock_screener_fields():
     return {
-        "fields": get_field_catalog(),
-        "cache_ttl_seconds": 300,
-        "query_spec": get_screener_query_spec(),
+        "fields": get_combined_field_catalog(),
+        "cache_ttl_seconds": 20 * 60,
+        "query_spec": get_combined_query_spec(),
     }
 
 
 async def _resolve_screener_symbols_for_request(body, db: Session) -> List[str]:
-    return await resolve_screener_symbols(
+    return await resolve_analysis_symbols(
         universe=getattr(body, "universe", "nepse") or "nepse",
         client_id=body.client_id,
         client_ids=body.client_ids,
@@ -2637,19 +2660,83 @@ async def _resolve_screener_symbols_for_request(body, db: Session) -> List[str]:
     )
 
 
-@app.post("/stock_screener/parse")
-async def stock_screener_parse(body: StockScreenerRequest):
+@app.get("/market_analysis/status")
+async def market_analysis_status(db: Session = Depends(get_db)):
+    from utils.market_data.scheduler import get_market_data_scheduler_status
+
+    return {
+        **get_cache_status(db),
+        "scheduler": get_market_data_scheduler_status(db),
+    }
+
+
+@app.get("/market_analysis/new_stocks")
+async def market_analysis_new_stocks(days: int = Query(15, ge=1, le=365), db: Session = Depends(get_db)):
+    return {
+        "days": days,
+        "symbols": get_new_symbols(db, days=days),
+    }
+
+
+@app.get("/market_analysis/data")
+async def market_analysis_data(
+    source: str = Query("combined", pattern="^(combined|merolagani|nepse_alpha)$"),
+    db: Session = Depends(get_db),
+):
+    bootstrap_info = await asyncio.to_thread(ensure_market_cache_ready, db)
+    rows = load_table_rows(db, source)
+    if not rows and bootstrap_info.get("status") != "ok":
+        bootstrap_info = await asyncio.to_thread(bootstrap_cache_from_daily_snapshot, db)
+        if bootstrap_info.get("status") == "ok":
+            rows = load_table_rows(db, source)
+    display = get_table_display_metadata(source, rows)
+    return {
+        "source": source,
+        "count": len(rows),
+        "rows": rows,
+        "columns": display["columns"],
+        "column_labels": display["column_labels"],
+        "bootstrap": bootstrap_info,
+        "cache_status": get_cache_status(db),
+    }
+
+
+@app.post("/market_analysis/refresh")
+async def market_analysis_refresh(db: Session = Depends(get_db)):
+    daily_result = await asyncio.to_thread(run_daily_merolagani_snapshot, db)
+    enrich_result = await asyncio.to_thread(enrich_merolagani_from_daily_snapshot, db)
+    screener_result = await refresh_screener_cache(db, force=True, require_market_open=False)
+    return {
+        "daily_snapshot": daily_result,
+        "merolagani_enrich": enrich_result,
+        "screener_cache": screener_result,
+        "cache_status": get_cache_status(db),
+    }
+
+
+@app.get("/market_analysis/fields")
+async def market_analysis_fields():
+    return {
+        "fields": get_combined_field_catalog(),
+        "cache_ttl_seconds": 20 * 60,
+        "query_spec": get_combined_query_spec(),
+    }
+
+
+@app.post("/market_analysis/parse")
+async def market_analysis_parse(body: StockScreenerRequest):
     if not body.query or not body.query.strip():
         raise HTTPException(status_code=400, detail="Query text is required")
     try:
-        parsed = parse_screener_query(body.query)
+        parsed = parse_combined_screener_query(body.query)
     except ScreenerQueryError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return parsed
 
 
-@app.post("/stock_screener/screen")
-async def stock_screener_screen(body: StockScreenerRequest, db: Session = Depends(get_db)):
+@app.post("/market_analysis/screen")
+async def market_analysis_screen(body: StockScreenerRequest, db: Session = Depends(get_db)):
+    await asyncio.to_thread(ensure_market_cache_ready, db)
     symbols = await _resolve_screener_symbols_for_request(body, db)
 
     filters = [item.model_dump() for item in body.filters]
@@ -2660,7 +2747,7 @@ async def stock_screener_screen(body: StockScreenerRequest, db: Session = Depend
 
     if body.query and body.query.strip():
         try:
-            parsed_query = parse_screener_query(body.query)
+            parsed_query = parse_combined_screener_query(body.query)
         except ScreenerQueryError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         filters = parsed_query["filters"]
@@ -2669,14 +2756,16 @@ async def stock_screener_screen(body: StockScreenerRequest, db: Session = Depend
         limit = parsed_query["limit"]
 
     try:
-        payload = await run_stock_screener(
+        payload = run_combined_screener_from_db(
+            db,
             symbols,
             filters,
             rank_by=rank_by,
             rank_direction=rank_direction,
             limit=limit,
-            force_refresh=body.force_refresh,
         )
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -2691,8 +2780,8 @@ async def stock_screener_screen(body: StockScreenerRequest, db: Session = Depend
     return payload
 
 
-@app.post("/stock_screener/ai_screen")
-async def stock_screener_ai_screen(body: StockScreenerAiRequest, db: Session = Depends(get_db)):
+@app.post("/market_analysis/ai_screen")
+async def market_analysis_ai_screen(body: StockScreenerAiRequest, db: Session = Depends(get_db)):
     message = (body.message or "").strip()
     if not message:
         raise HTTPException(status_code=400, detail="Message is required")
@@ -2700,17 +2789,17 @@ async def stock_screener_ai_screen(body: StockScreenerAiRequest, db: Session = D
     symbols = await _resolve_screener_symbols_for_request(body, db)
 
     async def _run(parsed_query: dict) -> dict:
-        return await run_stock_screener(
+        return run_combined_screener_from_db(
+            db,
             symbols,
             parsed_query["filters"],
             rank_by=parsed_query["rank_by"],
             rank_direction=parsed_query["rank_direction"],
             limit=parsed_query["limit"],
-            force_refresh=body.force_refresh,
         )
 
     try:
-        payload = await execute_ai_screener_with_retries(message, _run)
+        payload = await execute_combined_ai_screener(message, _run)
     except ScreenerAiError as exc:
         raise HTTPException(
             status_code=422,
@@ -2723,7 +2812,7 @@ async def stock_screener_ai_screen(body: StockScreenerAiRequest, db: Session = D
     except HTTPException:
         raise
     except Exception as exc:
-        logging.exception("AI screener failed for message=%r", message[:120])
+        logging.exception("AI market analysis failed for message=%r", message[:120])
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     payload["universe"] = body.universe
@@ -2733,6 +2822,21 @@ async def stock_screener_ai_screen(body: StockScreenerAiRequest, db: Session = D
         symbol_count=len(symbols),
     )
     return payload
+
+
+@app.post("/stock_screener/parse")
+async def stock_screener_parse(body: StockScreenerRequest):
+    return await market_analysis_parse(body)
+
+
+@app.post("/stock_screener/screen")
+async def stock_screener_screen(body: StockScreenerRequest, db: Session = Depends(get_db)):
+    return await market_analysis_screen(body, db)
+
+
+@app.post("/stock_screener/ai_screen")
+async def stock_screener_ai_screen(body: StockScreenerAiRequest, db: Session = Depends(get_db)):
+    return await market_analysis_ai_screen(body, db)
 
 
 @app.get("/check_orders/")

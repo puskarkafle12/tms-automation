@@ -8,7 +8,8 @@ export const DASHBOARD_PATHS = {
   dpHoldings: `${DASHBOARD_BASE}/dp-holdings`,
   stockTable: `${DASHBOARD_BASE}/stock-table`,
   stockGrabber: `${DASHBOARD_BASE}/stock-grabber`,
-  stockScreener: `${DASHBOARD_BASE}/stock-screener`,
+  stockAnalysis: `${DASHBOARD_BASE}/stock-analysis`,
+  stockScreener: `${DASHBOARD_BASE}/stock-analysis`,
   settings: `${DASHBOARD_BASE}/settings`,
 } as const;
 
@@ -20,7 +21,8 @@ export const TAB_TO_PATH: Record<string, string> = {
   DPHoldings: DASHBOARD_PATHS.dpHoldings,
   StockTable: DASHBOARD_PATHS.stockTable,
   StockGrabber: DASHBOARD_PATHS.stockGrabber,
-  StockScreener: DASHBOARD_PATHS.stockScreener,
+  StockAnalysis: DASHBOARD_PATHS.stockAnalysis,
+  StockScreener: DASHBOARD_PATHS.stockAnalysis,
   Settings: DASHBOARD_PATHS.settings,
 };
 
@@ -39,7 +41,9 @@ export const pathToTab = (pathname: string): string => {
     [`${DASHBOARD_BASE}/check-orders`]: 'StockGrabber',
     [DASHBOARD_PATHS.stockTable]: 'StockTable',
     [DASHBOARD_PATHS.stockGrabber]: 'StockGrabber',
-    [DASHBOARD_PATHS.stockScreener]: 'StockScreener',
+    [DASHBOARD_PATHS.stockAnalysis]: 'StockAnalysis',
+    [DASHBOARD_PATHS.stockScreener]: 'StockAnalysis',
+    [`${DASHBOARD_BASE}/stock-screener`]: 'StockAnalysis',
     [DASHBOARD_PATHS.settings]: 'Settings',
     [`${DASHBOARD_BASE}/order-status-logs`]: 'OrderStatus',
     [`${DASHBOARD_BASE}/add-order`]: 'ScheduleOrder',

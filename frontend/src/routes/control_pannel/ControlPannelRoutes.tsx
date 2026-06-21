@@ -11,7 +11,7 @@ const dashboardSections = [
   DASHBOARD_PATHS.dpHoldings,
   DASHBOARD_PATHS.stockTable,
   DASHBOARD_PATHS.stockGrabber,
-  DASHBOARD_PATHS.stockScreener,
+  DASHBOARD_PATHS.stockAnalysis,
   DASHBOARD_PATHS.settings,
 ];
 
