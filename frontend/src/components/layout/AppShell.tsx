@@ -112,20 +112,18 @@ const AppShell: React.FC<AppShellProps> = ({
       <div className="app-main">
         <header className="app-topbar">
           <div className="app-topbar-left">
-            {!sidebarOpen && (
-              <button
-                type="button"
-                className="app-sidebar-toggle"
-                aria-label="Show navigation menu"
-                aria-expanded={sidebarOpen}
-                aria-controls="app-sidebar-nav"
-                onClick={toggleSidebar}
-              >
-                <span className="app-sidebar-toggle-bar" />
-                <span className="app-sidebar-toggle-bar" />
-                <span className="app-sidebar-toggle-bar" />
-              </button>
-            )}
+            <button
+              type="button"
+              className={`app-sidebar-toggle${sidebarOpen ? ' is-open' : ''}`}
+              aria-label={sidebarOpen ? 'Hide navigation menu' : 'Show navigation menu'}
+              aria-expanded={sidebarOpen}
+              aria-controls="app-sidebar-nav"
+              onClick={toggleSidebar}
+            >
+              <span className="app-sidebar-toggle-bar" />
+              <span className="app-sidebar-toggle-bar" />
+              <span className="app-sidebar-toggle-bar" />
+            </button>
             <div className="app-topbar-heading">
               <h1 className="app-page-title">{title}</h1>
               {subtitle && <p className="app-page-subtitle">{subtitle}</p>}
