@@ -1258,6 +1258,7 @@ const StockAnalysis: React.FC = () => {
 
         {analysisTab === 'screener' && (
           <div className="stock-analysis-panel stock-analysis-panel-screener">
+            <div className="stock-screener-universe-block">
         <div className="stock-screener-universe-chips stock-screener-universe-chips-compact" role="group" aria-label="Symbol universe">
             <button
               type="button"
@@ -1289,7 +1290,8 @@ const StockAnalysis: React.FC = () => {
                 {clientLabel(session)}
               </button>
             ))}
-        </div>
+            </div>
+            </div>
           {clientSessions.length === 0 && (
             <p className="stock-screener-universe-warning">
               Log in from the Accounts page to screen your own holdings.
