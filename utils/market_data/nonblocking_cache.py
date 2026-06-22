@@ -7,6 +7,7 @@ import logging
 from typing import Any, Dict, Optional
 
 from database import SessionLocal
+from utils.market_data.executor import MarketDataJobBusy, run_market_blocking
 from utils.market_data.nepse_alpha_bulk import bootstrap_cache_from_daily_snapshot
 from utils.market_data.repository import get_cache_symbol_count
 
@@ -57,7 +58,9 @@ async def _run_bootstrap_task() -> None:
             db.close()
 
     try:
-        result = await asyncio.to_thread(_work)
+        result = await run_market_blocking(_work, exclusive=True, skip_if_busy=True)
         logger.info("Background market cache bootstrap finished: %s", result)
+    except MarketDataJobBusy:
+        logger.info("Background market cache bootstrap skipped because another market job is running")
     except Exception:
         logger.exception("Background market cache bootstrap failed")

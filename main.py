@@ -99,6 +99,7 @@ tms_user_cache: Dict[str, TmsUser] = {}
 tms_user_cache_touched: Dict[str, float] = {}
 tms_user_cache_ttl = 300.0
 market_status_cache: Optional[tuple[float, dict]] = None
+MARKET_STATUS_CACHE_TTL_SECONDS = 60.0
 
 async def invalidate_cached_tms_user(client_id: str) -> None:
     cached = tms_user_cache.pop(client_id, None)
@@ -822,7 +823,7 @@ async def get_api_time():
 async def get_market_status(db: Session = Depends(get_db)):
     global market_status_cache
     cache_now = monotonic_time.monotonic()
-    if market_status_cache and cache_now - market_status_cache[0] < 4.0:
+    if market_status_cache and cache_now - market_status_cache[0] < MARKET_STATUS_CACHE_TTL_SECONDS:
         return market_status_cache[1]
 
     now = get_nepal_now()

@@ -11,7 +11,13 @@ from utils.market_data.combined_screener import (
     run_combined_screener_from_db,
 )
 from utils.market_data.combined_screener import parse_combined_screener_query
-from utils.market_data.repository import get_cache_status, get_new_symbols, get_table_display_metadata, load_table_rows
+from utils.market_data.repository import (
+    get_cache_status,
+    get_new_symbols,
+    get_table_display_metadata,
+    load_latest_daily_stock_rows,
+    load_table_rows,
+)
 from utils.market_data.screen_presets import ensure_market_screen_presets, list_market_screen_presets
 from utils.market_data.sql_screener import MarketSqlError
 
@@ -72,6 +78,10 @@ def worker_get_market_data(source: str) -> Dict[str, Any]:
     try:
         ensure_read_session(db)
         rows = load_table_rows(db, source)
+        if not rows and source in {"combined", "merolagani"}:
+            fallback_rows = load_latest_daily_stock_rows(db)
+            if fallback_rows:
+                rows = fallback_rows
         display = get_table_display_metadata(source, rows)
         return {
             "source": source,

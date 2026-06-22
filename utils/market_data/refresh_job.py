@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional
 from database import SessionLocal
 from utils.market_data.combined_screener import invalidate_combined_catalog_cache
 from utils.market_data.daily_snapshot import run_daily_merolagani_snapshot
+from utils.market_data.executor import MarketDataJobBusy, run_market_blocking
 from utils.market_data.nepse_alpha_bulk import (
     enrich_merolagani_from_daily_snapshot,
     refresh_screener_cache,
@@ -59,8 +60,24 @@ async def _run_market_refresh() -> None:
     )
     db = SessionLocal()
     try:
-        daily_result = await asyncio.to_thread(run_daily_merolagani_snapshot, db)
-        enrich_result = await asyncio.to_thread(enrich_merolagani_from_daily_snapshot, db)
+        try:
+            daily_result = await run_market_blocking(
+                run_daily_merolagani_snapshot,
+                db,
+                exclusive=True,
+                skip_if_busy=True,
+            )
+        except MarketDataJobBusy:
+            daily_result = {"status": "skipped", "reason": "market_job_busy"}
+        try:
+            enrich_result = await run_market_blocking(
+                enrich_merolagani_from_daily_snapshot,
+                db,
+                exclusive=True,
+                skip_if_busy=True,
+            )
+        except MarketDataJobBusy:
+            enrich_result = {"status": "skipped", "reason": "market_job_busy"}
         screener_result = await refresh_screener_cache(db, force=True, require_market_open=False)
         invalidate_combined_catalog_cache()
         payload = {

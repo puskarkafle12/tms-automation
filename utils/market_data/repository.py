@@ -10,6 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from database import ensure_read_session
+from utils.market_data.merolagani_fields import extract_symbol
 from utils.market_data.canonical_fields import (
     build_combined_record,
     canonicalize_merolagani_record,

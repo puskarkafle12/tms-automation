@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from database import SessionLocal
 from utils.market_data.daily_snapshot import run_daily_merolagani_snapshot
+from utils.market_data.executor import MarketDataJobBusy, run_market_blocking
 from utils.market_data.nonblocking_cache import kickoff_cache_bootstrap_if_empty
 from utils.market_data.nepse_alpha_bulk import (
     MEROLAGANI_REFRESH_INTERVAL_SECONDS,
@@ -28,6 +29,7 @@ CHECK_INTERVAL_SECONDS = 60
 _daily_lock = asyncio.Lock()
 _merolagani_lock = asyncio.Lock()
 _nepse_alpha_lock = asyncio.Lock()
+_cache_bootstrap_lock = asyncio.Lock()
 _scheduler_started_at: Optional[datetime] = None
 
 
@@ -43,6 +45,17 @@ def _seconds_until_next_refresh(last_refresh: datetime | None, interval_seconds:
     elapsed = (datetime.utcnow() - last_refresh).total_seconds()
     remaining = interval_seconds - elapsed
     return max(0, int(remaining))
+
+
+def _log_background_task_exception(task: asyncio.Task) -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc:
+        logger.error(
+            "Market data scheduler background task failed",
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
 
 
 def get_market_data_scheduler_status(db: Session) -> Dict[str, Any]:
@@ -84,26 +97,41 @@ async def _run_daily_snapshot_if_needed() -> None:
     async with _daily_lock:
         db = SessionLocal()
         try:
-            result = await asyncio.to_thread(run_daily_merolagani_snapshot, db)
+            result = await run_market_blocking(
+                run_daily_merolagani_snapshot,
+                db,
+                exclusive=True,
+                skip_if_busy=True,
+            )
             if result.get("status") == "ok":
                 logger.info(
                     "Daily Merolagani snapshot saved (%s symbols)",
                     result.get("symbol_count"),
                 )
+        except MarketDataJobBusy:
+            logger.info("Daily Merolagani snapshot skipped because another market job is running")
         finally:
             db.close()
 
 
 async def _ensure_cache_bootstrapped() -> None:
-    await kickoff_cache_bootstrap_if_empty()
+    if _cache_bootstrap_lock.locked():
+        return
+    async with _cache_bootstrap_lock:
+        await kickoff_cache_bootstrap_if_empty()
 
 
 async def _run_merolagani_refresh_if_needed() -> None:
+    market_open = is_market_hours_open(get_nepal_now())
     db = SessionLocal()
     try:
-        if get_cache_symbol_count(db) == 0:
+        cache_count = get_cache_symbol_count(db)
+        if cache_count == 0:
             await kickoff_cache_bootstrap_if_empty()
         last_refresh = get_last_refresh(db, "merolagani_cache")
+        last_daily = get_last_refresh(db, "daily_snapshot")
+        if not market_open and cache_count > 0 and last_daily and last_refresh and last_refresh >= last_daily:
+            return
         should_refresh = _should_refresh(last_refresh, MEROLAGANI_REFRESH_INTERVAL_SECONDS)
     finally:
         db.close()
@@ -168,10 +196,14 @@ async def market_data_scheduler_loop() -> None:
 
     while True:
         try:
-            asyncio.create_task(_run_daily_snapshot_if_needed())
-            asyncio.create_task(_ensure_cache_bootstrapped())
-            asyncio.create_task(_run_merolagani_refresh_if_needed())
-            asyncio.create_task(_run_nepse_alpha_refresh_if_needed())
+            tasks = [
+                asyncio.create_task(_run_daily_snapshot_if_needed()),
+                asyncio.create_task(_ensure_cache_bootstrapped()),
+                asyncio.create_task(_run_merolagani_refresh_if_needed()),
+                asyncio.create_task(_run_nepse_alpha_refresh_if_needed()),
+            ]
+            for task in tasks:
+                task.add_done_callback(_log_background_task_exception)
         except Exception:
             logger.exception("Market data scheduler iteration failed")
         await asyncio.sleep(CHECK_INTERVAL_SECONDS)

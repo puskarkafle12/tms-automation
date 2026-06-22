@@ -1,8 +1,8 @@
 from datetime import datetime
 from pathlib import Path
+import logging
 import re
 from threading import local
-from functools import partial
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
@@ -10,9 +10,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-REQUEST_TIMEOUT = 20
-MAX_WORKERS = 24
+REQUEST_TIMEOUT = 12
+MAX_WORKERS = 8
 _thread_local = local()
+logger = logging.getLogger(__name__)
 
 try:
     from utils.base_functions import get_function_time
@@ -27,9 +28,16 @@ except Exception:
         return wrapper
 
 def convert_to_numeric(value):
+    if value is None:
+        return value
+    if isinstance(value, (int, float)):
+        return value
     try:
-        return float(value.replace('%', '').replace(',', ''))
-    except ValueError:
+        text = str(value).strip()
+        if not text or text in {"-", "--"}:
+            return value
+        return float(text.replace('%', '').replace(',', ''))
+    except (TypeError, ValueError):
         return value  
 def extract_numeric_value(s):
     match = re.search(r'([-+]?\d*\.\d+|\d+)', str(s))
@@ -88,9 +96,8 @@ def fetch_stock_details(row_data):
     try:
         stock_detail = get_stock_detail(link) or {}
     except Exception as exc:
-        print(f"{link} failed: {exc}")
+        logger.warning("Merolagani detail fetch failed for %s: %s", link, exc)
         stock_detail = {}
-    print(link)
     row_data.update(stock_detail)
     return row_data
 
@@ -149,8 +156,11 @@ def get_stock_details():
                        '30-Day Avg Volume', 'Market Capitalization'
                        ]
         df = pd.DataFrame(stock_details)
-        df[numeric_columns] = df[numeric_columns].map(convert_to_numeric)
-        df['EPS'] = df["EPS"].apply(extract_numeric_value)
+        existing_numeric_columns = [column for column in numeric_columns if column in df.columns]
+        if existing_numeric_columns:
+            df[existing_numeric_columns] = df[existing_numeric_columns].map(convert_to_numeric)
+        if 'EPS' in df.columns:
+            df['EPS'] = df["EPS"].apply(extract_numeric_value)
 
         return df
 

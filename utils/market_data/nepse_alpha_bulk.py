@@ -23,6 +23,7 @@ from utils.market_data.merolagani_fields import (
     merge_merolagani_records,
     normalize_merolagani_record,
 )
+from utils.market_data.executor import MarketDataJobBusy, run_market_blocking
 from utils.market_data.repository import (
     get_cache_symbol_count,
     load_latest_daily_stock_rows,
@@ -245,7 +246,14 @@ async def refresh_merolagani_cache(
 
     started_at = datetime.utcnow()
     try:
-        market_rows = await asyncio.to_thread(get_latest_market_rows)
+        try:
+            market_rows = await run_market_blocking(
+                get_latest_market_rows,
+                exclusive=True,
+                skip_if_busy=True,
+            )
+        except MarketDataJobBusy:
+            return {"status": "skipped", "reason": "market_job_busy"}
         merolagani_by_symbol: Dict[str, Dict[str, Any]] = {}
         for row in market_rows:
             symbol = extract_symbol(row)
@@ -399,4 +407,3 @@ async def refresh_screener_cache(
         "nepse_alpha": nepse_result,
         "force": force,
     }
-

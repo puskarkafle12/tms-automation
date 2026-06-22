@@ -32,6 +32,8 @@ class TmsUser:
     TRADEBOOK_CHUNK_DAYS = 366
     TRADEBOOK_MAX_CONCURRENT_CHUNKS = 4
     TRADEBOOK_PAGE_RETRIES = 3
+    AUTH_REFRESH_TIMEOUT = aiohttp.ClientTimeout(total=8, connect=3, sock_read=4)
+    AUTH_REFRESH_COOLDOWN_SECONDS = 60
     _security_cache: Dict[str, tuple[float, List[Dict]]] = {}
     _security_cache_ttl = 300.0
     _collateral_cache: Dict[str, tuple[float, Dict]] = {}
@@ -59,6 +61,7 @@ class TmsUser:
         self.session: Optional[aiohttp.ClientSession] = None
         self._auth_refresh_lock = asyncio.Lock()
         self._session_lock = asyncio.Lock()
+        self._auth_refresh_failed_at: float = 0.0
         self.security = None
         self.stock_symbol = stock_symbol
         self.max_request_per_sec = 5.0  # Maximum fetch rate
@@ -1302,6 +1305,7 @@ class TmsUser:
             headers=self.headers,
             cookies=self.tokens,
             json={},
+            timeout=self.AUTH_REFRESH_TIMEOUT,
         ) as response:
             try:
                 response_json = await response.json(content_type=None)
@@ -1330,7 +1334,13 @@ class TmsUser:
             return True
 
     async def _refresh_authentication(self, reason: str = "access token expired") -> None:
+        now = monotonic_time.monotonic()
+        if self._auth_refresh_failed_at and now - self._auth_refresh_failed_at < self.AUTH_REFRESH_COOLDOWN_SECONDS:
+            raise LoginFailedException("Session refresh is temporarily blocked after a recent failure")
         async with self._auth_refresh_lock:
+            now = monotonic_time.monotonic()
+            if self._auth_refresh_failed_at and now - self._auth_refresh_failed_at < self.AUTH_REFRESH_COOLDOWN_SECONDS:
+                raise LoginFailedException("Session refresh is temporarily blocked after a recent failure")
             self.updates.append({
                 "status": "warn",
                 "message": "Session expired — refreshing login token and retrying…",
@@ -1348,11 +1358,18 @@ class TmsUser:
                         "token refreshed without captcha",
                         update_login_time=False,
                     )
+                    self._auth_refresh_failed_at = 0.0
                     return
                 except Exception:
                     pass
 
-            await self._full_login_and_persist()
+            try:
+                result = await self._full_login_and_persist()
+                self._auth_refresh_failed_at = 0.0
+                return result
+            except Exception:
+                self._auth_refresh_failed_at = monotonic_time.monotonic()
+                raise
 
     async def _authenticated_request(
         self,
@@ -1403,7 +1420,11 @@ class TmsUser:
                     raise
 
                 if unauthorized_retried:
-                    await self._refresh_authentication()
+                    try:
+                        await self._refresh_authentication()
+                    except Exception as exc:
+                        last_error = exc
+                        raise
                     continue
                 break
 
