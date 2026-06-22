@@ -11,11 +11,11 @@ from sqlalchemy.orm import Session
 
 from database import SessionLocal
 from utils.market_data.daily_snapshot import run_daily_merolagani_snapshot
+from utils.market_data.nonblocking_cache import kickoff_cache_bootstrap_if_empty
 from utils.market_data.nepse_alpha_bulk import (
     MEROLAGANI_REFRESH_INTERVAL_SECONDS,
     NEPSE_ALPHA_REFRESH_INTERVAL_SECONDS,
     bootstrap_cache_from_daily_snapshot,
-    ensure_market_cache_ready,
     refresh_merolagani_cache,
     refresh_nepse_alpha_cache,
 )
@@ -95,18 +95,14 @@ async def _run_daily_snapshot_if_needed() -> None:
 
 
 async def _ensure_cache_bootstrapped() -> None:
-    db = SessionLocal()
-    try:
-        await asyncio.to_thread(ensure_market_cache_ready, db)
-    finally:
-        db.close()
+    await kickoff_cache_bootstrap_if_empty()
 
 
 async def _run_merolagani_refresh_if_needed() -> None:
     db = SessionLocal()
     try:
         if get_cache_symbol_count(db) == 0:
-            await asyncio.to_thread(bootstrap_cache_from_daily_snapshot, db)
+            await kickoff_cache_bootstrap_if_empty()
         last_refresh = get_last_refresh(db, "merolagani_cache")
         should_refresh = _should_refresh(last_refresh, MEROLAGANI_REFRESH_INTERVAL_SECONDS)
     finally:
@@ -135,7 +131,7 @@ async def _run_nepse_alpha_refresh_if_needed() -> None:
     db = SessionLocal()
     try:
         if get_cache_symbol_count(db) == 0:
-            await asyncio.to_thread(bootstrap_cache_from_daily_snapshot, db)
+            await kickoff_cache_bootstrap_if_empty()
         last_refresh = get_last_refresh(db, "nepse_alpha_cache")
         should_refresh = _should_refresh(last_refresh, NEPSE_ALPHA_REFRESH_INTERVAL_SECONDS)
     finally:
@@ -167,17 +163,15 @@ async def market_data_scheduler_loop() -> None:
         MEROLAGANI_REFRESH_INTERVAL_SECONDS,
         NEPSE_ALPHA_REFRESH_INTERVAL_SECONDS,
     )
-    await _run_daily_snapshot_if_needed()
-    await _ensure_cache_bootstrapped()
-    await _run_merolagani_refresh_if_needed()
-    await _run_nepse_alpha_refresh_if_needed()
+    await kickoff_cache_bootstrap_if_empty()
+    await asyncio.sleep(CHECK_INTERVAL_SECONDS)
 
     while True:
         try:
-            await _run_daily_snapshot_if_needed()
-            await _ensure_cache_bootstrapped()
-            await _run_merolagani_refresh_if_needed()
-            await _run_nepse_alpha_refresh_if_needed()
+            asyncio.create_task(_run_daily_snapshot_if_needed())
+            asyncio.create_task(_ensure_cache_bootstrapped())
+            asyncio.create_task(_run_merolagani_refresh_if_needed())
+            asyncio.create_task(_run_nepse_alpha_refresh_if_needed())
         except Exception:
             logger.exception("Market data scheduler iteration failed")
         await asyncio.sleep(CHECK_INTERVAL_SECONDS)

@@ -164,6 +164,10 @@
   gap: 0.45rem;
 }
 
+.stock-screener-universe-chips-compact {
+  margin-bottom: 0.75rem;
+}
+
 .stock-screener-universe-chip {
   border: 1px solid var(--color-border, #d8dee9);
   border-radius: 999px;

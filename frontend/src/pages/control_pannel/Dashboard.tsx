@@ -36,7 +36,7 @@ const PAGE_META: Record<string, { title: string; subtitle: string }> = {
   CheckOrders: { title: 'Check Orders', subtitle: 'Monitor and verify pending orders' },
   DPHoldings: { title: 'Portfolio', subtitle: 'Holdings, buy cost, and profit/loss overview' },
   StockTable: { title: 'Stock Table', subtitle: 'Live market data and stock quotes' },
-  StockAnalysis: { title: 'Market Analysis', subtitle: 'Combined Merolagani + Nepse Alpha screener, new IPO tracking, and stored market data' },
+  StockAnalysis: { title: 'Market Analysis', subtitle: '' },
   StockGrabber: { title: 'Stock Grabber', subtitle: 'Automated stock monitoring and order placement' },
   Settings: { title: 'Settings', subtitle: 'Monitoring speed, defaults, and portal refresh behavior' },
 };

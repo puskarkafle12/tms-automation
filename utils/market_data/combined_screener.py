@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
@@ -21,13 +22,33 @@ from utils.market_data.sql_screener import (
 
 DB_CACHE_TTL_SECONDS = 10 * 60
 NEPSE_ALPHA_CACHE_TTL_SECONDS = 10 * 60
+FIELD_CATALOG_CACHE_TTL_SECONDS = 10 * 60
+
+_field_catalog_cache: Optional[Tuple[float, List[Dict[str, Any]]]] = None
+_query_spec_cache: Optional[Tuple[float, Dict[str, Any]]] = None
+
+
+def invalidate_combined_catalog_cache() -> None:
+    global _field_catalog_cache, _query_spec_cache
+    _field_catalog_cache = None
+    _query_spec_cache = None
 
 
 def get_combined_field_catalog(db: Optional[Session] = None) -> List[Dict[str, Any]]:
-    return build_dynamic_field_catalog(db)
+    global _field_catalog_cache
+    now = time.time()
+    if _field_catalog_cache and now - _field_catalog_cache[0] < FIELD_CATALOG_CACHE_TTL_SECONDS:
+        return _field_catalog_cache[1]
+    catalog = build_dynamic_field_catalog(db)
+    _field_catalog_cache = (now, catalog)
+    return catalog
 
 
 def get_combined_query_spec(db: Optional[Session] = None) -> Dict[str, Any]:
+    global _query_spec_cache
+    now = time.time()
+    if _query_spec_cache and now - _query_spec_cache[0] < FIELD_CATALOG_CACHE_TTL_SECONDS:
+        return _query_spec_cache[1]
     spec = build_dynamic_query_spec(db)
     spec.update(
         {
@@ -38,6 +59,7 @@ def get_combined_query_spec(db: Optional[Session] = None) -> Dict[str, Any]:
             "nepse_alpha_refresh_interval_seconds": NEPSE_ALPHA_CACHE_TTL_SECONDS,
         }
     )
+    _query_spec_cache = (now, spec)
     return spec
 
 

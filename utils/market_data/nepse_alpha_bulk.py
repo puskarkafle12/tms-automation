@@ -150,11 +150,22 @@ def enrich_merolagani_from_daily_snapshot(db: Session) -> Dict[str, Any]:
 
 
 def bootstrap_cache_from_daily_snapshot(db: Session) -> Dict[str, Any]:
-    """Seed market_screener_cache from the latest stored daily Merolagani snapshot."""
+    """Seed market_screener_cache from daily snapshot or live market table."""
     if get_cache_symbol_count(db) > 0:
         return {"status": "skipped", "reason": "cache_not_empty"}
 
     rows = load_latest_daily_stock_rows(db)
+    source = "daily_snapshot"
+    if not rows:
+        try:
+            from services.stock_data_scrapper.scrapper import get_latest_market_rows
+
+            rows = get_latest_market_rows()
+            source = "live_market_table"
+        except Exception as exc:
+            logger.warning("Bootstrap live market fallback failed: %s", exc)
+            return {"status": "skipped", "reason": "no_daily_snapshot"}
+
     if not rows:
         return {"status": "skipped", "reason": "no_daily_snapshot"}
 
@@ -183,12 +194,20 @@ def bootstrap_cache_from_daily_snapshot(db: Session) -> Dict[str, Any]:
         refresh_type="merolagani_cache",
         status="ok",
         symbol_count=count,
-        message=f"Bootstrapped cache from daily snapshot ({count} symbols)",
+        message=f"Bootstrapped cache from {source} ({count} symbols)",
         started_at=started_at,
     )
     db.commit()
-    logger.info("Bootstrapped market cache from daily snapshot (%s symbols)", count)
-    return {"status": "ok", "symbol_count": count, "source": "daily_snapshot"}
+    logger.info("Bootstrapped market cache from %s (%s symbols)", source, count)
+    return {"status": "ok", "symbol_count": count, "source": source}
+
+
+def ensure_market_cache_ready(db: Session) -> Dict[str, Any]:
+    """Fast cache probe only — never scrape or enrich on the request path."""
+    count = get_cache_symbol_count(db)
+    if count > 0:
+        return {"status": "ok", "reason": "cache_ready", "symbol_count": count}
+    return {"status": "empty", "reason": "cache_empty", "symbol_count": 0}
 
 
 async def _fetch_nepse_alpha_record(
@@ -381,9 +400,3 @@ async def refresh_screener_cache(
         "force": force,
     }
 
-
-def ensure_market_cache_ready(db: Session) -> Dict[str, Any]:
-    """Make sure cache has rows; bootstrap from daily snapshot when empty."""
-    if get_cache_symbol_count(db) == 0:
-        return bootstrap_cache_from_daily_snapshot(db)
-    return enrich_merolagani_from_daily_snapshot(db)

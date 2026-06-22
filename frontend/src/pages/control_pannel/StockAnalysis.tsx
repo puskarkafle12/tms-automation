@@ -319,56 +319,9 @@ interface NewStockRow {
   is_watchlist?: boolean;
 }
 
-interface SchedulerStatus {
-  running?: boolean;
-  market_hours_open?: boolean;
-  merolagani_mode?: string;
-  nepse_alpha_mode?: string;
-  next_merolagani_refresh_in_seconds?: number | null;
-  next_nepse_alpha_refresh_in_seconds?: number | null;
-  merolagani_refresh_interval_seconds?: number;
-  nepse_alpha_refresh_interval_seconds?: number;
-}
-
-interface CacheStatus {
-  cache?: {
-    total?: number;
-    merolagani_count?: number;
-    nepse_alpha_count?: number;
-    combined_count?: number;
-    last_updated?: string;
-  };
-  latest_daily_snapshot?: {
-    snapshot_date?: string;
-    symbol_count?: number;
-    created_at?: string;
-  };
-  last_daily_refresh?: string;
-  last_screener_refresh?: string;
-  scheduler?: SchedulerStatus;
-}
-
-
-const formatRefreshIn = (seconds?: number | null) => {
-  if (seconds == null) {
-    return 'paused';
-  }
-  if (seconds <= 0) {
-    return 'due now';
-  }
-  if (seconds < 60) {
-    return `${seconds}s`;
-  }
-  if (seconds < 3600) {
-    return `${Math.round(seconds / 60)}m`;
-  }
-  return `${Math.round(seconds / 3600)}h`;
-};
-
 const StockAnalysis: React.FC = () => {
   const [analysisTab, setAnalysisTab] = useState<AnalysisTab>('screener');
   const [dataSource, setDataSource] = useState<DataSource>('combined');
-  const [cacheStatus, setCacheStatus] = useState<CacheStatus | null>(null);
   const [newStocks, setNewStocks] = useState<NewStockRow[]>([]);
   const [newStocksDays, setNewStocksDays] = useState(15);
   const [dataRows, setDataRows] = useState<Record<string, unknown>[]>([]);
@@ -397,7 +350,6 @@ const StockAnalysis: React.FC = () => {
   const [resultColumns, setResultColumns] = useState<string[]>(['rank', 'symbol']);
   const [resultColumnLabels, setResultColumnLabels] = useState<Record<string, string>>({});
   const [stats, setStats] = useState<ScreenerStats | null>(null);
-  const [cacheTtl, setCacheTtl] = useState(300);
   const [querySpec, setQuerySpec] = useState<ScreenerQuerySpec | null>(null);
   const [presetGuideOpen, setPresetGuideOpen] = useState(false);
   const [hasRun, setHasRun] = useState(false);
@@ -500,7 +452,6 @@ const StockAnalysis: React.FC = () => {
       }>('/market_analysis/fields');
       if (response.ok) {
         setFields(response.data.fields || []);
-        setCacheTtl(response.data.cache_ttl_seconds || 300);
         setQuerySpec(response.data.query_spec || null);
       }
     };
@@ -584,20 +535,6 @@ const StockAnalysis: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    const loadStatus = async () => {
-      const response = await fetchJson<CacheStatus>('/market_analysis/status');
-      if (response.ok) {
-        setCacheStatus(response.data);
-      }
-    };
-    void loadStatus();
-    const timer = window.setInterval(() => {
-      void loadStatus();
-    }, 60000);
-    return () => window.clearInterval(timer);
-  }, []);
-
-  useEffect(() => {
     if (analysisTab !== 'new_stocks') {
       return;
     }
@@ -641,15 +578,6 @@ const StockAnalysis: React.FC = () => {
         );
         if (response.ok) {
           applyMarketDataResponse(response.data);
-          if (!(response.data.rows || []).length) {
-            await fetchJson('/market_analysis/refresh', { method: 'POST' });
-            const retry = await fetchJson<MarketDataResponse>(
-              `/market_analysis/data?source=${dataSource}`,
-            );
-            if (retry.ok) {
-              applyMarketDataResponse(retry.data);
-            }
-          }
         }
       } finally {
         setDataLoading(false);
@@ -661,7 +589,16 @@ const StockAnalysis: React.FC = () => {
   const refreshDataTable = useCallback(async () => {
     setDataRefreshing(true);
     try {
-      await fetchJson('/market_analysis/refresh', { method: 'POST' });
+      const refreshResponse = await fetchJson<{ status?: string }>('/market_analysis/refresh', { method: 'POST' });
+      if (refreshResponse.ok && refreshResponse.data.status === 'started') {
+        for (let attempt = 0; attempt < 120; attempt += 1) {
+          await new Promise((resolve) => window.setTimeout(resolve, 3000));
+          const statusResponse = await fetchJson<{ refresh?: { running?: boolean } }>('/market_analysis/status');
+          if (statusResponse.ok && !statusResponse.data.refresh?.running) {
+            break;
+          }
+        }
+      }
       const response = await fetchJson<MarketDataResponse>(
         `/market_analysis/data?source=${dataSource}`,
       );
@@ -1193,52 +1130,8 @@ const StockAnalysis: React.FC = () => {
     [dataColumns, dataRows],
   );
 
-  const formatRelativeTimestamp = (value?: string | null) =>
-    formatRelativeTime(value, relativeNow) || '-';
-
   return (
     <div className="stock-screener-page">
-      <section className="stock-screener-hero card">
-        <div>
-          <h2 className="stock-screener-title">Market Analysis</h2>
-          <p className="stock-screener-subtitle">
-            Combined Merolagani + Nepse Alpha screener backed by the server database.
-            Cache refreshes every {Math.round(cacheTtl / 60)} minutes during market hours.
-            Daily Merolagani snapshots track newly listed symbols.
-          </p>
-        </div>
-        <div className="stock-screener-status">
-          {cacheStatus?.cache?.combined_count ? (
-            <>
-              <span>Cached {cacheStatus.cache.combined_count} symbols</span>
-              <span>Updated {formatRelativeTimestamp(cacheStatus.cache.last_updated)}</span>
-              <span>Daily {cacheStatus.latest_daily_snapshot?.snapshot_date || 'pending'}</span>
-              {cacheStatus.scheduler?.running ? (
-                <>
-                  <span>
-                    Merolagani {cacheStatus.scheduler.market_hours_open ? 'live' : 'daily'} · next{' '}
-                    {formatRefreshIn(cacheStatus.scheduler.next_merolagani_refresh_in_seconds)}
-                  </span>
-                  <span>
-                    Nepse {cacheStatus.scheduler.market_hours_open ? 'live' : 'paused'} · next{' '}
-                    {formatRefreshIn(cacheStatus.scheduler.next_nepse_alpha_refresh_in_seconds)}
-                  </span>
-                </>
-              ) : null}
-            </>
-          ) : stats ? (
-            <>
-              {universeLabel && <span>{universeLabel}</span>}
-              <span>Scanned {stats.requested}</span>
-              <span>Loaded {stats.loaded}</span>
-              <span>Matched {stats.matched}</span>
-            </>
-          ) : (
-            <span>Waiting for first cache refresh</span>
-          )}
-        </div>
-      </section>
-
       <section className="stock-analysis-workspace card">
         <div className="stock-analysis-mode-tabs stock-screener-mode-tabs" role="tablist" aria-label="Market analysis views">
           <button
@@ -1343,6 +1236,11 @@ const StockAnalysis: React.FC = () => {
             </div>
             {dataLoading ? (
               <p className="stock-analysis-panel-message">Loading table…</p>
+            ) : dataRows.length === 0 ? (
+              <p className="stock-analysis-panel-message">
+                No cached market data yet. Click Refresh to load Merolagani and Nepse Alpha in the background
+                (first run can take a few minutes; the rest of the app stays usable).
+              </p>
             ) : (
               <div className="stock-analysis-table-shell">
                 <CommonTable
@@ -1360,20 +1258,7 @@ const StockAnalysis: React.FC = () => {
 
         {analysisTab === 'screener' && (
           <div className="stock-analysis-panel stock-analysis-panel-screener">
-        <div className="stock-screener-universe stock-screener-universe-card">
-          <div className="stock-screener-universe-header">
-            <div>
-              <span className="stock-screener-universe-label">Symbol universe</span>
-              <p className="stock-screener-universe-note">
-                {universe === 'nepse'
-                  ? 'Search across every listed stock in the market database.'
-                  : universe === 'combined_holdings'
-                    ? 'Search only stocks held across your logged-in accounts.'
-                    : 'Search only stocks in this account\'s portfolio.'}
-              </p>
-            </div>
-          </div>
-          <div className="stock-screener-universe-chips" role="group" aria-label="Symbol universe">
+        <div className="stock-screener-universe-chips stock-screener-universe-chips-compact" role="group" aria-label="Symbol universe">
             <button
               type="button"
               className={`stock-screener-universe-chip${universe === 'nepse' ? ' active' : ''}`}
@@ -1404,13 +1289,12 @@ const StockAnalysis: React.FC = () => {
                 {clientLabel(session)}
               </button>
             ))}
-          </div>
+        </div>
           {clientSessions.length === 0 && (
             <p className="stock-screener-universe-warning">
               Log in from the Accounts page to screen your own holdings.
             </p>
           )}
-        </div>
 
         <div className="stock-screener-mode-tabs">
           <button

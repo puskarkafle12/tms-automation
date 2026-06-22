@@ -498,6 +498,71 @@ class DynamicCatalogTest(unittest.TestCase):
         self.assertEqual(results[1]["updated_at"], "2026-06-22T02:00:00")
         db.close()
 
+    def test_ensure_market_cache_ready_skips_full_enrich_when_populated(self):
+        from sqlalchemy import create_engine, text
+        from sqlalchemy.orm import sessionmaker
+
+        from utils.market_data.nepse_alpha_bulk import ensure_market_cache_ready
+
+        engine = create_engine("sqlite:///:memory:")
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE market_screener_cache (
+                        symbol TEXT PRIMARY KEY,
+                        merolagani_data TEXT,
+                        combined_data TEXT,
+                        updated_at TEXT
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO market_screener_cache (symbol, merolagani_data, combined_data, updated_at)
+                    VALUES (:symbol, :merolagani_data, :combined_data, :updated_at)
+                    """
+                ),
+                {
+                    "symbol": "AAA",
+                    "merolagani_data": '{"symbol":"AAA","ltp":100}',
+                    "combined_data": '{"symbol":"AAA","ltp":100}',
+                    "updated_at": "2026-06-22T01:00:00",
+                },
+            )
+        Session = sessionmaker(bind=engine)
+        db = Session()
+        result = ensure_market_cache_ready(db)
+        self.assertEqual(result.get("status"), "ok")
+        self.assertEqual(result.get("reason"), "cache_ready")
+        db.close()
+
+    def test_ensure_market_cache_ready_reports_empty_without_scraping(self):
+        from sqlalchemy import create_engine, text
+        from sqlalchemy.orm import sessionmaker
+
+        from utils.market_data.nepse_alpha_bulk import ensure_market_cache_ready
+
+        engine = create_engine("sqlite:///:memory:")
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE market_screener_cache (
+                        symbol TEXT PRIMARY KEY
+                    )
+                    """
+                )
+            )
+        Session = sessionmaker(bind=engine)
+        db = Session()
+        result = ensure_market_cache_ready(db)
+        self.assertEqual(result.get("status"), "empty")
+        self.assertEqual(result.get("symbol_count"), 0)
+        db.close()
+
 
 if __name__ == "__main__":
     unittest.main()
