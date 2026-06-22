@@ -708,6 +708,54 @@
   line-height: 1.4;
 }
 
+.stock-screener-chat-empty-label {
+  margin: 0 0 0.35rem;
+}
+
+.stock-screener-chat-examples {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  max-height: 15rem;
+  overflow-y: auto;
+  padding-right: 0.25rem;
+  scrollbar-width: thin;
+}
+
+.stock-screener-chat-example-btn {
+  display: block;
+  width: 100%;
+  padding: 0.45rem 0.55rem;
+  border: 1px dashed #cbd5e1;
+  border-radius: 8px;
+  background: #fff;
+  color: #334155;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  text-align: left;
+  cursor: pointer;
+}
+
+.stock-screener-chat-example-btn:hover:not(:disabled) {
+  border-color: #93c5fd;
+  background: #f8fbff;
+  color: #1e40af;
+}
+
+.stock-screener-chat-example-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.stock-screener-chat-empty-hint {
+  margin: 0;
+  font-size: 0.76rem;
+  color: var(--color-text-muted);
+}
+
 .stock-screener-chat-bubble {
   max-width: 92%;
   padding: 0.45rem 0.6rem;

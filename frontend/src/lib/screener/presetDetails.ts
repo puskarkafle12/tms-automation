@@ -158,17 +158,17 @@ export const PRESET_DETAILS: Record<string, PresetDetailBase> = {
     ],
   },
   graham_deep_value: {
-    goal: 'Classic deep-value candidates trading below intrinsic-style measures.',
+    goal: 'Classic deep-value candidates trading at or below Graham-number reference.',
     howItWorks: [
-      'Uses distance from Graham number as a primary value signal.',
+      'Uses negative Graham distance (price at/below Graham reference) as the value signal.',
       'Requires low PE, PBV under 3, and positive EPS.',
-      'Filters for names far enough below Graham reference.',
-      'Ranks by value depth and PE attractiveness.',
+      'Filters for names at or below Graham reference, not far above it.',
+      'Ranks by deepest Graham discount and PE attractiveness.',
     ],
     looksFor: [
       'Low PE (roughly 2–20) with positive earnings',
       'PBV not stretched vs book value',
-      'High Graham-distance score (meaningfully undervalued)',
+      'Graham distance at or below zero (undervalued vs Graham number)',
     ],
     examples: [
       'A stock at PE 8, PBV 1.2, with strong Graham discount',
@@ -230,39 +230,39 @@ export const PRESET_DETAILS: Record<string, PresetDetailBase> = {
     ],
   },
   trend_pullback: {
-    goal: 'Buy pullbacks inside an still-intact longer-term uptrend.',
+    goal: 'Buy pullbacks inside a still-intact longer-term uptrend.',
     howItWorks: [
-      'Requires 3-month trend label and SMA 50/200 still bullish.',
-      'Allows short-term SMA dip (pullback) while macro trend holds.',
+      'Requires 3-month trend label and price above SMA 50.',
+      'Allows short-term SMA dip (pullback) while the medium trend holds.',
       'RSI, stochastic, and %B screen for reset—not breakdown.',
       'Ranks by strength, alpha, and volume on recovery setup.',
     ],
     looksFor: [
       'Primary trend up, short-term dip to support',
-      'RSI often 35–62 during the pullback',
-      'MACD neutral or turning bullish again',
+      'RSI often 35–65 during the pullback',
+      'MACD may still be bearish while price resets above SMA 50',
     ],
     examples: [
       'A leader below SMA 10 but still above SMA 50 with RSI 42',
       'A stock consolidating after a run, ready to resume trend',
     ],
   },
-  confirmed_oversold_reversal: {
-    goal: 'Oversold bounces with price and volume confirmation—not falling knives.',
+  oversold_slow_recovery: {
+    goal: 'Oversold names starting a slow bullish bounce—not falling knives.',
     howItWorks: [
-      'RSI, stochastic, %B, and MFI must show oversold readings.',
-      'Requires positive percent change and price holding above open.',
-      'Volume trend cannot be sharply negative.',
-      'Ranks by recovery strength, volume, and relative strength.',
+      'RSI in the oversold zone (30–45) with MACD turning bullish.',
+      'Requires a green day (positive percent change).',
+      'Sorted by smallest gain first to favor slower recoveries.',
+      'Shows core trading columns: price, change, volume, and OHLC.',
     ],
     looksFor: [
-      'Oversold on multiple indicators (RSI ~25–43)',
-      'Green day with volume picking up',
-      'Early reversal, not a continued breakdown',
+      'RSI ~30–45 (oversold but not extreme panic)',
+      'MACD Bullish with percent_change > 0',
+      'Gradual recovery vs sharp spike',
     ],
     examples: [
-      'A stock down several days that closes green with RSI 38 and volume spike',
-      'An oversold name bouncing with stochastic under 35 turning up',
+      'A stock with RSI 38, MACD bullish, and +0.4% today',
+      'An oversold bank slowly turning green with volume still active',
     ],
   },
   alpha_swing_leaders: {
@@ -441,10 +441,10 @@ const PRESET_USAGE: Record<string, Pick<PresetDetail, 'useCase' | 'whatYouGet'>>
     whatYouGet:
       'Up to 25 pullback setups with trend label, SMA 20/50/200 status, RSI, stochastic, relative strength, and volume.',
   },
-  confirmed_oversold_reversal: {
-    useCase: 'You look for oversold bounce trades—not stocks still in free fall.',
+  oversold_slow_recovery: {
+    useCase: 'You want oversold stocks that are starting to recover slowly—not violent bounces.',
     whatYouGet:
-      'Up to 25 reversal candidates with RSI, stochastic, MFI, %B, today\'s change vs open, and volume trend.',
+      'Up to 25 names with RSI 30–45, bullish MACD, positive day change, sorted by smallest gain first—plus OHLC and volume.',
   },
   alpha_swing_leaders: {
     useCase: 'You swing-trade names beating the market on a risk-adjusted basis.',

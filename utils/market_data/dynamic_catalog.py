@@ -404,7 +404,7 @@ SEMANTIC_INTENT_HINTS: List[Tuple[str, str, str]] = [
     ("fundamental_pe_ttm", "pe ratio, price to earnings", "use fundamental_pe_ttm or pe_ratio"),
     ("ltp", "share price, last price, cheap stocks by price", "use ltp (not a cap substitute if market_cap exists)"),
     ("alpha_annualized", "alpha, risk-adjusted return", "use alpha_annualized"),
-    ("technical_rsi_14", "oversold, rsi", "use technical_rsi_14 BETWEEN 30 AND 45"),
+    ("technical_rsi_14", "oversold, oversold and slowly recovering, rsi", "use technical_rsi_14 BETWEEN 28 AND 45 with percent_change > 0 for recovery"),
     ("fundamental_roe_ttm", "roe, return on equity", "use fundamental_roe_ttm"),
     ("fundamental_debt_to_equity", "debt, leverage", "use fundamental_debt_to_equity"),
     ("sector", "sector, industry", "use sector with = or CONTAINS"),
@@ -525,11 +525,19 @@ def _build_dynamic_examples(
         )
     if rsi:
         macd = _pick_existing(keys, "technical_macd")
+        stoch = _pick_existing(keys, "technical_stochastic_14")
         cols = f"symbol, sector, ltp, percent_change, qty, {rsi}"
+        if stoch:
+            cols += f", {stoch}"
         if macd:
             cols += f", {macd}"
         examples.append(
-            f"Oversold RSI (trader):\nSELECT {cols}\nFROM market_combined\nWHERE {rsi} BETWEEN 30 AND 45\nORDER BY {rank_default} DESC\nLIMIT {limit}"
+            "Oversold slowly recovering (trader):\n"
+            f"SELECT {cols}\nFROM market_combined\n"
+            f"WHERE {rsi} BETWEEN 28 AND 45\n"
+            "  AND percent_change > 0\n"
+            "ORDER BY percent_change DESC\n"
+            f"LIMIT {limit}"
         )
 
     if not examples:

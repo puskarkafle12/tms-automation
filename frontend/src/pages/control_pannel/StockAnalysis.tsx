@@ -21,6 +21,11 @@ import {
 } from '../../lib/screener/chatGptPrompt';
 import { buildNepseAlphaChartUrl } from '../../lib/nepseAlpha';
 import { apiTimestampToUtcMs } from '../../utils/nepalTime';
+import {
+  AiQuickScreen,
+  fetchAiQuickScreens,
+  findQuickScreenByPrompt,
+} from '../../lib/screener/aiQuickScreens';
 import { formatRelativeTime, formatShortRelativeTime } from '../../utils/relativeTime';
 
 type FieldType = 'number' | 'text';
@@ -367,6 +372,8 @@ const StockAnalysis: React.FC = () => {
   const [hasRun, setHasRun] = useState(false);
   const [aiInput, setAiInput] = useState('');
   const [aiMessages, setAiMessages] = useState<AiChatMessage[]>([]);
+  const [aiQuickScreens, setAiQuickScreens] = useState<AiQuickScreen[]>([]);
+  const [aiQuickScreensLoading, setAiQuickScreensLoading] = useState(true);
   const [presets, setPresets] = useState<ScreenerPreset[]>([]);
   const [presetsLoading, setPresetsLoading] = useState(true);
   const [presetCategory, setPresetCategory] = useState<ScreenerPresetCategory>('TRADER');
@@ -479,6 +486,21 @@ const StockAnalysis: React.FC = () => {
       }
     };
     void loadPresets();
+  }, []);
+
+  useEffect(() => {
+    const loadQuickScreens = async () => {
+      setAiQuickScreensLoading(true);
+      try {
+        const loaded = await fetchAiQuickScreens();
+        setAiQuickScreens(loaded);
+      } catch {
+        setAiQuickScreens([]);
+      } finally {
+        setAiQuickScreensLoading(false);
+      }
+    };
+    void loadQuickScreens();
   }, []);
 
   useEffect(() => {
@@ -724,6 +746,92 @@ const StockAnalysis: React.FC = () => {
     }
   };
 
+  const runQuickScreen = async (screen: AiQuickScreen) => {
+    const universeError = validateUniverse();
+    if (universeError) {
+      setError(universeError);
+      return;
+    }
+
+    const userMsg: AiChatMessage = {
+      id: `${Date.now()}-user`,
+      role: 'user',
+      content: screen.prompt,
+    };
+    setAiMessages((prev) => [...prev, userMsg]);
+    setAiInput('');
+    setLoading(true);
+    setLoadingLabel('Running quick screen…');
+    setError('');
+    setResults([]);
+    setResultColumns(['rank', 'symbol']);
+    setResultColumnLabels({});
+    setStats(null);
+    setUniverseLabel('');
+    setHasRun(false);
+
+    let completedScreen = false;
+    try {
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), 60000);
+      const response = await fetch(`${getApiUrl()}/market_analysis/screen`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...buildUniversePayload(),
+          query: screen.query,
+        }),
+        signal: controller.signal,
+      });
+      window.clearTimeout(timeoutId);
+
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(parseApiError(data, 'Quick screen request failed'));
+      }
+
+      setQueryText(screen.query);
+      setAiMessages((prev) => [
+        ...prev,
+        {
+          id: `${Date.now()}-assistant`,
+          role: 'assistant',
+          content: screen.summary,
+          query: screen.query,
+        },
+      ]);
+      applyScreenResponse(data as {
+        results?: ScreenerResult[];
+        result_columns?: string[];
+        column_labels?: Record<string, string>;
+      });
+      setStats((data as { stats?: ScreenerStats | null }).stats || null);
+      setUniverseLabel(String((data as { universe_label?: string }).universe_label || ''));
+      completedScreen = true;
+      setHasRun(true);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Quick screen request failed';
+      setError(message);
+      setAiMessages((prev) => [
+        ...prev,
+        {
+          id: `${Date.now()}-assistant-error`,
+          role: 'assistant',
+          content: message,
+          isError: true,
+        },
+      ]);
+      completedScreen = true;
+      setHasRun(true);
+    } finally {
+      setLoading(false);
+      setLoadingLabel('');
+      if (completedScreen) {
+        scrollResultsIntoView(resultsRef.current);
+      }
+    }
+  };
+
   const runAiScreener = async (messageOverride?: string) => {
     const universeError = validateUniverse();
     if (universeError) {
@@ -734,6 +842,12 @@ const StockAnalysis: React.FC = () => {
     const userMessage = (messageOverride ?? aiInput).trim();
     if (!userMessage) {
       setError('Describe what you want to screen for.');
+      return;
+    }
+
+    const quickScreen = findQuickScreenByPrompt(aiQuickScreens, userMessage);
+    if (quickScreen) {
+      await runQuickScreen(quickScreen);
       return;
     }
 
@@ -1233,7 +1347,26 @@ const StockAnalysis: React.FC = () => {
             <div ref={chatScrollRef} className="stock-screener-chat-messages" aria-live="polite">
               {aiMessages.length === 0 && !loading && (
                 <div className="stock-screener-chat-empty">
-                  Ask for stocks — e.g. oversold banks with bullish MACD
+                  {aiQuickScreensLoading ? (
+                    <p className="stock-screener-chat-empty-hint">Loading quick screens…</p>
+                  ) : aiQuickScreens.length === 0 ? (
+                    <p className="stock-screener-chat-empty-hint">Ask anything about NEPSE stocks in plain English.</p>
+                  ) : (
+                    <ul className="stock-screener-chat-examples">
+                      {aiQuickScreens.map((screen) => (
+                        <li key={screen.id}>
+                          <button
+                            type="button"
+                            className="stock-screener-chat-example-btn"
+                            disabled={loading}
+                            onClick={() => void runQuickScreen(screen)}
+                          >
+                            {screen.prompt}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                 </div>
               )}
               {aiMessages.map((message) => (
@@ -1268,7 +1401,7 @@ const StockAnalysis: React.FC = () => {
                 rows={2}
                 value={aiInput}
                 onChange={(e) => setAiInput(e.target.value)}
-                placeholder="Ask anything — e.g. show bank stocks with low PE and bullish MACD"
+                placeholder={aiQuickScreens[0]?.prompt || 'Ask anything about NEPSE stocks…'}
                 disabled={loading}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && !e.shiftKey) {

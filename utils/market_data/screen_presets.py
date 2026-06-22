@@ -282,14 +282,15 @@ WITH ranked AS (
         PERCENT_RANK() OVER (ORDER BY percent_change) AS change_rank
     FROM v_nepse_stock_screen s
     WHERE LOWER(technical_macd) = 'bullish'
-      AND LOWER(technical_sma_20) = 'above'
-      AND LOWER(technical_sma_50) = 'above'
-      AND technical_rsi_14 BETWEEN 50 AND 72
-      AND technical_mfi_14 BETWEEN 40 AND 82
-      AND LOWER(technical_volume_trend) = 'trending up'
-      AND technical_price_relative_strength >= 45
-      AND liquidity_rank >= 0.55
-      AND current_volume_ratio >= 0.30
+      AND (
+          LOWER(technical_sma_20) = 'above'
+          OR LOWER(technical_sma_50) = 'above'
+      )
+      AND technical_rsi_14 BETWEEN 45 AND 78
+      AND technical_mfi_14 BETWEEN 35 AND 85
+      AND technical_price_relative_strength >= 30
+      AND liquidity_rank >= 0.20
+      AND current_volume_ratio >= 0.10
 )
 SELECT
     symbol, sector, ltp, percent_change, qty, avg_volume_30d, current_volume_ratio,
@@ -319,20 +320,20 @@ LIMIT 25
 WITH ranked AS (
     SELECT
         s.*,
-        PERCENT_RANK() OVER (ORDER BY position_52_week_pct) AS breakout_rank,
+        PERCENT_RANK() OVER (PARTITION BY sector ORDER BY position_52_week_pct) AS breakout_rank,
         PERCENT_RANK() OVER (ORDER BY current_volume_ratio) AS volume_rank,
         PERCENT_RANK() OVER (PARTITION BY sector ORDER BY technical_price_relative_strength) AS strength_rank,
         PERCENT_RANK() OVER (ORDER BY alpha_annualized) AS alpha_rank
     FROM v_nepse_stock_screen s
-    WHERE position_52_week_pct BETWEEN 80 AND 105
-      AND LOWER(technical_macd) = 'bullish'
-      AND LOWER(technical_sma_20) = 'above'
-      AND LOWER(technical_sma_50) = 'above'
-      AND technical_percent_b BETWEEN 75 AND 115
-      AND technical_rsi_14 BETWEEN 52 AND 75
-      AND LOWER(technical_volume_trend) = 'trending up'
-      AND liquidity_rank >= 0.60
-      AND current_volume_ratio >= 0.50
+    WHERE position_52_week_pct >= 65
+      AND (
+          LOWER(technical_macd) = 'bullish'
+          OR LOWER(technical_sma_20) = 'above'
+      )
+      AND technical_rsi_14 BETWEEN 45 AND 80
+      AND technical_percent_b BETWEEN 55 AND 130
+      AND liquidity_rank >= 0.15
+      AND current_volume_ratio >= 0.10
 )
 SELECT
     symbol, sector, ltp, fifty_two_week_high, position_52_week_pct, percent_change,
@@ -366,18 +367,16 @@ WITH ranked AS (
         PERCENT_RANK() OVER (ORDER BY current_volume_ratio) AS volume_rank
     FROM v_nepse_stock_screen s
     WHERE LOWER(technical_3m_price_tend) = 'trending'
-      AND LOWER(technical_macd) IN ('bullish', 'neutral')
       AND LOWER(technical_sma_50) = 'above'
-      AND LOWER(technical_sma_200) = 'above'
       AND (
           LOWER(technical_sma_10) = 'below'
           OR LOWER(technical_sma_20) = 'below'
       )
-      AND technical_rsi_14 BETWEEN 35 AND 62
-      AND technical_stochastic_14 BETWEEN 15 AND 55
-      AND technical_percent_b BETWEEN 10 AND 60
-      AND liquidity_rank >= 0.35
-      AND current_volume_ratio >= 0.20
+      AND technical_rsi_14 BETWEEN 35 AND 65
+      AND technical_stochastic_14 BETWEEN 10 AND 60
+      AND technical_percent_b BETWEEN 5 AND 65
+      AND liquidity_rank >= 0.25
+      AND current_volume_ratio >= 0.15
 )
 SELECT
     symbol, sector, ltp, percent_change, technical_3m_price_tend, technical_macd,
@@ -386,9 +385,9 @@ SELECT
     technical_price_relative_strength, current_volume_ratio,
     ROUND((
         100.0 * (
-            strength_rank * 0.35 + alpha_rank * 0.20 + volume_rank * 0.20 +
-            CASE WHEN LOWER(technical_macd) = 'bullish' THEN 1 ELSE 0 END * 0.15 +
-            GREATEST(0, 1 - ABS(technical_rsi_14 - 45) / 15.0) * 0.10
+            strength_rank * 0.35 + alpha_rank * 0.25 + volume_rank * 0.25 +
+            CASE WHEN LOWER(technical_macd) = 'bullish' THEN 1 ELSE 0 END * 0.10 +
+            GREATEST(0, 1 - ABS(technical_rsi_14 - 45) / 20.0) * 0.05
         )
     )::numeric, 2) AS preset_score
 FROM ranked
@@ -397,43 +396,20 @@ LIMIT 25
 """,
     },
     {
-        "preset_code": "confirmed_oversold_reversal",
-        "preset_name": "Confirmed Oversold Reversal",
+        "preset_code": "oversold_slow_recovery",
+        "preset_name": "Oversold Slow Recovery",
         "category": "TRADER",
-        "risk_level": "HIGH",
+        "risk_level": "MEDIUM_HIGH",
         "time_horizon": "1 day to 4 weeks",
-        "description": "Oversold stocks recovering with price and volume confirmation.",
+        "description": "Oversold RSI with bullish MACD and a positive day—early recovery setups.",
         "display_order": 14,
         "query_sql": """
-WITH ranked AS (
-    SELECT
-        s.*,
-        PERCENT_RANK() OVER (ORDER BY current_volume_ratio) AS volume_rank,
-        PERCENT_RANK() OVER (ORDER BY percent_change) AS recovery_rank,
-        PERCENT_RANK() OVER (PARTITION BY sector ORDER BY technical_price_relative_strength) AS strength_rank
-    FROM v_nepse_stock_screen s
-    WHERE technical_rsi_14 BETWEEN 25 AND 43
-      AND technical_stochastic_14 <= 35
-      AND technical_percent_b <= 30
-      AND technical_mfi_14 <= 45
-      AND percent_change > 0
-      AND (ltp >= open OR percent_change >= 0.5)
-      AND LOWER(technical_volume_trend) != 'trending down'
-      AND liquidity_rank >= 0.15
-      AND current_volume_ratio >= 0.25
-)
-SELECT
-    symbol, sector, ltp, open, percent_change, qty, avg_volume_30d, current_volume_ratio,
-    technical_macd, technical_rsi_14, technical_stochastic_14, technical_percent_b,
-    technical_mfi_14,
-    ROUND((
-        100.0 * (
-            volume_rank * 0.35 + recovery_rank * 0.30 + strength_rank * 0.15 +
-            CASE WHEN LOWER(technical_macd) = 'bullish' THEN 1 ELSE 0 END * 0.20
-        )
-    )::numeric, 2) AS preset_score
-FROM ranked
-ORDER BY preset_score DESC
+SELECT symbol, ltp, percent_change, qty, sector, technical_rsi_14, technical_macd, open, high, low, avg_volume_30d
+FROM market_combined
+WHERE technical_rsi_14 BETWEEN 30 AND 45
+  AND percent_change > 0
+  AND technical_macd = 'Bullish'
+ORDER BY percent_change ASC
 LIMIT 25
 """,
     },
@@ -565,21 +541,22 @@ FROM ranked ORDER BY preset_score DESC LIMIT 25
         "category": "INVESTOR",
         "risk_level": "MEDIUM",
         "time_horizon": "6–18 months",
-        "description": "Stocks trading below Graham-number distance with positive EPS.",
+        "description": "Stocks at or below Graham-number reference with positive EPS and sensible valuation.",
         "display_order": 9,
         "query_sql": """
 WITH ranked AS (
     SELECT s.*,
-        PERCENT_RANK() OVER (PARTITION BY sector ORDER BY fundamental_distance_from_graham_number DESC) AS graham_rank,
+        PERCENT_RANK() OVER (PARTITION BY sector ORDER BY fundamental_distance_from_graham_number) AS graham_rank,
         PERCENT_RANK() OVER (PARTITION BY sector ORDER BY pe_ratio DESC) AS pe_rank
     FROM v_nepse_stock_screen s
     WHERE eps > 0 AND pe_ratio BETWEEN 2 AND 20 AND pbv <= 3
       AND fundamental_distance_from_graham_number IS NOT NULL
-      AND fundamental_distance_from_graham_number >= 80 AND liquidity_rank >= 0.15
+      AND fundamental_distance_from_graham_number <= 0
+      AND liquidity_rank >= 0.10
 )
 SELECT symbol, sector, ltp, eps, pe_ratio, pbv, book_value,
        fundamental_distance_from_graham_number, market_cap,
-       ROUND((100.0 * (graham_rank * 0.60 + pe_rank * 0.40))::numeric, 2) AS preset_score
+       ROUND((100.0 * ((1 - graham_rank) * 0.60 + pe_rank * 0.40))::numeric, 2) AS preset_score
 FROM ranked ORDER BY preset_score DESC LIMIT 25
 """,
     },
@@ -621,10 +598,11 @@ WITH ranked AS (
         PERCENT_RANK() OVER (ORDER BY percent_change) AS move_rank,
         PERCENT_RANK() OVER (ORDER BY current_volume_ratio) AS vol_rank
     FROM v_nepse_stock_screen s
-    WHERE technical_rsi_14 BETWEEN 55 AND 72
+    WHERE technical_rsi_14 BETWEEN 50 AND 75
       AND LOWER(technical_macd) = 'bullish'
       AND LOWER(technical_sma_20) = 'above'
-      AND liquidity_rank >= 0.40 AND current_volume_ratio >= 0.30
+      AND liquidity_rank >= 0.20
+      AND current_volume_ratio >= 0.15
 )
 SELECT symbol, sector, ltp, percent_change, qty, avg_volume_30d, technical_rsi_14,
        technical_macd, technical_sma_20, alpha_annualized,
@@ -646,9 +624,9 @@ WITH ranked AS (
         PERCENT_RANK() OVER (PARTITION BY sector ORDER BY technical_price_relative_strength) AS strength_rank
     FROM v_nepse_stock_screen s
     WHERE LOWER(technical_sma_20) = 'above'
-      AND LOWER(technical_sma_50) = 'above'
       AND LOWER(technical_macd) = 'bullish'
-      AND technical_rsi_14 BETWEEN 48 AND 70 AND liquidity_rank >= 0.35
+      AND technical_rsi_14 BETWEEN 45 AND 72
+      AND liquidity_rank >= 0.20
 )
 SELECT symbol, sector, ltp, percent_change, technical_sma_10, technical_sma_20, technical_sma_50,
        technical_macd, technical_rsi_14, technical_price_relative_strength,
@@ -741,6 +719,18 @@ def ensure_market_screen_presets(db: Session) -> int:
             },
         )
         updated += 1
+    active_codes = [preset["preset_code"] for preset in SCREEN_PRESET_SEEDS]
+    if active_codes:
+        db.execute(
+            text(
+                """
+                UPDATE market_screen_presets
+                SET enabled = FALSE, updated_at = NOW()
+                WHERE NOT (preset_code = ANY(:active_codes))
+                """
+            ),
+            {"active_codes": active_codes},
+        )
     db.commit()
     return updated
 

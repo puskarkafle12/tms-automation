@@ -71,6 +71,11 @@ from config.app_build_info import get_app_build_info
 from utils.external_data_sources.nepse_alpha.ai_query import ScreenerAiError
 from utils.market_data.sql_screener import MarketSqlError
 from utils.market_data.analysis_ai_query import execute_combined_ai_screener
+from utils.market_data.ai_quick_screens import (
+    build_quick_ai_screen_payload,
+    list_quick_ai_screens,
+    match_quick_ai_screen,
+)
 from utils.market_data.combined_screener import (
     get_combined_field_catalog,
     get_combined_query_spec,
@@ -2808,6 +2813,11 @@ async def market_analysis_screen(body: StockScreenerRequest, db: Session = Depen
     return payload
 
 
+@app.get("/market_analysis/ai_quick_screens")
+async def market_analysis_ai_quick_screens():
+    return {"quick_screens": list_quick_ai_screens()}
+
+
 @app.post("/market_analysis/ai_screen")
 async def market_analysis_ai_screen(body: StockScreenerAiRequest, db: Session = Depends(get_db)):
     message = (body.message or "").strip()
@@ -2817,6 +2827,30 @@ async def market_analysis_ai_screen(body: StockScreenerAiRequest, db: Session = 
     await asyncio.to_thread(ensure_market_cache_ready, db)
     ensure_read_session(db)
     symbols = await _resolve_screener_symbols_for_request(body, db)
+
+    quick_screen = match_quick_ai_screen(message)
+    if quick_screen is not None:
+        try:
+            screener_payload = run_combined_screener_from_db(
+                db,
+                symbols,
+                sql=quick_screen["query_sql"].strip(),
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            ensure_read_session(db)
+            logging.exception("Quick AI screen failed for id=%s", quick_screen["id"])
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+        payload = build_quick_ai_screen_payload(quick_screen, screener_payload)
+        payload["universe"] = body.universe
+        payload["universe_label"] = screener_universe_label(
+            body.universe,
+            client_id=body.client_id,
+            symbol_count=len(symbols),
+        )
+        return payload
 
     async def _run(ai_payload: dict) -> dict:
         sql = ai_payload.get("generated_query") or (ai_payload.get("parsed_query") or {}).get("sql")

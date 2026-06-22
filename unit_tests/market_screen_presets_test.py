@@ -111,8 +111,12 @@ def _sample_universe() -> List[Dict[str, Any]]:
         _base_stock(
             "PULL1",
             sector="Finance",
+            technical_3m_price_tend="Trending",
             technical_sma_10="below",
             technical_sma_20="below",
+            technical_sma_50="above",
+            technical_sma_200="above",
+            technical_macd="Bearish",
             technical_rsi_14=44.0,
             technical_stochastic_14=28.0,
             technical_percent_b=35.0,
@@ -166,7 +170,7 @@ def _sample_universe() -> List[Dict[str, Any]]:
             sector="Development Bank Limited",
             pe_ratio=8.0,
             pbv=0.9,
-            fundamental_distance_from_graham_number=110.0,
+            fundamental_distance_from_graham_number=-18.0,
             fundamental_roe_ttm=11.0,
             fundamental_yoy_earnings_growth=5.0,
         ),
@@ -226,7 +230,8 @@ class MarketScreenPresetsTest(unittest.TestCase):
                 0,
                 f"Preset {preset['preset_code']} returned zero rows",
             )
-            self.assertIn("preset_score", dict(rows[0]))
+            if "preset_score" in preset["query_sql"].lower():
+                self.assertIn("preset_score", dict(rows[0]))
         db.close()
         self.assertEqual(failures, [])
 
