@@ -460,7 +460,9 @@ The backend rejects invalid SQL with messages like:
 - \`Unknown column\` — you used a key not in section 2
 - \`Only SELECT queries are allowed\`
 - \`Query must read FROM market_combined\`
-- \`Query contains forbidden SQL syntax\`
+- \`Query contains forbidden SQL syntax: JOIN is not allowed. Use only the single market_combined table/view.\`
+- \`Query contains forbidden SQL syntax: UNION is not allowed. Use one simple SELECT from market_combined.\`
+- \`Invalid GROUP BY query\` — only group if every selected column is grouped or aggregated; otherwise keep the screen row-based and use \`ORDER BY\`
 
 ---
 

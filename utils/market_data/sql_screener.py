@@ -20,24 +20,24 @@ MAX_SQL_LENGTH = 32_000
 MAX_SQL_LIMIT = 500
 AI_BASE_SELECT_COLUMNS = ("symbol", "ltp", "percent_change", "qty", "updated_at")
 
-FORBIDDEN_SQL_PATTERNS = (
-    r"\binsert\b",
-    r"\bupdate\b",
-    r"\bdelete\b",
-    r"\bdrop\b",
-    r"\balter\b",
-    r"\bcreate\b",
-    r"\btruncate\b",
-    r"\bgrant\b",
-    r"\brevoke\b",
-    r"\bunion\b",
-    r"\bjoin\b",
-    r"\binto\b",
-    r"\bpg_catalog\b",
-    r"\binformation_schema\b",
-    r";\s*\S",  # multiple statements
-    r"--",
-    r"/\*",
+FORBIDDEN_SQL_RULES = (
+    (r"\binsert\b", "INSERT is not allowed because screeners are read-only."),
+    (r"\bupdate\b", "UPDATE is not allowed because screeners are read-only."),
+    (r"\bdelete\b", "DELETE is not allowed because screeners are read-only."),
+    (r"\bdrop\b", "DROP is not allowed because it can remove database objects."),
+    (r"\balter\b", "ALTER is not allowed because it can change database structure."),
+    (r"\bcreate\b", "CREATE is not allowed because screeners cannot create database objects."),
+    (r"\btruncate\b", "TRUNCATE is not allowed because it can erase data."),
+    (r"\bgrant\b", "GRANT is not allowed because permissions cannot be changed."),
+    (r"\brevoke\b", "REVOKE is not allowed because permissions cannot be changed."),
+    (r"\bunion\b", "UNION is not allowed. Use one simple SELECT from market_combined."),
+    (r"\bjoin\b", "JOIN is not allowed. Use only the single market_combined table/view."),
+    (r"\binto\b", "INTO is not allowed because queries must not create or write tables."),
+    (r"\bpg_catalog\b", "System catalog pg_catalog is not allowed."),
+    (r"\binformation_schema\b", "System catalog information_schema is not allowed."),
+    (r";\s*\S", "Multiple SQL statements are not allowed. Return exactly one SELECT statement."),
+    (r"--", "SQL line comments are not allowed. Remove comments from the generated query."),
+    (r"/\*", "SQL block comments are not allowed. Remove comments from the generated query."),
 )
 
 ALLOWED_QUERY_SOURCES = (
@@ -149,9 +149,14 @@ def validate_market_sql(sql: str, *, allow_select_star: bool = True) -> None:
         raise MarketSqlError(
             f"Query must read FROM {MARKET_TABLE} or {SCREEN_VIEW_NAME}"
         )
-    for pattern in FORBIDDEN_SQL_PATTERNS:
+    for pattern, reason in FORBIDDEN_SQL_RULES:
         if re.search(pattern, lowered):
-            raise MarketSqlError("Query contains forbidden SQL syntax")
+            raise MarketSqlError(
+                f"Query contains forbidden SQL syntax: {reason} "
+                "Generate a safe read-only screener query shaped like "
+                "SELECT symbol, ltp, percent_change, qty FROM market_combined "
+                "WHERE <simple filters> ORDER BY <allowed_column> DESC LIMIT 25."
+            )
     if re.search(r"\bmarket_screener_cache\b", lowered):
         raise MarketSqlError(f"Use {MARKET_TABLE} or {SCREEN_VIEW_NAME} instead of market_screener_cache")
 
@@ -191,6 +196,36 @@ def _select_expression_name(expression: str) -> Optional[str]:
     return None
 
 
+def _strip_select_alias(expression: str) -> str:
+    cleaned = expression.strip()
+    cleaned = re.sub(r"\bas\s+[a-zA-Z_][a-zA-Z0-9_]*\s*$", "", cleaned, flags=re.IGNORECASE).strip()
+    parts = re.split(r"\s+", cleaned)
+    if len(parts) > 1 and re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", parts[-1]):
+        return " ".join(parts[:-1]).strip()
+    return cleaned
+
+
+def _expression_is_aggregate(expression: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(count|sum|avg|min|max|string_agg|array_agg|bool_and|bool_or)\s*\(",
+            expression,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _extract_outer_group_by_list(sql: str) -> List[str]:
+    match = re.search(
+        r"\bgroup\s+by\s+(.*?)(?:\border\s+by\b|\bhaving\b|\blimit\b|\boffset\b|\Z)",
+        sql,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if not match:
+        return []
+    return [_strip_select_alias(item).lower() for item in _split_select_list(match.group(1))]
+
+
 def _select_list_column_names(select_list: str) -> Set[str]:
     names: Set[str] = set()
     for expression in _split_select_list(select_list):
@@ -198,6 +233,37 @@ def _select_list_column_names(select_list: str) -> Set[str]:
         if name:
             names.add(name)
     return names
+
+
+def _validate_ai_group_by_columns(sql: str) -> None:
+    group_items = set(_extract_outer_group_by_list(sql))
+    if not group_items:
+        return
+
+    pattern = re.compile(
+        r"select\s+(?:distinct\s+)?(.*?)\s+from\s+market_combined\b",
+        re.IGNORECASE | re.DOTALL,
+    )
+    matches = list(pattern.finditer(sql))
+    if not matches:
+        return
+
+    missing: List[str] = []
+    for expression in _split_select_list(matches[-1].group(1)):
+        base = _strip_select_alias(expression)
+        if not base or _expression_is_aggregate(base):
+            continue
+        normalized = base.split(".")[-1].strip().lower()
+        if normalized not in group_items and base.strip().lower() not in group_items:
+            missing.append(base)
+
+    if missing:
+        shown = ", ".join(missing[:6])
+        raise MarketSqlError(
+            "Invalid GROUP BY query: every plain SELECT column must appear in GROUP BY "
+            f"or be wrapped in an aggregate. Missing: {shown}. "
+            "For normal stock screens, remove GROUP BY and rank rows with ORDER BY instead."
+        )
 
 
 def _ensure_ai_display_columns(sql: str) -> str:
@@ -327,6 +393,7 @@ def prepare_market_sql(
             raise MarketSqlError("Use an explicit column list in SELECT — SELECT * is not allowed for AI queries")
         normalized = _ensure_ai_display_columns(normalized)
         _validate_ai_select_columns(normalized)
+        _validate_ai_group_by_columns(normalized)
     dialect_name = db.get_bind().dialect.name
     prepared = _expand_screen_view(normalized, db)
     prepared = _expand_market_table(prepared, db)

@@ -455,6 +455,143 @@ class DynamicCatalogTest(unittest.TestCase):
         self.assertIn("updated_at", lowered)
         self.assertTrue(lowered.index("symbol") < lowered.index("sector"))
 
+    def test_ai_sql_rejects_group_by_with_unaggregated_display_columns(self):
+        from utils.market_data.sql_screener import MarketSqlError, validate_market_sql_query
+
+        engine = create_engine("sqlite:///:memory:")
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE market_screener_cache (
+                        symbol VARCHAR PRIMARY KEY,
+                        combined_data TEXT
+                    )
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO market_screener_cache (symbol, combined_data)
+                    VALUES (:symbol, :combined_data)
+                    """
+                ),
+                {
+                    "symbol": "AAA",
+                    "combined_data": '{"symbol":"AAA","ltp":100,"percent_change":-0.2,"qty":500,"updated_at":"2023-02-01"}',
+                },
+            )
+        Session = sessionmaker(bind=engine)
+        db = Session()
+
+        with self.assertRaises(MarketSqlError) as ctx:
+            validate_market_sql_query(
+                db,
+                """
+                SELECT symbol, ltp, percent_change, qty
+                FROM (
+                    SELECT symbol, ltp, percent_change, qty, updated_at
+                    FROM market_combined
+                ) AS market_combined
+                WHERE percent_change < -0.1
+                GROUP BY symbol, ltp
+                HAVING MAX(ABS(percent_change)) < 0.05
+                ORDER BY MAX(ABS(percent_change)) DESC
+                LIMIT 25
+                """,
+                allow_select_star=False,
+            )
+        self.assertIn("Invalid GROUP BY query", str(ctx.exception))
+        db.close()
+
+    def test_forbidden_sql_error_explains_exact_syntax(self):
+        from utils.market_data.sql_screener import MarketSqlError, validate_market_sql_query
+
+        engine = create_engine("sqlite:///:memory:")
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE market_screener_cache (
+                        symbol VARCHAR PRIMARY KEY,
+                        combined_data TEXT
+                    )
+                    """
+                )
+            )
+        Session = sessionmaker(bind=engine)
+        db = Session()
+
+        with self.assertRaises(MarketSqlError) as ctx:
+            validate_market_sql_query(
+                db,
+                """
+                SELECT symbol, ltp
+                FROM market_combined
+                UNION
+                SELECT symbol, ltp
+                FROM market_combined
+                """,
+                allow_select_star=False,
+            )
+        message = str(ctx.exception)
+        self.assertIn("UNION is not allowed", message)
+        self.assertIn("one simple SELECT", message)
+        self.assertIn("SELECT symbol, ltp, percent_change, qty FROM market_combined", message)
+        db.close()
+
+    def test_combined_screener_ai_mode_rejects_invalid_group_by_before_execution(self):
+        from utils.market_data.sql_screener import MarketSqlError
+
+        engine = create_engine("sqlite:///:memory:")
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE market_screener_cache (
+                        symbol VARCHAR PRIMARY KEY,
+                        combined_data TEXT
+                    )
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO market_screener_cache (symbol, combined_data)
+                    VALUES (:symbol, :combined_data)
+                    """
+                ),
+                {
+                    "symbol": "AAA",
+                    "combined_data": '{"symbol":"AAA","ltp":100,"percent_change":-0.2,"qty":500,"updated_at":"2023-02-01"}',
+                },
+            )
+        Session = sessionmaker(bind=engine)
+        db = Session()
+
+        with self.assertRaises(MarketSqlError) as ctx:
+            run_combined_screener_from_db(
+                db,
+                ["AAA"],
+                sql="""
+                SELECT symbol, ltp, percent_change, qty
+                FROM (
+                    SELECT symbol, ltp, percent_change, qty, updated_at
+                    FROM market_combined
+                ) AS market_combined
+                WHERE percent_change < -0.1
+                GROUP BY symbol, ltp
+                HAVING MAX(ABS(percent_change)) < 0.05
+                ORDER BY MAX(ABS(percent_change)) DESC
+                LIMIT 25
+                """,
+                allow_select_star=False,
+            )
+        self.assertIn("Invalid GROUP BY query", str(ctx.exception))
+        db.close()
+
     def test_attach_freshness_metadata_from_cache(self):
         from sqlalchemy import create_engine, text
         from sqlalchemy.orm import sessionmaker

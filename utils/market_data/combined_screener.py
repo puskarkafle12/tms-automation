@@ -72,10 +72,16 @@ def run_combined_screener_from_db(
     rank_by: Optional[str] = None,
     rank_direction: str = "desc",
     limit: int = 50,
+    allow_select_star: bool = True,
 ) -> Dict[str, Any]:
     ensure_read_session(db)
     if sql and sql.strip():
-        payload = run_market_sql_screener(db, sql, symbols if symbols else None)
+        payload = run_market_sql_screener(
+            db,
+            sql,
+            symbols if symbols else None,
+            allow_select_star=allow_select_star,
+        )
     elif filters is not None:
         generated_sql = filters_to_market_sql(
             db,

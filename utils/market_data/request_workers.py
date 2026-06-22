@@ -112,6 +112,7 @@ def worker_run_market_screen(
     rank_by: Optional[str],
     rank_direction: str,
     limit: int,
+    allow_select_star: bool = True,
 ) -> Dict[str, Any]:
     db = SessionLocal()
     try:
@@ -124,6 +125,7 @@ def worker_run_market_screen(
             rank_by=rank_by,
             rank_direction=rank_direction,
             limit=limit,
+            allow_select_star=allow_select_star,
         )
     finally:
         db.close()

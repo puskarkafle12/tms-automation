@@ -2880,6 +2880,7 @@ async def market_analysis_ai_screen(body: StockScreenerAiRequest, db: Session = 
             rank_by=None,
             rank_direction="desc",
             limit=25,
+            allow_select_star=False,
         )
 
     try:
