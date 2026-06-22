@@ -1,7 +1,14 @@
 import unittest
 from unittest.mock import patch
 
-from utils.llm_chat import LlmChatError, call_llm_chat, is_auth_llm_error, is_retryable_llm_error, should_fallback_llm_error
+from utils.llm_chat import (
+    LlmChatError,
+    call_llm_chat,
+    is_auth_llm_error,
+    is_retryable_llm_error,
+    should_fallback_llm_error,
+    summarize_llm_providers,
+)
 
 
 class LlmChatTest(unittest.TestCase):
@@ -60,6 +67,26 @@ class LlmChatTest(unittest.TestCase):
         mock_call.return_value = "STATUS: OK"
         call_llm_chat("full prompt", "hello", compact_system_prompt="compact prompt")
         self.assertEqual(mock_call.call_args.args[1], "full prompt")
+
+    @patch("utils.llm_chat.test_llm_connection", return_value={"response_preview": "OK"})
+    @patch("utils.llm_chat._provider_chain", return_value=["gemini", "cohere", "groq"])
+    @patch.dict(
+        "os.environ",
+        {
+            "GEMINI_API_KEY": "gemini-key",
+            "COHERE_API_KEY": "cohere-key",
+            "GROQ_API_KEY": "groq-key",
+            "NVIDIA_API_KEY": "",
+        },
+        clear=False,
+    )
+    def test_summarize_llm_providers_marks_missing_nvidia_key(self, _chain, _probe):
+        summary = summarize_llm_providers(probe=False)
+        by_name = {item["provider"]: item for item in summary["providers"]}
+        self.assertEqual(by_name["gemini"]["status"], "configured")
+        self.assertEqual(by_name["nvidia"]["status"], "missing_key")
+        self.assertFalse(by_name["nvidia"]["configured"])
+        self.assertIn("gemini", summary["provider_chain"])
 
 
 if __name__ == "__main__":

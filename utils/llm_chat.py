@@ -27,6 +27,9 @@ PROVIDER_ENV_KEYS = {
 }
 
 
+ALL_LLM_PROVIDERS = ["gemini", "cohere", "nvidia", "groq"]
+
+
 class LlmChatError(Exception):
     """Raised when all configured LLM providers fail."""
 
@@ -383,4 +386,47 @@ def test_llm_connection(provider: Optional[str] = None) -> Dict[str, Any]:
         "model": settings["model"],
         "base_url": settings.get("base_url", ""),
         "response_preview": raw[:200],
+    }
+
+
+def summarize_llm_providers(*, probe: bool = True) -> Dict[str, Any]:
+    """Summarize .env LLM key configuration and optionally probe each provider."""
+    chain = _provider_chain()
+    providers: List[Dict[str, Any]] = []
+    for provider in ALL_LLM_PROVIDERS:
+        settings = _provider_settings(provider)
+        env_key = PROVIDER_ENV_KEYS.get(provider, f"{provider.upper()}_API_KEY")
+        item: Dict[str, Any] = {
+            "provider": provider,
+            "env_key": env_key,
+            "configured": bool(settings["api_key"]),
+            "in_chain": provider in chain,
+            "model": settings["model"],
+            "base_url": settings.get("base_url", ""),
+        }
+        if not settings["api_key"]:
+            item["status"] = "missing_key"
+            item["error"] = f"{env_key} is not set in the server environment."
+        elif probe:
+            try:
+                result = test_llm_connection(provider)
+                item["status"] = "ok"
+                item["response_preview"] = (result.get("response_preview") or "")[:120]
+            except LlmChatError as exc:
+                message = str(exc)
+                item["status"] = "error"
+                item["error"] = message[:400]
+                if is_auth_llm_error(exc):
+                    item["error_type"] = "auth"
+                elif is_retryable_llm_error(exc):
+                    item["error_type"] = "retryable"
+        else:
+            item["status"] = "configured"
+        providers.append(item)
+
+    configured = [item for item in providers if item.get("configured")]
+    return {
+        "provider_chain": chain,
+        "providers": providers,
+        "all_configured_ok": bool(configured) and all(item.get("status") == "ok" for item in configured),
     }

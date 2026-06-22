@@ -68,7 +68,7 @@ from utils.market_status import (
 )
 import config.tms_config as tms_config
 from config.app_build_info import get_app_build_info
-from utils.external_data_sources.nepse_alpha.ai_query import ScreenerAiError
+from utils.external_data_sources.nepse_alpha.ai_query import ScreenerAiError, test_all_llm_connections
 from utils.market_data.sql_screener import MarketSqlError
 from utils.market_data.analysis_ai_query import execute_combined_ai_screener
 from utils.market_data.ai_quick_screens import (
@@ -2816,6 +2816,11 @@ async def market_analysis_screen(body: StockScreenerRequest, db: Session = Depen
 @app.get("/market_analysis/ai_quick_screens")
 async def market_analysis_ai_quick_screens():
     return {"quick_screens": list_quick_ai_screens()}
+
+
+@app.get("/market_analysis/llm_health")
+async def market_analysis_llm_health(probe: bool = True):
+    return await asyncio.to_thread(test_all_llm_connections, probe=probe)
 
 
 @app.post("/market_analysis/ai_screen")

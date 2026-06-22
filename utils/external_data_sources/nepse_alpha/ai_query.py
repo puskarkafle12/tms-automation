@@ -16,7 +16,12 @@ from database import ensure_read_session
 from utils.external_data_sources.nepse_alpha.query_parser import ScreenerQueryError
 import utils.external_data_sources.nepse_alpha.query_parser as query_parser
 import utils.external_data_sources.nepse_alpha.screener as screener_module
-from utils.llm_chat import LlmChatError, call_llm_chat, test_llm_connection
+from utils.llm_chat import (
+    LlmChatError,
+    call_llm_chat,
+    summarize_llm_providers,
+    test_llm_connection,
+)
 from utils.market_data.sql_screener import MARKET_TABLE, MarketSqlError, validate_market_sql_query
 
 TEXT_FIELD_HINTS = {
@@ -436,3 +441,8 @@ async def execute_ai_screener_with_retries(
 def test_nvidia_connection() -> Dict[str, Any]:
     """Quick connectivity check for the configured primary LLM provider."""
     return test_llm_connection()
+
+
+def test_all_llm_connections(*, probe: bool = True) -> Dict[str, Any]:
+    """Check all configured LLM providers from .env."""
+    return summarize_llm_providers(probe=probe)
