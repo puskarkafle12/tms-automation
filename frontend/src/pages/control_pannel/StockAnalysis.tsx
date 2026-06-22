@@ -26,7 +26,7 @@ import {
   fetchAiQuickScreens,
   findQuickScreenByPrompt,
 } from '../../lib/screener/aiQuickScreens';
-import { formatRelativeTime, formatShortRelativeTime } from '../../utils/relativeTime';
+import { formatRelativeTime } from '../../utils/relativeTime';
 
 type FieldType = 'number' | 'text';
 
@@ -92,6 +92,23 @@ const METADATA_COLUMNS = new Set(['updated_at', 'fetched_at', 'cached']);
 
 const scrollResultsIntoView = (element: HTMLElement | null) => {
   element?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+};
+
+const chainInnerScrollToPage = (element: HTMLElement, event: WheelEvent) => {
+  const delta = event.deltaY;
+  if (delta === 0) {
+    return;
+  }
+  const { scrollTop, scrollHeight, clientHeight } = element;
+  if (scrollHeight <= clientHeight + 1) {
+    return;
+  }
+  const atTop = scrollTop <= 0;
+  const atBottom = scrollTop + clientHeight >= scrollHeight - 1;
+  if ((delta < 0 && atTop) || (delta > 0 && atBottom)) {
+    event.preventDefault();
+    window.scrollBy({ top: delta, left: 0, behavior: 'auto' });
+  }
 };
 
 const deriveResultColumns = (
@@ -169,6 +186,21 @@ const reorderColumnsByData = (
   return [...body, ...metadata];
 };
 
+const resolveUpdatedAtRaw = (row: Record<string, unknown>): string | null | undefined => {
+  const candidates = [
+    row.updated_at,
+    row.merolagani_fetched_at,
+    row.nepse_alpha_fetched_at,
+    row.last_traded_on,
+  ];
+  for (const candidate of candidates) {
+    if (candidate != null && candidate !== '') {
+      return String(candidate);
+    }
+  }
+  return null;
+};
+
 const formatMarketTableRows = (rows: Record<string, unknown>[], now = Date.now()) =>
   rows.map((row, index) => {
     const percentChange = parsePercentChange(row.percent_change ?? row.ml_percent_change);
@@ -176,11 +208,9 @@ const formatMarketTableRows = (rows: Record<string, unknown>[], now = Date.now()
     const qtyValue = row.qty ?? row.ml_quantity;
     const ltpSort = typeof ltpValue === 'number' ? ltpValue : Number(String(ltpValue ?? '').replace(/[^\d.-]/g, '')) || '';
     const qtySort = typeof qtyValue === 'number' ? qtyValue : Number(String(qtyValue ?? '').replace(/[^\d.-]/g, '')) || '';
-    const updatedAtRaw = row.updated_at;
-    const updatedAtMs = apiTimestampToUtcMs(updatedAtRaw as string | null);
-    const updatedAtLabel = formatShortRelativeTime(updatedAtRaw as string | null, now)
-      || formatRelativeTime(updatedAtRaw as string | null, now)
-      || '-';
+    const updatedAtRaw = resolveUpdatedAtRaw(row);
+    const updatedAtMs = apiTimestampToUtcMs(updatedAtRaw);
+    const updatedAtLabel = formatRelativeTime(updatedAtRaw, now) || '-';
     return {
       ...row,
       percent_change:
@@ -318,6 +348,7 @@ interface CacheStatus {
   scheduler?: SchedulerStatus;
 }
 
+
 const formatRefreshIn = (seconds?: number | null) => {
   if (seconds == null) {
     return 'paused';
@@ -382,6 +413,7 @@ const StockAnalysis: React.FC = () => {
   const [detailPreset, setDetailPreset] = useState<ScreenerPreset | null>(null);
   const resultsRef = useRef<HTMLElement | null>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
+  const ideasScrollRef = useRef<HTMLUListElement | null>(null);
   const presetDetailPanelRef = useRef<HTMLDivElement | null>(null);
   const presetDetailBodyRef = useRef<HTMLDivElement | null>(null);
 
@@ -526,6 +558,25 @@ const StockAnalysis: React.FC = () => {
       .map((id) => byId.get(id))
       .filter((screen): screen is AiQuickScreen => Boolean(screen));
   }, [aiQuickScreens, quickScreenOrder]);
+
+  useEffect(() => {
+    if (inputMode !== 'ai') {
+      return undefined;
+    }
+    const scrollTargets = [chatScrollRef.current, ideasScrollRef.current].filter(Boolean) as HTMLElement[];
+    const onWheel = (event: WheelEvent) => {
+      const target = event.currentTarget as HTMLElement;
+      chainInnerScrollToPage(target, event);
+    };
+    scrollTargets.forEach((element) => {
+      element.addEventListener('wheel', onWheel, { passive: false });
+    });
+    return () => {
+      scrollTargets.forEach((element) => {
+        element.removeEventListener('wheel', onWheel);
+      });
+    };
+  }, [inputMode, aiMessages.length, aiQuickScreensLoading, orderedQuickScreens.length]);
 
   const bumpQuickScreenOrder = useCallback((screenId: string) => {
     setQuickScreenOrder((prev) => [...prev.filter((id) => id !== screenId), screenId]);
@@ -1107,8 +1158,12 @@ const StockAnalysis: React.FC = () => {
     const columns = resultColumns.length > 0
       ? resultColumns
       : deriveResultColumns(results);
+    const unique = columns.filter((column, index, list) => list.indexOf(column) === index);
+    const withUpdated = unique.includes('updated_at')
+      ? unique
+      : [...unique, 'updated_at'];
     return reorderColumnsByData(
-      columns.filter((column, index, list) => list.indexOf(column) === index),
+      withUpdated,
       results as unknown as Record<string, unknown>[],
     );
   }, [resultColumns, results]);
@@ -1465,7 +1520,7 @@ const StockAnalysis: React.FC = () => {
               ) : orderedQuickScreens.length === 0 ? (
                 <p className="stock-screener-ideas-loading">No suggested screens available.</p>
               ) : (
-                <ul className="stock-screener-ideas-list">
+                <ul ref={ideasScrollRef} className="stock-screener-ideas-list">
                   {orderedQuickScreens.map((screen, index) => (
                     <li key={screen.id}>
                       <button

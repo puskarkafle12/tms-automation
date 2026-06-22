@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence, Set
 
 from sqlalchemy import text
@@ -17,7 +18,7 @@ SCREEN_VIEW_NAME = "v_nepse_stock_screen"
 LEGACY_TABLE = "combined_market_data"
 MAX_SQL_LENGTH = 32_000
 MAX_SQL_LIMIT = 500
-AI_BASE_SELECT_COLUMNS = ("symbol", "ltp", "percent_change", "qty")
+AI_BASE_SELECT_COLUMNS = ("symbol", "ltp", "percent_change", "qty", "updated_at")
 
 FORBIDDEN_SQL_PATTERNS = (
     r"\binsert\b",
@@ -394,6 +395,100 @@ def filters_to_market_sql(
     )
 
 
+def _serialize_cell(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value
+
+
+def _load_symbol_freshness(db: Session, symbols: Sequence[str]) -> Dict[str, str]:
+    cleaned = [str(symbol).strip() for symbol in symbols if str(symbol).strip()]
+    if not cleaned:
+        return {}
+
+    dialect_name = db.get_bind().dialect.name
+    if dialect_name == "postgresql":
+        rows = db.execute(
+            text(
+                """
+                SELECT symbol, updated_at, merolagani_fetched_at, nepse_alpha_fetched_at
+                FROM market_screener_cache
+                WHERE symbol = ANY(:symbols)
+                """
+            ),
+            {"symbols": cleaned},
+        ).mappings().all()
+    else:
+        placeholders = ", ".join(f":symbol_{index}" for index in range(len(cleaned)))
+        params = {f"symbol_{index}": symbol for index, symbol in enumerate(cleaned)}
+        rows = db.execute(
+            text(
+                f"""
+                SELECT symbol, updated_at, merolagani_fetched_at, nepse_alpha_fetched_at
+                FROM market_screener_cache
+                WHERE symbol IN ({placeholders})
+                """
+            ),
+            params,
+        ).mappings().all()
+
+    freshness: Dict[str, str] = {}
+    for row in rows:
+        symbol = str(row.get("symbol") or "").strip()
+        if not symbol:
+            continue
+        candidates = [
+            row.get("updated_at"),
+            row.get("merolagani_fetched_at"),
+            row.get("nepse_alpha_fetched_at"),
+        ]
+        valid = [candidate for candidate in candidates if candidate is not None]
+        if not valid:
+            continue
+        freshest = max(valid)
+        serialized = _serialize_cell(freshest)
+        if serialized:
+            freshness[symbol] = str(serialized)
+    return freshness
+
+
+def _attach_freshness_metadata(
+    db: Session,
+    results: List[Dict[str, Any]],
+    result_keys: List[str],
+) -> List[str]:
+    if not results:
+        return result_keys
+
+    freshness = _load_symbol_freshness(
+        db,
+        [str(record.get("symbol") or "") for record in results],
+    )
+    keys = list(result_keys)
+    for record in results:
+        for key, value in list(record.items()):
+            record[key] = _serialize_cell(value)
+        symbol = str(record.get("symbol") or "").strip()
+        cached = freshness.get(symbol)
+        if not cached:
+            continue
+        existing = record.get("updated_at")
+        if existing in (None, ""):
+            record["updated_at"] = cached
+        else:
+            existing_serialized = _serialize_cell(existing)
+            record["updated_at"] = existing_serialized
+            try:
+                if cached > str(existing_serialized):
+                    record["updated_at"] = cached
+            except TypeError:
+                pass
+
+    if "updated_at" not in keys and any(record.get("updated_at") for record in results):
+        keys.append("updated_at")
+    return keys
+
+
 def run_market_sql_screener(
     db: Session,
     query: str,
@@ -413,11 +508,13 @@ def run_market_sql_screener(
     results: List[Dict[str, Any]] = []
     result_keys: List[str] = []
     for index, row in enumerate(rows, start=1):
-        record = dict(row)
+        record = {key: _serialize_cell(value) for key, value in dict(row).items()}
         record["rank"] = index
         if not result_keys:
             result_keys = [key for key in record.keys() if key != "rank"]
         results.append(record)
+
+    result_keys = _attach_freshness_metadata(db, results, result_keys)
 
     display_keys = ["rank", *result_keys] if result_keys else ["rank", "symbol"]
     column_labels = build_column_labels_for_keys(display_keys)

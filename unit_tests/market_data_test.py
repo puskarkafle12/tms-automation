@@ -452,7 +452,51 @@ class DynamicCatalogTest(unittest.TestCase):
         self.assertIn("symbol", lowered)
         self.assertIn("percent_change", lowered)
         self.assertIn("qty", lowered)
+        self.assertIn("updated_at", lowered)
         self.assertTrue(lowered.index("symbol") < lowered.index("sector"))
+
+    def test_attach_freshness_metadata_from_cache(self):
+        from sqlalchemy import create_engine, text
+        from sqlalchemy.orm import sessionmaker
+
+        from utils.market_data.sql_screener import _attach_freshness_metadata
+
+        engine = create_engine("sqlite:///:memory:")
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE market_screener_cache (
+                        symbol TEXT PRIMARY KEY,
+                        updated_at TEXT,
+                        merolagani_fetched_at TEXT,
+                        nepse_alpha_fetched_at TEXT
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO market_screener_cache
+                    (symbol, updated_at, merolagani_fetched_at, nepse_alpha_fetched_at)
+                    VALUES
+                    ('AAA', '2026-06-22T01:00:00', '2026-06-22T01:10:00', '2026-06-22T01:05:00'),
+                    ('BBB', NULL, '2026-06-22T02:00:00', NULL)
+                    """
+                )
+            )
+        Session = sessionmaker(bind=engine)
+        db = Session()
+        results = [
+            {"symbol": "AAA", "ltp": 100},
+            {"symbol": "BBB", "ltp": 50, "updated_at": None},
+        ]
+        keys = _attach_freshness_metadata(db, results, ["symbol", "ltp"])
+        self.assertIn("updated_at", keys)
+        self.assertEqual(results[0]["updated_at"], "2026-06-22T01:10:00")
+        self.assertEqual(results[1]["updated_at"], "2026-06-22T02:00:00")
+        db.close()
 
 
 if __name__ == "__main__":

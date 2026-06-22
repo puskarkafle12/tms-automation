@@ -730,7 +730,7 @@
   overflow-y: auto;
   padding: 0.85rem 0.9rem;
   background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
-  overscroll-behavior: contain;
+  overscroll-behavior-y: auto;
   -webkit-overflow-scrolling: touch;
   scrollbar-width: thin;
   scrollbar-color: #cbd5e1 transparent;
@@ -788,7 +788,7 @@
   flex-direction: column;
   gap: 0.55rem;
   overflow-y: auto;
-  overscroll-behavior: contain;
+  overscroll-behavior-y: auto;
   -webkit-overflow-scrolling: touch;
   scrollbar-width: thin;
   scrollbar-color: #cbd5e1 transparent;
