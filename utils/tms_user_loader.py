@@ -18,7 +18,11 @@ async def load_tms_users_instances(client_ids, tms_instances: Dict):
             if client_id in tms_instances or client_id not in session_ids:
                 continue
             try:
-                tms_instances[client_id] = await get_tms_user_for_client(client_id, db)
+                tms_instances[client_id] = await get_tms_user_for_client(
+                    client_id,
+                    db,
+                    allow_full_login=True,
+                )
             except Exception:
                 tms_instances.pop(client_id, None)
     finally:

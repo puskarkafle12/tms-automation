@@ -107,7 +107,12 @@ async def invalidate_cached_tms_user(client_id: str) -> None:
     if cached:
         await cached.close()
 
-async def get_cached_tms_user(user: User, *, request_per_sec: float = 5) -> TmsUser:
+async def get_cached_tms_user(
+    user: User,
+    *,
+    request_per_sec: float = 5,
+    allow_full_login: bool = False,
+) -> TmsUser:
     from utils.tms_broker import normalize_broker_no
 
     broker_no = normalize_broker_no(user.broker_no)
@@ -135,7 +140,7 @@ async def get_cached_tms_user(user: User, *, request_per_sec: float = 5) -> TmsU
         request_per_sec=request_per_sec,
     )
     try:
-        await tms_user.try_cached_login()
+        await tms_user.try_cached_login(allow_full_login=allow_full_login)
     except Exception:
         await tms_user.close()
         raise
@@ -913,6 +918,7 @@ async def get_market_status(db: Session = Depends(get_db)):
         "client_id": client_id,
         "broker_no": broker_no,
         "session_data": session_data,
+        "tms_request_cache": TmsUser.tms_request_cache_status(),
     }
     market_status_cache = (cache_now, payload)
     return payload
@@ -1568,7 +1574,7 @@ async def login_tms_account(client_id: str, db: Session = Depends(get_db)):
 
     try:
         await invalidate_cached_tms_user(client_id)
-        tms_instance = await get_cached_tms_user(user, request_per_sec=5)
+        tms_instance = await get_cached_tms_user(user, request_per_sec=5, allow_full_login=True)
         try:
             await tms_instance.get_client_collateral(force_refresh=True)
         except Exception:

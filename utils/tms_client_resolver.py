@@ -19,6 +19,7 @@ async def get_tms_user_for_client(
     db: Session,
     *,
     request_per_sec: float = 5,
+    allow_full_login: bool = True,
 ) -> TmsUser:
     """Build TmsUser from DB session using broker_no — never use client_id as broker."""
     user = db.query(User).filter(User.client_id == client_id).first()
@@ -39,5 +40,5 @@ async def get_tms_user_for_client(
         password=user.password,
         request_per_sec=request_per_sec,
     )
-    await tms_user.try_cached_login()
+    await tms_user.try_cached_login(allow_full_login=allow_full_login)
     return tms_user

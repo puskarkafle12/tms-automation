@@ -4,7 +4,7 @@ from datetime import date, datetime, time
 from http.cookies import SimpleCookie
 import json
 import time as monotonic_time
-from typing import Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 import aiohttp
 from database import get_db_session
 from exceptions.login_exceptions import LoginFailedException
@@ -38,6 +38,17 @@ class TmsUser:
     _security_cache_ttl = 300.0
     _collateral_cache: Dict[str, tuple[float, Dict]] = {}
     _collateral_cache_ttl = 300.0
+    _quote_cache: Dict[str, tuple[float, Dict]] = {}
+    _quote_cache_ttl = 2.0
+    _quote_stale_ttl = 60.0
+    _quote_failures: Dict[str, tuple[int, float]] = {}
+    _quote_circuit_failure_limit = 3
+    _quote_circuit_cooldown = 15.0
+    _full_login_lock: Optional[asyncio.Lock] = None
+    _non_live_request_cache: Dict[str, tuple[float, int, object]] = {}
+    _non_live_request_cache_ttl = 3600.0
+    _market_live_override: Optional[tuple[float, bool]] = None
+    _market_live_override_ttl = 90.0
 
     def __init__(
         self,
@@ -62,6 +73,7 @@ class TmsUser:
         self._auth_refresh_lock = asyncio.Lock()
         self._session_lock = asyncio.Lock()
         self._auth_refresh_failed_at: float = 0.0
+        self._allow_full_login_on_refresh = True
         self.security = None
         self.stock_symbol = stock_symbol
         self.max_request_per_sec = 5.0  # Maximum fetch rate
@@ -240,20 +252,22 @@ class TmsUser:
         if not self.password:
             raise LoginFailedException("No TMS password available for login")
 
-        self.login_response = await self.login()
-        self.tokens = self.login_response["tokens"]
-        self.headers = self.get_header(self.login_response["request_owner"], self.tokens)
-        rotation_result = await self.rotate_password_if_expired()
-        await self._validate_session()
-        message = (
-            rotation_result["message"]
-            if rotation_result.get("rotated")
-            else "token refreshed and stored in the database"
-        )
-        await self._persist_logged_in_session(message, update_login_time=True)
-        return self._login_success_payload(message, rotation_result)
+        async with self._get_full_login_lock():
+            self.login_response = await self.login()
+            self.tokens = self.login_response["tokens"]
+            self.headers = self.get_header(self.login_response["request_owner"], self.tokens)
+            rotation_result = await self.rotate_password_if_expired()
+            await self._validate_session()
+            message = (
+                rotation_result["message"]
+                if rotation_result.get("rotated")
+                else "token refreshed and stored in the database"
+            )
+            await self._persist_logged_in_session(message, update_login_time=True)
+            return self._login_success_payload(message, rotation_result)
 
-    async def try_cached_login(self):
+    async def try_cached_login(self, *, allow_full_login: bool = True):
+        self._allow_full_login_on_refresh = allow_full_login
         await self._load_password_from_db()
         rotation_result: Dict = {"rotated": False}
 
@@ -280,6 +294,9 @@ class TmsUser:
                     return self._login_success_payload(message, rotation_result)
                 except Exception:
                     pass
+
+        if not allow_full_login:
+            raise LoginFailedException("Cached TMS session is unavailable; full captcha login skipped")
 
         return await self._full_login_and_persist()
 
@@ -584,15 +601,15 @@ class TmsUser:
             return {"error": str(e)}
 
     async def get_client_details(self, cookies, headers, client_dealer_id):
-        await self._ensure_session()
-        async with self.session.get(
+        _, payload = await self._authenticated_request(
+            "GET",
             f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/clientApi/clientDealer/info/{client_dealer_id}',
             cookies=cookies,
             headers=headers,
-        ) as response:
-            if response.status != 200:
-                response.raise_for_status()
-            return await response.json()
+            expected_statuses={200},
+            retry_on_unauthorized=False,
+        )
+        return payload
 
     async def save_login_info(self):
         db = get_db_session()
@@ -721,6 +738,13 @@ class TmsUser:
     async def check_exchange_session(self) -> Dict:
         url = f"https://tms{self.broker_no}.nepsetms.com.np/tmsapi/dnaApi/exchange/sessionCheck"
         _, payload = await self._authenticated_request("GET", url, expected_statuses={200})
+        try:
+            from utils.market_status import get_market_hours_status, is_market_live, parse_session_check_response
+
+            parsed = parse_session_check_response(payload)
+            self.set_market_live_override(is_market_live(get_market_hours_status(), parsed["session_active"]))
+        except Exception:
+            pass
         return payload
 
     async def get_order_book(self):
@@ -1294,6 +1318,143 @@ class TmsUser:
             return True
         return "connector is closed" in str(exc).lower()
 
+    @classmethod
+    def _get_full_login_lock(cls) -> asyncio.Lock:
+        if cls._full_login_lock is None:
+            cls._full_login_lock = asyncio.Lock()
+        return cls._full_login_lock
+
+    @classmethod
+    def set_market_live_override(cls, market_live: bool) -> None:
+        cls._market_live_override = (monotonic_time.monotonic(), bool(market_live))
+        if market_live:
+            cls.clear_non_live_request_cache()
+
+    @classmethod
+    def is_non_live_tms_cache_enabled(cls) -> bool:
+        from utils.market_status import get_market_hours_status
+
+        hours = get_market_hours_status()
+        if not hours["market_hours_open"]:
+            return True
+
+        if cls._market_live_override:
+            checked_at, market_live = cls._market_live_override
+            if monotonic_time.monotonic() - checked_at <= cls._market_live_override_ttl:
+                return not market_live
+
+        return False
+
+    @classmethod
+    def tms_request_cache_status(cls) -> Dict[str, Any]:
+        from utils.market_status import get_market_hours_status
+
+        hours = get_market_hours_status()
+        override_live = None
+        if cls._market_live_override:
+            checked_at, market_live = cls._market_live_override
+            if monotonic_time.monotonic() - checked_at <= cls._market_live_override_ttl:
+                override_live = market_live
+
+        enabled = cls.is_non_live_tms_cache_enabled()
+        if enabled:
+            reason = "market_not_live"
+        elif hours["market_hours_open"]:
+            reason = "market_live_or_unverified_during_market_hours"
+        else:
+            reason = "disabled"
+
+        return {
+            "enabled": enabled,
+            "reason": reason,
+            "entries": len(cls._non_live_request_cache),
+            "ttl_seconds": int(cls._non_live_request_cache_ttl),
+            "market_live_override": override_live,
+        }
+
+    @classmethod
+    def clear_non_live_request_cache(cls) -> None:
+        cls._non_live_request_cache.clear()
+
+    @staticmethod
+    def _request_cache_value_token(value: Any) -> str:
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return str(value)
+        try:
+            return json.dumps(value, sort_keys=True, default=str)
+        except Exception:
+            return str(value)
+
+    @classmethod
+    def _non_live_request_cache_key(cls, method: str, url: str, kwargs: Dict[str, Any]) -> str:
+        stable_parts = []
+        for key, value in sorted(kwargs.items()):
+            if key.lower() in {"headers", "cookies"}:
+                continue
+            stable_parts.append(f"{key}={cls._request_cache_value_token(value)}")
+        return f"{method.upper()} {url} {'&'.join(stable_parts)}"
+
+    @classmethod
+    def _get_non_live_cached_request(cls, cache_key: str) -> Optional[tuple[int, object]]:
+        cached = cls._non_live_request_cache.get(cache_key)
+        if not cached:
+            return None
+        cached_at, status, payload = cached
+        if monotonic_time.monotonic() - cached_at <= cls._non_live_request_cache_ttl:
+            return status, payload
+        cls._non_live_request_cache.pop(cache_key, None)
+        return None
+
+    @classmethod
+    def _set_non_live_cached_request(cls, cache_key: str, status: int, payload: object) -> None:
+        cls._non_live_request_cache[cache_key] = (monotonic_time.monotonic(), status, payload)
+
+    @classmethod
+    def clear_quote_cache(cls, broker_no: Optional[str] = None) -> None:
+        if broker_no is None:
+            cls._quote_cache.clear()
+            cls._quote_failures.clear()
+            return
+        prefix = f"{normalize_broker_no(str(broker_no))}:"
+        cls._quote_cache = {
+            key: value for key, value in cls._quote_cache.items()
+            if not key.startswith(prefix)
+        }
+        cls._quote_failures = {
+            key: value for key, value in cls._quote_failures.items()
+            if not key.startswith(prefix)
+        }
+
+    @classmethod
+    def _get_cached_quote(cls, key: str, max_age: float) -> Optional[Dict]:
+        cached = cls._quote_cache.get(key)
+        if not cached:
+            return None
+        cached_at, quote = cached
+        if monotonic_time.monotonic() - cached_at <= max_age:
+            return quote
+        return None
+
+    @classmethod
+    def _quote_circuit_open_seconds(cls, key: str) -> float:
+        _, open_until = cls._quote_failures.get(key, (0, 0.0))
+        remaining = open_until - monotonic_time.monotonic()
+        return remaining if remaining > 0 else 0.0
+
+    @classmethod
+    def _record_quote_success(cls, key: str, quote: Dict) -> None:
+        cls._quote_cache[key] = (monotonic_time.monotonic(), quote)
+        cls._quote_failures.pop(key, None)
+
+    @classmethod
+    def _record_quote_failure(cls, key: str) -> None:
+        failures, open_until = cls._quote_failures.get(key, (0, 0.0))
+        now = monotonic_time.monotonic()
+        failures = failures + 1 if open_until <= now else failures
+        if failures >= cls._quote_circuit_failure_limit:
+            open_until = now + cls._quote_circuit_cooldown
+        cls._quote_failures[key] = (failures, open_until)
+
     async def refresh_auth_token(self) -> bool:
         if not self.tokens or not self.headers:
             return False
@@ -1363,6 +1524,10 @@ class TmsUser:
                 except Exception:
                     pass
 
+            if not self._allow_full_login_on_refresh:
+                self._auth_refresh_failed_at = monotonic_time.monotonic()
+                raise LoginFailedException("TMS token refresh failed; full captcha login skipped")
+
             try:
                 result = await self._full_login_and_persist()
                 self._auth_refresh_failed_at = 0.0
@@ -1386,6 +1551,17 @@ class TmsUser:
         explicit_cookies = kwargs.pop("cookies", None)
         last_error: Optional[Exception] = None
         response = None
+        normalized_method = method.upper()
+        use_non_live_cache = (
+            normalized_method == "GET"
+            and parse_json
+            and self.is_non_live_tms_cache_enabled()
+        )
+        cache_key = self._non_live_request_cache_key(normalized_method, url, kwargs) if use_non_live_cache else None
+        if cache_key:
+            cached_response = self._get_non_live_cached_request(cache_key)
+            if cached_response is not None:
+                return cached_response
 
         for connection_attempt in range(max_connection_retries):
             unauthorized_retried = False
@@ -1398,7 +1574,7 @@ class TmsUser:
                 try:
                     async with self._session_lock:
                         await self._ensure_session()
-                        response = await self.session.request(method.upper(), url, **request_kwargs)
+                        response = await self.session.request(normalized_method, url, **request_kwargs)
                         async with response:
                             if response.status == 401 and retry_on_unauthorized and not unauthorized_retried:
                                 await response.read()
@@ -1407,8 +1583,12 @@ class TmsUser:
                                 response.raise_for_status()
                             else:
                                 if parse_json:
-                                    return response.status, await response.json(content_type=None)
-                                return response.status, await response.text()
+                                    payload = await response.json(content_type=None)
+                                else:
+                                    payload = await response.text()
+                                if cache_key:
+                                    self._set_non_live_cached_request(cache_key, response.status, payload)
+                                return response.status, payload
                 except Exception as exc:
                     if not self._is_transient_request_error(exc):
                         raise
@@ -1447,8 +1627,24 @@ class TmsUser:
         *,
         retry_backoff: bool = False,
     ) -> Optional[Dict]:
+        security_id = str(id)
+        cache_key = f"{self.broker_no}:{security_id}"
         url = f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/rtApi/ws/stockQuote/{id}'
         last_error = None
+        cached_quote = self._get_cached_quote(cache_key, self._quote_cache_ttl)
+        if cached_quote is not None:
+            return cached_quote
+
+        circuit_remaining = self._quote_circuit_open_seconds(cache_key)
+        if circuit_remaining > 0:
+            stale_quote = self._get_cached_quote(cache_key, self._quote_stale_ttl)
+            if stale_quote is not None:
+                return stale_quote
+            self.updates.append({
+                "status": "warn",
+                "message": f"Price fetch paused for {int(circuit_remaining)}s after repeated TMS quote timeouts.",
+            })
+            return None
 
         for attempt in range(max_retries):
             try:
@@ -1457,13 +1653,16 @@ class TmsUser:
                     url,
                     expected_statuses={200},
                     timeout=self.QUOTE_TIMEOUT,
+                    max_connection_retries=1,
                 )
-                return response_data['payload']['data'][0]
+                quote = response_data['payload']['data'][0]
+                self._record_quote_success(cache_key, quote)
+                return quote
 
             except (aiohttp.ClientError, asyncio.TimeoutError, ConnectionError) as exc:
                 last_error = str(exc)
                 print(f"Error fetching stock details (attempt {attempt + 1}): {exc}, url={url}")
-                await self._recreate_session()
+                self._record_quote_failure(cache_key)
 
             except Exception as exc:
                 last_error = str(exc)
@@ -1474,6 +1673,9 @@ class TmsUser:
                 await asyncio.sleep(backoff)
 
         if last_error:
+            stale_quote = self._get_cached_quote(cache_key, self._quote_stale_ttl)
+            if stale_quote is not None:
+                return stale_quote
             self.updates.append({
                 "status": "warn",
                 "message": f"Price fetch failed after {max_retries} retries — retrying scan…",

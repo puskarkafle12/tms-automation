@@ -13,10 +13,16 @@ class TestTmsPerformanceOptimizations(unittest.IsolatedAsyncioTestCase):
         self.TmsUser = TmsUser
         self.TmsUser.clear_security_cache()
         self.TmsUser.clear_collateral_cache()
+        self.TmsUser.clear_quote_cache()
+        self.TmsUser.clear_non_live_request_cache()
+        self.TmsUser._market_live_override = None
 
     async def asyncTearDown(self):
         self.TmsUser.clear_security_cache()
         self.TmsUser.clear_collateral_cache()
+        self.TmsUser.clear_quote_cache()
+        self.TmsUser.clear_non_live_request_cache()
+        self.TmsUser._market_live_override = None
 
     async def test_tms_user_session_is_lazy_and_reused(self):
         user = self.TmsUser(broker_no="35", username="u", password="p", request_per_sec=1)
@@ -89,6 +95,43 @@ class TestTmsPerformanceOptimizations(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(calls), 3)
         self.assertEqual(sleeps, [0.2, 0.4])
 
+    async def test_quote_fetch_does_not_recreate_session_on_timeout(self):
+        user = self.TmsUser(broker_no="35", username="u", password="p")
+        user._authenticated_request = AsyncMock(side_effect=ConnectionError("timeout"))
+        user._recreate_session = AsyncMock(return_value=None)
+
+        result = await user.get_stock_details_async("1", max_retries=1)
+
+        self.assertIsNone(result)
+        user._recreate_session.assert_not_awaited()
+
+    async def test_quote_fetch_uses_short_cache_for_duplicate_requests(self):
+        user = self.TmsUser(broker_no="35", username="u", password="p")
+        user._authenticated_request = AsyncMock(
+            return_value=(200, {"payload": {"data": [{"ltp": 123.4}]}})
+        )
+
+        first = await user.get_stock_details_async("1", max_retries=1)
+        second = await user.get_stock_details_async("1", max_retries=1)
+
+        self.assertEqual(first, {"ltp": 123.4})
+        self.assertIs(second, first)
+        user._authenticated_request.assert_awaited_once()
+
+    async def test_quote_circuit_returns_stale_quote_after_repeated_timeouts(self):
+        user = self.TmsUser(broker_no="35", username="u", password="p")
+        self.TmsUser._quote_cache["35:1"] = (time.monotonic(), {"ltp": 120.0})
+        self.TmsUser._quote_failures["35:1"] = (
+            self.TmsUser._quote_circuit_failure_limit,
+            time.monotonic() + 10,
+        )
+        user._authenticated_request = AsyncMock()
+
+        result = await user.get_stock_details_async("1", max_retries=1)
+
+        self.assertEqual(result, {"ltp": 120.0})
+        user._authenticated_request.assert_not_awaited()
+
     async def test_authenticated_request_refreshes_token_once_on_401(self):
         user = self.TmsUser(broker_no="35", username="u", password="p")
         user.headers = {"x-xsrf-token": "old"}
@@ -125,7 +168,7 @@ class TestTmsPerformanceOptimizations(unittest.IsolatedAsyncioTestCase):
             def __init__(self):
                 self.calls = []
 
-            def request(self, method, url, **kwargs):
+            async def request(self, method, url, **kwargs):
                 self.calls.append((method, url, kwargs))
                 if len(self.calls) == 1:
                     return FakeResponse(401, {"message": "Unauthorized"})
@@ -152,6 +195,101 @@ class TestTmsPerformanceOptimizations(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(fake_session.calls), 2)
         self.assertEqual(fake_session.calls[0][2]["headers"], {"x-xsrf-token": "old"})
         self.assertEqual(fake_session.calls[1][2]["headers"], {"x-xsrf-token": "new"})
+
+    async def test_authenticated_get_uses_non_live_cache(self):
+        user = self.TmsUser(broker_no="35", username="u", password="p")
+        original_cache_enabled = self.TmsUser.is_non_live_tms_cache_enabled
+
+        class FakeResponse:
+            status = 200
+            request_info = None
+            history = ()
+            reason = "OK"
+            headers = {}
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def json(self, content_type=None):
+                return {"ok": True}
+
+            def raise_for_status(self):
+                raise AssertionError("raise_for_status should not be called")
+
+        class FakeSession:
+            closed = False
+
+            def __init__(self):
+                self.calls = 0
+
+            async def request(self, method, url, **kwargs):
+                self.calls += 1
+                return FakeResponse()
+
+        fake_session = FakeSession()
+        user.session = fake_session
+        self.TmsUser.is_non_live_tms_cache_enabled = classmethod(lambda cls: True)
+        try:
+            first = await user._authenticated_request("GET", "https://tms35.example.test/data")
+            second = await user._authenticated_request("GET", "https://tms35.example.test/data")
+        finally:
+            self.TmsUser.is_non_live_tms_cache_enabled = original_cache_enabled
+
+        self.assertEqual(first, (200, {"ok": True}))
+        self.assertEqual(second, first)
+        self.assertEqual(fake_session.calls, 1)
+
+    async def test_authenticated_get_bypasses_cache_when_market_live(self):
+        user = self.TmsUser(broker_no="35", username="u", password="p")
+        original_cache_enabled = self.TmsUser.is_non_live_tms_cache_enabled
+
+        class FakeResponse:
+            status = 200
+            request_info = None
+            history = ()
+            reason = "OK"
+            headers = {}
+
+            def __init__(self, count):
+                self.count = count
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def json(self, content_type=None):
+                return {"count": self.count}
+
+            def raise_for_status(self):
+                raise AssertionError("raise_for_status should not be called")
+
+        class FakeSession:
+            closed = False
+
+            def __init__(self):
+                self.calls = 0
+
+            async def request(self, method, url, **kwargs):
+                self.calls += 1
+                return FakeResponse(self.calls)
+
+        fake_session = FakeSession()
+        user.session = fake_session
+        self.TmsUser.is_non_live_tms_cache_enabled = classmethod(lambda cls: False)
+        try:
+            first = await user._authenticated_request("GET", "https://tms35.example.test/data")
+            second = await user._authenticated_request("GET", "https://tms35.example.test/data")
+        finally:
+            self.TmsUser.is_non_live_tms_cache_enabled = original_cache_enabled
+
+        self.assertEqual(first, (200, {"count": 1}))
+        self.assertEqual(second, (200, {"count": 2}))
+        self.assertEqual(fake_session.calls, 2)
 
     async def test_available_collateral_calculation(self):
         collateral = self.TmsUser.calculate_available_collateral({
