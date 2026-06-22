@@ -5,7 +5,8 @@ import CommonTable from '../../components/table/Table';
 import { fetchJson, getApiUrl } from '../../utils/api';
 import {
   buildPresetCopyText,
-  SCREENER_PRESETS,
+  DEFAULT_SIMPLE_QUERY,
+  fetchMarketAnalysisPresets,
   SCREENER_QUERY_GUIDE,
   ScreenerPreset,
 } from '../../lib/screener/presets';
@@ -93,7 +94,7 @@ const RESULT_COLUMNS = [
   'technical_macd',
 ];
 
-const DEFAULT_QUERY = SCREENER_PRESETS[0].query;
+const DEFAULT_QUERY = DEFAULT_SIMPLE_QUERY;
 
 type InputMode = 'builder' | 'query' | 'ai';
 
@@ -156,7 +157,7 @@ const readJsonResponse = async (
 
 const formatNonJsonResponse = (rawText: string, fallback: string): string => {
   if (rawText.startsWith('Traceback')) {
-    return 'Server error while calling AI. Check NVIDIA_API_KEY and server logs.';
+    return 'Server error while calling AI. Check GEMINI_API_KEY / COHERE_API_KEY / NVIDIA_API_KEY / GROQ_API_KEY and server logs.';
   }
   const trimmed = rawText.trim();
   return trimmed ? trimmed.slice(0, 400) : fallback;
@@ -202,16 +203,15 @@ const StockScreener: React.FC = () => {
   const [hasRun, setHasRun] = useState(false);
   const [aiInput, setAiInput] = useState('');
   const [aiMessages, setAiMessages] = useState<AiChatMessage[]>([]);
-  const [aiSummary, setAiSummary] = useState('');
-  const [generatedQuery, setGeneratedQuery] = useState('');
   const [baselineModalOpen, setBaselineModalOpen] = useState(false);
   const [baselineScheduleInput, setBaselineScheduleInput] = useState<ScreenerDropScheduleInput | null>(null);
   const [scheduleMessage, setScheduleMessage] = useState('');
+  const [presets, setPresets] = useState<ScreenerPreset[]>([]);
   const resultsRef = useRef<HTMLElement | null>(null);
 
   const activePreset = useMemo(
-    () => SCREENER_PRESETS.find((preset) => preset.id === activePresetId) || null,
-    [activePresetId],
+    () => presets.find((preset) => preset.id === activePresetId) || null,
+    [activePresetId, presets],
   );
 
   const chatGptPromptFull = useMemo(
@@ -237,6 +237,18 @@ const StockScreener: React.FC = () => {
       }
     };
     void loadFields();
+  }, []);
+
+  useEffect(() => {
+    const loadPresets = async () => {
+      try {
+        const loaded = await fetchMarketAnalysisPresets();
+        setPresets(loaded);
+      } catch {
+        setPresets([]);
+      }
+    };
+    void loadPresets();
   }, []);
 
   useEffect(() => {
@@ -407,8 +419,6 @@ const StockScreener: React.FC = () => {
     setError('');
     setResults([]);
     setStats(null);
-    setAiSummary('');
-    setGeneratedQuery('');
     setUniverseLabel('');
     setHasRun(false);
 
@@ -438,7 +448,6 @@ const StockScreener: React.FC = () => {
           ? String((detail as { generated_query?: string }).generated_query || '')
           : '';
         if (generated) {
-          setGeneratedQuery(generated);
           setQueryText(generated);
         }
         throw new Error(parseApiError(data, 'AI screener request failed'));
@@ -446,9 +455,7 @@ const StockScreener: React.FC = () => {
 
       const query = String((data as { generated_query?: string }).generated_query || '');
       const summary = String((data as { ai_summary?: string }).ai_summary || 'Query generated and screened successfully.');
-      setGeneratedQuery(query);
       setQueryText(query);
-      setAiSummary(summary);
       if ((data as { parsed_query?: { rank_by?: string } }).parsed_query?.rank_by) {
         setRankBy((data as { parsed_query: { rank_by: string } }).parsed_query.rank_by);
       }
@@ -704,7 +711,7 @@ const StockScreener: React.FC = () => {
             <span className="stock-screener-presets-note">Click a shortcut to run instantly</span>
           </div>
           <div className="stock-screener-preset-grid">
-            {SCREENER_PRESETS.map((preset) => (
+            {presets.map((preset) => (
               <button
                 key={preset.id}
                 type="button"
@@ -861,7 +868,7 @@ const StockScreener: React.FC = () => {
                   </div>
                 </div>
                 {copyMessage && <p className="stock-screener-copy-msg">{copyMessage}</p>}
-                <pre className="stock-screener-prompt-body">{activePreset.prompt}</pre>
+                <pre className="stock-screener-prompt-body">{buildPresetCopyText(activePreset)}</pre>
                 <div className="stock-screener-prompt-query">
                   <span className="stock-screener-prompt-query-label">Query used</span>
                   <pre>{activePreset.query}</pre>
@@ -1030,13 +1037,6 @@ const StockScreener: React.FC = () => {
             </h3>
             {universeLabel && (
               <p className="stock-screener-universe-result">{universeLabel}</p>
-            )}
-            {inputMode === 'ai' && generatedQuery && (
-              <div className="stock-screener-generated-query">
-                <span className="stock-screener-prompt-query-label">AI-generated query (strictly validated)</span>
-                {aiSummary && <p className="stock-screener-ai-summary">{aiSummary}</p>}
-                <pre>{generatedQuery}</pre>
-              </div>
             )}
             {loading ? (
               <div className="stock-screener-loading" role="status" aria-live="polite">

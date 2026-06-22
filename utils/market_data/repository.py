@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from database import ensure_read_session
 from utils.market_data.canonical_fields import (
     build_combined_record,
     canonicalize_merolagani_record,
@@ -127,6 +128,7 @@ def save_daily_snapshot(db: Session, snapshot_date: date, rows: List[Dict[str, A
 
 
 def get_cache_symbol_count(db: Session) -> int:
+    ensure_read_session(db)
     return int(db.execute(text("SELECT COUNT(*) FROM market_screener_cache")).scalar() or 0)
 
 
@@ -226,6 +228,7 @@ def upsert_screener_cache_row(
 
 
 def load_cached_records(db: Session, symbols: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    ensure_read_session(db)
     if symbols:
         normalized = sorted({str(item).strip().upper() for item in symbols if str(item).strip()})
         if not normalized:
@@ -270,6 +273,7 @@ def load_cached_records(db: Session, symbols: Optional[List[str]] = None) -> Lis
 
 
 def get_cache_status(db: Session) -> Dict[str, Any]:
+    ensure_read_session(db)
     counts = db.execute(
         text(
             """
@@ -297,6 +301,7 @@ def get_cache_status(db: Session) -> Dict[str, Any]:
 
 
 def load_table_rows(db: Session, source: str, symbols: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    ensure_read_session(db)
     column_map = {
         "merolagani": "merolagani_data",
         "nepse_alpha": "nepse_alpha_data",

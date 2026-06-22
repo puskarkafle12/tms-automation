@@ -1,4 +1,4 @@
-"""Generate strict screener queries via NVIDIA integrate API (DeepSeek v4 Flash)."""
+"""Generate strict screener queries via configurable LLM providers (NVIDIA/Gemini primary, Groq fallback)."""
 
 from __future__ import annotations
 
@@ -8,12 +8,16 @@ import re
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 try:
-    import config.db_config  # noqa: F401 — loads .env for NVIDIA_API_KEY
+    import config.db_config  # noqa: F401 — loads .env for LLM API keys
 except Exception:
     pass
 
-from utils.external_data_sources.nepse_alpha.query_parser import ScreenerQueryError, parse_screener_query
-from utils.external_data_sources.nepse_alpha.screener import get_field_catalog, get_screener_query_spec
+from database import ensure_read_session
+from utils.external_data_sources.nepse_alpha.query_parser import ScreenerQueryError
+import utils.external_data_sources.nepse_alpha.query_parser as query_parser
+import utils.external_data_sources.nepse_alpha.screener as screener_module
+from utils.llm_chat import LlmChatError, call_llm_chat, test_llm_connection
+from utils.market_data.sql_screener import MARKET_TABLE, MarketSqlError, validate_market_sql_query
 
 TEXT_FIELD_HINTS = {
     "technical_macd": "Usually 'Bullish' or 'Bearish'",
@@ -28,7 +32,7 @@ TEXT_FIELD_HINTS = {
 # Keep system prompt bounded; override via env if your model allows more.
 MAX_AI_SYSTEM_PROMPT_CHARS = 12_000
 
-MAX_AI_SCREENER_RETRIES = int(os.getenv("NVIDIA_AI_MAX_RETRIES", "3"))
+MAX_AI_SCREENER_RETRIES = int(os.getenv("NVIDIA_AI_MAX_RETRIES", "2"))
 
 
 class ScreenerAiError(Exception):
@@ -41,22 +45,33 @@ class ScreenerAiError(Exception):
         self.generated_query = generated_query
 
 
-def _nvidia_settings() -> Dict[str, Any]:
-    return {
-        "api_key": os.getenv("NVIDIA_API_KEY", "").strip(),
-        "base_url": os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1").strip(),
-        "model": os.getenv("NVIDIA_MODEL", "deepseek-ai/deepseek-v4-flash").strip(),
-        "temperature": float(os.getenv("NVIDIA_TEMPERATURE", "1")),
-        "top_p": float(os.getenv("NVIDIA_TOP_P", "0.95")),
-        "max_tokens": int(os.getenv("NVIDIA_MAX_TOKENS", "16384")),
-        "enable_thinking": os.getenv("NVIDIA_ENABLE_THINKING", "true").lower() == "true",
-        "reasoning_effort": (os.getenv("NVIDIA_REASONING_EFFORT", "high") or "high").strip().lower(),
-    }
+def _call_nvidia_chat(
+    system_prompt: str,
+    user_message: str,
+    *,
+    conversation: Optional[List[Dict[str, str]]] = None,
+    compact_system_prompt: Optional[str] = None,
+) -> str:
+    try:
+        content, _provider = call_llm_chat(
+            system_prompt,
+            user_message,
+            conversation=conversation,
+            compact_system_prompt=compact_system_prompt,
+        )
+    except LlmChatError as exc:
+        raise ScreenerAiError(str(exc)) from exc
+    return content
 
 
-def build_ai_system_prompt() -> str:
-    catalog = get_field_catalog()
-    spec = get_screener_query_spec()
+def build_ai_system_prompt(db: Optional[Any] = None) -> str:
+    if db is not None:
+        from utils.market_data.dynamic_catalog import build_dynamic_ai_system_prompt
+
+        return build_dynamic_ai_system_prompt(db)
+
+    catalog = screener_module.get_field_catalog()
+    spec = screener_module.get_screener_query_spec()
     allowed_keys = sorted(spec["allowed_filter_keys"])
     numeric_keys = [item["key"] for item in catalog if item["type"] == "number"]
     text_keys = [item["key"] for item in catalog if item["type"] == "text"]
@@ -70,9 +85,9 @@ def build_ai_system_prompt() -> str:
         f"{key}({hint})" for key, hint in TEXT_FIELD_HINTS.items() if key in allowed_keys
     )
 
-    return f"""You are a NEPSE stock screener query generator (Nepse Alpha). Single-pass: answer once with the best valid query you can build.
+    return f"""You are a NEPSE market analysis screener query generator. Single-pass: answer once with the best valid query you can build.
 
-GOAL: The user may ask anything. Return the most relevant runnable screen using ONLY allowed fields below.
+GOAL: The user may ask anything. Return the most relevant runnable screen using ONLY allowed fields from the combined market database ({len(allowed_keys)} columns discovered dynamically).
 Prefer STATUS: OK with a close approximation. Use STATUS: ERROR only when no valid query is possible.
 
 RULES:
@@ -135,6 +150,8 @@ Previous query:
 Instructions:
 - Return STATUS: OK with the best corrected query in one shot.
 - Stay relevant to the original user request; substitute closest allowed fields when needed.
+- SELECT must always include: symbol, ltp, percent_change, qty (stock name + price basics).
+- Never use sector instead of symbol — each row must show the stock ticker in symbol.
 - If zero rows before: relax filters slightly so related stocks can match.
 - Add a Limitation bullet when you approximated or dropped unsupported parts.
 - Do not repeat the same invalid query.
@@ -164,20 +181,31 @@ def _extract_query_block(text: str) -> str:
 
     for match in re.finditer(r"```(?:\w+)?\s*(.*?)```", text, flags=re.DOTALL):
         block = match.group(1).strip()
-        if re.search(r"\b(WHERE|ORDER\s+BY)\b", block, flags=re.IGNORECASE):
+        if re.search(r"\b(SELECT|WHERE|ORDER\s+BY)\b", block, flags=re.IGNORECASE):
             return block
 
     lines: List[str] = []
     capture = False
     for line in text.splitlines():
         upper = line.strip().upper()
-        if upper.startswith("WHERE") or upper.startswith("ORDER BY"):
+        if upper.startswith("SELECT") or upper.startswith("WHERE") or upper.startswith("ORDER BY"):
             capture = True
         if capture:
             if upper.startswith("STATUS:"):
                 break
             lines.append(line.rstrip())
     return "\n".join(lines).strip()
+
+
+def _uses_market_sql(db: Optional[Any], system_prompt: Optional[str], query: str) -> bool:
+    if db is None:
+        return False
+    cleaned = (query or "").strip().upper()
+    if cleaned.startswith("SELECT") or f"FROM {MARKET_TABLE.upper()}" in cleaned:
+        return True
+    if system_prompt and MARKET_TABLE in system_prompt.lower():
+        return True
+    return False
 
 
 def parse_ai_screener_response(text: str) -> Dict[str, Any]:
@@ -214,83 +242,43 @@ def parse_ai_screener_response(text: str) -> Dict[str, Any]:
     }
 
 
-def _call_nvidia_chat(
-    system_prompt: str,
-    user_message: str,
-    *,
-    conversation: Optional[List[Dict[str, str]]] = None,
-) -> str:
-    settings = _nvidia_settings()
-    if not settings["api_key"]:
-        raise ScreenerAiError("NVIDIA_API_KEY is not configured on the server.")
-
-    try:
-        from openai import OpenAI
-    except ImportError as exc:
-        raise ScreenerAiError("openai package is not installed on the server.") from exc
-
-    client = OpenAI(base_url=settings["base_url"], api_key=settings["api_key"])
-    messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
-    if conversation:
-        messages.extend(conversation)
-    messages.append({"role": "user", "content": user_message})
-
-    request_kwargs: Dict[str, Any] = {
-        "model": settings["model"],
-        "messages": messages,
-        "temperature": settings["temperature"],
-        "top_p": settings["top_p"],
-        "max_tokens": settings["max_tokens"],
-        "stream": False,
-    }
-    if settings["enable_thinking"]:
-        request_kwargs["extra_body"] = {
-            "chat_template_kwargs": {
-                "thinking": True,
-                "reasoning_effort": settings["reasoning_effort"],
-            },
-        }
-
-    try:
-        completion = client.chat.completions.create(**request_kwargs)
-    except Exception as exc:
-        message = str(exc).strip() or exc.__class__.__name__
-        if "maximum context length" in message.lower():
-            raise ScreenerAiError(
-                "AI prompt exceeds the configured NVIDIA model context window. "
-                "Use a larger-context model or lower NVIDIA_MAX_TOKENS.",
-            ) from exc
-        raise ScreenerAiError(f"NVIDIA AI request failed: {message}") from exc
-
-    if not completion.choices:
-        raise ScreenerAiError("AI returned no completion choices.")
-
-    message = completion.choices[0].message
-    content = (message.content or "").strip()
-    reasoning = getattr(message, "reasoning", None) or getattr(message, "reasoning_content", None)
-    if not content and reasoning:
-        content = str(reasoning).strip()
-    if not content:
-        raise ScreenerAiError("AI returned empty content.")
-    return content
-
-
 def generate_and_validate_screener_query(
     user_message: str,
     *,
     conversation: Optional[List[Dict[str, str]]] = None,
+    db: Optional[Any] = None,
+    system_prompt: Optional[str] = None,
+    compact_system_prompt: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Call NVIDIA AI, parse STATUS response, and strictly validate query syntax."""
+    """Call configured LLM, parse STATUS response, and strictly validate query syntax."""
     cleaned = (user_message or "").strip()
     if not cleaned:
         raise ScreenerAiError("Message is required.")
 
-    system_prompt = build_ai_system_prompt()
-    raw_response = _call_nvidia_chat(system_prompt, cleaned, conversation=conversation)
+    if db is not None:
+        ensure_read_session(db)
+
+    prompt_text = system_prompt or build_ai_system_prompt(db)
+    raw_response = _call_nvidia_chat(
+        prompt_text,
+        cleaned,
+        conversation=conversation,
+        compact_system_prompt=compact_system_prompt,
+    )
     parsed_ai = parse_ai_screener_response(raw_response)
 
     try:
-        parsed_query = parse_screener_query(parsed_ai["query"])
+        if _uses_market_sql(db, system_prompt, parsed_ai["query"]):
+            parsed_query = validate_market_sql_query(db, parsed_ai["query"], allow_select_star=False)
+        else:
+            parsed_query = query_parser.parse_screener_query(parsed_ai["query"])
+    except MarketSqlError as exc:
+        raise ScreenerAiError(
+            f"AI query failed SQL validation: {exc}",
+            status="parse_error",
+            raw_response=raw_response,
+            generated_query=parsed_ai["query"],
+        ) from exc
     except ScreenerQueryError as exc:
         raise ScreenerAiError(
             f"AI query failed strict parser validation: {exc}",
@@ -313,6 +301,9 @@ async def execute_ai_screener_with_retries(
     screener_runner: Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]],
     *,
     max_retries: int = MAX_AI_SCREENER_RETRIES,
+    db: Optional[Any] = None,
+    system_prompt: Optional[str] = None,
+    compact_system_prompt: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Loop: LLM → validate → run screener.
@@ -328,6 +319,7 @@ async def execute_ai_screener_with_retries(
     last_error: Optional[ScreenerAiError] = None
 
     for attempt in range(1, max_retries + 1):
+        ensure_read_session(db)
         if attempt == 1:
             prompt = original
         else:
@@ -345,9 +337,13 @@ async def execute_ai_screener_with_retries(
                 generate_and_validate_screener_query,
                 prompt,
                 conversation=conversation.copy() if conversation else None,
+                db=db,
+                system_prompt=system_prompt,
+                compact_system_prompt=compact_system_prompt,
             )
         except ScreenerAiError as exc:
             last_error = exc
+            ensure_read_session(db)
             entry = {
                 "attempt": attempt,
                 "failure_type": exc.status,
@@ -364,8 +360,9 @@ async def execute_ai_screener_with_retries(
             continue
 
         try:
-            screen_payload = await screener_runner(ai_payload["parsed_query"])
+            screen_payload = await screener_runner(ai_payload)
         except Exception as exc:
+            ensure_read_session(db)
             last_error = ScreenerAiError(
                 f"Screener execution failed: {exc}",
                 status="execution_error",
@@ -437,14 +434,5 @@ async def execute_ai_screener_with_retries(
 
 
 def test_nvidia_connection() -> Dict[str, Any]:
-    """Quick connectivity check for NVIDIA API (used by scripts/tests)."""
-    settings = _nvidia_settings()
-    raw = _call_nvidia_chat(
-        "You are a helpful assistant. Reply briefly.",
-        "Reply with exactly: OK",
-    )
-    return {
-        "model": settings["model"],
-        "base_url": settings["base_url"],
-        "response_preview": raw[:200],
-    }
+    """Quick connectivity check for the configured primary LLM provider."""
+    return test_llm_connection()

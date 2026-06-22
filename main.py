@@ -12,7 +12,7 @@ from typing import Dict, List, Optional, Type
 from fastapi import FastAPI, HTTPException, Depends, Query, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 import websockets
-from database import ensure_performance_indexes, get_db
+from database import ensure_performance_indexes, ensure_read_session, get_db, get_db_session
 from sqlalchemy import cast, DateTime, or_, and_, text
 from exceptions.login_exceptions import LoginFailedException
 from models.frontend_user import FrontendUser
@@ -69,7 +69,7 @@ from utils.market_status import (
 import config.tms_config as tms_config
 from config.app_build_info import get_app_build_info
 from utils.external_data_sources.nepse_alpha.ai_query import ScreenerAiError
-from utils.external_data_sources.nepse_alpha.query_parser import ScreenerQueryError
+from utils.market_data.sql_screener import MarketSqlError
 from utils.market_data.analysis_ai_query import execute_combined_ai_screener
 from utils.market_data.combined_screener import (
     get_combined_field_catalog,
@@ -85,6 +85,7 @@ from utils.market_data.nepse_alpha_bulk import (
     refresh_screener_cache,
 )
 from utils.market_data.repository import get_cache_status, get_new_symbols, get_table_display_metadata, load_table_rows
+from utils.market_data.screen_presets import ensure_market_screen_presets, list_market_screen_presets
 from utils.market_data.symbols import resolve_analysis_symbols, screener_universe_label
 from utils.strategy_builder.api import router as strategy_builder_router
 from utils.strategy_builder.reference_display import (
@@ -566,9 +567,18 @@ async def ensure_database_indexes() -> None:
     from utils.market_data.scheduler import market_data_scheduler_loop
 
     await asyncio.to_thread(ensure_performance_indexes)
+    await asyncio.to_thread(_seed_market_screen_presets)
     await asyncio.to_thread(load_portal_settings)
     scheduled_supervisor_task = asyncio.create_task(scheduled_monitor_supervisor_loop())
     market_data_scheduler_task = asyncio.create_task(market_data_scheduler_loop())
+
+
+def _seed_market_screen_presets() -> None:
+    db = get_db_session()
+    try:
+        ensure_market_screen_presets(db)
+    finally:
+        db.close()
 
 async def _run_stock_grabber_task(
     tms_user: TmsUser,
@@ -2642,11 +2652,11 @@ async def get_script_details(client_id: str, db: Session = Depends(get_db)):
 
 
 @app.get("/stock_screener/fields")
-async def stock_screener_fields():
+async def stock_screener_fields(db: Session = Depends(get_db)):
     return {
-        "fields": get_combined_field_catalog(),
-        "cache_ttl_seconds": 20 * 60,
-        "query_spec": get_combined_query_spec(),
+        "fields": get_combined_field_catalog(db),
+        "cache_ttl_seconds": 10 * 60,
+        "query_spec": get_combined_query_spec(db),
     }
 
 
@@ -2684,6 +2694,7 @@ async def market_analysis_data(
     db: Session = Depends(get_db),
 ):
     bootstrap_info = await asyncio.to_thread(ensure_market_cache_ready, db)
+    ensure_read_session(db)
     rows = load_table_rows(db, source)
     if not rows and bootstrap_info.get("status") != "ok":
         bootstrap_info = await asyncio.to_thread(bootstrap_cache_from_daily_snapshot, db)
@@ -2714,22 +2725,37 @@ async def market_analysis_refresh(db: Session = Depends(get_db)):
     }
 
 
-@app.get("/market_analysis/fields")
-async def market_analysis_fields():
+@app.get("/market_analysis/presets")
+async def market_analysis_presets(db: Session = Depends(get_db)):
+    ensure_market_screen_presets(db)
     return {
-        "fields": get_combined_field_catalog(),
-        "cache_ttl_seconds": 20 * 60,
-        "query_spec": get_combined_query_spec(),
+        "presets": list_market_screen_presets(db),
+        "groups": [
+            {"category": "INVESTOR", "label": "Investor"},
+            {"category": "TRADER", "label": "Trader"},
+        ],
+    }
+
+
+@app.get("/market_analysis/fields")
+async def market_analysis_fields(db: Session = Depends(get_db)):
+    ensure_read_session(db)
+    return {
+        "fields": get_combined_field_catalog(db),
+        "cache_ttl_seconds": 10 * 60,
+        "query_spec": get_combined_query_spec(db),
     }
 
 
 @app.post("/market_analysis/parse")
-async def market_analysis_parse(body: StockScreenerRequest):
+async def market_analysis_parse(body: StockScreenerRequest, db: Session = Depends(get_db)):
     if not body.query or not body.query.strip():
         raise HTTPException(status_code=400, detail="Query text is required")
+    ensure_read_session(db)
     try:
-        parsed = parse_combined_screener_query(body.query)
-    except ScreenerQueryError as exc:
+        parsed = parse_combined_screener_query(body.query, db=db)
+    except MarketSqlError as exc:
+        ensure_read_session(db)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return parsed
 
@@ -2737,29 +2763,30 @@ async def market_analysis_parse(body: StockScreenerRequest):
 @app.post("/market_analysis/screen")
 async def market_analysis_screen(body: StockScreenerRequest, db: Session = Depends(get_db)):
     await asyncio.to_thread(ensure_market_cache_ready, db)
+    ensure_read_session(db)
     symbols = await _resolve_screener_symbols_for_request(body, db)
 
     filters = [item.model_dump() for item in body.filters]
     rank_by = body.rank_by
     rank_direction = body.rank_direction
     limit = body.limit
+    sql = None
     parsed_query = None
 
     if body.query and body.query.strip():
+        sql = body.query.strip()
         try:
-            parsed_query = parse_combined_screener_query(body.query)
-        except ScreenerQueryError as exc:
+            parsed_query = parse_combined_screener_query(sql, db=db)
+        except MarketSqlError as exc:
+            ensure_read_session(db)
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        filters = parsed_query["filters"]
-        rank_by = parsed_query["rank_by"]
-        rank_direction = parsed_query["rank_direction"]
-        limit = parsed_query["limit"]
 
     try:
         payload = run_combined_screener_from_db(
             db,
             symbols,
-            filters,
+            sql=sql,
+            filters=filters if not sql else None,
             rank_by=rank_by,
             rank_direction=rank_direction,
             limit=limit,
@@ -2767,6 +2794,7 @@ async def market_analysis_screen(body: StockScreenerRequest, db: Session = Depen
     except HTTPException:
         raise
     except Exception as exc:
+        ensure_read_session(db)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     if parsed_query:
@@ -2786,21 +2814,22 @@ async def market_analysis_ai_screen(body: StockScreenerAiRequest, db: Session = 
     if not message:
         raise HTTPException(status_code=400, detail="Message is required")
 
+    await asyncio.to_thread(ensure_market_cache_ready, db)
+    ensure_read_session(db)
     symbols = await _resolve_screener_symbols_for_request(body, db)
 
-    async def _run(parsed_query: dict) -> dict:
+    async def _run(ai_payload: dict) -> dict:
+        sql = ai_payload.get("generated_query") or (ai_payload.get("parsed_query") or {}).get("sql")
         return run_combined_screener_from_db(
             db,
             symbols,
-            parsed_query["filters"],
-            rank_by=parsed_query["rank_by"],
-            rank_direction=parsed_query["rank_direction"],
-            limit=parsed_query["limit"],
+            sql=sql,
         )
 
     try:
-        payload = await execute_combined_ai_screener(message, _run)
+        payload = await execute_combined_ai_screener(message, _run, db=db)
     except ScreenerAiError as exc:
+        ensure_read_session(db)
         raise HTTPException(
             status_code=422,
             detail={
@@ -2812,6 +2841,7 @@ async def market_analysis_ai_screen(body: StockScreenerAiRequest, db: Session = 
     except HTTPException:
         raise
     except Exception as exc:
+        ensure_read_session(db)
         logging.exception("AI market analysis failed for message=%r", message[:120])
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

@@ -21,10 +21,21 @@ def get_db_session():
     return SessionLocal()
 
 
+def ensure_read_session(db) -> None:
+    """Reset an aborted transaction so the next SELECT can run (Postgres requirement)."""
+    try:
+        db.rollback()
+    except Exception:
+        pass
+
+
 def get_db():
     db = SessionLocal()
     try:
         yield db
+    except Exception:
+        ensure_read_session(db)
+        raise
     finally:
         db.close()
 
@@ -208,6 +219,21 @@ def ensure_performance_indexes():
             completed_at TIMESTAMP DEFAULT NOW()
         )""",
         "CREATE INDEX IF NOT EXISTS ix_market_data_refresh_log_type ON market_data_refresh_log (refresh_type, completed_at DESC)",
+        """CREATE TABLE IF NOT EXISTS market_screen_presets (
+            id SERIAL PRIMARY KEY,
+            preset_code VARCHAR(100) NOT NULL UNIQUE,
+            preset_name VARCHAR(150) NOT NULL,
+            category VARCHAR(20) NOT NULL CHECK (category IN ('INVESTOR', 'TRADER')),
+            risk_level VARCHAR(20) NOT NULL,
+            time_horizon VARCHAR(100),
+            description TEXT NOT NULL,
+            query_sql TEXT NOT NULL,
+            display_order INTEGER NOT NULL DEFAULT 0,
+            enabled BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )""",
+        "CREATE INDEX IF NOT EXISTS ix_market_screen_presets_category ON market_screen_presets (category, display_order)",
     ]
     with engine.begin() as connection:
         for statement in statements:

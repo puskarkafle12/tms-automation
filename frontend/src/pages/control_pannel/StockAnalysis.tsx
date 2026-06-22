@@ -6,19 +6,21 @@ import Dropdown from '../../components/Dropdown';
 import { fetchJson, getApiUrl } from '../../utils/api';
 import {
   buildPresetCopyText,
-  SCREENER_PRESETS,
+  DEFAULT_SIMPLE_QUERY,
+  fetchMarketAnalysisPresets,
+  groupPresetsByCategory,
+  ScreenerPresetCategory,
   SCREENER_QUERY_GUIDE,
   ScreenerPreset,
 } from '../../lib/screener/presets';
+import { getPresetDetail } from '../../lib/screener/presetDetails';
 import {
   buildChatGptScreenerPrompt,
   buildChatGptScreenerPromptForCopy,
   ScreenerQuerySpec,
 } from '../../lib/screener/chatGptPrompt';
 import { buildNepseAlphaChartUrl } from '../../lib/nepseAlpha';
-import ScreenerDropConfirmModal from '../../components/ScreenerDropConfirmModal';
-import { ScreenerDropScheduleInput } from '../../api/screenerDrop.api';
-import { addNepalDays, apiTimestampToUtcMs, currentNepalDateTimeLocal, todayNepalDate } from '../../utils/nepalTime';
+import { apiTimestampToUtcMs } from '../../utils/nepalTime';
 import { formatRelativeTime, formatShortRelativeTime } from '../../utils/relativeTime';
 
 type FieldType = 'number' | 'text';
@@ -81,21 +83,29 @@ const makeFilterRow = (overrides?: Partial<Omit<FilterRow, 'id'>>): FilterRow =>
   ...overrides,
 });
 
-const RESULT_COLUMNS = [
-  'rank',
-  'symbol',
-  'ltp',
-  'percent_change',
-  'qty',
-  'alpha_annualized',
-  'beta_3_month',
-  'sharpe_ratio_annualized',
-  'pe_ratio',
-  'one_year_yield',
-  'fundamental_roe_ttm',
-  'technical_rsi_14',
-  'technical_macd',
-];
+const METADATA_COLUMNS = new Set(['updated_at', 'fetched_at', 'cached']);
+
+const scrollResultsIntoView = (element: HTMLElement | null) => {
+  element?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+};
+
+const deriveResultColumns = (
+  rows: ScreenerResult[],
+  apiColumns?: string[],
+): string[] => {
+  const skip = new Set(['sortValues', 'rowKey', 'color']);
+  if (apiColumns?.length) {
+    return apiColumns.filter(
+      (column, index, list) => list.indexOf(column) === index && !skip.has(column),
+    );
+  }
+  if (rows.length === 0) {
+    return ['rank', 'symbol'];
+  }
+  const keys = Object.keys(rows[0]).filter((key) => !skip.has(key));
+  const withoutRank = keys.filter((key) => key !== 'rank');
+  return keys.includes('rank') ? ['rank', ...withoutRank] : ['rank', ...keys];
+};
 
 interface MarketDataResponse {
   rows?: Record<string, unknown>[];
@@ -134,8 +144,6 @@ const isEmptyCell = (value: unknown): boolean => {
   const text = String(value).trim();
   return !text || text === '-' || text === '--' || text === '—';
 };
-
-const METADATA_COLUMNS = new Set(['updated_at', 'fetched_at']);
 
 const reorderColumnsByData = (
   columns: string[],
@@ -191,7 +199,7 @@ const formatMarketTableRows = (rows: Record<string, unknown>[], now = Date.now()
     };
   });
 
-const DEFAULT_QUERY = SCREENER_PRESETS[0].query;
+const DEFAULT_QUERY = DEFAULT_SIMPLE_QUERY;
 
 type InputMode = 'builder' | 'query' | 'ai';
 
@@ -254,7 +262,7 @@ const readJsonResponse = async (
 
 const formatNonJsonResponse = (rawText: string, fallback: string): string => {
   if (rawText.startsWith('Traceback')) {
-    return 'Server error while calling AI. Check NVIDIA_API_KEY and server logs.';
+    return 'Server error while calling AI. Check GEMINI_API_KEY / COHERE_API_KEY / NVIDIA_API_KEY / GROQ_API_KEY and server logs.';
   }
   const trimmed = rawText.trim();
   return trimmed ? trimmed.slice(0, 400) : fallback;
@@ -263,12 +271,6 @@ const formatNonJsonResponse = (rawText: string, fallback: string): string => {
 const clientLabel = (client: ClientSession) => {
   const name = client.display_name?.trim() || client.client_id;
   return client.broker_no ? `${name}[${client.broker_no}]` : name;
-};
-
-const defaultBaselineExpiryLocal = () => {
-  const today = todayNepalDate() || currentNepalDateTimeLocal().slice(0, 10);
-  const nextDay = addNepalDays(today, 1);
-  return `${nextDay}T15:00`;
 };
 
 const universeRequiresLogin = (universe: ScreenerUniverse) =>
@@ -340,7 +342,7 @@ const StockAnalysis: React.FC = () => {
   const [dataLoading, setDataLoading] = useState(false);
   const [dataRefreshing, setDataRefreshing] = useState(false);
   const [fields, setFields] = useState<ScreenerField[]>([]);
-  const [inputMode, setInputMode] = useState<InputMode>('builder');
+  const [inputMode, setInputMode] = useState<InputMode>('ai');
   const [queryText, setQueryText] = useState(DEFAULT_QUERY);
   const [activePresetId, setActivePresetId] = useState<string | null>(null);
   const [copyMessage, setCopyMessage] = useState('');
@@ -352,11 +354,12 @@ const StockAnalysis: React.FC = () => {
   const [rankBy, setRankBy] = useState('alpha_annualized');
   const [rankDirection, setRankDirection] = useState<'desc' | 'asc'>('desc');
   const [limit, setLimit] = useState('25');
-  const [forceRefresh, setForceRefresh] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loadingLabel, setLoadingLabel] = useState('');
   const [error, setError] = useState('');
   const [results, setResults] = useState<ScreenerResult[]>([]);
+  const [resultColumns, setResultColumns] = useState<string[]>(['rank', 'symbol']);
+  const [resultColumnLabels, setResultColumnLabels] = useState<Record<string, string>>({});
   const [stats, setStats] = useState<ScreenerStats | null>(null);
   const [cacheTtl, setCacheTtl] = useState(300);
   const [querySpec, setQuerySpec] = useState<ScreenerQuerySpec | null>(null);
@@ -364,16 +367,78 @@ const StockAnalysis: React.FC = () => {
   const [hasRun, setHasRun] = useState(false);
   const [aiInput, setAiInput] = useState('');
   const [aiMessages, setAiMessages] = useState<AiChatMessage[]>([]);
-  const [aiSummary, setAiSummary] = useState('');
-  const [generatedQuery, setGeneratedQuery] = useState('');
-  const [baselineModalOpen, setBaselineModalOpen] = useState(false);
-  const [baselineScheduleInput, setBaselineScheduleInput] = useState<ScreenerDropScheduleInput | null>(null);
-  const [scheduleMessage, setScheduleMessage] = useState('');
+  const [presets, setPresets] = useState<ScreenerPreset[]>([]);
+  const [presetsLoading, setPresetsLoading] = useState(true);
+  const [presetCategory, setPresetCategory] = useState<ScreenerPresetCategory>('TRADER');
+  const [detailPreset, setDetailPreset] = useState<ScreenerPreset | null>(null);
   const resultsRef = useRef<HTMLElement | null>(null);
+  const chatScrollRef = useRef<HTMLDivElement | null>(null);
+  const presetDetailPanelRef = useRef<HTMLDivElement | null>(null);
+  const presetDetailBodyRef = useRef<HTMLDivElement | null>(null);
+
+  const activePresetDetail = useMemo(
+    () => (detailPreset ? getPresetDetail(detailPreset) : null),
+    [detailPreset],
+  );
+
+  const openPresetDetail = (preset: ScreenerPreset) => {
+    setDetailPreset(preset);
+  };
+
+  useEffect(() => {
+    if (!detailPreset) {
+      document.body.style.removeProperty('overflow');
+      return undefined;
+    }
+    document.body.style.overflow = 'hidden';
+    const frame = window.requestAnimationFrame(() => {
+      if (presetDetailBodyRef.current) {
+        presetDetailBodyRef.current.scrollTop = 0;
+      }
+      presetDetailPanelRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      presetDetailPanelRef.current?.focus({ preventScroll: true });
+    });
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setDetailPreset(null);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      document.body.style.removeProperty('overflow');
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [detailPreset]);
+
+  useEffect(() => {
+    setDetailPreset(null);
+  }, [presetCategory]);
+
+  useEffect(() => {
+    if (!chatScrollRef.current) {
+      return;
+    }
+    chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
+  }, [aiMessages, loading]);
+
+  const groupedPresets = useMemo(() => groupPresetsByCategory(presets), [presets]);
+  const visiblePresets = groupedPresets[presetCategory];
+
+  const applyScreenResponse = useCallback((data: {
+    results?: ScreenerResult[];
+    result_columns?: string[];
+    column_labels?: Record<string, string>;
+  }) => {
+    const nextResults = data.results || [];
+    setResults(nextResults);
+    setResultColumns(deriveResultColumns(nextResults, data.result_columns));
+    setResultColumnLabels(data.column_labels || {});
+  }, []);
 
   const activePreset = useMemo(
-    () => SCREENER_PRESETS.find((preset) => preset.id === activePresetId) || null,
-    [activePresetId],
+    () => presets.find((preset) => preset.id === activePresetId) || null,
+    [activePresetId, presets],
   );
 
   const chatGptPromptFull = useMemo(
@@ -399,6 +464,21 @@ const StockAnalysis: React.FC = () => {
       }
     };
     void loadFields();
+  }, []);
+
+  useEffect(() => {
+    const loadPresets = async () => {
+      setPresetsLoading(true);
+      try {
+        const loaded = await fetchMarketAnalysisPresets();
+        setPresets(loaded);
+      } catch {
+        setPresets([]);
+      } finally {
+        setPresetsLoading(false);
+      }
+    };
+    void loadPresets();
   }, []);
 
   useEffect(() => {
@@ -497,7 +577,7 @@ const StockAnalysis: React.FC = () => {
     }
     const timer = window.setInterval(() => {
       void refreshDataTable();
-    }, 20 * 60 * 1000);
+    }, 10 * 60 * 1000);
     return () => window.clearInterval(timer);
   }, [analysisTab, refreshDataTable]);
 
@@ -668,9 +748,9 @@ const StockAnalysis: React.FC = () => {
     setLoadingLabel('AI is building query and screening stocks…');
     setError('');
     setResults([]);
+    setResultColumns(['rank', 'symbol']);
+    setResultColumnLabels({});
     setStats(null);
-    setAiSummary('');
-    setGeneratedQuery('');
     setUniverseLabel('');
     setHasRun(false);
 
@@ -684,7 +764,6 @@ const StockAnalysis: React.FC = () => {
         body: JSON.stringify({
           ...buildUniversePayload(),
           message: userMessage,
-          force_refresh: forceRefresh,
         }),
         signal: controller.signal,
       });
@@ -700,7 +779,6 @@ const StockAnalysis: React.FC = () => {
           ? String((detail as { generated_query?: string }).generated_query || '')
           : '';
         if (generated) {
-          setGeneratedQuery(generated);
           setQueryText(generated);
         }
         throw new Error(parseApiError(data, 'AI screener request failed'));
@@ -708,9 +786,7 @@ const StockAnalysis: React.FC = () => {
 
       const query = String((data as { generated_query?: string }).generated_query || '');
       const summary = String((data as { ai_summary?: string }).ai_summary || 'Query generated and screened successfully.');
-      setGeneratedQuery(query);
       setQueryText(query);
-      setAiSummary(summary);
       if ((data as { parsed_query?: { rank_by?: string } }).parsed_query?.rank_by) {
         setRankBy((data as { parsed_query: { rank_by: string } }).parsed_query.rank_by);
       }
@@ -730,7 +806,11 @@ const StockAnalysis: React.FC = () => {
           query,
         },
       ]);
-      setResults((data as { results?: ScreenerResult[] }).results || []);
+      applyScreenResponse(data as {
+        results?: ScreenerResult[];
+        result_columns?: string[];
+        column_labels?: Record<string, string>;
+      });
       setStats((data as { stats?: ScreenerStats | null }).stats || null);
       setUniverseLabel(String((data as { universe_label?: string }).universe_label || ''));
       completedScreen = true;
@@ -753,7 +833,7 @@ const StockAnalysis: React.FC = () => {
       setLoading(false);
       setLoadingLabel('');
       if (completedScreen) {
-        resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        scrollResultsIntoView(resultsRef.current);
       }
     }
   };
@@ -775,7 +855,7 @@ const StockAnalysis: React.FC = () => {
     const query = presetQuery ?? queryText;
 
     if (useQueryMode && !query.trim()) {
-      setError('Enter a SQL-like screener query.');
+      setError('Enter a SQL screener query.');
       return;
     }
 
@@ -783,11 +863,13 @@ const StockAnalysis: React.FC = () => {
     setLoadingLabel(options?.loadingMessage || (options?.fromPreset ? 'Screening stocks…' : 'Running screener…'));
     setError('');
     setResults([]);
+    setResultColumns(['rank', 'symbol']);
+    setResultColumnLabels({});
     setStats(null);
     setUniverseLabel('');
 
     if (options?.fromPreset) {
-      resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      scrollResultsIntoView(resultsRef.current);
     }
 
     let completedScreen = false;
@@ -795,7 +877,7 @@ const StockAnalysis: React.FC = () => {
       ? {
           ...buildUniversePayload(),
           query,
-          force_refresh: forceRefresh,
+          force_refresh: false,
         }
       : {
           ...buildUniversePayload(),
@@ -803,7 +885,7 @@ const StockAnalysis: React.FC = () => {
           rank_by: rankBy,
           rank_direction: rankDirection,
           limit: Math.max(1, Math.min(500, Number(limit) || 25)),
-          force_refresh: forceRefresh,
+          force_refresh: false,
         };
 
     try {
@@ -832,7 +914,7 @@ const StockAnalysis: React.FC = () => {
         setLimit(String(data.parsed_query.limit));
       }
 
-      setResults(data.results || []);
+      applyScreenResponse(data);
       setStats(data.stats || null);
       setUniverseLabel(String(data.universe_label || ''));
       completedScreen = true;
@@ -846,7 +928,7 @@ const StockAnalysis: React.FC = () => {
       setLoading(false);
       setLoadingLabel('');
       if (completedScreen) {
-        resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        scrollResultsIntoView(resultsRef.current);
       }
     }
   };
@@ -869,10 +951,19 @@ const StockAnalysis: React.FC = () => {
   };
 
   const displayColumns = useMemo(() => {
-    const extras = rankBy && !RESULT_COLUMNS.includes(rankBy) ? [rankBy] : [];
-    const merged = [...RESULT_COLUMNS, ...extras];
-    return merged.filter((column, index) => merged.indexOf(column) === index);
-  }, [rankBy]);
+    const columns = resultColumns.length > 0
+      ? resultColumns
+      : deriveResultColumns(results);
+    return reorderColumnsByData(
+      columns.filter((column, index, list) => list.indexOf(column) === index),
+      results as unknown as Record<string, unknown>[],
+    );
+  }, [resultColumns, results]);
+
+  const screenerTableRows = useMemo(
+    () => formatMarketTableRows(results as unknown as Record<string, unknown>[], relativeNow),
+    [results, relativeNow],
+  );
 
   const symbolColumnLinks = useMemo(
     () => ({
@@ -940,10 +1031,12 @@ const StockAnalysis: React.FC = () => {
         </div>
       </section>
 
-      <section className="stock-screener-controls card">
-        <div className="stock-screener-mode-tabs">
+      <section className="stock-analysis-workspace card">
+        <div className="stock-analysis-mode-tabs stock-screener-mode-tabs" role="tablist" aria-label="Market analysis views">
           <button
             type="button"
+            role="tab"
+            aria-selected={analysisTab === 'screener'}
             className={analysisTab === 'screener' ? 'active' : ''}
             onClick={() => setAnalysisTab('screener')}
           >
@@ -951,6 +1044,8 @@ const StockAnalysis: React.FC = () => {
           </button>
           <button
             type="button"
+            role="tab"
+            aria-selected={analysisTab === 'new_stocks'}
             className={analysisTab === 'new_stocks' ? 'active' : ''}
             onClick={() => setAnalysisTab('new_stocks')}
           >
@@ -958,106 +1053,117 @@ const StockAnalysis: React.FC = () => {
           </button>
           <button
             type="button"
+            role="tab"
+            aria-selected={analysisTab === 'data'}
             className={analysisTab === 'data' ? 'active' : ''}
             onClick={() => setAnalysisTab('data')}
           >
             Data Tables
           </button>
         </div>
-      </section>
 
-      {analysisTab === 'new_stocks' && (
-        <section className="stock-screener-results card">
+        {analysisTab === 'new_stocks' && (
+          <div className="stock-analysis-panel">
+            <div className="stock-analysis-panel-header stock-screener-universe-header">
+              <div>
+                <h3>New / IPO watchlist</h3>
+                <p className="stock-screener-subtitle">
+                  Symbols first seen in the daily Merolagani snapshot during the selected window.
+                </p>
+              </div>
+              <div className="stock-screener-universe-chips">
+                <Dropdown
+                  value={String(newStocksDays)}
+                  onChange={(value) => setNewStocksDays(Number(value) || 15)}
+                  options={[
+                    { label: '7 days', value: '7' },
+                    { label: '15 days', value: '15' },
+                    { label: '30 days', value: '30' },
+                    { label: '90 days', value: '90' },
+                  ]}
+                />
+                <span className="badge badge-muted">{newStocks.length} stocks</span>
+              </div>
+            </div>
+            {dataLoading ? (
+              <p className="stock-analysis-panel-message">Loading new symbols…</p>
+            ) : newStocks.length === 0 ? (
+              <p className="stock-analysis-panel-message">No new symbols detected in the selected period.</p>
+            ) : (
+              <div className="stock-analysis-table-shell">
+                <CommonTable
+                  data={newStocks}
+                  columns={['symbol', 'is_watchlist']}
+                  columnLinks={{
+                    symbol: (row) => buildNepseAlphaChartUrl(String(row.symbol || '')),
+                  }}
+                />
+              </div>
+            )}
+          </div>
+        )}
+
+        {analysisTab === 'data' && (
+          <div className="stock-analysis-panel">
+            <div className="stock-analysis-panel-header stock-screener-universe-header">
+              <div>
+                <h3>Stored market data</h3>
+                <p className="stock-screener-subtitle">
+                  Browse cached Merolagani, Nepse Alpha, or the combined database used by the screener.
+                </p>
+              </div>
+              <div className="stock-screener-universe-chips">
+                {(['combined', 'merolagani', 'nepse_alpha'] as DataSource[]).map((source) => (
+                  <button
+                    key={source}
+                    type="button"
+                    className={`stock-screener-universe-chip${dataSource === source ? ' active' : ''}`}
+                    onClick={() => setDataSource(source)}
+                  >
+                    {source === 'combined' ? 'Combined' : source === 'merolagani' ? 'Merolagani' : 'Nepse Alpha'}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => void refreshDataTable()}
+                  disabled={dataRefreshing || dataLoading}
+                >
+                  {dataRefreshing ? 'Refreshing…' : 'Refresh'}
+                </button>
+              </div>
+            </div>
+            {dataLoading ? (
+              <p className="stock-analysis-panel-message">Loading table…</p>
+            ) : (
+              <div className="stock-analysis-table-shell">
+                <CommonTable
+                  data={dataTableRows}
+                  columns={displayDataColumns}
+                  columnLabels={dataColumnLabels}
+                  columnLinks={{
+                    symbol: (row) => buildNepseAlphaChartUrl(String(row.symbol || '')),
+                  }}
+                />
+              </div>
+            )}
+          </div>
+        )}
+
+        {analysisTab === 'screener' && (
+          <div className="stock-analysis-panel stock-analysis-panel-screener">
+        <div className="stock-screener-universe stock-screener-universe-card">
           <div className="stock-screener-universe-header">
             <div>
-              <h3>New / IPO watchlist</h3>
-              <p className="stock-screener-subtitle">
-                Symbols first seen in the daily Merolagani snapshot during the selected window.
+              <span className="stock-screener-universe-label">Symbol universe</span>
+              <p className="stock-screener-universe-note">
+                {universe === 'nepse'
+                  ? 'Search across every listed stock in the market database.'
+                  : universe === 'combined_holdings'
+                    ? 'Search only stocks held across your logged-in accounts.'
+                    : 'Search only stocks in this account\'s portfolio.'}
               </p>
             </div>
-            <div className="stock-screener-universe-chips">
-              <Dropdown
-                value={String(newStocksDays)}
-                onChange={(value) => setNewStocksDays(Number(value) || 15)}
-                options={[
-                  { label: '7 days', value: '7' },
-                  { label: '15 days', value: '15' },
-                  { label: '30 days', value: '30' },
-                  { label: '90 days', value: '90' },
-                ]}
-              />
-              <span className="badge badge-muted">{newStocks.length} stocks</span>
-            </div>
-          </div>
-          {dataLoading ? (
-            <p>Loading new symbols…</p>
-          ) : newStocks.length === 0 ? (
-            <p>No new symbols detected in the selected period.</p>
-          ) : (
-            <CommonTable
-              data={newStocks}
-              columns={['symbol', 'is_watchlist']}
-              columnLinks={{
-                symbol: (row) => buildNepseAlphaChartUrl(String(row.symbol || '')),
-              }}
-            />
-          )}
-        </section>
-      )}
-
-      {analysisTab === 'data' && (
-        <section className="stock-screener-results card">
-          <div className="stock-screener-universe-header">
-            <h3>Stored market data</h3>
-            <div className="stock-screener-universe-chips">
-              {(['combined', 'merolagani', 'nepse_alpha'] as DataSource[]).map((source) => (
-                <button
-                  key={source}
-                  type="button"
-                  className={`stock-screener-universe-chip${dataSource === source ? ' active' : ''}`}
-                  onClick={() => setDataSource(source)}
-                >
-                  {source === 'combined' ? 'Combined' : source === 'merolagani' ? 'Merolagani' : 'Nepse Alpha'}
-                </button>
-              ))}
-              <button
-                type="button"
-                className="btn btn-secondary btn-sm"
-                onClick={() => void refreshDataTable()}
-                disabled={dataRefreshing || dataLoading}
-              >
-                {dataRefreshing ? 'Refreshing…' : 'Refresh'}
-              </button>
-            </div>
-          </div>
-          {dataLoading ? (
-            <p>Loading table…</p>
-          ) : (
-            <CommonTable
-              data={dataTableRows}
-              columns={displayDataColumns}
-              columnLabels={dataColumnLabels}
-              columnLinks={{
-                symbol: (row) => buildNepseAlphaChartUrl(String(row.symbol || '')),
-              }}
-            />
-          )}
-        </section>
-      )}
-
-      {analysisTab === 'screener' && (
-        <>
-      <section className="stock-screener-controls card">
-        <div className="stock-screener-universe">
-          <div className="stock-screener-universe-header">
-            <span className="stock-screener-universe-label">Symbol universe</span>
-            <span className="stock-screener-universe-note">
-              {universe === 'nepse'
-                ? 'All cached Merolagani symbols'
-                : universe === 'combined_holdings'
-                  ? 'Union of DP holdings across logged-in users'
-                  : 'DP holdings for selected user (qty > 0)'}
-            </span>
           </div>
           <div className="stock-screener-universe-chips" role="group" aria-label="Symbol universe">
             <button
@@ -1066,7 +1172,7 @@ const StockAnalysis: React.FC = () => {
               onClick={selectNepseUniverse}
               disabled={loading}
             >
-              NEPSE
+              All listed stocks
             </button>
             <button
               type="button"
@@ -1075,7 +1181,7 @@ const StockAnalysis: React.FC = () => {
               disabled={loading || clientSessions.length === 0}
               title={clientSessions.length === 0 ? 'Log in at least one TMS account first' : undefined}
             >
-              Combined holdings
+              All my holdings
             </button>
             {clientSessions.map((session) => (
               <button
@@ -1093,33 +1199,19 @@ const StockAnalysis: React.FC = () => {
           </div>
           {clientSessions.length === 0 && (
             <p className="stock-screener-universe-warning">
-              No logged-in TMS accounts. Log in from the Accounts page to use combined or user holdings.
+              Log in from the Accounts page to screen your own holdings.
             </p>
           )}
         </div>
 
-        <div className="stock-screener-presets">
-          <div className="stock-screener-presets-header">
-            <h3>Quick Screens (Top 25)</h3>
-            <span className="stock-screener-presets-note">Click a shortcut to run instantly</span>
-          </div>
-          <div className="stock-screener-preset-grid">
-            {SCREENER_PRESETS.map((preset) => (
-              <button
-                key={preset.id}
-                type="button"
-                className={`stock-screener-preset-card${activePresetId === preset.id ? ' active' : ''}`}
-                disabled={loading}
-                onClick={() => applyPreset(preset)}
-              >
-                <span className="stock-screener-preset-title">{preset.title}</span>
-                <span className="stock-screener-preset-subtitle">{preset.subtitle}</span>
-              </button>
-            ))}
-          </div>
-        </div>
-
         <div className="stock-screener-mode-tabs">
+          <button
+            type="button"
+            className={inputMode === 'ai' ? 'active' : ''}
+            onClick={() => setInputMode('ai')}
+          >
+            Talk to AI
+          </button>
           <button
             type="button"
             className={inputMode === 'builder' ? 'active' : ''}
@@ -1132,63 +1224,71 @@ const StockAnalysis: React.FC = () => {
             className={inputMode === 'query' ? 'active' : ''}
             onClick={() => setInputMode('query')}
           >
-            SQL-like Query
-          </button>
-          <button
-            type="button"
-            className={inputMode === 'ai' ? 'active' : ''}
-            onClick={() => setInputMode('ai')}
-          >
-            Talk to AI
+            SQL Query
           </button>
         </div>
 
         {inputMode === 'ai' ? (
-          <div className="stock-screener-ai-chat-panel">
-            <p className="stock-screener-ai-chat-desc">
-              Describe your screen in plain English. DeepSeek builds a strict query on the server
-              (validated against live field keys), runs it, and shows results below.
-            </p>
-            {aiMessages.length > 0 && (
-              <div className="stock-screener-ai-chat-log" aria-live="polite">
-                {aiMessages.map((message) => (
-                  <div
-                    key={message.id}
-                    className={`stock-screener-ai-chat-message ${message.role}${message.isError ? ' error' : ''}`}
-                  >
-                    <span className="stock-screener-ai-chat-role">
-                      {message.role === 'user' ? 'You' : 'AI'}
-                    </span>
-                    <p className="stock-screener-ai-chat-text">{message.content}</p>
-                    {message.query && (
-                      <pre className="stock-screener-ai-chat-query">{message.query}</pre>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-            <label htmlFor="screener-ai-input">What do you want to screen?</label>
-            <textarea
-              id="screener-ai-input"
-              className="stock-screener-query-input"
-              rows={4}
-              value={aiInput}
-              onChange={(e) => setAiInput(e.target.value)}
-              placeholder="e.g. Show top 25 stocks with RSI between 30 and 45, PE under 30, and bullish MACD, ranked by alpha"
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-                  e.preventDefault();
-                  void runAiScreener();
-                }
-              }}
-            />
-            <p className="stock-screener-query-help">
-              Press <kbd>Ctrl</kbd>+<kbd>Enter</kbd> or use the button below. Only columns from the live Nepse Alpha API are allowed.
-            </p>
-            <label className="stock-screener-checkbox">
-              <input type="checkbox" checked={forceRefresh} onChange={(e) => setForceRefresh(e.target.checked)} />
-              Bypass cache
-            </label>
+          <div className="stock-screener-chat-window">
+            <div ref={chatScrollRef} className="stock-screener-chat-messages" aria-live="polite">
+              {aiMessages.length === 0 && !loading && (
+                <div className="stock-screener-chat-empty">
+                  Ask for stocks — e.g. oversold banks with bullish MACD
+                </div>
+              )}
+              {aiMessages.map((message) => (
+                <div
+                  key={message.id}
+                  className={`stock-screener-chat-bubble ${message.role}${message.isError ? ' error' : ''}`}
+                >
+                  <span className="stock-screener-chat-bubble-role">
+                    {message.role === 'user' ? 'You' : 'Assistant'}
+                  </span>
+                  <p className="stock-screener-chat-bubble-text">{message.content}</p>
+                  {message.query && (
+                    <details className="stock-screener-chat-query-details">
+                      <summary>View screen query</summary>
+                      <pre>{message.query}</pre>
+                    </details>
+                  )}
+                </div>
+              ))}
+              {loading && (
+                <div className="stock-screener-chat-bubble assistant loading">
+                  <span className="stock-screener-chat-bubble-role">Assistant</span>
+                  <p className="stock-screener-chat-bubble-text">{loadingLabel || 'Building your screen…'}</p>
+                </div>
+              )}
+            </div>
+
+            <div className="stock-screener-chat-composer">
+              <textarea
+                id="screener-ai-input"
+                className="stock-screener-chat-input"
+                rows={2}
+                value={aiInput}
+                onChange={(e) => setAiInput(e.target.value)}
+                placeholder="Ask anything — e.g. show bank stocks with low PE and bullish MACD"
+                disabled={loading}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    if (!loading && aiInput.trim()) {
+                      void runAiScreener();
+                    }
+                  }
+                }}
+              />
+              <button
+                type="button"
+                className="stock-screener-chat-send"
+                disabled={loading || !aiInput.trim()}
+                onClick={() => void runAiScreener()}
+                aria-label="Send message"
+              >
+                Send
+              </button>
+            </div>
           </div>
         ) : inputMode === 'query' ? (
           <>
@@ -1215,13 +1315,6 @@ const StockAnalysis: React.FC = () => {
                     onClick={() => void copyText(chatGptPromptFull, 'Full reference prompt')}
                   >
                     Copy full reference
-                  </button>
-                  <button
-                    type="button"
-                    className="btn-secondary"
-                    onClick={() => void copyText(SCREENER_QUERY_GUIDE, 'Syntax guide')}
-                  >
-                    Copy syntax only
                   </button>
                 </div>
               </div>
@@ -1261,7 +1354,7 @@ const StockAnalysis: React.FC = () => {
                   </div>
                 </div>
                 {copyMessage && <p className="stock-screener-copy-msg">{copyMessage}</p>}
-                <pre className="stock-screener-prompt-body">{activePreset.prompt}</pre>
+                <pre className="stock-screener-prompt-body">{buildPresetCopyText(activePreset)}</pre>
                 <div className="stock-screener-prompt-query">
                   <span className="stock-screener-prompt-query-label">Query used</span>
                   <pre>{activePreset.query}</pre>
@@ -1286,16 +1379,12 @@ const StockAnalysis: React.FC = () => {
               spellCheck={false}
               value={queryText}
               onChange={(e) => handleQueryChange(e.target.value)}
-              placeholder="WHERE field >= value AND ..."
+              placeholder="SELECT * FROM market_combined WHERE field >= value ORDER BY field DESC LIMIT 25"
             />
             <p className="stock-screener-query-help">
-              Use field keys like <code>technical_rsi_14</code>, <code>fundamental_pe_ttm</code>, <code>alpha_annualized</code>.
-              Supports <code>WHERE</code>, <code>AND</code>, <code>BETWEEN</code>, <code>IN (...)</code>, <code>ORDER BY</code>, <code>LIMIT</code>.
+              Write SQL against <code>market_combined</code>. Use column keys like <code>technical_rsi_14</code>, <code>pe_ratio</code>, <code>alpha_annualized</code>.
+              Legacy <code>WHERE ... ORDER BY ... LIMIT</code> fragments still work.
             </p>
-            <label className="stock-screener-checkbox">
-              <input type="checkbox" checked={forceRefresh} onChange={(e) => setForceRefresh(e.target.checked)} />
-              Bypass cache
-            </label>
           </div>
           </>
         ) : (
@@ -1389,35 +1478,197 @@ const StockAnalysis: React.FC = () => {
                   onChange={(e) => setLimit(e.target.value)}
                 />
               </div>
-              <label className="stock-screener-checkbox">
-                <input type="checkbox" checked={forceRefresh} onChange={(e) => setForceRefresh(e.target.checked)} />
-                Bypass cache
-              </label>
             </div>
           </>
         )}
 
+        {inputMode !== 'ai' && (
         <div className="stock-screener-actions">
           <button
             type="button"
             className="btn-primary"
             disabled={loading}
-            onClick={() => {
-              if (inputMode === 'ai') {
-                void runAiScreener();
-                return;
-              }
-              void runScreener();
-            }}
+            onClick={() => void runScreener()}
           >
             {loading
               ? 'Screening…'
-              : inputMode === 'ai'
-                ? 'Ask AI & Screen'
-                : inputMode === 'query'
-                  ? 'Run Query'
-                  : 'Run Screener'}
+              : inputMode === 'query'
+                ? 'Run query'
+                : 'Run screener'}
           </button>
+        </div>
+        )}
+
+        <div className="stock-screener-presets">
+          <div className="stock-screener-presets-header">
+            <h3>Quick screens</h3>
+            <span className="stock-screener-presets-note">
+              {presetsLoading ? 'Loading…' : 'Click a screen to run · top 25 results'}
+            </span>
+          </div>
+          <div className="stock-screener-preset-toggle" role="tablist" aria-label="Preset category">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={presetCategory === 'TRADER'}
+              className={presetCategory === 'TRADER' ? 'active' : ''}
+              onClick={() => setPresetCategory('TRADER')}
+              disabled={loading || presetsLoading}
+            >
+              Trader
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={presetCategory === 'INVESTOR'}
+              className={presetCategory === 'INVESTOR' ? 'active' : ''}
+              onClick={() => setPresetCategory('INVESTOR')}
+              disabled={loading || presetsLoading}
+            >
+              Investor
+            </button>
+          </div>
+          <div className="stock-screener-preset-grid">
+            {visiblePresets.map((preset) => (
+              <article
+                key={preset.id}
+                className={`stock-screener-preset-card${activePresetId === preset.id ? ' active' : ''}`}
+              >
+                <button
+                  type="button"
+                  className="stock-screener-preset-card-run"
+                  disabled={loading || presetsLoading}
+                  onClick={() => applyPreset(preset)}
+                >
+                  <span className="stock-screener-preset-title">{preset.title}</span>
+                  <span className="stock-screener-preset-subtitle">{preset.subtitle}</span>
+                  {(preset.risk_level || preset.time_horizon) && (
+                    <span className="stock-screener-preset-meta">
+                      {[preset.risk_level, preset.time_horizon].filter(Boolean).join(' · ')}
+                    </span>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  className="stock-screener-preset-detail-link"
+                  disabled={presetsLoading}
+                  aria-expanded={detailPreset?.id === preset.id}
+                  onClick={() => openPresetDetail(preset)}
+                >
+                  Show details
+                </button>
+              </article>
+            ))}
+          </div>
+
+          {detailPreset && (
+            <>
+              <button
+                type="button"
+                className="stock-screener-preset-detail-backdrop"
+                aria-label="Close preset detail"
+                onClick={() => setDetailPreset(null)}
+              />
+              <div
+                ref={presetDetailPanelRef}
+                className="stock-screener-preset-detail-panel"
+                role="dialog"
+                aria-labelledby="preset-detail-title"
+                aria-modal="true"
+                tabIndex={-1}
+              >
+                <div className="stock-screener-preset-detail-header">
+                  <div>
+                    <p className="stock-screener-preset-detail-eyebrow">
+                      {detailPreset.category === 'TRADER' ? 'Trader screen' : 'Investor screen'}
+                    </p>
+                    <h4 id="preset-detail-title">{detailPreset.title}</h4>
+                    <p className="stock-screener-preset-detail-lead">
+                      {activePresetDetail?.goal}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    className="stock-screener-preset-detail-close"
+                    aria-label="Close"
+                    onClick={() => setDetailPreset(null)}
+                  >
+                    ×
+                  </button>
+                </div>
+
+                <div ref={presetDetailBodyRef} className="stock-screener-preset-detail-body">
+                  {(detailPreset.risk_level || detailPreset.time_horizon) && (
+                    <div className="stock-screener-preset-detail-badges">
+                      {detailPreset.risk_level && (
+                        <span className="stock-screener-preset-detail-badge">Risk: {detailPreset.risk_level}</span>
+                      )}
+                      {detailPreset.time_horizon && (
+                        <span className="stock-screener-preset-detail-badge">Horizon: {detailPreset.time_horizon}</span>
+                      )}
+                    </div>
+                  )}
+
+                  {activePresetDetail && (
+                    <div className="stock-screener-preset-detail-sections">
+                      <p className="stock-screener-preset-detail-use">
+                        <span className="stock-screener-preset-detail-label">When to use this</span>
+                        {activePresetDetail.useCase}
+                      </p>
+
+                      <div className="stock-screener-preset-detail-output">
+                        <span className="stock-screener-preset-detail-label">What you&apos;ll get</span>
+                        <p>{activePresetDetail.whatYouGet}</p>
+                      </div>
+
+                      {activePresetDetail.looksFor.length > 0 && (
+                        <section>
+                          <h5>What we filter for</h5>
+                          <ul>
+                            {activePresetDetail.looksFor.map((line) => (
+                              <li key={line}>{line}</li>
+                            ))}
+                          </ul>
+                        </section>
+                      )}
+
+                      {activePresetDetail.examples.length > 0 && (
+                        <section>
+                          <h5>Example stocks that might show up</h5>
+                          <ul>
+                            {activePresetDetail.examples.map((line) => (
+                              <li key={line}>{line}</li>
+                            ))}
+                          </ul>
+                        </section>
+                      )}
+
+                      {activePresetDetail.howItWorks.length > 0 && (
+                        <details className="stock-screener-preset-detail-advanced">
+                          <summary>How the screen works (technical)</summary>
+                          <ul>
+                            {activePresetDetail.howItWorks.map((line) => (
+                              <li key={line}>{line}</li>
+                            ))}
+                          </ul>
+                        </details>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                <div className="stock-screener-preset-detail-footer">
+                  <button
+                    type="button"
+                    className="stock-screener-preset-detail-close-btn"
+                    onClick={() => setDetailPreset(null)}
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
         </div>
 
         {error && !hasRun && <ErrorMessage message={error} variant="error" persistent />}
@@ -1430,13 +1681,6 @@ const StockAnalysis: React.FC = () => {
             </h3>
             {universeLabel && (
               <p className="stock-screener-universe-result">{universeLabel}</p>
-            )}
-            {inputMode === 'ai' && generatedQuery && (
-              <div className="stock-screener-generated-query">
-                <span className="stock-screener-prompt-query-label">AI-generated query (strictly validated)</span>
-                {aiSummary && <p className="stock-screener-ai-summary">{aiSummary}</p>}
-                <pre>{generatedQuery}</pre>
-              </div>
             )}
             {loading ? (
               <div className="stock-screener-loading" role="status" aria-live="polite">
@@ -1459,55 +1703,20 @@ const StockAnalysis: React.FC = () => {
                 </p>
               </div>
             ) : (
-              <>
-                {clientId && (
-                  <div className="stock-screener-schedule-row">
-                    <button
-                      type="button"
-                      className="btn btn-secondary"
-                      onClick={() => {
-                        const symbols = results.slice(0, 10).map((row) => row.symbol);
-                        setBaselineScheduleInput({
-                          clientId,
-                          queryText: '',
-                          symbols,
-                          dropPercent: 10,
-                          expiryTimeLocal: defaultBaselineExpiryLocal(),
-                          expirationAction: 'CANCEL',
-                          strategyType: 'Custom Query Buy',
-                        });
-                        setBaselineModalOpen(true);
-                      }}
-                    >
-                      Schedule Top {Math.min(results.length, 10)}
-                    </button>
-                    {scheduleMessage ? <p className="stock-screener-schedule-message">{scheduleMessage}</p> : null}
-                  </div>
-                )}
-                <CommonTable data={results} columns={displayColumns} columnLinks={symbolColumnLinks} />
-              </>
+              <div className="stock-analysis-table-shell">
+                <CommonTable
+                  data={screenerTableRows}
+                  columns={displayColumns}
+                  columnLabels={resultColumnLabels}
+                  columnLinks={symbolColumnLinks}
+                />
+              </div>
             )}
           </section>
         )}
+          </div>
+        )}
       </section>
-        </>
-      )}
-
-      <ScreenerDropConfirmModal
-        open={baselineModalOpen}
-        input={baselineScheduleInput}
-        onClose={() => {
-          setBaselineModalOpen(false);
-          setBaselineScheduleInput(null);
-        }}
-        onCommitted={({ scheduled, failed }) => {
-          setScheduleMessage(
-            failed.length
-              ? `Scheduled ${scheduled.join(', ')}. Failed: ${failed.join('; ')}`
-              : `Baseline schedule created for ${scheduled.join(', ')}.`,
-          );
-        }}
-      />
     </div>
   );
 };

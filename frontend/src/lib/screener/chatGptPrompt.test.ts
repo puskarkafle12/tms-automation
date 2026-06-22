@@ -42,10 +42,16 @@ describe('buildChatGptScreenerPromptForCopy', () => {
     const prompt = buildChatGptScreenerPromptForCopy(SAMPLE_FIELDS);
     expect(prompt).toContain('Avoid STATUS: ERROR');
     expect(prompt).toContain('top 50 good stocks');
-    expect(prompt).toContain('true market-wide discovery');
+    expect(prompt).toContain('market_combined');
     expect(prompt).toContain('Do not output Strategy Query Language');
     expect(prompt).not.toContain('Response only when no valid query is possible');
     expect(prompt).not.toContain('This screener is not supported');
+  });
+
+  it('instructs explicit column selection instead of SELECT *', () => {
+    const prompt = buildChatGptScreenerPromptForCopy(SAMPLE_FIELDS);
+    expect(prompt).toContain('NEVER use SELECT *');
+    expect(prompt).not.toMatch(/SELECT \* FROM market_combined/);
   });
 
   it('is much shorter than the full reference prompt', () => {

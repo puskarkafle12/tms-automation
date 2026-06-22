@@ -6,6 +6,13 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from utils.market_data.merolagani_fields import normalize_merolagani_record
 
+
+def _normalize_field_key(key: str) -> str:
+    import re
+
+    cleaned = re.sub(r"[^a-zA-Z0-9]+", "_", str(key or "").strip()).strip("_").lower()
+    return cleaned
+
 # canonical_key -> (label, type, aliases newest-last for merge)
 CANONICAL_FIELD_SPECS: Dict[str, Dict[str, Any]] = {
     "symbol": {"label": "Symbol", "type": "text", "aliases": ["Symbol", "symbol"]},
@@ -189,7 +196,7 @@ COLUMN_LABELS.update(
         "technical_sma_200": "SMA 200",
         "technical_volume_trend": "Vol Trend",
         "technical_3m_price_tend": "3M Trend",
-    "updated_at": "Updated",
+        "updated_at": "Updated",
         "is_watchlist": "Watchlist",
     }
 )
@@ -264,25 +271,25 @@ def canonicalize_record(*sources: Optional[Mapping[str, Any]]) -> Dict[str, Any]
         if value is not None:
             record[canonical] = value
 
+    extras: Dict[str, Any] = {}
     for source in normalized_sources:
         for key, value in source.items():
-            if value is None:
+            if _is_empty_cell(value):
                 continue
             if key in CANONICAL_FIELD_SPECS or key in _ALIAS_TO_CANONICAL:
                 continue
-            if key in record:
+            norm_key = _normalize_field_key(key)
+            if norm_key in CANONICAL_FIELD_SPECS:
                 continue
-            record[key] = value
+            extras[norm_key] = value
+    record.update(extras)
 
     return record
 
 
-def build_combined_record(
-    merolagani_record: Optional[Mapping[str, Any]],
-    nepse_record: Optional[Mapping[str, Any]],
-) -> Dict[str, Any]:
-    """Build merged combined_data row with canonical price fields and Nepse extras."""
-    return canonicalize_record(merolagani_record, nepse_record)
+def build_combined_record(*sources: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """Merge one or more source payloads; later sources win on duplicate keys."""
+    return canonicalize_record(*sources)
 
 
 def canonicalize_merolagani_record(record: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
@@ -305,14 +312,19 @@ def expand_legacy_field_aliases(record: Mapping[str, Any]) -> Dict[str, Any]:
     return expanded
 
 
-def resolve_record_field(record: Mapping[str, Any], field: str) -> Any:
-    canonical = _ALIAS_TO_CANONICAL.get(field, field)
+def resolve_record_field(
+    record: Mapping[str, Any],
+    field: str,
+    alias_map: Optional[Mapping[str, str]] = None,
+) -> Any:
+    lookup = alias_map or get_field_alias_map()
+    canonical = lookup.get(str(field).lower(), _ALIAS_TO_CANONICAL.get(field, field))
     if canonical in record and record.get(canonical) is not None:
         return record.get(canonical)
     spec = CANONICAL_FIELD_SPECS.get(canonical)
     if spec:
         return _coalesce_from_sources([record], [canonical, *(spec.get("aliases") or [])])
-    return record.get(field)
+    return record.get(canonical, record.get(field))
 
 
 METADATA_COLUMNS = frozenset({"updated_at", "fetched_at"})

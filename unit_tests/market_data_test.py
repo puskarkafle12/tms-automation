@@ -6,7 +6,18 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 from utils.market_data.combined_screener import parse_combined_screener_query, run_combined_screener_from_db
-from utils.market_data.canonical_fields import build_combined_record, canonicalize_merolagani_record, ordered_columns_for_source
+from utils.market_data.canonical_fields import (
+    build_combined_record,
+    canonicalize_merolagani_record,
+    ordered_columns_for_source,
+)
+from utils.market_data.dynamic_catalog import (
+    GROQ_AI_SYSTEM_PROMPT_MAX_CHARS,
+    build_dynamic_ai_system_prompt_from_records,
+    build_dynamic_field_catalog,
+    build_dynamic_query_spec,
+    discover_combined_field_keys,
+)
 from utils.market_data.merolagani_fields import flatten_merolagani_row, merge_merolagani_records
 from utils.market_data.repository import get_new_symbols, load_latest_daily_stock_rows
 
@@ -162,7 +173,7 @@ class MarketDataRepositoryTest(unittest.TestCase):
         payload = run_combined_screener_from_db(
             db,
             ["AAA"],
-            [
+            filters=[
                 {"field": "ltp", "operator": "gte", "value": 90},
                 {"field": "alpha_annualized", "operator": "gte", "value": 10},
             ],
@@ -171,18 +182,58 @@ class MarketDataRepositoryTest(unittest.TestCase):
         self.assertEqual(len(payload["results"]), 1)
         self.assertEqual(payload["results"][0]["symbol"], "AAA")
 
-    def test_parse_combined_query_supports_market_field_aliases(self):
-        parsed = parse_combined_screener_query(
-            "WHERE pe_ratio <= 25 AND alpha_annualized >= 5 ORDER BY ltp DESC LIMIT 10"
+    def test_parse_combined_query_validates_sql(self):
+        db = self.Session()
+        db.execute(
+            text(
+                """
+                INSERT INTO market_screener_cache (symbol, combined_data)
+                VALUES (:symbol, :combined_data)
+                """
+            ),
+            {
+                "symbol": "AAA",
+                "combined_data": '{"symbol":"AAA","ltp":100,"pe_ratio":18,"market_cap":1000000}',
+            },
         )
-        self.assertEqual(parsed["filters"][0]["field"], "pe_ratio")
-        self.assertEqual(parsed["rank_by"], "ltp")
+        db.commit()
+
+        parsed = parse_combined_screener_query(
+            "SELECT * FROM market_combined WHERE pe_ratio <= 25 ORDER BY ltp DESC LIMIT 10",
+            db=db,
+        )
+        self.assertTrue(parsed["valid"])
+        self.assertIn("market_combined", parsed["sql"].lower())
 
         legacy = parse_combined_screener_query(
-            "WHERE ml_pe_ratio <= 25 ORDER BY ml_ltp DESC LIMIT 10"
+            "WHERE market_cap <= 5000000000 ORDER BY market_cap ASC LIMIT 10",
+            db=db,
         )
-        self.assertEqual(legacy["filters"][0]["field"], "pe_ratio")
-        self.assertEqual(legacy["rank_by"], "ltp")
+        self.assertTrue(legacy["valid"])
+        self.assertIn("market_cap", legacy["sql"].lower())
+
+    def test_combined_parse_accepts_market_cap(self):
+        db = self.Session()
+        db.execute(
+            text(
+                """
+                INSERT INTO market_screener_cache (symbol, combined_data)
+                VALUES (:symbol, :combined_data)
+                """
+            ),
+            {
+                "symbol": "AAA",
+                "combined_data": '{"symbol":"AAA","market_cap":1000000,"ltp":100}',
+            },
+        )
+        db.commit()
+
+        parsed = parse_combined_screener_query(
+            "SELECT * FROM market_combined WHERE market_cap <= 5000000000 ORDER BY market_cap ASC LIMIT 25",
+            db=db,
+        )
+        self.assertTrue(parsed["valid"])
+        self.assertIn("market_cap", parsed["sql"].lower())
 
 
 class MerolaganiFieldsTest(unittest.TestCase):
@@ -244,6 +295,164 @@ class CanonicalFieldsTest(unittest.TestCase):
         columns = ordered_columns_for_source("combined", rows)
         self.assertLess(columns.index("ltp"), columns.index("technical_macd"))
         self.assertEqual(columns[-1], "technical_macd")
+
+
+class DynamicCatalogTest(unittest.TestCase):
+    def test_build_dynamic_catalog_from_records(self):
+        records = [
+            {"symbol": "AAA", "ltp": 100, "alpha_annualized": 12, "custom_source_score": 0.8},
+            {"symbol": "BBB", "ltp": 200, "alpha_annualized": 8, "custom_source_score": 0.4},
+        ]
+        catalog = build_dynamic_field_catalog(None, records=records)
+        keys = [item["key"] for item in catalog]
+        self.assertIn("ltp", keys)
+        self.assertIn("custom_source_score", keys)
+
+    def test_dynamic_query_spec_includes_custom_field(self):
+        records = [{"symbol": "AAA", "custom_beta": 1.2, "ltp": 50}]
+        spec = build_dynamic_query_spec(None, records=records)
+        self.assertIn("custom_beta", spec["allowed_filter_keys"])
+        self.assertTrue(spec.get("dynamic"))
+        self.assertEqual(spec.get("unsupported_user_terms"), [])
+
+    def test_build_combined_record_merges_new_source_fields(self):
+        combined = build_combined_record(
+            {"ltp": 100, "ml_pe_ratio": 10},
+            {"fundamental_pe_ttm": 12, "custom_signal": "buy"},
+            {"custom_signal": "hold", "new_metric": 5},
+        )
+        self.assertEqual(combined["ltp"], 100)
+        self.assertEqual(combined["pe_ratio"], 12)
+        self.assertEqual(combined["custom_signal"], "hold")
+    def test_dynamic_ai_prompt_includes_market_cap_when_available(self):
+        records = [
+            {"symbol": "AAA", "market_cap": 1_000_000, "ltp": 100},
+            {"symbol": "BBB", "market_cap": 5_000_000_000, "ltp": 500},
+        ]
+        spec = build_dynamic_query_spec(None, records=records)
+        self.assertIn("market_cap", spec["allowed_filter_keys"])
+        prompt = build_dynamic_ai_system_prompt_from_records(records)
+        self.assertIn("market_cap", prompt)
+        self.assertIn("low cap", prompt.lower())
+        self.assertIn("market_combined", prompt.lower())
+        self.assertIn("never use select *", prompt.lower())
+
+    def test_dynamic_ai_prompt_fits_groq_budget_with_large_catalog(self):
+        flat_records = []
+        for i in range(8):
+            row = {
+                "symbol": f"SYM{i}",
+                "ltp": 100 + i,
+                "percent_change": i % 5,
+                "qty": 1000 * i,
+                "market_cap": 1_000_000 * i,
+            }
+            for j in range(12):
+                row[f"fundamental_metric_{j}"] = float(j)
+            for k in range(10):
+                row[f"technical_indicator_{k}"] = float(k)
+            flat_records.append(row)
+
+        prompt = build_dynamic_ai_system_prompt_from_records(
+            flat_records,
+            max_chars=GROQ_AI_SYSTEM_PROMPT_MAX_CHARS,
+        )
+        self.assertLessEqual(len(prompt), GROQ_AI_SYSTEM_PROMPT_MAX_CHARS)
+        self.assertIn("symbol, ltp, percent_change, qty", prompt)
+        self.assertIn("SEMANTIC MAP", prompt)
+        self.assertIn("market_combined", prompt)
+        self.assertIn("fundamental_metric_0", prompt)
+        self.assertIn("STATUS: OK", prompt)
+
+    def test_validate_market_sql_rejects_select_star_for_ai(self):
+        from utils.market_data.sql_screener import MarketSqlError, validate_market_sql_query
+
+        engine = create_engine("sqlite:///:memory:")
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE market_screener_cache (
+                        symbol VARCHAR PRIMARY KEY,
+                        combined_data TEXT
+                    )
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO market_screener_cache (symbol, combined_data)
+                    VALUES (:symbol, :combined_data)
+                    """
+                ),
+                {
+                    "symbol": "AAA",
+                    "combined_data": '{"symbol":"AAA","ltp":100,"pe_ratio":18}',
+                },
+            )
+        Session = sessionmaker(bind=engine)
+        db = Session()
+
+        with self.assertRaises(MarketSqlError):
+            validate_market_sql_query(
+                db,
+                "SELECT * FROM market_combined ORDER BY ltp DESC LIMIT 10",
+                allow_select_star=False,
+            )
+        parsed = validate_market_sql_query(
+            db,
+            "SELECT symbol, ltp, pe_ratio FROM market_combined ORDER BY ltp DESC LIMIT 10",
+            allow_select_star=False,
+        )
+        self.assertTrue(parsed["valid"])
+        db.close()
+
+    def test_discover_combined_field_keys_recovers_after_sql_failure(self):
+        engine = create_engine("sqlite:///:memory:")
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE market_screener_cache (
+                        symbol VARCHAR PRIMARY KEY,
+                        combined_data TEXT
+                    )
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO market_screener_cache (symbol, combined_data)
+                    VALUES (:symbol, :combined_data)
+                    """
+                ),
+                {
+                    "symbol": "AAA",
+                    "combined_data": '{"symbol":"AAA","ltp":100,"pe_ratio":18,"qty":500}',
+                },
+            )
+        Session = sessionmaker(bind=engine)
+        db = Session()
+        keys = discover_combined_field_keys(db)
+        self.assertIn("ltp", keys)
+        self.assertIn("pe_ratio", keys)
+        self.assertIn("qty", keys)
+        db.close()
+
+    def test_ensure_ai_select_injects_symbol_and_basics(self):
+        from utils.market_data.sql_screener import _ensure_ai_display_columns
+
+        fixed = _ensure_ai_display_columns(
+            "SELECT sector, ltp, technical_rsi_14, technical_macd "
+            "FROM market_combined ORDER BY technical_rsi_14 DESC LIMIT 25"
+        )
+        lowered = fixed.lower()
+        self.assertIn("symbol", lowered)
+        self.assertIn("percent_change", lowered)
+        self.assertIn("qty", lowered)
+        self.assertTrue(lowered.index("symbol") < lowered.index("sector"))
 
 
 if __name__ == "__main__":

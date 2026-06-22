@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from database import ensure_read_session
 from utils.stock_screener_symbols import (
     ScreenerUniverse,
     _normalize_explicit_symbols,
@@ -18,6 +19,7 @@ from utils.stock_screener_symbols import (
 
 
 def load_cached_symbol_universe(db: Session) -> List[str]:
+    ensure_read_session(db)
     rows = db.execute(text("SELECT symbol FROM market_screener_cache ORDER BY symbol ASC")).scalars().all()
     symbols = sorted({str(item).strip().upper() for item in rows if str(item).strip()})
     if not symbols:
