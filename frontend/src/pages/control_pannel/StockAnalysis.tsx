@@ -374,6 +374,8 @@ const StockAnalysis: React.FC = () => {
   const [aiMessages, setAiMessages] = useState<AiChatMessage[]>([]);
   const [aiQuickScreens, setAiQuickScreens] = useState<AiQuickScreen[]>([]);
   const [aiQuickScreensLoading, setAiQuickScreensLoading] = useState(true);
+  const [quickScreenOrder, setQuickScreenOrder] = useState<string[]>([]);
+  const [activeQuickScreenId, setActiveQuickScreenId] = useState<string | null>(null);
   const [presets, setPresets] = useState<ScreenerPreset[]>([]);
   const [presetsLoading, setPresetsLoading] = useState(true);
   const [presetCategory, setPresetCategory] = useState<ScreenerPresetCategory>('TRADER');
@@ -501,6 +503,33 @@ const StockAnalysis: React.FC = () => {
       }
     };
     void loadQuickScreens();
+  }, []);
+
+  useEffect(() => {
+    setQuickScreenOrder((prev) => {
+      const ids = aiQuickScreens.map((screen) => screen.id);
+      if (ids.length === 0) {
+        return [];
+      }
+      if (prev.length === 0) {
+        return ids;
+      }
+      const kept = prev.filter((id) => ids.includes(id));
+      const added = ids.filter((id) => !kept.includes(id));
+      return [...kept, ...added];
+    });
+  }, [aiQuickScreens]);
+
+  const orderedQuickScreens = useMemo(() => {
+    const byId = new Map(aiQuickScreens.map((screen) => [screen.id, screen]));
+    return quickScreenOrder
+      .map((id) => byId.get(id))
+      .filter((screen): screen is AiQuickScreen => Boolean(screen));
+  }, [aiQuickScreens, quickScreenOrder]);
+
+  const bumpQuickScreenOrder = useCallback((screenId: string) => {
+    setQuickScreenOrder((prev) => [...prev.filter((id) => id !== screenId), screenId]);
+    setActiveQuickScreenId(screenId);
   }, []);
 
   useEffect(() => {
@@ -746,12 +775,22 @@ const StockAnalysis: React.FC = () => {
     }
   };
 
+  const focusResultsTable = useCallback(() => {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        scrollResultsIntoView(resultsRef.current);
+      });
+    });
+  }, []);
+
   const runQuickScreen = async (screen: AiQuickScreen) => {
     const universeError = validateUniverse();
     if (universeError) {
       setError(universeError);
       return;
     }
+
+    bumpQuickScreenOrder(screen.id);
 
     const userMsg: AiChatMessage = {
       id: `${Date.now()}-user`,
@@ -769,6 +808,7 @@ const StockAnalysis: React.FC = () => {
     setStats(null);
     setUniverseLabel('');
     setHasRun(false);
+    focusResultsTable();
 
     let completedScreen = false;
     try {
@@ -797,7 +837,6 @@ const StockAnalysis: React.FC = () => {
           id: `${Date.now()}-assistant`,
           role: 'assistant',
           content: screen.summary,
-          query: screen.query,
         },
       ]);
       applyScreenResponse(data as {
@@ -827,7 +866,7 @@ const StockAnalysis: React.FC = () => {
       setLoading(false);
       setLoadingLabel('');
       if (completedScreen) {
-        scrollResultsIntoView(resultsRef.current);
+        focusResultsTable();
       }
     }
   };
@@ -1343,85 +1382,111 @@ const StockAnalysis: React.FC = () => {
         </div>
 
         {inputMode === 'ai' ? (
-          <div className="stock-screener-chat-window">
-            <div ref={chatScrollRef} className="stock-screener-chat-messages" aria-live="polite">
-              {aiMessages.length === 0 && !loading && (
-                <div className="stock-screener-chat-empty">
-                  {aiQuickScreensLoading ? (
-                    <p className="stock-screener-chat-empty-hint">Loading quick screens…</p>
-                  ) : aiQuickScreens.length === 0 ? (
-                    <p className="stock-screener-chat-empty-hint">Ask anything about NEPSE stocks in plain English.</p>
-                  ) : (
-                    <ul className="stock-screener-chat-examples">
-                      {aiQuickScreens.map((screen) => (
-                        <li key={screen.id}>
-                          <button
-                            type="button"
-                            className="stock-screener-chat-example-btn"
-                            disabled={loading}
-                            onClick={() => void runQuickScreen(screen)}
-                          >
-                            {screen.prompt}
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              )}
-              {aiMessages.map((message) => (
-                <div
-                  key={message.id}
-                  className={`stock-screener-chat-bubble ${message.role}${message.isError ? ' error' : ''}`}
+          <div className="stock-screener-ai-layout">
+            <div className="stock-screener-chat-window">
+              <div className="stock-screener-chat-header">
+                <h4 className="stock-screener-chat-title">Conversation</h4>
+                <p className="stock-screener-chat-subtitle">Ask in plain English — results show below</p>
+              </div>
+              <div ref={chatScrollRef} className="stock-screener-chat-messages" aria-live="polite">
+                {aiMessages.length === 0 && !loading && (
+                  <div className="stock-screener-chat-empty">
+                    <p className="stock-screener-chat-empty-hint">
+                      {aiQuickScreensLoading
+                        ? 'Loading suggested screens…'
+                        : 'Type a question below, or pick a suggested screen on the right anytime.'}
+                    </p>
+                  </div>
+                )}
+                {aiMessages.map((message) => (
+                  <div
+                    key={message.id}
+                    className={`stock-screener-chat-bubble ${message.role}${message.isError ? ' error' : ''}`}
+                  >
+                    <span className="stock-screener-chat-bubble-role">
+                      {message.role === 'user' ? 'You' : 'Assistant'}
+                    </span>
+                    <p className="stock-screener-chat-bubble-text">{message.content}</p>
+                    {message.query && (
+                      <details className="stock-screener-chat-query-details">
+                        <summary>View screen query</summary>
+                        <pre>{message.query}</pre>
+                      </details>
+                    )}
+                  </div>
+                ))}
+                {loading && (
+                  <div className="stock-screener-chat-bubble assistant loading">
+                    <span className="stock-screener-chat-bubble-role">Assistant</span>
+                    <p className="stock-screener-chat-bubble-text">{loadingLabel || 'Building your screen…'}</p>
+                  </div>
+                )}
+              </div>
+
+              <div className="stock-screener-chat-composer">
+                <textarea
+                  id="screener-ai-input"
+                  className="stock-screener-chat-input"
+                  rows={3}
+                  value={aiInput}
+                  onChange={(e) => setAiInput(e.target.value)}
+                  placeholder={orderedQuickScreens[0]?.prompt || 'Ask anything about NEPSE stocks…'}
+                  disabled={loading}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      if (!loading && aiInput.trim()) {
+                        void runAiScreener();
+                      }
+                    }
+                  }}
+                />
+                <button
+                  type="button"
+                  className="stock-screener-chat-send"
+                  disabled={loading || !aiInput.trim()}
+                  onClick={() => void runAiScreener()}
+                  aria-label="Send message"
                 >
-                  <span className="stock-screener-chat-bubble-role">
-                    {message.role === 'user' ? 'You' : 'Assistant'}
-                  </span>
-                  <p className="stock-screener-chat-bubble-text">{message.content}</p>
-                  {message.query && (
-                    <details className="stock-screener-chat-query-details">
-                      <summary>View screen query</summary>
-                      <pre>{message.query}</pre>
-                    </details>
-                  )}
-                </div>
-              ))}
-              {loading && (
-                <div className="stock-screener-chat-bubble assistant loading">
-                  <span className="stock-screener-chat-bubble-role">Assistant</span>
-                  <p className="stock-screener-chat-bubble-text">{loadingLabel || 'Building your screen…'}</p>
-                </div>
-              )}
+                  Send
+                </button>
+              </div>
             </div>
 
-            <div className="stock-screener-chat-composer">
-              <textarea
-                id="screener-ai-input"
-                className="stock-screener-chat-input"
-                rows={2}
-                value={aiInput}
-                onChange={(e) => setAiInput(e.target.value)}
-                placeholder={aiQuickScreens[0]?.prompt || 'Ask anything about NEPSE stocks…'}
-                disabled={loading}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    if (!loading && aiInput.trim()) {
-                      void runAiScreener();
-                    }
-                  }
-                }}
-              />
-              <button
-                type="button"
-                className="stock-screener-chat-send"
-                disabled={loading || !aiInput.trim()}
-                onClick={() => void runAiScreener()}
-                aria-label="Send message"
-              >
-                Send
-              </button>
-            </div>
+            <aside className="stock-screener-ideas-panel" aria-label="Suggested screens">
+              <div className="stock-screener-ideas-header">
+                <h4 className="stock-screener-ideas-title">Suggested screens</h4>
+                <p className="stock-screener-ideas-subtitle">
+                  Scroll and tap anytime — your chat stays on the left, results appear below.
+                </p>
+              </div>
+              {aiQuickScreensLoading ? (
+                <p className="stock-screener-ideas-loading">Loading ideas…</p>
+              ) : orderedQuickScreens.length === 0 ? (
+                <p className="stock-screener-ideas-loading">No suggested screens available.</p>
+              ) : (
+                <ul className="stock-screener-ideas-list">
+                  {orderedQuickScreens.map((screen, index) => (
+                    <li key={screen.id}>
+                      <button
+                        type="button"
+                        className={`stock-screener-idea-card${
+                          activeQuickScreenId === screen.id ? ' active' : ''
+                        }${index === orderedQuickScreens.length - 1 && activeQuickScreenId === screen.id ? ' last-used' : ''}`}
+                        disabled={loading}
+                        onClick={() => void runQuickScreen(screen)}
+                      >
+                        {index === 0 && (
+                          <span className="stock-screener-idea-badge">Recommended</span>
+                        )}
+                        <span className="stock-screener-idea-prompt">{screen.prompt}</span>
+                        <span className="stock-screener-idea-summary">{screen.summary}</span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </aside>
           </div>
         ) : inputMode === 'query' ? (
           <>
