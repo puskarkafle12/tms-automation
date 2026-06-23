@@ -819,6 +819,7 @@ const DPHoldings: React.FC = () => {
                 })}
               </div>
             )}
+            
 
             <StrategySellForm
               key={`${holdingSymbol(sellHolding)}-${quote?.ltp || sellHolding.ltp || ''}`}

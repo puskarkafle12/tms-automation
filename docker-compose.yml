@@ -23,7 +23,7 @@ services:
       NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:-}
       NGROK_DOMAIN: ${NGROK_DOMAIN:-}
       ZROK_ENV_TOKEN: ${ZROK_ENV_TOKEN:-}
-      ZROK_RESERVED_NAME: ${ZROK_RESERVED_NAME:-tmsautomationapp}
+      ZROK_RESERVED_NAME: ${ZROK_RESERVED_NAME:-tmsautomationlive}
     env_file:
       - .env
     volumes:

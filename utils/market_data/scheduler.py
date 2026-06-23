@@ -30,6 +30,7 @@ _daily_lock = asyncio.Lock()
 _merolagani_lock = asyncio.Lock()
 _nepse_alpha_lock = asyncio.Lock()
 _cache_bootstrap_lock = asyncio.Lock()
+_tick_lock = asyncio.Lock()
 _scheduler_started_at: Optional[datetime] = None
 
 
@@ -196,14 +197,19 @@ async def market_data_scheduler_loop() -> None:
 
     while True:
         try:
-            tasks = [
-                asyncio.create_task(_run_daily_snapshot_if_needed()),
-                asyncio.create_task(_ensure_cache_bootstrapped()),
-                asyncio.create_task(_run_merolagani_refresh_if_needed()),
-                asyncio.create_task(_run_nepse_alpha_refresh_if_needed()),
-            ]
-            for task in tasks:
-                task.add_done_callback(_log_background_task_exception)
+            if _tick_lock.locked():
+                logger.info("Market data scheduler tick skipped because the previous tick is still running")
+            else:
+                async with _tick_lock:
+                    tasks = [
+                        asyncio.create_task(_run_daily_snapshot_if_needed()),
+                        asyncio.create_task(_ensure_cache_bootstrapped()),
+                        asyncio.create_task(_run_merolagani_refresh_if_needed()),
+                        asyncio.create_task(_run_nepse_alpha_refresh_if_needed()),
+                    ]
+                    for task in tasks:
+                        task.add_done_callback(_log_background_task_exception)
+                    await asyncio.gather(*tasks, return_exceptions=True)
         except Exception:
             logger.exception("Market data scheduler iteration failed")
         await asyncio.sleep(CHECK_INTERVAL_SECONDS)
