@@ -48,12 +48,14 @@ ENV PYTHONUNBUFFERED=1 \
     FRONTEND_SEED_PASSWORD=admin \
     TUNNEL_PROVIDER=ngrok \
     NGROK_AUTHTOKEN=REDACTED_CREDENTIAL \
-    NGROK_DOMAIN=untrained-pleading-unmarked.ngrok-free.dev
+    NGROK_DOMAIN=untrained-pleading-unmarked.ngrok-free.dev \
+    ZROK_ENV_TOKEN=
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
+        gnupg \
         libglib2.0-0 \
         libgl1 \
         libpq5 \
@@ -80,6 +82,19 @@ RUN set -eux; \
       | tar xz -C /usr/local/bin ngrok; \
     chmod +x /usr/local/bin/ngrok; \
     ngrok version
+
+RUN set -eux; \
+    curl -fsSL https://get.openziti.io/tun/package-repos.gpg \
+      | gpg --dearmor --yes --output /usr/share/keyrings/openziti.gpg; \
+    chmod a+r /usr/share/keyrings/openziti.gpg; \
+    printf '%s\n' \
+      'deb [signed-by=/usr/share/keyrings/openziti.gpg] https://packages.openziti.org/zitipax-openziti-deb-stable debian main' \
+      > /etc/apt/sources.list.d/openziti-release.list; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends zrok2; \
+    ln -sf /usr/bin/zrok2 /usr/local/bin/zrok2; \
+    ln -sf /usr/bin/zrok2 /usr/local/bin/zrok; \
+    zrok2 version
 
 WORKDIR /app
 

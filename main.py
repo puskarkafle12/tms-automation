@@ -824,6 +824,12 @@ async def get_api_time():
     return get_server_time_payload()
 
 
+@app.get("/health")
+@app.get("/api/health")
+async def health_check():
+    return {"status": "ok"}
+
+
 @app.get("/market-status/")
 async def get_market_status(db: Session = Depends(get_db)):
     global market_status_cache

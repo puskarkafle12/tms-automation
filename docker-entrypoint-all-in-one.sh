@@ -10,21 +10,44 @@ set -euo pipefail
 : "${FRONTEND_SEED_PASSWORD:=admin}"
 : "${NGROK_AUTHTOKEN:=}"
 : "${NGROK_DOMAIN:=}"
+: "${ZROK_ENV_TOKEN:=}"
+: "${ZROK_SHARE_LABEL:=TMS Automation zrok}"
+: "${ZROK_RESERVED_NAME:=tmsautomationapp}"
 : "${ENVIRONMENT:=test}"
 
 export DB_USER DB_PASSWORD DB_HOST DB_NAME FRONTEND_SEED_USER FRONTEND_SEED_PASSWORD ENVIRONMENT
 
 PUBLIC_URL_FILE=/tmp/public-url.txt
+PUBLIC_URLS_FILE=/tmp/public-urls.txt
 TUNNEL_LOG=/tmp/tunnel.log
 TUNNEL_PID=""
+ZROK_LOG=/tmp/zrok.log
+ZROK_PID=""
+NGROK_WAIT_PID=""
+ZROK_WAIT_PID=""
+
+touch_public_urls_file() {
+  : > "$PUBLIC_URLS_FILE"
+}
+
+append_public_url() {
+  local label="$1"
+  local url="$2"
+  local note="${3:-}"
+  {
+    echo "$label|$url|$note"
+  } >> "$PUBLIC_URLS_FILE"
+}
 
 print_public_url_banner() {
-  local url="$1"
-  local note="${2:-}"
+  local label="${1:-URL}"
+  local url="${2:-}"
+  local note="${3:-}"
   echo "$url" > "$PUBLIC_URL_FILE"
+  append_public_url "$label" "$url" "$note"
   echo ""
   echo "=============================================="
-  echo " PUBLIC URL: $url"
+  echo " $label: $url"
   if [ -n "$note" ]; then
     echo " NOTE: $note"
   fi
@@ -39,7 +62,7 @@ wait_for_ngrok_url() {
       | python3 -c "import json,sys; data=json.load(sys.stdin); tunnels=data.get('tunnels') or []; print(next((t['public_url'] for t in tunnels if t.get('public_url','').startswith('https')), ''))" 2>/dev/null \
       || true)"
     if [ -n "$url" ]; then
-      print_public_url_banner "$url" "Permanent ngrok URL for your account."
+      print_public_url_banner "ngrok" "$url" "Permanent ngrok URL for your account."
       return 0
     fi
     sleep 1
@@ -80,6 +103,53 @@ start_ngrok_tunnel() {
   wait_for_ngrok_url
 }
 
+wait_for_zrok_url() {
+  local url=""
+  for _ in $(seq 1 60); do
+    url="$(grep -Eo 'https://[^[:space:]]+' "$ZROK_LOG" 2>/dev/null | tail -1 || true)"
+    if [ -n "$url" ]; then
+      print_public_url_banner "$ZROK_SHARE_LABEL" "$url" "zrok public share."
+      return 0
+    fi
+    sleep 1
+  done
+  echo "zrok started — run: docker exec tms-automation cat /tmp/public-urls.txt"
+  return 1
+}
+
+start_zrok_tunnel() {
+  if [ -z "$ZROK_ENV_TOKEN" ]; then
+    echo "ZROK_ENV_TOKEN is missing."
+    return 1
+  fi
+
+  mkdir -p "$(dirname "$ZROK_LOG")"
+  : > "$ZROK_LOG"
+  touch_public_urls_file
+
+  ZROK_BIN="$(command -v zrok2 2>/dev/null || command -v zrok 2>/dev/null || true)"
+  if [ -z "$ZROK_BIN" ]; then
+    echo "zrok binary is not installed."
+    return 1
+  fi
+
+  if ! "$ZROK_BIN" enable --headless "$ZROK_ENV_TOKEN" >/dev/null 2>&1; then
+    echo "zrok enable failed."
+    return 1
+  fi
+  if "$ZROK_BIN" create name -n public "$ZROK_RESERVED_NAME" >>"$ZROK_LOG" 2>&1 || true; then
+    echo "Starting zrok reserved share '$ZROK_SHARE_LABEL' as 'public:$ZROK_RESERVED_NAME' ..."
+    "$ZROK_BIN" share public http://127.0.0.1:80 -n "public:$ZROK_RESERVED_NAME" --headless >>"$ZROK_LOG" 2>&1 &
+  else
+    echo "zrok reserve failed; falling back to public share."
+    echo "Starting zrok public share '$ZROK_SHARE_LABEL' on http://127.0.0.1:80 ..."
+    "$ZROK_BIN" share public http://127.0.0.1:80 >>"$ZROK_LOG" 2>&1 &
+  fi
+
+  ZROK_PID="$!"
+  wait_for_zrok_url
+}
+
 mkdir -p "$PGDATA"
 chown -R postgres:postgres "$PGDATA"
 
@@ -94,6 +164,15 @@ gosu postgres pg_ctl -D "$PGDATA" -o "-c listen_addresses='127.0.0.1'" -w start
 cleanup() {
   if [ -n "${TUNNEL_PID:-}" ]; then
     kill "$TUNNEL_PID" >/dev/null 2>&1 || true
+  fi
+  if [ -n "${ZROK_PID:-}" ]; then
+    kill "$ZROK_PID" >/dev/null 2>&1 || true
+  fi
+  if [ -n "${NGROK_WAIT_PID:-}" ]; then
+    kill "$NGROK_WAIT_PID" >/dev/null 2>&1 || true
+  fi
+  if [ -n "${ZROK_WAIT_PID:-}" ]; then
+    kill "$ZROK_WAIT_PID" >/dev/null 2>&1 || true
   fi
   nginx -s quit >/dev/null 2>&1 || true
   gosu postgres pg_ctl -D "$PGDATA" -m fast -w stop
@@ -129,10 +208,13 @@ echo "Starting Nginx reverse proxy on http://0.0.0.0:80"
 nginx
 
 if [ "$ENVIRONMENT" = "production" ] || [ "$ENVIRONMENT" = "prod" ]; then
-  start_ngrok_tunnel || true
+  start_ngrok_tunnel >/tmp/ngrok-start.log 2>&1 &
+  NGROK_WAIT_PID="$!"
+  start_zrok_tunnel >/tmp/zrok-start.log 2>&1 &
+  ZROK_WAIT_PID="$!"
 else
   echo "ENVIRONMENT=$ENVIRONMENT — ngrok disabled (local/test mode)."
-  print_public_url_banner "http://localhost:3000" "Open this URL on your machine. Set ENVIRONMENT=prod in .env to enable ngrok."
+  print_public_url_banner "local" "http://localhost:3000" "Open this URL on your machine. Set ENVIRONMENT=prod in .env to enable tunnels."
 fi
 
 echo "Starting TMS Automation backend on http://127.0.0.1:8000"

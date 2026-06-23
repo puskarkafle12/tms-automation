@@ -8,6 +8,11 @@ if ! docker ps --format '{{.Names}}' | grep -qx "$CONTAINER"; then
   exit 1
 fi
 
+if urls="$(docker exec "$CONTAINER" sh -c 'if [ -f /tmp/public-urls.txt ]; then cat /tmp/public-urls.txt; fi' 2>/dev/null)" && [ -n "$urls" ]; then
+  printf '%s\n' "$urls" | awk -F'|' 'NF >= 2 && $2 != "" {print ($1 ? $1 ": " : "") $2 (NF >= 3 && $3 != "" ? " (" $3 ")" : "")}'
+  exit 0
+fi
+
 if url="$(docker exec "$CONTAINER" cat /tmp/public-url.txt 2>/dev/null)" && [ -n "$url" ]; then
   echo "$url"
   exit 0

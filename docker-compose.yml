@@ -18,10 +18,12 @@ services:
       DB_NAME: stock
       FRONTEND_SEED_USER: admin
       FRONTEND_SEED_PASSWORD: admin
-      ENVIRONMENT: ${ENVIRONMENT:-test}
+      ENVIRONMENT: ${ENVIRONMENT:-prod}
       TUNNEL_PROVIDER: ngrok
       NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:-}
       NGROK_DOMAIN: ${NGROK_DOMAIN:-}
+      ZROK_ENV_TOKEN: ${ZROK_ENV_TOKEN:-}
+      ZROK_RESERVED_NAME: ${ZROK_RESERVED_NAME:-tmsautomationapp}
     env_file:
       - .env
     volumes:
