@@ -153,7 +153,11 @@ const Settings: React.FC = () => {
   };
 
   const updateUi = (patch: Partial<UiPortalSettings>) => {
-    setUiSettings((current) => normalizeUiPortalSettings({ ...current, ...patch }));
+    setUiSettings((current) => {
+      const next = normalizeUiPortalSettings({ ...current, ...patch });
+      writeUiPortalSettings(next);
+      return next;
+    });
   };
 
   const handleSave = async () => {
