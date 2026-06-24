@@ -1,7 +1,14 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { syncMonitoringStatus } from './monitoringSync';
+import { readUiPortalSettings, subscribeUiPortalSettings } from '../lib/uiPortalSettings';
 
 export const useMonitoringSync = () => {
+  const [pollSeconds, setPollSeconds] = useState(() => readUiPortalSettings().marketStatusPollSeconds);
+
+  useEffect(() => subscribeUiPortalSettings((settings) => {
+    setPollSeconds(settings.marketStatusPollSeconds);
+  }), []);
+
   useEffect(() => {
     let active = true;
 
@@ -13,10 +20,10 @@ export const useMonitoringSync = () => {
     };
 
     safeSync();
-    const interval = window.setInterval(safeSync, 5000);
+    const interval = window.setInterval(safeSync, Math.max(1, pollSeconds) * 1000);
     return () => {
       active = false;
       window.clearInterval(interval);
     };
-  }, []);
+  }, [pollSeconds]);
 };

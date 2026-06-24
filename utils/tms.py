@@ -1579,6 +1579,8 @@ class TmsUser:
                             if response.status == 401 and retry_on_unauthorized and not unauthorized_retried:
                                 await response.read()
                                 unauthorized_retried = True
+                                await self._refresh_authentication(reason=f"{normalized_method} {url} returned 401")
+                                break
                             elif expected_statuses and response.status not in expected_statuses:
                                 response.raise_for_status()
                             else:
@@ -1599,13 +1601,6 @@ class TmsUser:
                         break
                     raise
 
-                if unauthorized_retried:
-                    try:
-                        await self._refresh_authentication()
-                    except Exception as exc:
-                        last_error = exc
-                        raise
-                    continue
                 break
 
         if last_error:

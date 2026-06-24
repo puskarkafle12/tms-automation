@@ -6,6 +6,7 @@ import Dropdown from '../../components/Dropdown';
 import CommonTable from '../../components/table/Table';
 import StrategySellForm, { StrategyPayload } from './StrategySellForm';
 import { getBoardLotSize, normalizeSellQty } from './lotSize';
+import { notifyScheduledOrdersChanged } from './scheduleOrderHelpers';
 
 interface DPHolding {
   clientID: string;
@@ -376,6 +377,9 @@ const DPHoldings: React.FC = () => {
   const openSellDialog = async (holding: DPHolding) => {
     const symbol = holdingSymbol(holding);
     const quoteClientId = (holding as CombinedHolding).holders?.[0]?.clientID || clientID;
+    if (holding.clientID && holding.clientID !== 'combined') {
+      setClientID(holding.clientID);
+    }
     setSellHolding(holding);
     setQuote(null);
     setQuoteError('');
@@ -420,11 +424,15 @@ const DPHoldings: React.FC = () => {
     }
 
     const symbol = holdingSymbol(sellHolding);
+    const resolvedClientId =
+      (sellHolding as CombinedHolding).holders?.[0]?.clientID
+      || (sellHolding.clientID && sellHolding.clientID !== 'combined' ? sellHolding.clientID : '')
+      || clientID;
     const qty = strategyPayload.qty;
     const price = strategyPayload.price;
     const availableQty = Number(sellHolding.currentBalance || 0);
 
-    if (!symbol || !qty || qty < 1 || !price || price <= 0) {
+    if (!symbol || !resolvedClientId || !qty || qty < 1 || !price || price <= 0) {
       setQuoteError('Enter a valid sell quantity and price.');
       return;
     }
@@ -438,7 +446,7 @@ const DPHoldings: React.FC = () => {
     try {
       const holders = (sellHolding as CombinedHolding).holders?.length
         ? [...(sellHolding as CombinedHolding).holders]
-        : [{ ...sellHolding, clientID }];
+        : [{ ...sellHolding, clientID: resolvedClientId }];
       const lotSize = getBoardLotSize(quote?.security || sellHolding);
       const orders = strategyPayload.odd_lot_allowed
         ? (() => {
@@ -497,6 +505,7 @@ const DPHoldings: React.FC = () => {
           ? `${strategyPayload.strategy_type} scheduled for ${symbol} across ${orders.length} users.`
           : `${strategyPayload.strategy_type} scheduled for ${symbol}.`,
       );
+      notifyScheduledOrdersChanged();
       closeSellDialog();
     } catch {
       setQuoteError('Failed to schedule sell order. Check your API connection.');
@@ -521,6 +530,11 @@ const DPHoldings: React.FC = () => {
 
   const isProfit = totals.profit >= 0;
   const isDailyGain = totals.dailyGain >= 0;
+  const activeSellClientId = sellHolding
+    ? ((sellHolding as CombinedHolding).holders?.[0]?.clientID
+      || (sellHolding.clientID && sellHolding.clientID !== 'combined' ? sellHolding.clientID : '')
+      || clientID)
+    : '';
   const portfolioRows = visibleHoldings.map((holding, index) => {
     const dailyGain = (holding.valueAsOfLTP || 0) - (holding.valueAsOfPreviousClosePrice || 0);
     const totalProfit = typeof holding.actualProfitLoss === 'number' ? holding.actualProfitLoss : null;
@@ -823,6 +837,8 @@ const DPHoldings: React.FC = () => {
 
             <StrategySellForm
               key={`${holdingSymbol(sellHolding)}-${quote?.ltp || sellHolding.ltp || ''}`}
+              scriptName={holdingSymbol(sellHolding)}
+              clientId={activeSellClientId}
               currentLtp={Number(quote?.ltp ?? sellHolding.ltp ?? 0)}
               availableQty={Number(sellHolding.currentBalance || 0)}
               averageBuyPrice={

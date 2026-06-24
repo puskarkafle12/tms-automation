@@ -1927,7 +1927,7 @@ async def get_logged_in_clients(db: Session = Depends(get_db)):
             if not user or not user.auto_login:
                 continue
             try:
-                await get_cached_tms_user(user)
+                await get_cached_tms_user(user, allow_full_login=True)
             except LoginFailedException:
                 continue
             except Exception:
