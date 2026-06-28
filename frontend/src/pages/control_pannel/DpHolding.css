@@ -305,6 +305,13 @@
   gap: 1rem;
 }
 
+.dp-holdings-content-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
 .dp-holdings-content-header {
   margin-bottom: 1rem;
 }

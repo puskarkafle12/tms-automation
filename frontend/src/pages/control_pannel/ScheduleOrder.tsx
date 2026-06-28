@@ -265,7 +265,11 @@ const ScheduleOrder: React.FC = () => {
     const requestId = buyScripRequestId.current + 1;
     buyScripRequestId.current = requestId;
     try {
-      const response = await fetch(`${getApiUrl()}/get_script_details?client_id=${encodeURIComponent(clientId)}`);
+      const params = new URLSearchParams({
+        client_id: clientId,
+        force_refresh: String(forceRefresh),
+      });
+      const response = await fetch(`${getApiUrl()}/get_script_details?${params.toString()}`);
       if (requestId !== buyScripRequestId.current) {
         return;
       }
@@ -326,7 +330,11 @@ const ScheduleOrder: React.FC = () => {
     const requestId = sellScripRequestId.current + 1;
     sellScripRequestId.current = requestId;
     try {
-      const response = await fetch(`${getApiUrl()}/dp_holdings?client_id=${encodeURIComponent(clientId)}`, {
+      const params = new URLSearchParams({
+        client_id: clientId,
+        force_refresh: String(forceRefresh),
+      });
+      const response = await fetch(`${getApiUrl()}/dp_holdings?${params.toString()}`, {
         headers: { Accept: 'application/json' },
       });
       if (requestId !== sellScripRequestId.current) {

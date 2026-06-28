@@ -112,6 +112,15 @@ def ensure_performance_indexes():
         )""",
         "CREATE INDEX IF NOT EXISTS ix_tradebook_history_cache_client_date ON tradebook_history_cache (client_id, trade_date)",
         "CREATE INDEX IF NOT EXISTS ix_tradebook_history_cache_client_symbol ON tradebook_history_cache (client_id, symbol)",
+        """CREATE TABLE IF NOT EXISTS dp_holdings_cache (
+            client_id VARCHAR PRIMARY KEY,
+            holdings_json JSON NOT NULL,
+            source VARCHAR,
+            market_phase VARCHAR,
+            refreshed_at TIMESTAMP DEFAULT NOW(),
+            updated_at TIMESTAMP DEFAULT NOW()
+        )""",
+        "CREATE INDEX IF NOT EXISTS ix_dp_holdings_cache_refreshed_at ON dp_holdings_cache (refreshed_at DESC)",
         """CREATE TABLE IF NOT EXISTS tradebook_history_refreshes (
             id SERIAL PRIMARY KEY,
             client_id VARCHAR NOT NULL,

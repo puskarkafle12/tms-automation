@@ -49,6 +49,17 @@ export interface LoggedInSession {
   last_updated: string | null;
 }
 
+export interface LoginAllResponse {
+  message: string;
+  attempted_count: number;
+  logged_in_count: number;
+  results: Array<{
+    client_id: string;
+    status: 'logged_in' | 'failed';
+    message: string;
+  }>;
+}
+
 export interface ScheduledOrder {
   order_id?: number;
   client_id: string;
@@ -163,6 +174,11 @@ export const clearScheduledOrders = async () => {
 
 export const loginTmsAccount = async (clientId: string) => {
   const response = await axios.post(`${getApiUrl()}/tms-accounts/${encodeURIComponent(clientId)}/login`);
+  return response.data;
+};
+
+export const loginAllTmsAccounts = async () => {
+  const response = await axios.post<LoginAllResponse>(`${getApiUrl()}/tms-accounts/login-all`);
   return response.data;
 };
 

@@ -263,7 +263,7 @@ const DPHoldings: React.FC = () => {
     fetchLoggedInClientIDs();
   }, []);
 
-  const fetchHoldings = useCallback(async (selectedClientID: string) => {
+  const fetchHoldings = useCallback(async (selectedClientID: string, forceRefresh = false) => {
     if (!selectedClientID) {
       setDPHoldings([]);
       setHasFetched(false);
@@ -277,7 +277,11 @@ const DPHoldings: React.FC = () => {
     setHasFetched(true);
 
     try {
-      const response = await fetch(`${getApiUrl()}/dp_holdings?client_id=${selectedClientID}`, {
+      const params = new URLSearchParams({
+        client_id: selectedClientID,
+        force_refresh: String(forceRefresh),
+      });
+      const response = await fetch(`${getApiUrl()}/dp_holdings?${params.toString()}`, {
         headers: { Accept: 'application/json' },
       });
 
@@ -315,7 +319,7 @@ const DPHoldings: React.FC = () => {
     }
   }, [clientID, fetchHoldings, holdingMode]);
 
-  const fetchCombinedHoldings = useCallback(async (clientIds: string[]) => {
+  const fetchCombinedHoldings = useCallback(async (clientIds: string[], forceRefresh = false) => {
     const selectedIds = clientIds.filter(Boolean);
     if (selectedIds.length === 0) {
       setCombinedHoldings([]);
@@ -332,7 +336,11 @@ const DPHoldings: React.FC = () => {
     try {
       const allHoldings = await Promise.all(
         selectedIds.map(async (id) => {
-          const response = await fetch(`${getApiUrl()}/dp_holdings?client_id=${encodeURIComponent(id)}`, {
+          const params = new URLSearchParams({
+            client_id: id,
+            force_refresh: String(forceRefresh),
+          });
+          const response = await fetch(`${getApiUrl()}/dp_holdings?${params.toString()}`, {
             headers: { Accept: 'application/json' },
           });
           if (!response.ok) {
@@ -372,6 +380,14 @@ const DPHoldings: React.FC = () => {
     setSelectedCombinedClients((prev) =>
       prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id],
     );
+  };
+
+  const refreshHoldings = () => {
+    if (holdingMode === 'combined') {
+      void fetchCombinedHoldings(selectedCombinedClients, true);
+      return;
+    }
+    void fetchHoldings(clientID, true);
   };
 
   const openSellDialog = async (holding: DPHolding) => {
@@ -721,11 +737,21 @@ const DPHoldings: React.FC = () => {
       <div className="dp-holdings-content panel">
         <div className="dp-holdings-content-header">
           <h3 className="panel-title">Portfolio Table</h3>
-          {clientID && hasFetched && !isLoading && (
-            <span className="badge badge-muted">
-              {holdingMode === 'combined' ? `${selectedCombinedClients.length} users` : clientID}
-            </span>
-          )}
+          <div className="dp-holdings-content-actions">
+            {clientID && hasFetched && !isLoading && (
+              <span className="badge badge-muted">
+                {holdingMode === 'combined' ? `${selectedCombinedClients.length} users` : clientID}
+              </span>
+            )}
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={refreshHoldings}
+              disabled={isLoading || (!clientID && holdingMode === 'single') || (holdingMode === 'combined' && selectedCombinedClients.length === 0)}
+            >
+              {isLoading ? 'Refreshing...' : 'Refresh'}
+            </button>
+          </div>
         </div>
 
         {isLoading ? (

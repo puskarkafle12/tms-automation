@@ -17,6 +17,7 @@ export interface MarketStatus {
   market_phase: 'open' | 'pre_open' | 'closed' | 'closed_weekend';
   tms_session_active: boolean;
   tms_session_message: string;
+  dna_status?: string | null;
   market_live: boolean;
   market_live_from_api: boolean | null;
   client_id: string | null;

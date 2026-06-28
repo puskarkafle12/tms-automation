@@ -12,7 +12,16 @@ const buildStatusTitle = (status: MarketStatus | null) => {
     return 'Market status unavailable';
   }
 
+  const dnaStatus = status.dna_status === 'LOGGED_IN'
+    ? 'DNA logged in'
+    : status.dna_status === 'LOGGED_OFF'
+      ? 'DNA logged off'
+      : status.tms_session_active
+        ? 'DNA session active'
+        : 'DNA session inactive';
+
   const parts = [
+    dnaStatus,
     status.tms_session_message,
     `Pre-open: Sun–Fri 10:30 AM–10:45 AM NPT`,
     `Trading hours: Sun–Fri 11:00 AM–3:00 PM NPT`,
@@ -29,6 +38,8 @@ const buildStatusTitle = (status: MarketStatus | null) => {
   if (status.client_id) {
     parts.push(`Checked via ${status.client_id}`);
   }
+
+  parts.push('Live execution requires market open and an active DNA session');
 
   return parts.filter(Boolean).join(' · ');
 };
@@ -90,6 +101,7 @@ const MarketStatusBar: React.FC = () => {
   const isPreOpen = status?.market_phase === 'pre_open';
   const statusClass = isMarketOpen ? 'live' : isPreOpen ? 'pre-open' : 'closed';
   const statusLabel = isMarketOpen ? 'Market Open' : isPreOpen ? 'Pre Open' : 'Market Closed';
+  const pillTitle = buildStatusTitle(status);
   const clockTime = liveClock?.time || status?.nepal_time_formatted || status?.server_time?.time || '--:--:--';
   const clockDate = liveClock?.date || status?.nepal_date_formatted || status?.server_time?.date || '';
   const clockTitle = liveClock?.display || status?.nepal_time_display || 'Nepal Time (NPT)';
@@ -104,7 +116,7 @@ const MarketStatusBar: React.FC = () => {
       </div>
       <span
         className={`market-status-pill ${statusClass}`}
-        title={buildStatusTitle(status)}
+        title={pillTitle}
       >
         <span className="market-status-dot" />
         {statusLabel}

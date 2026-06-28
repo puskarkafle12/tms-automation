@@ -10,6 +10,7 @@ import {
   deleteTmsAccount,
   listScheduledOrders,
   listTmsAccounts,
+  loginAllTmsAccounts,
   loginTmsAccount,
   refreshTmsAccountCollateral,
   updateTmsAccount,
@@ -426,6 +427,24 @@ const Login: React.FC = () => {
     }
   };
 
+  const handleLoginAll = async () => {
+    resetMessages();
+    setActionLoading('login-all');
+    try {
+      const response = await loginAllTmsAccounts();
+      const failedCount = response.results.filter((result) => result.status === 'failed').length;
+      setSuccessMessage(
+        `${response.message}. ${response.logged_in_count}/${response.attempted_count} account(s) logged in.${failedCount > 0 ? ` ${failedCount} account(s) need attention.` : ''}`,
+      );
+      await loadAccounts({ silent: true });
+    } catch (error) {
+      setErrorMessage(extractApiErrorMessage(error));
+      await loadAccounts({ silent: true });
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
   const handleRefreshCollateral = async () => {
     resetMessages();
     setCollateralRefreshing(true);
@@ -531,6 +550,14 @@ const Login: React.FC = () => {
               </button>
               <button type="button" className="btn btn-secondary" onClick={openImportModal}>
                 Import
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => { void handleLoginAll(); }}
+                disabled={actionLoading === 'login-all' || accounts.length === 0}
+              >
+                {actionLoading === 'login-all' ? 'Logging in all...' : 'Login All'}
               </button>
               <button
                 type="button"
