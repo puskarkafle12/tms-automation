@@ -61,14 +61,10 @@ def parse_session_check_response(payload: Dict[str, Any]) -> Dict[str, Any]:
     status = str(payload.get("status", "")).lower()
     message = str(payload.get("message") or "").strip()
     message_lower = message.lower()
-    data = payload.get("data")
-    dna_status = ""
-    if isinstance(data, dict):
-        dna_status = str(data.get("dnaStatus") or data.get("dna_status") or "").upper()
 
     logged_off = status == "failed" or "logged off" in message_lower
-    logged_in = "logged in" in message_lower or dna_status == "LOGGED_IN"
-    session_active = logged_in or (not logged_off and status in {"success", "ok", "active", "open"})
+    logged_in = "logged in" in message_lower
+    session_active = not logged_off and (logged_in or status != "failed")
 
     if logged_off:
         session_active = False
@@ -78,22 +74,13 @@ def parse_session_check_response(payload: Dict[str, Any]) -> Dict[str, Any]:
     else:
         session_message = message if message else "DNA logged off"
 
-    market_live_from_api = None
-    if isinstance(data, dict):
-        for key in ("marketOpen", "market_open", "isMarketOpen", "sessionActive", "isOpen"):
-            if key in data:
-                market_live_from_api = bool(data[key])
-                break
-        if market_live_from_api is None and dna_status:
-            market_live_from_api = dna_status == "LOGGED_IN"
-
     return {
         "session_active": session_active,
         "session_message": session_message,
         "raw_status": payload.get("status"),
-        "dna_status": dna_status or None,
-        "market_live_from_api": market_live_from_api,
-        "session_data": data,
+        "dna_status": None,
+        "market_live_from_api": None,
+        "session_data": payload.get("data"),
     }
 
 
