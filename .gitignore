@@ -11,6 +11,10 @@ test.py
 *.csv
 node_modules
 
+# Keep captcha solver reference data tracked.
+!utils/tms_captcha_solver/bold_data.json
+!utils/tms_captcha_solver/slim_data.json
+
 # Captcha debug/test artifacts
 data/captcha_analysis/
 data/captcha_calib/
