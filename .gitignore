@@ -10,6 +10,12 @@ test.py
 *.jsonl
 *.csv
 node_modules
+
+# Captcha debug/test artifacts
+data/captcha_analysis/
+data/captcha_calib/
+data/captcha_debug/
+data/captcha_empty/
 # Ignore everything in the alembic folder
 alembic/*
 # Do not ignore the .env file inside the alembic folder

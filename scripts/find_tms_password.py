@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from utils.tms import TmsUser
-from utils.tms_captcha_solver.imgto_txt import solve_captcha
+from utils.tms_captcha_solver.solver import solve_captcha
 
 CAPTCHA_RETRIES = 6
 

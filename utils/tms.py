@@ -11,7 +11,7 @@ from exceptions.login_exceptions import LoginFailedException
 from models.logged_in_user import LoggedInUsers
 from models.tms_password_backup import TmsPasswordBackup
 from models.user import User
-from utils.tms_captcha_solver.imgto_txt import solve_captcha
+from utils.tms_captcha_solver.solver import solve_captcha
 from utils.tms_broker import normalize_broker_no
 from utils.base_functions import (
     NEPSE_INTRADAY_LIMIT_PERCENT,

@@ -1,7 +1,2 @@
 # Slow / large wheels — installed in the isolated python-deps Docker stage.
-# CPU torch keeps aarch64/amd64 images much smaller than easyocr's default GPU torch.
---extra-index-url https://download.pytorch.org/whl/cpu
-torch
-torchvision
-easyocr==1.7.1
 pandas==2.2.1

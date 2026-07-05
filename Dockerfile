@@ -61,7 +61,6 @@ RUN apt-get update \
         libpq5 \
         nginx \
         python3 \
-    && mkdir -p /root/.EasyOCR/model /root/.EasyOCR/user_network \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=python-deps /opt/venv /opt/venv
