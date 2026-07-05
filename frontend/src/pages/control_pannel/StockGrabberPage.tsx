@@ -124,7 +124,7 @@ const StockGrabberPage: React.FC = () => {
     const id = `${clientId}-${stockSymbol}-${Date.now()}`;
     setGrabbers((prev) => dedupeGrabbers([
       ...prev,
-      { id, client_id: clientId, stock_symbol: stockSymbol },
+      { id, client_id: clientId, stock_symbol: stockSymbol, scan_mode: 'socket' },
     ]));
   };
 

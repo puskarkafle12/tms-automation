@@ -6,7 +6,7 @@ import ScheduleMonitorBar from '../../components/ScheduleMonitorBar';
 import StrategySellForm, { STRATEGY_HELP } from './StrategySellForm';
 import type { StrategyPayload, StrategyType } from './StrategySellForm';
 import { buildScheduleScriptOptions, mergeQuoteIntoStockDetail, mergeUniqueStockDetails, formatApiErrorDetail, notifyScheduledOrdersChanged } from './scheduleOrderHelpers';
-import { fetchJson } from '../../utils/api';
+import { buildWebSocketUrl, fetchJson } from '../../utils/api';
 import {
   extractSymbolsFromCompiledPlan,
   extractPlanSide,
@@ -75,13 +75,15 @@ const ScheduleOrder: React.FC = () => {
   const [submitProgress, setSubmitProgress] = useState('');
   const [latestLtp, setLatestLtp] = useState<number | null>(null);
   const [quote, setQuote] = useState<any | null>(null);
+  const [quoteSocketQuoteTime, setQuoteSocketQuoteTime] = useState<string | null>(null);
+  const quoteSocketQuoteTimeRef = useRef<string | null>(null);
+  const quoteSocketRef = useRef<WebSocket | null>(null);
   const [quoteLoading, setQuoteLoading] = useState(false);
   const [quoteError, setQuoteError] = useState('');
   const [holdingQty, setHoldingQty] = useState<number | null>(null);
   const [holdingLabel, setHoldingLabel] = useState('');
   const [holdingLoading, setHoldingLoading] = useState(false);
   const [holdingError, setHoldingError] = useState('');
-  const [quoteRefreshMs, setQuoteRefreshMs] = useState(5000);
   const quoteRequestId = useRef(0);
   const holdingRequestId = useRef(0);
   const buyScripRequestId = useRef(0);
@@ -447,6 +449,45 @@ const ScheduleOrder: React.FC = () => {
     setSelectedStock(stockDetails.find((stock) => stock.symbol === normalizedName) || null);
   }, [scriptName, stockDetails]);
 
+  const applyQuotePayload = useCallback((data: any, normalizedSymbol: string, options?: { silent?: boolean }) => {
+    const quoteData = data?.quote
+      ? { ...data.quote, __socket: data.socket || null, __quote_source: data.quote_source || null }
+      : null;
+    setQuote(quoteData);
+    const socketQuoteTime = quoteData?.lastTradedTime
+      || quoteData?.lastTradedAt
+      || quoteData?.lastTraded
+      || data?.socket?.quote?.lastTradedTime
+      || null;
+    if (socketQuoteTime && socketQuoteTime !== quoteSocketQuoteTimeRef.current) {
+      quoteSocketQuoteTimeRef.current = socketQuoteTime;
+      setQuoteSocketQuoteTime(socketQuoteTime);
+    }
+    const ltp = Number(quoteData?.ltp ?? 0);
+    if (ltp > 0) {
+      setLatestLtp(ltp);
+    } else if (!options?.silent) {
+      setLatestLtp(null);
+      setQuoteError('Latest LTP is not available.');
+    }
+
+    if (quoteData) {
+      setSelectedStock((previous: any) => {
+        if (!previous || String(previous.symbol || '').trim().toUpperCase() !== normalizedSymbol) {
+          return previous;
+        }
+        return mergeQuoteIntoStockDetail(previous, quoteData);
+      });
+      setStockDetails((previous: any[]) =>
+        previous.map((stock) =>
+          String(stock.symbol || '').trim().toUpperCase() === normalizedSymbol
+            ? mergeQuoteIntoStockDetail(stock, quoteData)
+            : stock,
+        ),
+      );
+    }
+  }, []);
+
   const loadLatestQuote = useCallback(async (clientId: string, symbol: string, options?: { silent?: boolean }) => {
     const normalizedSymbol = symbol.trim().toUpperCase();
     if (!clientId || !normalizedSymbol) {
@@ -487,31 +528,7 @@ const ScheduleOrder: React.FC = () => {
       if (requestId !== quoteRequestId.current) {
         return;
       }
-      const quoteData = data?.quote || null;
-      setQuote(quoteData);
-      const ltp = Number(quoteData?.ltp ?? 0);
-      if (ltp > 0) {
-        setLatestLtp(ltp);
-      } else if (!options?.silent) {
-        setLatestLtp(null);
-        setQuoteError('Latest LTP is not available.');
-      }
-
-      if (quoteData) {
-        setSelectedStock((previous: any) => {
-          if (!previous || String(previous.symbol || '').trim().toUpperCase() !== normalizedSymbol) {
-            return previous;
-          }
-          return mergeQuoteIntoStockDetail(previous, quoteData);
-        });
-        setStockDetails((previous: any[]) =>
-          previous.map((stock) =>
-            String(stock.symbol || '').trim().toUpperCase() === normalizedSymbol
-              ? mergeQuoteIntoStockDetail(stock, quoteData)
-              : stock,
-          ),
-        );
-      }
+      applyQuotePayload(data, normalizedSymbol, options);
     } catch {
       if (requestId === quoteRequestId.current) {
         if (!options?.silent) {
@@ -525,7 +542,7 @@ const ScheduleOrder: React.FC = () => {
         setQuoteLoading(false);
       }
     }
-  }, []);
+  }, [applyQuotePayload]);
 
   const loadSellHolding = useCallback(async (clientId: string, symbol: string, options?: { silent?: boolean }) => {
     const normalizedSymbol = symbol.trim().toUpperCase();
@@ -576,32 +593,77 @@ const ScheduleOrder: React.FC = () => {
   }, [orderType, sellHoldings]);
 
   useEffect(() => {
-    const loadInterval = async () => {
-      const result = await fetchJson<{ monitor_interval: number }>('/get_monitor_interval');
-      if (result.ok && result.data.monitor_interval > 0) {
-        setQuoteRefreshMs(result.data.monitor_interval * 1000);
-      }
-    };
-    void loadInterval();
-  }, []);
-
-  useEffect(() => {
     void loadLatestQuote(clientID, selectedScriptSymbol);
   }, [clientID, selectedScriptSymbol, loadLatestQuote]);
 
   useEffect(() => {
+    quoteSocketQuoteTimeRef.current = null;
+    setQuoteSocketQuoteTime(null);
+  }, [selectedScriptSymbol]);
+
+  useEffect(() => {
     const normalizedSymbol = selectedScriptSymbol.trim().toUpperCase();
     if (!clientID || !normalizedSymbol) {
+      quoteSocketRef.current?.close();
+      quoteSocketRef.current = null;
+      setQuoteLoading(false);
       return undefined;
     }
-    const interval = window.setInterval(() => {
-      void loadLatestQuote(clientID, normalizedSymbol, { silent: true });
-      if (orderType === 'sell') {
-        void loadSellHolding(clientID, normalizedSymbol, { silent: true });
+    const socketUrl = buildWebSocketUrl('/ws/stock_quote', {
+      client_id: clientID,
+      symbol: normalizedSymbol,
+    });
+    const socket = new WebSocket(socketUrl);
+    quoteSocketRef.current = socket;
+    setQuoteLoading(true);
+
+    socket.onopen = () => {
+      setQuoteLoading(false);
+      setQuoteError('');
+    };
+
+    socket.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data?.type === 'error') {
+          setQuoteError(String(data.message || 'Live socket unavailable.'));
+          return;
+        }
+        if (data?.type === 'heartbeat') {
+          const socketState = data.socket || null;
+          const quoteTime = socketState?.quote?.lastTradedTime || null;
+          if (quoteTime && quoteTime !== quoteSocketQuoteTimeRef.current) {
+            quoteSocketQuoteTimeRef.current = quoteTime;
+            setQuoteSocketQuoteTime(quoteTime);
+          }
+          return;
+        }
+        applyQuotePayload(data, normalizedSymbol, { silent: true });
+      } catch {
+        setQuoteError('Received an invalid live quote update.');
       }
-    }, quoteRefreshMs);
-    return () => window.clearInterval(interval);
-  }, [clientID, loadLatestQuote, loadSellHolding, orderType, quoteRefreshMs, selectedScriptSymbol]);
+    };
+
+    socket.onerror = () => {
+      setQuoteLoading(false);
+      setQuoteError('Live socket connection failed.');
+    };
+
+    socket.onclose = () => {
+      setQuoteLoading(false);
+    };
+
+    return () => {
+      socket.onopen = null;
+      socket.onmessage = null;
+      socket.onerror = null;
+      socket.onclose = null;
+      if (quoteSocketRef.current === socket) {
+        quoteSocketRef.current = null;
+      }
+      socket.close();
+    };
+  }, [applyQuotePayload, clientID, selectedScriptSymbol]);
 
   useEffect(() => {
     void loadSellHolding(clientID, selectedScriptSymbol);
@@ -1133,6 +1195,9 @@ const ScheduleOrder: React.FC = () => {
               quoteError={quoteError}
               topBuy={quote?.topBuy || []}
               topSell={quote?.topSell || []}
+              socketStatus={quote?.__socket?.status || null}
+              socketQuoteTime={quoteSocketQuoteTime || quote?.lastTradedTime || quote?.__socket?.quote?.lastTradedTime || null}
+              quoteSource={quote?.__quote_source || null}
               holdingQty={holdingQty}
               holdingLabel={holdingLabel}
               holdingLoading={holdingLoading}

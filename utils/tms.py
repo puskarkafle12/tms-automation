@@ -24,6 +24,7 @@ from utils.base_functions import (
     save_tokens,
     summarize_login_message,
 )
+from utils.live_quote_socket import live_quote_manager
 
 class TmsUser:
     DEFAULT_TIMEOUT = aiohttp.ClientTimeout(total=12, connect=4, sock_read=8)
@@ -44,6 +45,7 @@ class TmsUser:
     _quote_failures: Dict[str, tuple[int, float]] = {}
     _quote_circuit_failure_limit = 3
     _quote_circuit_cooldown = 15.0
+    _stock_grabber_socket_wait_seconds = 0.15
     _full_login_lock: Optional[asyncio.Lock] = None
     _non_live_request_cache: Dict[str, tuple[float, int, object]] = {}
     _non_live_request_cache_ttl = 3600.0
@@ -58,6 +60,7 @@ class TmsUser:
         tokens=None,
         stock_symbol=None,
         request_per_sec=2,
+        scan_mode="socket",
         resume_scan_count=0,
         resume_previous_ltp=0.0,
         resume_stable_rate=None,
@@ -76,6 +79,7 @@ class TmsUser:
         self._allow_full_login_on_refresh = True
         self.security = None
         self.stock_symbol = stock_symbol
+        self.scan_mode = "fixed" if str(scan_mode or "").lower() == "fixed" else "socket"
         self.max_request_per_sec = 5.0  # Maximum fetch rate
         self.min_request_per_sec = 3.0
         requested_rate = float(request_per_sec or self.min_request_per_sec)
@@ -785,6 +789,87 @@ class TmsUser:
         rows = [self._normalize_order_book_row(row) for row in self._order_book_rows(payload)]
         rows.sort(key=lambda row: str(row.get("orderTime") or ""), reverse=True)
         return rows
+
+    @staticmethod
+    def _parse_tms_datetime(value) -> Optional[datetime]:
+        if value in (None, ""):
+            return None
+        text = str(value).strip().replace("T", " ")
+        if "." in text:
+            head, tail = text.split(".", 1)
+            digits = "".join(char for char in tail if char.isdigit())[:6]
+            text = f"{head}.{digits}" if digits else head
+        for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(text[:26], fmt)
+            except ValueError:
+                continue
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _format_delay(seconds: Optional[float]) -> Optional[str]:
+        if seconds is None:
+            return None
+        sign = "-" if seconds < 0 else ""
+        absolute = abs(seconds)
+        if absolute < 1:
+            return f"{sign}{round(absolute * 1000)} ms"
+        return f"{sign}{absolute:.2f} sec"
+
+    async def get_latest_order_timing_for_symbol(
+        self,
+        symbol: str,
+        *,
+        order_type: str,
+        order_price: float,
+        order_quantity: int,
+        market_last_traded_time=None,
+    ) -> Dict:
+        normalized_symbol = str(symbol or "").strip().upper()
+        side_code = 1 if str(order_type).lower() == "buy" else 2
+        rows: List[Dict] = []
+        for loader in (self.get_normalized_order_book, self.get_normalized_daily_order_book):
+            try:
+                rows.extend(await loader())
+            except Exception:
+                continue
+
+        candidates = []
+        for row in rows:
+            if str(row.get("symbol") or "").strip().upper() != normalized_symbol:
+                continue
+            row_side = row.get("buyOrSell")
+            if row_side not in (None, "", side_code, str(side_code)):
+                continue
+            row_time = self._parse_tms_datetime(row.get("orderTime"))
+            if row_time is None:
+                continue
+            candidates.append(row)
+
+        candidates.sort(
+            key=lambda row: self._parse_tms_datetime(row.get("orderTime")) or datetime.min,
+            reverse=True,
+        )
+        matched_order = candidates[0] if candidates else None
+        order_time = self._parse_tms_datetime(matched_order.get("orderTime")) if matched_order else None
+        market_time = self._parse_tms_datetime(market_last_traded_time)
+        delay_seconds = (order_time - market_time).total_seconds() if order_time and market_time else None
+        return {
+            "symbol": normalized_symbol,
+            "market_last_traded_time": str(market_last_traded_time) if market_last_traded_time else None,
+            "tms_order_time": matched_order.get("orderTime") if matched_order else None,
+            "delay_seconds": delay_seconds,
+            "delay_ms": round(delay_seconds * 1000, 3) if delay_seconds is not None else None,
+            "delay_display": self._format_delay(delay_seconds),
+            "exchange_order_id": matched_order.get("exchangeOrderId") if matched_order else None,
+            "order_status": matched_order.get("displayActiveStatus") or matched_order.get("activeStatus") if matched_order else None,
+            "order_price": matched_order.get("orderPrice") if matched_order else order_price,
+            "order_quantity": matched_order.get("orderQuantity") if matched_order else order_quantity,
+            "matched_order": matched_order,
+        }
 
     @staticmethod
     def _order_book_rows(payload) -> List[Dict]:
@@ -1545,6 +1630,7 @@ class TmsUser:
         parse_json: bool = True,
         retry_on_unauthorized: bool = True,
         max_connection_retries: int = 3,
+        bypass_non_live_cache: bool = False,
         **kwargs,
     ) -> tuple[int, object]:
         explicit_headers = kwargs.pop("headers", None)
@@ -1553,6 +1639,8 @@ class TmsUser:
         response = None
         normalized_method = method.upper()
         use_non_live_cache = (
+            not bypass_non_live_cache
+            and
             normalized_method == "GET"
             and parse_json
             and self.is_non_live_tms_cache_enabled()
@@ -1621,20 +1709,23 @@ class TmsUser:
         max_retries: int = 1,
         *,
         retry_backoff: bool = False,
+        force_refresh: bool = False,
     ) -> Optional[Dict]:
         security_id = str(id)
         cache_key = f"{self.broker_no}:{security_id}"
         url = f'https://tms{self.broker_no}.nepsetms.com.np/tmsapi/rtApi/ws/stockQuote/{id}'
         last_error = None
-        cached_quote = self._get_cached_quote(cache_key, self._quote_cache_ttl)
-        if cached_quote is not None:
-            return cached_quote
+        if not force_refresh:
+            cached_quote = self._get_cached_quote(cache_key, self._quote_cache_ttl)
+            if cached_quote is not None:
+                return cached_quote
 
         circuit_remaining = self._quote_circuit_open_seconds(cache_key)
         if circuit_remaining > 0:
-            stale_quote = self._get_cached_quote(cache_key, self._quote_stale_ttl)
-            if stale_quote is not None:
-                return stale_quote
+            if not force_refresh:
+                stale_quote = self._get_cached_quote(cache_key, self._quote_stale_ttl)
+                if stale_quote is not None:
+                    return stale_quote
             self.updates.append({
                 "status": "warn",
                 "message": f"Price fetch paused for {int(circuit_remaining)}s after repeated TMS quote timeouts.",
@@ -1649,6 +1740,7 @@ class TmsUser:
                     expected_statuses={200},
                     timeout=self.QUOTE_TIMEOUT,
                     max_connection_retries=1,
+                    bypass_non_live_cache=force_refresh,
                 )
                 quote = response_data['payload']['data'][0]
                 self._record_quote_success(cache_key, quote)
@@ -1668,9 +1760,10 @@ class TmsUser:
                 await asyncio.sleep(backoff)
 
         if last_error:
-            stale_quote = self._get_cached_quote(cache_key, self._quote_stale_ttl)
-            if stale_quote is not None:
-                return stale_quote
+            if not force_refresh:
+                stale_quote = self._get_cached_quote(cache_key, self._quote_stale_ttl)
+                if stale_quote is not None:
+                    return stale_quote
             self.updates.append({
                 "status": "warn",
                 "message": f"Price fetch failed after {max_retries} retries — retrying scan…",
@@ -1687,35 +1780,44 @@ class TmsUser:
         max_delay = 10.0
 
         await self._ensure_session()
+        last_quote_signature = ""
+        if self.scan_mode == "socket":
+            await live_quote_manager.ensure_stream(
+                self,
+                self.stock_symbol,
+                str(id),
+                force_restart=True,
+            )
 
         while True:
             try:
-                await asyncio.sleep(1 / self.request_per_sec)
                 elapsed_time = asyncio.get_event_loop().time() - start_time
                 fetch_rate = fetch_count / elapsed_time if elapsed_time > 0 else 0
                 if elapsed_time >= reset_time:
                     start_time = asyncio.get_event_loop().time()
                     fetch_count = 0
 
-                response = await self.get_stock_details_async(id, max_retries=1)
+                if self.scan_mode == "fixed":
+                    response = await self.get_stock_details_async(
+                        str(id),
+                        max_retries=1,
+                        force_refresh=True,
+                    )
+                    live_snapshot = live_quote_manager.get_snapshot(self.stock_symbol)
+                    quote_source = "fixed"
+                else:
+                    live_snapshot = await live_quote_manager.wait_for_next_distinct_quote(
+                        self.stock_symbol,
+                        after_signature=last_quote_signature,
+                        timeout=self._stock_grabber_socket_wait_seconds,
+                    )
+                    response = (live_snapshot or {}).get("quote")
+                    quote_source = "socket"
                 self.total_requests += 1
                 self.trial_requests += 1
 
                 if response is None:
-                    consecutive_failures += 1
-                    if consecutive_failures >= max_consecutive_failures:
-                        consecutive_failures = 0
-                        self.updates.append({
-                            "status": "warn",
-                            "message": "Fetch failures — retrying scan",
-                        })
-                    if self.stable_rate is None:
-                        self.request_per_sec = max(self.min_request_per_sec, self.request_per_sec - 1.0)
-                        print(f"Fetch rate decreased to {self.request_per_sec} due to failure")
-                    delay = min(0.2, max_delay)
-                    print(f"Request failed, backing off for {delay} seconds")
-                    self.updates.append({"status": "backoff", "delay": delay})
-                    await asyncio.sleep(delay)
+                    await asyncio.sleep(0.05 if self.scan_mode == "fixed" else 0.0)
                     continue
 
                 if response.get('status') == '401' and response.get('message') == 'ACCESS_TOKEN_EXPIRED':
@@ -1728,6 +1830,7 @@ class TmsUser:
                 fetch_count += 1
                 self.scan_count += 1
                 total_fetch_count = self.scan_count
+                last_quote_signature = str((live_snapshot or {}).get("quote_signature") or last_quote_signature)
 
                 ltp = float(response['ltp'])
                 percentage_change = float(response['changePercentage'])
@@ -1737,7 +1840,15 @@ class TmsUser:
                     "fetch_rate": fetch_rate,
                     "total_fetch_count": total_fetch_count,
                     "ltp": ltp,
-                    "change_percentage": percentage_change
+                    "change_percentage": percentage_change,
+                    "quote_source": quote_source,
+                    "socket_status": (live_snapshot or {}).get("status"),
+                    "socket_last_received_at": (live_snapshot or {}).get("last_received_at"),
+                    "socket_message_count": (live_snapshot or {}).get("message_count"),
+                    "topBuy": response.get("topBuy") or [],
+                    "topSell": response.get("topSell") or [],
+                    "volume": response.get("volume"),
+                    "lastTradedTime": response.get("lastTradedTime"),
                 }
                 print(f"Symbol: {update['symbol']}, Fetch per second: {fetch_rate}, LTP: {ltp}, Change {percentage_change}")
                 self.updates.append(update)
@@ -1748,6 +1859,9 @@ class TmsUser:
                         "message": f"Still scanning — {total_fetch_count} price checks @ Rs. {ltp}",
                         "ltp": ltp,
                         "total_fetch_count": total_fetch_count,
+                        "quote_source": quote_source,
+                        "socket_status": (live_snapshot or {}).get("status"),
+                        "socket_last_received_at": (live_snapshot or {}).get("last_received_at"),
                     })
 
                 if self.stable_rate is None and self.total_requests >= 10:
@@ -1786,8 +1900,16 @@ class TmsUser:
                     response['twoPercentHigh'] = two_percent_high
                     response['ltp'] = ltp
                     response['changePercentage'] = percentage_change
+                    response['quote_source'] = quote_source
+                    if self.scan_mode == "fixed":
+                        response['socket_status'] = (live_snapshot or {}).get("status")
+                        response['socket_last_received_at'] = (live_snapshot or {}).get("last_received_at")
+                        response['socket_message_count'] = (live_snapshot or {}).get("message_count")
                     self.updates.append(response)
                     return response
+
+                if self.scan_mode == "fixed":
+                    await asyncio.sleep(1.0 / max(0.5, float(self.request_per_sec or self.min_request_per_sec)))
 
             except asyncio.CancelledError:
                 print(f"Price scanner for session {session_id} cancelled")
@@ -1915,12 +2037,29 @@ class TmsUser:
                     traded_at = stock_details.get('lastTradedTime')
                     if traded_at:
                         await asyncio.to_thread(log_time, traded_at, self.headers, order_response)
+                    delay_details = await self.get_latest_order_timing_for_symbol(
+                        self.stock_symbol,
+                        order_type="buy",
+                        order_price=target_price,
+                        order_quantity=order_quantity_to_use,
+                        market_last_traded_time=traded_at,
+                    )
+                    order_response["delay_details"] = delay_details
                     order_limit += 1
                     total_orders.append(order_response)
                     await self.refresh_client_collateral()
                     self.updates.append({
                         "status": "info",
                         "message": f"Order {order_limit}/{max_order_limit} placed at Rs. {target_price}",
+                    })
+                    self.updates.append({
+                        "status": "order_delay",
+                        "message": (
+                            f"Delayed {delay_details['delay_display']}"
+                            if delay_details.get("delay_display")
+                            else "Order delay unavailable"
+                        ),
+                        "delay_details": delay_details,
                     })
                     if previous_order_ids:
                         try:

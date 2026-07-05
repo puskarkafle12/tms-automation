@@ -38,6 +38,16 @@ const pushDetail = (
   items.push({ label, value: formatted, kind });
 };
 
+const firstDepthPrice = (rows: unknown): number | null => {
+  if (!Array.isArray(rows)) return null;
+  for (const row of rows) {
+    const price = Number((row as Record<string, unknown>)?.price || 0);
+    const quantity = Number((row as Record<string, unknown>)?.quantity || 0);
+    if (price > 0 && quantity >= 0) return price;
+  }
+  return null;
+};
+
 export function buildStrategyDetailLayout(
   order: ScheduledOrderLike & Record<string, any>,
   helpers: DetailHelpers,
@@ -129,7 +139,17 @@ export function buildStrategyDetailLayout(
   );
   pushDetail(secondary, 'Live Status', helpers.formatLiveScanStatus(order));
   pushDetail(secondary, 'TMS Price Scans', order.tms_scan_count ?? order.scanning_count, helpers.formatScanCount);
-  pushDetail(secondary, 'Nepse Alpha Scans', order.nepse_alpha_scan_count, helpers.formatScanCount);
+  if (order.requires_nepse_alpha === false) {
+    secondary.push({ label: 'Nepse Alpha', value: 'Not used by this strategy', kind: 'muted' });
+  } else {
+    pushDetail(secondary, 'Nepse Alpha Scans', order.nepse_alpha_scan_count, helpers.formatScanCount);
+  }
+  pushDetail(secondary, 'Quote Source', order.socket_quote ? 'socket' : order.strategy_config?.last_tms_quote_source);
+  pushDetail(secondary, 'Socket Status', order.socket_status || order.strategy_config?.last_socket_status);
+  pushDetail(secondary, 'Socket Last Received', order.socket_last_received_at || order.strategy_config?.last_socket_received_at, helpers.formatDateTime);
+  pushDetail(secondary, 'Socket Messages', order.socket_message_count || order.strategy_config?.last_socket_message_count, helpers.formatScanCount);
+  pushDetail(primary, 'Top Buy', firstDepthPrice(order.socket_top_buy), helpers.formatCurrency);
+  pushDetail(primary, 'Top Sell', firstDepthPrice(order.socket_top_sell), helpers.formatCurrency);
 
   if (order.last_scan_at) {
     secondary.push({

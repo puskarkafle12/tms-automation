@@ -16,6 +16,7 @@ const startGrabberViaApi = async (grabber: StockGrabberInstance): Promise<{ ok: 
         stock_symbol: grabber.stock_symbol,
         order_quantity: grabber.order_quantity ?? 10,
         request_per_sec: grabber.request_per_sec ?? 3,
+        scan_mode: grabber.scan_mode ?? 'socket',
         max_order_limit: 4,
         resume_scan_count: grabber.scanCount ?? 0,
         resume_stable_rate: grabber.stableRate ?? null,
@@ -186,7 +187,7 @@ export const useMonitoring = () => {
       const activeKeys = new Set<string>();
       if (activeResult.ok) {
         const payload = await activeResult.json().catch(() => ({ grabbers: [] }));
-        (payload.grabbers || []).forEach((item: { client_id: string; stock_symbol: string }) => {
+        (payload.grabbers || []).forEach((item: { client_id: string; stock_symbol: string; scan_mode?: string }) => {
           activeKeys.add(makeGrabberKey(item.client_id, item.stock_symbol));
         });
       }

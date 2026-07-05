@@ -62,9 +62,17 @@ class StockGrabberRequest(BaseModel):
     max_order_limit: Optional[int] = 0
     stop_buy_after_percent: Optional[float] = 15.0
     request_per_sec: Optional[float] = 2.0
+    scan_mode: Optional[Literal["socket", "fixed"]] = "socket"
     resume_scan_count: Optional[int] = 0
     resume_previous_ltp: Optional[float] = 0.0
     resume_stable_rate: Optional[float] = None
+
+
+class StockGrabberFetchTestRequest(BaseModel):
+    client_id: str
+    stock_symbol: str
+    request_per_sec: Optional[float] = 2.0
+    duration_seconds: Optional[float] = 10.0
 
 
 class TmsAccountCreate(BaseModel):

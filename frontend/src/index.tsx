@@ -6,6 +6,24 @@ import reportWebVitals from './reportWebVitals';
 import { getDefaultApiUrl, shouldResetStoredApiUrl } from './utils/api';
 import './hooks/monitoringStore';
 
+const isNumberInput = (target: EventTarget | null): target is HTMLInputElement =>
+  target instanceof HTMLInputElement && target.type === 'number';
+
+document.addEventListener('keydown', (event) => {
+  if (!isNumberInput(event.target)) {
+    return;
+  }
+  if (['e', 'E', '+', '-'].includes(event.key)) {
+    event.preventDefault();
+  }
+});
+
+document.addEventListener('wheel', (event) => {
+  if (isNumberInput(event.target) && document.activeElement === event.target) {
+    event.preventDefault();
+  }
+}, { passive: false });
+
 const savedApiUrl = localStorage.getItem('apiUrl');
 if (shouldResetStoredApiUrl(savedApiUrl)) {
   localStorage.setItem('apiUrl', getDefaultApiUrl());

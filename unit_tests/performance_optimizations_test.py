@@ -191,7 +191,7 @@ class TestTmsPerformanceOptimizations(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(status, 200)
         self.assertEqual(payload, {"ok": True})
-        self.assertEqual(refreshes, ["access token expired"])
+        self.assertEqual(refreshes, ["GET https://tms35.nepsetms.com.np/tmsapi/example returned 401"])
         self.assertEqual(len(fake_session.calls), 2)
         self.assertEqual(fake_session.calls[0][2]["headers"], {"x-xsrf-token": "old"})
         self.assertEqual(fake_session.calls[1][2]["headers"], {"x-xsrf-token": "new"})
@@ -411,6 +411,68 @@ class TestTmsPerformanceOptimizations(unittest.IsolatedAsyncioTestCase):
                 update.get("message") == "Cancelled 1 previous ABC order(s)"
                 for update in user.updates
             )
+        )
+
+    async def test_stock_grabber_attaches_delay_details_after_order(self):
+        user = self.TmsUser(
+            broker_no="35",
+            username="u",
+            password="p",
+            stock_symbol="ABC",
+            resume_previous_ltp=100,
+        )
+
+        async def fake_ensure_session():
+            return None
+
+        async def fake_get_security_id(symbol):
+            return {"id": "1", "symbol": symbol}
+
+        async def fake_price_scanner(security_id, previous_ltp, session_id):
+            return {
+                "twoPercentHigh": 103,
+                "changePercentage": 2,
+                "ltp": 101,
+                "lastTradedTime": "2026-07-03 10:00:00",
+            }
+
+        async def fake_order(order_price, order_quantity, order_type, security=None):
+            return {"status": 200, "message": "placed", "exchangeOrderId": "ord-1"}
+
+        async def fake_delay_lookup(*args, **kwargs):
+            return {
+                "symbol": "ABC",
+                "market_last_traded_time": "2026-07-03 10:00:00",
+                "tms_order_time": "2026-07-03 10:00:00.250000",
+                "delay_seconds": 0.25,
+                "delay_ms": 250.0,
+                "delay_display": "250 ms",
+                "exchange_order_id": "ord-1",
+                "order_status": "Placed",
+                "order_price": 103,
+                "order_quantity": 10,
+                "matched_order": {"exchangeOrderId": "ord-1"},
+            }
+
+        user._ensure_session = fake_ensure_session
+        user.get_security_id = fake_get_security_id
+        user.price_scanner = fake_price_scanner
+        user.order = fake_order
+        user.get_latest_order_timing_for_symbol = fake_delay_lookup
+        user.refresh_client_collateral = AsyncMock(return_value=None)
+        user.cancel_open_orders_for_symbol = AsyncMock(return_value=[])
+
+        result = await user.stock_grabber(
+            order_quantity=10,
+            session_id="test-session",
+            max_order_limit=1,
+        )
+
+        self.assertEqual(result["message"], "successfully ordered shares")
+        self.assertEqual(result["totalOrders"][0]["delay_details"]["delay_display"], "250 ms")
+        self.assertTrue(
+            any(update.get("status") == "order_delay" and update.get("delay_details", {}).get("delay_display") == "250 ms"
+                for update in user.updates)
         )
 
 

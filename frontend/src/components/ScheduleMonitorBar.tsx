@@ -4,8 +4,11 @@ import { useMonitoring } from '../hooks/useMonitoring';
 import { formatMonitorDuration } from '../utils/formatDuration';
 
 const ScheduleMonitorBar: React.FC = () => {
-  const { state, schedule } = useMonitoring();
+  const { state, schedule, startScheduled, stopScheduled } = useMonitoring();
   const [runtime, setRuntime] = React.useState('');
+  const showControls = state.scheduledStatusMessage.includes('Test mode');
+  const canStart = showControls && !state.scheduledActive && state.scheduledLoading !== 'start';
+  const canStop = showControls && state.scheduledActive && state.scheduledLoading !== 'stop';
 
   React.useEffect(() => {
     const updateRuntime = () => {
@@ -33,6 +36,28 @@ const ScheduleMonitorBar: React.FC = () => {
           <span className="dot" />
           {schedule.badgeLabel}
         </span>
+        {showControls && (
+          <>
+            <button
+              type="button"
+              className={`page-monitor-btn play ${canStart ? 'is-enabled' : ''}`}
+              onClick={() => { void startScheduled(); }}
+              disabled={!canStart}
+              title="Start scheduled monitoring"
+            >
+              ▶
+            </button>
+            <button
+              type="button"
+              className={`page-monitor-btn stop ${canStop ? 'is-enabled' : 'is-available'}`}
+              onClick={() => { void stopScheduled(); }}
+              disabled={!canStop}
+              title="Stop scheduled monitoring"
+            >
+              ⏹
+            </button>
+          </>
+        )}
       </div>
     </div>
   );

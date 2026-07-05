@@ -32,6 +32,24 @@ export const getApiUrl = (): string => {
   return getDefaultApiUrl();
 };
 
+export const buildWebSocketUrl = (path: string, params?: Record<string, string | number | boolean | null | undefined>): string => {
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  const baseUrl = new URL(getApiUrl());
+  baseUrl.pathname = normalizedPath;
+  baseUrl.search = '';
+  baseUrl.hash = '';
+  baseUrl.protocol = baseUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+  if (params) {
+    Object.entries(params).forEach(([key, value]) => {
+      if (value === null || value === undefined || value === '') {
+        return;
+      }
+      baseUrl.searchParams.set(key, String(value));
+    });
+  }
+  return baseUrl.toString();
+};
+
 const buildUrl = (path: string): string => {
   if (path.startsWith('http://') || path.startsWith('https://')) {
     return path;

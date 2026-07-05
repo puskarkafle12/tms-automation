@@ -6,6 +6,7 @@ export interface StockGrabberInstance {
   isRunning?: boolean;
   order_quantity?: number;
   request_per_sec?: number;
+  scan_mode?: 'socket' | 'fixed';
   stop_buy_after_percent?: number;
   scanCount?: number;
   stableRate?: number | null;
@@ -18,6 +19,7 @@ export interface ActiveGrabberFromApi {
   scan_count: number;
   scanner_active: boolean;
   request_per_sec: number;
+  scan_mode?: 'socket' | 'fixed';
   stop_buy_after_percent?: number;
   stable_rate: number | null;
 }
@@ -102,6 +104,7 @@ export const mergeWithActiveGrabbers = (
       sessionId: match.session_id,
       isRunning: match.scanner_active,
       request_per_sec: match.request_per_sec,
+      scan_mode: match.scan_mode ?? grabber.scan_mode ?? 'socket',
       stop_buy_after_percent: match.stop_buy_after_percent ?? grabber.stop_buy_after_percent,
       scanCount: match.scan_count,
       stableRate: match.stable_rate,
@@ -125,6 +128,7 @@ export const mergeWithActiveGrabbers = (
         sessionId: remote.session_id,
         isRunning: remote.scanner_active,
         request_per_sec: remote.request_per_sec,
+        scan_mode: remote.scan_mode ?? 'socket',
         stop_buy_after_percent: remote.stop_buy_after_percent,
         scanCount: remote.scan_count,
         stableRate: remote.stable_rate,

@@ -25,6 +25,9 @@ interface StockDetailsProps {
   quoteError?: string;
   topBuy?: QuoteLevel[];
   topSell?: QuoteLevel[];
+  socketStatus?: string | null;
+  socketQuoteTime?: string | null;
+  quoteSource?: string | null;
   holdingQty?: number | null;
   holdingLabel?: string;
   holdingLoading?: boolean;
@@ -47,6 +50,29 @@ const formatDate = (dateArray?: number[]) => {
   return `${day}-${month}-${year} ${hour}:${minute}:${second}`;
 };
 
+const formatSocketQuoteTime = (value?: string | null) => {
+  const raw = String(value || '').trim();
+  if (!raw) {
+    return '-';
+  }
+  const timeMatch = raw.match(/(\d{1,2}):(\d{2}):(\d{2})(?:\.\d+)?$/);
+  if (timeMatch) {
+    const hour24 = Number(timeMatch[1]);
+    const minute = Number(timeMatch[2]);
+    const second = Number(timeMatch[3]);
+    if (Number.isFinite(hour24) && Number.isFinite(minute) && Number.isFinite(second)) {
+      const suffix = hour24 >= 12 ? 'PM' : 'AM';
+      const hour12 = ((hour24 + 11) % 12) + 1;
+      return `${hour12}:${String(minute).padStart(2, '0')}:${String(second).padStart(2, '0')} ${suffix}`;
+    }
+  }
+  const parsed = new Date(raw);
+  if (!Number.isNaN(parsed.getTime())) {
+    return parsed.toLocaleTimeString();
+  }
+  return raw;
+};
+
 const formatNumber = (value?: number | null) =>
   Number.isFinite(Number(value)) ? Number(value).toLocaleString('en-NP') : '-';
 
@@ -58,6 +84,9 @@ const StockDetails: React.FC<StockDetailsProps> = ({
   quoteError = '',
   topBuy = [],
   topSell = [],
+  socketStatus = null,
+  socketQuoteTime = null,
+  quoteSource = null,
   holdingQty = null,
   holdingLabel = '',
   holdingLoading = false,
@@ -148,6 +177,13 @@ const StockDetails: React.FC<StockDetailsProps> = ({
           </div>
         )}
       </div>
+      {(socketStatus || quoteSource || socketQuoteTime) && (
+        <div className="stock-details-socket">
+          <span>Source: {quoteSource || 'socket'}</span>
+          {socketStatus && <span>Socket: {socketStatus}</span>}
+          {socketQuoteTime && <span>Last: {formatSocketQuoteTime(socketQuoteTime)}</span>}
+        </div>
+      )}
       {quoteError && <p className="stock-details-error">{quoteError}</p>}
       {orderType === 'sell' && holdingError && <p className="stock-details-error">{holdingError}</p>}
       <div className="stock-depth-grid">

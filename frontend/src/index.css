@@ -67,6 +67,18 @@ textarea {
   font: inherit;
 }
 
+input[type='number'] {
+  appearance: textfield;
+  -webkit-appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+input[type='number']::-webkit-outer-spin-button,
+input[type='number']::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
 .btn {
   display: inline-flex;
   align-items: center;

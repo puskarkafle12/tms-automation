@@ -20,6 +20,7 @@ from sqlalchemy import or_, update
 from utils.strategy_builder.constants import RULE_BASED_STRATEGIES
 from utils.log_sender import consume_monitor_scan_count_resets, store_or_update_logs
 from utils.market_gate import resolve_market_gate
+from utils.live_quote_socket import live_quote_manager
 from utils.tms import TmsUser
 from utils.strategies.normalize import normalize_tms_quote
 from utils.strategies.order_context import build_scanner_memory, update_scan_history
@@ -305,8 +306,11 @@ def _evaluate_strategy(
 
         config_payload = hydrate_strategy_config_references(db, db_order.order_id, config_payload)
     config_payload["tms_scan_count"] = int(scan_count or 0)
+    db_order.tms_scan_count = int(scan_count or 0)
     if nepse_network_attempted:
-        config_payload["nepse_alpha_scan_count"] = int(config_payload.get("nepse_alpha_scan_count") or 0) + 1
+        next_nepse_scan_count = int(config_payload.get("nepse_alpha_scan_count") or 0) + 1
+        config_payload["nepse_alpha_scan_count"] = next_nepse_scan_count
+        db_order.nepse_alpha_scan_count = next_nepse_scan_count
     db_order.strategy_config = config_payload
 
     decision = evaluate_strategy(db_order, snapshot, memory, details)
@@ -610,12 +614,20 @@ async def monitor_order_task_func():
                                 error_message=f"Security not found for {order.script_name}",
                             )
 
-                        async with price_fetch_sem:
-                            quote = await tms_user.get_stock_details_async(
-                                security_details["id"],
-                                max_retries=3,
-                                retry_backoff=True,
-                            )
+                        await live_quote_manager.ensure_stream(
+                            tms_user,
+                            order.script_name,
+                            str(security_details["id"]),
+                        )
+                        live_snapshot = await live_quote_manager.wait_for_quote(order.script_name)
+                        quote = (live_snapshot or {}).get("quote")
+                        if quote is None:
+                            async with price_fetch_sem:
+                                quote = await tms_user.get_stock_details_async(
+                                    security_details["id"],
+                                    max_retries=3,
+                                    retry_backoff=True,
+                                )
                         if quote is None:
                             return OrderQuoteSnapshot(
                                 order=order,
@@ -631,7 +643,7 @@ async def monitor_order_task_func():
                             security_details=security_details,
                             current_price=quote.get("ltp"),
                             quote=quote,
-                            high_price=quote.get("high"),
+                            high_price=quote.get("high") or quote.get("dayHigh"),
                         )
                     except Exception as exc:
                         return OrderQuoteSnapshot(
@@ -717,6 +729,15 @@ async def monitor_order_task_func():
                             tms_interval,
                             stagger_enabled=stagger_enabled,
                         )
+                        live_snapshot = live_quote_manager.get_snapshot(order.script_name)
+                        if live_snapshot:
+                            updated_config = {
+                                **(updated_config or {}),
+                                "last_tms_quote_source": "socket" if snapshot.quote else "http",
+                                "last_socket_status": live_snapshot.get("status"),
+                                "last_socket_received_at": live_snapshot.get("last_received_at"),
+                                "last_socket_message_count": live_snapshot.get("message_count"),
+                            }
                         if updated_config != (db_order.strategy_config or {}):
                             db_order.strategy_config = updated_config
 
@@ -763,6 +784,8 @@ async def monitor_order_task_func():
                         config_payload["nepse_alpha_last_source"] = nepse_source
                         if nepse_source == "live" and nepse_network_attempted:
                             config_payload["nepse_alpha_last_fetched_at"] = time.time()
+                            db_order.nepse_alpha_last_fetched_at = datetime.utcnow()
+                        db_order.nepse_alpha_last_source = nepse_source
                         db_order.strategy_config = config_payload
                         if strategy_log:
                             await store_or_update_logs(

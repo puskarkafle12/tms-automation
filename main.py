@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 import asyncio
 import sys
 from typing import Dict, List, Optional, Type
-from fastapi import FastAPI, HTTPException, Depends, Query, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Depends, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 import websockets
 from database import SessionLocal, ensure_performance_indexes, ensure_read_session, get_db, get_db_session
@@ -24,6 +24,7 @@ from models.user import User
 from schemas.schemas import (
     LoginRequest,
     OrderCreateRequest,
+    StockGrabberFetchTestRequest,
     StockGrabberRequest,
     StockScreenerAiRequest,
     StockScreenerRequest,
@@ -40,6 +41,7 @@ from utils.log_sender import (
     is_transient_monitor_log_line,
     reset_scan_count_after_scheduled_order_removed,
 )
+from utils.monitor_scan_settings import order_requires_nepse_alpha
 from utils.order_status_log_serializer import serialize_order_status_log, status_log_from_scheduled_order
 from utils.scheduled_monitor_control import (
     get_scheduler_display_status,
@@ -83,6 +85,7 @@ from utils.strategy_builder.reference_display import (
     display_values_for_scheduled_order,
     display_values_from_strategy_config,
 )
+from utils.live_quote_socket import live_quote_manager
 
 app = FastAPI(debug=True)
 app.include_router(strategy_builder_router)
@@ -95,6 +98,7 @@ scheduled_supervisor_task: Optional[asyncio.Task] = None
 market_data_scheduler_task: Optional[asyncio.Task] = None
 running_grabbers: Dict[str, TmsUser] = {}
 stock_grabber_updates: Dict[str, List[Dict]] = {}
+stock_grabber_fetch_tests: Dict[str, Dict] = {}
 tms_user_cache: Dict[str, TmsUser] = {}
 tms_user_cache_touched: Dict[str, float] = {}
 tms_user_cache_ttl = 300.0
@@ -742,6 +746,7 @@ async def close_cached_tms_users() -> None:
             pass
     scheduled_supervisor_task = None
     await stop_scheduled_order_monitor()
+    await live_quote_manager.close_all()
     for client_id in list(tms_user_cache.keys()):
         await invalidate_cached_tms_user(client_id)
 
@@ -862,6 +867,7 @@ async def stock_grabber(request: StockGrabberRequest, db: Session = Depends(get_
         password=user.password,
         stock_symbol=request.stock_symbol,
         request_per_sec=request.request_per_sec,
+        scan_mode=request.scan_mode or "socket",
         resume_scan_count=int(request.resume_scan_count or 0),
         resume_previous_ltp=float(request.resume_previous_ltp or 0.0),
         resume_stable_rate=request.resume_stable_rate,
@@ -897,6 +903,119 @@ async def stock_grabber(request: StockGrabberRequest, db: Session = Depends(get_
     task.add_done_callback(_on_grabber_done)
     return {"session_id": session_id, "message": "Stock grabber started"}
 
+
+async def _run_stock_grabber_fetch_speed_test(
+    test_id: str,
+    tms_user_instance: TmsUser,
+    security: Dict,
+    symbol: str,
+    duration_seconds: float,
+    request_per_sec: float,
+    tms_api_url: str,
+) -> None:
+    interval_seconds = 1.0 / request_per_sec
+    started_at = monotonic_time.monotonic()
+    deadline = started_at + duration_seconds
+
+    state = stock_grabber_fetch_tests[test_id]
+    while monotonic_time.monotonic() < deadline:
+        call_started_at = monotonic_time.monotonic()
+        try:
+            quote = await tms_user_instance.get_stock_details_async(
+                str(security["id"]),
+                max_retries=1,
+                force_refresh=True,
+            )
+            if not quote:
+                raise RuntimeError("Quote missing")
+            state["ok_count"] = int(state.get("ok_count") or 0) + 1
+            state["last_ltp"] = quote.get("ltp")
+        except Exception as exc:
+            state["fail_count"] = int(state.get("fail_count") or 0) + 1
+            state["last_error"] = str(exc)
+
+        elapsed_seconds = max(0.001, monotonic_time.monotonic() - started_at)
+        state["duration_seconds"] = elapsed_seconds
+        state["fetch_per_sec"] = int(state.get("ok_count") or 0) / elapsed_seconds
+
+        elapsed_call = monotonic_time.monotonic() - call_started_at
+        sleep_for = min(max(0.0, interval_seconds - elapsed_call), max(0.0, deadline - monotonic_time.monotonic()))
+        if sleep_for > 0:
+            await asyncio.sleep(sleep_for)
+
+    elapsed_seconds = max(0.001, monotonic_time.monotonic() - started_at)
+    state.update({
+        "running": False,
+        "done": True,
+        "duration_seconds": elapsed_seconds,
+        "fetch_per_sec": int(state.get("ok_count") or 0) / elapsed_seconds,
+        "tms_api_url": tms_api_url,
+    })
+
+
+@app.post("/stock_grabber/test_fetch_speed")
+async def test_stock_grabber_fetch_speed(
+    request: StockGrabberFetchTestRequest,
+    db: Session = Depends(get_db),
+):
+    user = db.query(User).filter(User.client_id == request.client_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    symbol = (request.stock_symbol or "").strip().upper()
+    if not symbol:
+        raise HTTPException(status_code=400, detail="Stock symbol is required")
+
+    duration_seconds = min(30.0, max(1.0, float(request.duration_seconds or 10.0)))
+    request_per_sec = min(200.0, max(0.2, float(request.request_per_sec or 2.0)))
+
+    tms_user_instance = await get_cached_tms_user(user)
+    security = await tms_user_instance.get_security_id(symbol)
+    if not security or not security.get("id"):
+        raise HTTPException(status_code=404, detail=f"Security not found for {symbol}")
+    tms_api_url = (
+        f"https://tms{tms_user_instance.broker_no}.nepsetms.com.np"
+        f"/tmsapi/rtApi/ws/stockQuote/{security['id']}"
+    )
+    test_id = str(uuid.uuid4())
+    stock_grabber_fetch_tests[test_id] = {
+        "test_id": test_id,
+        "mode": "fixed",
+        "source": "tms_http",
+        "cache_bypassed": True,
+        "non_live_cache_bypassed": True,
+        "tms_api_url": tms_api_url,
+        "symbol": symbol,
+        "security": security,
+        "duration_seconds": 0.0,
+        "requested_per_sec": request_per_sec,
+        "ok_count": 0,
+        "fail_count": 0,
+        "fetch_per_sec": 0.0,
+        "last_ltp": None,
+        "last_error": None,
+        "running": True,
+        "done": False,
+    }
+    asyncio.create_task(_run_stock_grabber_fetch_speed_test(
+        test_id,
+        tms_user_instance,
+        security,
+        symbol,
+        duration_seconds,
+        request_per_sec,
+        tms_api_url,
+    ))
+    return stock_grabber_fetch_tests[test_id]
+
+
+@app.get("/stock_grabber/test_fetch_speed/{test_id}")
+async def get_stock_grabber_fetch_speed_status(test_id: str):
+    state = stock_grabber_fetch_tests.get(test_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Fetch speed test not found")
+    return state
+
 @app.post("/stop_stock_grabber/{session_id}")
 async def stop_stock_grabber(session_id: str):
     task = running_tasks.get(session_id)
@@ -921,6 +1040,24 @@ async def get_stock_grabber_updates(session_id: str):
     if tms_user and tms_user.updates:
         updates.extend(tms_user.updates)
         tms_user.updates = []
+    if tms_user:
+        live_snapshot = live_quote_manager.get_snapshot(tms_user.stock_symbol or "")
+        quote = (live_snapshot or {}).get("quote") or {}
+        if live_snapshot:
+            updates.append({
+                "status": "socket",
+                "symbol": tms_user.stock_symbol,
+                "quote_source": "socket" if quote else None,
+                "socket_status": live_snapshot.get("status"),
+                "socket_last_received_at": live_snapshot.get("last_received_at"),
+                "socket_message_count": live_snapshot.get("message_count"),
+                "ltp": quote.get("ltp"),
+                "change_percentage": quote.get("changePercentage"),
+                "topBuy": quote.get("topBuy") or [],
+                "topSell": quote.get("topSell") or [],
+                "volume": quote.get("volume"),
+                "lastTradedTime": quote.get("lastTradedTime"),
+            })
 
     task = running_tasks.get(session_id)
     scanner_active = task is not None and not task.done()
@@ -935,6 +1072,7 @@ async def active_stock_grabbers():
     for session_id, tms_user in running_grabbers.items():
         task = running_tasks.get(session_id)
         started_at = tms_config.grabber_started_at.get(session_id)
+        live_snapshot = live_quote_manager.get_snapshot(tms_user.stock_symbol or "")
         grabbers.append({
             "session_id": session_id,
             "client_id": tms_user.client_id,
@@ -942,10 +1080,14 @@ async def active_stock_grabbers():
             "scan_count": getattr(tms_user, "scan_count", 0),
             "scanner_active": task is not None and not task.done(),
             "request_per_sec": tms_user.request_per_sec,
+            "scan_mode": getattr(tms_user, "scan_mode", "socket"),
             "stop_buy_after_percent": getattr(tms_user, "stop_buy_after_percent", 15.0),
             "stable_rate": tms_user.stable_rate,
             "phase": tms_config.grabber_phase.get(session_id, "armed"),
             "status_message": tms_config.grabber_status_message.get(session_id, ""),
+            "socket_status": (live_snapshot or {}).get("status"),
+            "socket_last_received_at": (live_snapshot or {}).get("last_received_at"),
+            "socket_message_count": (live_snapshot or {}).get("message_count"),
             "started_at": started_at.isoformat() if started_at else None,
         })
     return {"grabbers": grabbers}
@@ -1422,6 +1564,8 @@ def _serialize_scheduled_order(order: ScheduledOrder) -> dict:
     display_reference_captured_at = order.reference_ltp_captured_at
     if display_reference_captured_at is None:
         display_reference_captured_at = reference_display.reference_ltp_captured_at
+    live_snapshot = live_quote_manager.get_snapshot(order.script_name)
+    live_quote = (live_snapshot or {}).get("quote") or {}
 
     return {
         "order_id": order.order_id,
@@ -1472,6 +1616,12 @@ def _serialize_scheduled_order(order: ScheduledOrder) -> dict:
         "user_allocation": order.user_allocation,
         "last_checked_ltp": order.last_checked_ltp,
         "last_checked_at": ts(order.last_checked_at),
+        "socket_quote": live_quote or None,
+        "socket_status": (live_snapshot or {}).get("status"),
+        "socket_last_received_at": (live_snapshot or {}).get("last_received_at"),
+        "socket_message_count": (live_snapshot or {}).get("message_count"),
+        "socket_top_buy": live_quote.get("topBuy") or [],
+        "socket_top_sell": live_quote.get("topSell") or [],
         "below_stop_loss_check_count": order.below_stop_loss_check_count,
         "consecutive_drop_count": order.consecutive_drop_count,
         "strategy_config": order.strategy_config,
@@ -2530,8 +2680,11 @@ async def get_order_status_logs(
     scheduled_payload = []
     monitor_phase = tms_config.scheduled_phase if tms_config.is_running else "stopped"
     for order in scheduled_orders:
+        live_snapshot = live_quote_manager.get_snapshot(order.script_name)
+        live_quote = (live_snapshot or {}).get("quote") or {}
         scan_log = scan_logs.get((order.client_id, order.script_name))
         scanning_count = int(scan_log.scanning_count or 0) if scan_log else 0
+        requires_nepse_alpha = order_requires_nepse_alpha(order)
         current_price_val = (
             float(scan_log.current_price)
             if scan_log and scan_log.current_price is not None
@@ -2594,11 +2747,40 @@ async def get_order_status_logs(
             "partial_legs": order.partial_legs,
             "requested_price": order.price,
             "last_checked_ltp": order.last_checked_ltp,
+            "socket_quote": live_quote or None,
+            "socket_status": (live_snapshot or {}).get("status"),
+            "socket_last_received_at": (live_snapshot or {}).get("last_received_at"),
+            "socket_message_count": (live_snapshot or {}).get("message_count"),
+            "socket_top_buy": live_quote.get("topBuy") or [],
+            "socket_top_sell": live_quote.get("topSell") or [],
             "strategy_config": order.strategy_config,
-            "nepse_alpha_scan_count": int((order.strategy_config or {}).get("nepse_alpha_scan_count") or 0),
-            "nepse_alpha_last_source": (order.strategy_config or {}).get("nepse_alpha_last_source"),
-            "nepse_alpha_last_fetched_at": (order.strategy_config or {}).get("nepse_alpha_last_fetched_at"),
-            "tms_scan_count": int((order.strategy_config or {}).get("tms_scan_count") or scanning_count),
+            "requires_nepse_alpha": requires_nepse_alpha,
+            "nepse_alpha_scan_count": (
+                int(
+                    getattr(order, "nepse_alpha_scan_count", None)
+                    or (order.strategy_config or {}).get("nepse_alpha_scan_count")
+                    or 0
+                )
+                if requires_nepse_alpha
+                else None
+            ),
+            "nepse_alpha_last_source": (
+                getattr(order, "nepse_alpha_last_source", None)
+                or (order.strategy_config or {}).get("nepse_alpha_last_source")
+                if requires_nepse_alpha
+                else None
+            ),
+            "nepse_alpha_last_fetched_at": (
+                getattr(order, "nepse_alpha_last_fetched_at", None)
+                or (order.strategy_config or {}).get("nepse_alpha_last_fetched_at")
+                if requires_nepse_alpha
+                else None
+            ),
+            "tms_scan_count": int(
+                getattr(order, "tms_scan_count", None)
+                or (order.strategy_config or {}).get("tms_scan_count")
+                or scanning_count
+            ),
             "security_details": order.security_details or {},
             "editable": _is_scheduled_order_editable(order),
             "failed_reason": order.failed_reason,
@@ -2759,7 +2941,13 @@ async def get_dp_holdings(client_id: str, force_refresh: bool = Query(False), db
 
 
 @app.get("/stock_quote")
-async def get_stock_quote(client_id: str, symbol: str, db: Session = Depends(get_db)):
+async def get_stock_quote(
+    client_id: str,
+    symbol: str,
+    fresh: bool = False,
+    transport: str = "auto",
+    db: Session = Depends(get_db),
+):
     try:
         user = db.query(User).filter(User.client_id == client_id).first()
         if not user:
@@ -2771,15 +2959,36 @@ async def get_stock_quote(client_id: str, symbol: str, db: Session = Depends(get
         if not security or not security.get("id"):
             raise HTTPException(status_code=404, detail=f"Security not found for {symbol}")
 
-        quote = await tms_user_instance.get_stock_details_async(
-            str(security["id"]),
-            max_retries=3,
-            retry_backoff=True,
-        )
+        normalized_transport = str(transport or "auto").strip().lower()
+        live_snapshot = None
+        quote = None
+        source = "http"
+        if normalized_transport != "http":
+            await live_quote_manager.ensure_stream(tms_user_instance, symbol, str(security["id"]))
+            live_snapshot = await live_quote_manager.wait_for_quote(symbol)
+            quote = (live_snapshot or {}).get("quote")
+            source = "socket" if quote else "http"
+        if quote is None:
+            quote = await tms_user_instance.get_stock_details_async(
+                str(security["id"]),
+                max_retries=3,
+                retry_backoff=True,
+                force_refresh=fresh or normalized_transport == "http",
+            )
         if not quote:
-            return {"security": security, "quote": None}
+            return {
+                "security": security,
+                "quote": None,
+                "quote_source": source,
+                "socket": live_quote_manager.get_snapshot(symbol),
+            }
 
-        return {"security": security, "quote": quote}
+        return {
+            "security": security,
+            "quote": quote,
+            "quote_source": source,
+            "socket": live_quote_manager.get_snapshot(symbol),
+        }
 
     except LoginFailedException as e:
         await invalidate_cached_tms_user(client_id)
@@ -2788,6 +2997,72 @@ async def get_stock_quote(client_id: str, symbol: str, db: Session = Depends(get
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.websocket("/ws/stock_quote")
+async def websocket_stock_quote(websocket: WebSocket, client_id: str, symbol: str):
+    db = SessionLocal()
+    normalized_symbol = str(symbol or "").strip().upper()
+    try:
+        await websocket.accept()
+        user = db.query(User).filter(User.client_id == client_id).first()
+        if not user:
+            await websocket.send_json({"type": "error", "message": "User not found"})
+            await websocket.close(code=1008)
+            return
+
+        tms_user_instance = await get_cached_tms_user(user)
+        security = await tms_user_instance.get_security_id(normalized_symbol)
+        if not security or not security.get("id"):
+            await websocket.send_json({
+                "type": "error",
+                "message": f"Security not found for {normalized_symbol}",
+            })
+            await websocket.close(code=1008)
+            return
+
+        await live_quote_manager.ensure_stream(tms_user_instance, normalized_symbol, str(security["id"]))
+        live_snapshot = await live_quote_manager.wait_for_quote(normalized_symbol)
+
+        async def send_snapshot(snapshot: Optional[dict]) -> None:
+            live_state = snapshot or live_quote_manager.get_snapshot(normalized_symbol)
+            quote = (live_state or {}).get("quote")
+            source = "socket" if quote else "http"
+            payload = {
+                "type": "quote",
+                "security": security,
+                "quote": quote,
+                "quote_source": source,
+                "socket": live_state,
+            }
+            await websocket.send_json(payload)
+
+        await send_snapshot(live_snapshot)
+        last_message_count = int((live_snapshot or {}).get("message_count") or 0)
+
+        while True:
+            snapshot = await live_quote_manager.wait_for_next_quote(
+                normalized_symbol,
+                after_message_count=last_message_count,
+                timeout=25.0,
+            )
+            if snapshot and snapshot.get("quote"):
+                last_message_count = int(snapshot.get("message_count") or last_message_count)
+                await send_snapshot(snapshot)
+                continue
+            await websocket.send_json({
+                "type": "heartbeat",
+                "socket": live_quote_manager.get_snapshot(normalized_symbol),
+            })
+    except WebSocketDisconnect:
+        return
+    except Exception as e:
+        try:
+            await websocket.send_json({"type": "error", "message": str(e)})
+        except Exception:
+            pass
+    finally:
+        db.close()
 
 
 @app.get("/get_order_book")
