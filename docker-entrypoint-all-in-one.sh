@@ -165,7 +165,13 @@ ensure_zrok_reserved_name() {
     return 0
   fi
   echo "Creating zrok reserved name '$ZROK_RESERVED_NAME' in namespace public..."
-  "$ZROK_BIN" create name -n public "$ZROK_RESERVED_NAME" >>"$ZROK_LOG" 2>&1
+  if ! "$ZROK_BIN" create name -n public "$ZROK_RESERVED_NAME" >>"$ZROK_LOG" 2>&1; then
+    if grep -q '409\|shareNameConflict' "$ZROK_LOG" 2>/dev/null; then
+      echo "Reserved name '$ZROK_RESERVED_NAME' already exists; continuing."
+      return 0
+    fi
+    return 1
+  fi
 }
 
 get_existing_zrok_share_url() {
@@ -198,9 +204,8 @@ repair_zrok_share_binding() {
   fi
   token="${binding%%|*}"
   env_zid="${binding#*|}"
-  echo "Reusing existing zrok share '$token' for '$ZROK_RESERVED_NAME'."
-  export ZROK_REUSE_SHARE_TOKEN="$token"
-  export ZROK_REUSE_SHARE_ENVZID="$env_zid"
+  echo "Removing stale zrok share '$token' ..."
+  "$ZROK_BIN" delete share "$token" --envzid "$env_zid" >>"$ZROK_LOG" 2>&1 || true
 }
 
 start_zrok_tunnel() {
@@ -233,16 +238,6 @@ start_zrok_tunnel() {
       echo "zrok enable failed."
       return 1
     fi
-  fi
-
-  existing_url="$(get_existing_zrok_share_url "$ZROK_BIN" || true)"
-  if [ -n "$existing_url" ]; then
-    if [[ "$existing_url" != http* ]]; then
-      existing_url="https://$existing_url"
-    fi
-    echo "Reusing existing zrok share '$existing_url' for '$ZROK_RESERVED_NAME'."
-    print_public_url_banner "$ZROK_SHARE_LABEL" "$existing_url" "zrok public share."
-    return 0
   fi
 
   if ensure_zrok_reserved_name "$ZROK_BIN"; then
