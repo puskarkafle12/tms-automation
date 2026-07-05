@@ -1,4 +1,5 @@
 import React from 'react';
+import { format } from 'date-fns';
 import './StockDetails.css';
 import NepseAlphaSymbolLink from '../../components/NepseAlphaSymbolLink';
 
@@ -47,7 +48,11 @@ const formatDate = (dateArray?: number[]) => {
     return '-';
   }
   const [year, month, day, hour, minute, second] = dateArray;
-  return `${day}-${month}-${year} ${hour}:${minute}:${second}`;
+  const date = new Date(year, Math.max(0, month - 1), day, hour, minute, second);
+  if (Number.isNaN(date.getTime())) {
+    return '-';
+  }
+  return format(date, 'dd MMM yyyy, hh:mm:ss a');
 };
 
 const formatSocketQuoteTime = (value?: string | null) => {

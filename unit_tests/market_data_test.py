@@ -19,7 +19,7 @@ from utils.market_data.dynamic_catalog import (
     discover_combined_field_keys,
 )
 from utils.market_data.merolagani_fields import flatten_merolagani_row, merge_merolagani_records
-from utils.market_data.repository import get_new_symbols, load_latest_daily_stock_rows
+from utils.market_data.repository import get_new_symbols, load_latest_daily_stock_rows, set_new_symbol_watchlist_status
 
 
 class MarketDataRepositoryTest(unittest.TestCase):
@@ -115,7 +115,7 @@ class MarketDataRepositoryTest(unittest.TestCase):
             text(
                 """
                 INSERT INTO market_symbol_registry (symbol, first_seen_date, last_seen_date, is_watchlist)
-                VALUES ('BBB', :today, :today, 1)
+                VALUES ('ABC', :today, :today, 1)
                 """
             ),
             {"today": today},
@@ -123,7 +123,86 @@ class MarketDataRepositoryTest(unittest.TestCase):
         db.commit()
 
         new_symbols = get_new_symbols(db, days=15)
-        self.assertEqual([item["symbol"] for item in new_symbols], ["BBB"])
+        self.assertEqual([item["symbol"] for item in new_symbols], ["ABC"])
+
+    def test_get_new_symbols_filters_to_recent_equity_listings(self):
+        db = self.Session()
+        today = date.today()
+        older_snapshot = today - timedelta(days=120)
+        db.execute(
+            text(
+                """
+                INSERT INTO merolagani_daily_snapshots (snapshot_date, symbol_count)
+                VALUES (:older_snapshot, 1)
+                """
+            ),
+            {"older_snapshot": older_snapshot},
+        )
+        db.execute(
+            text(
+                """
+                INSERT INTO merolagani_daily_snapshots (snapshot_date, symbol_count)
+                VALUES (:today, 5)
+                """
+            ),
+            {"today": today},
+        )
+        db.execute(
+            text(
+                """
+                INSERT INTO merolagani_daily_stocks (snapshot_date, symbol, data)
+                VALUES
+                    (:today, 'AAA', '{"Symbol":"AAA","Sector":"Commercial Bank","Qty.":"12345"}'),
+                    (:today, 'ADBLB', '{"Symbol":"ADBLB","Sector":"Others"}'),
+                    (:today, 'GBBLPO', '{"Symbol":"GBBLPO","Sector":"Promotor Share"}'),
+                    (:today, 'SRLIP', '{"Symbol":"SRLIP"}'),
+                    (:today, 'LBLD86', '{"Symbol":"LBLD86"}')
+                """
+            ),
+            {"today": today},
+        )
+        db.execute(
+            text(
+                """
+                INSERT INTO market_symbol_registry (symbol, first_seen_date, last_seen_date, is_watchlist)
+                VALUES
+                    ('AAA', :today, :today, 1),
+                    ('ADBLB', :today, :today, 1),
+                    ('GBBLPO', :today, :today, 1),
+                    ('SRLIP', :today, :today, 1),
+                    ('LBLD86', :today, :today, 1)
+                """
+            ),
+            {"today": today},
+        )
+        db.commit()
+
+        new_symbols = get_new_symbols(db, days=15)
+        self.assertEqual([item["symbol"] for item in new_symbols], ["AAA"])
+        self.assertEqual(new_symbols[0]["sector"], "Commercial Bank")
+        self.assertEqual(new_symbols[0]["volume"], 12345.0)
+
+    def test_set_new_symbol_watchlist_status_updates_registry(self):
+        db = self.Session()
+        today = date.today()
+        db.execute(
+            text(
+                """
+                INSERT INTO market_symbol_registry (symbol, first_seen_date, last_seen_date, is_watchlist)
+                VALUES ('AAA', :today, :today, 1)
+                """
+            ),
+            {"today": today},
+        )
+        db.commit()
+
+        updated = set_new_symbol_watchlist_status(db, ["AAA"], is_watchlist=False)
+        db.commit()
+
+        self.assertEqual(updated, 1)
+        flag = db.execute(text("SELECT is_watchlist FROM market_symbol_registry WHERE symbol = 'AAA'")).scalar()
+        self.assertIn(flag, (0, False))
+        self.assertEqual(get_new_symbols(db, days=15), [])
 
     def test_load_latest_daily_stock_rows(self):
         db = self.Session()

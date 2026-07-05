@@ -16,6 +16,12 @@ const stock = {
 };
 
 describe('StockDetails market depth', () => {
+  test('formats last traded time as a readable timestamp', () => {
+    render(<StockDetails stock={stock} />);
+
+    expect(screen.getByText('Last Traded').nextSibling).toHaveTextContent('14 Jun 2026, 12:00:00 PM');
+  });
+
   test('shows Top Buy and Top Sell tables when market depth is available', () => {
     render(
       <StockDetails

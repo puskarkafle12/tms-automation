@@ -77,6 +77,18 @@
   margin: 0;
 }
 
+.stock-analysis-reset-hidden {
+  white-space: nowrap;
+}
+
+.stock-analysis-muted-note {
+  margin: 0;
+  padding: 0.7rem 0.9rem;
+  background: #fff7ed;
+  border-color: #fed7aa;
+  color: #9a3412;
+}
+
 .stock-analysis-panel-screener .stock-screener-universe-card {
   margin-bottom: 0.15rem;
 }

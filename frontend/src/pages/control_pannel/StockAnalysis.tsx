@@ -317,13 +317,33 @@ type DataSource = 'combined' | 'merolagani' | 'nepse_alpha';
 interface NewStockRow {
   symbol: string;
   is_watchlist?: boolean;
+  volume?: number;
 }
+
+const NEW_STOCKS_DISMISSED_STORAGE_KEY = 'market_analysis_new_stocks_dismissed_symbols';
+
+const loadDismissedNewStocks = (): string[] => {
+  try {
+    const raw = localStorage.getItem(NEW_STOCKS_DISMISSED_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed)
+      ? parsed.map((value) => String(value || '').trim().toUpperCase()).filter(Boolean)
+      : [];
+  } catch {
+    return [];
+  }
+};
+
+const saveDismissedNewStocks = (symbols: string[]) => {
+  localStorage.setItem(NEW_STOCKS_DISMISSED_STORAGE_KEY, JSON.stringify(Array.from(new Set(symbols)).slice(0, 500)));
+};
 
 const StockAnalysis: React.FC = () => {
   const [analysisTab, setAnalysisTab] = useState<AnalysisTab>('screener');
   const [dataSource, setDataSource] = useState<DataSource>('combined');
   const [newStocks, setNewStocks] = useState<NewStockRow[]>([]);
   const [newStocksDays, setNewStocksDays] = useState(15);
+  const [dismissedNewStocks, setDismissedNewStocks] = useState<string[]>(() => loadDismissedNewStocks());
   const [dataRows, setDataRows] = useState<Record<string, unknown>[]>([]);
   const [dataColumns, setDataColumns] = useState<string[]>(['symbol']);
   const [dataColumnLabels, setDataColumnLabels] = useState<Record<string, string>>({});
@@ -372,6 +392,14 @@ const StockAnalysis: React.FC = () => {
   const activePresetDetail = useMemo(
     () => (detailPreset ? getPresetDetail(detailPreset) : null),
     [detailPreset],
+  );
+  const dismissedNewStockSet = useMemo(
+    () => new Set(dismissedNewStocks.map((symbol) => String(symbol || '').trim().toUpperCase()).filter(Boolean)),
+    [dismissedNewStocks],
+  );
+  const visibleNewStocks = useMemo(
+    () => newStocks.filter((row) => !dismissedNewStockSet.has(String(row.symbol || '').trim().toUpperCase())),
+    [dismissedNewStockSet, newStocks],
   );
 
   const openPresetDetail = (preset: ScreenerPreset) => {
@@ -534,23 +562,57 @@ const StockAnalysis: React.FC = () => {
     setActiveQuickScreenId(screenId);
   }, []);
 
+  const refreshNewStocks = useCallback(async () => {
+    setDataLoading(true);
+    try {
+      const response = await fetchJson<{ symbols?: NewStockRow[] }>(`/market_analysis/new_stocks?days=${newStocksDays}`);
+      if (response.ok) {
+        setNewStocks(response.data.symbols || []);
+      }
+    } finally {
+      setDataLoading(false);
+    }
+  }, [newStocksDays]);
+
   useEffect(() => {
     if (analysisTab !== 'new_stocks') {
       return;
     }
-    const loadNewStocks = async () => {
-      setDataLoading(true);
-      try {
-        const response = await fetchJson<{ symbols?: NewStockRow[] }>(`/market_analysis/new_stocks?days=${newStocksDays}`);
-        if (response.ok) {
-          setNewStocks(response.data.symbols || []);
-        }
-      } finally {
-        setDataLoading(false);
-      }
-    };
-    void loadNewStocks();
-  }, [analysisTab, newStocksDays]);
+    void refreshNewStocks();
+  }, [analysisTab, refreshNewStocks]);
+
+  useEffect(() => {
+    saveDismissedNewStocks(dismissedNewStocks);
+  }, [dismissedNewStocks]);
+
+  const removeNewStock = useCallback(async (symbol: string) => {
+    const normalized = String(symbol || '').trim().toUpperCase();
+    if (!normalized) {
+      return;
+    }
+    const response = await fetchJson<{ updated?: number }>(`/market_analysis/new_stocks/${encodeURIComponent(normalized)}/remove`, {
+      method: 'POST',
+    });
+    if (response.ok) {
+      setDismissedNewStocks((prev) => (prev.includes(normalized) ? prev : [...prev, normalized]));
+      await refreshNewStocks();
+    }
+  }, [refreshNewStocks]);
+
+  const restoreNewStocks = useCallback(async () => {
+    if (dismissedNewStocks.length === 0) {
+      return;
+    }
+    const response = await fetchJson<{ updated?: number }>('/market_analysis/new_stocks/restore', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(dismissedNewStocks),
+    });
+    if (response.ok) {
+      setDismissedNewStocks([]);
+      await refreshNewStocks();
+    }
+  }, [dismissedNewStocks, refreshNewStocks]);
 
   const applyMarketDataResponse = useCallback((payload: MarketDataResponse) => {
     const rows = payload.rows || [];
@@ -1183,22 +1245,46 @@ const StockAnalysis: React.FC = () => {
                     { label: '90 days', value: '90' },
                   ]}
                 />
-                <span className="badge badge-muted">{newStocks.length} stocks</span>
+                <span className="badge badge-muted">{visibleNewStocks.length} stocks</span>
+                {dismissedNewStocks.length > 0 && (
+                  <button type="button" className="btn-secondary stock-analysis-reset-hidden" onClick={restoreNewStocks}>
+                    Show all
+                  </button>
+                )}
               </div>
             </div>
             {dataLoading ? (
               <p className="stock-analysis-panel-message">Loading new symbols…</p>
-            ) : newStocks.length === 0 ? (
+            ) : visibleNewStocks.length === 0 ? (
               <p className="stock-analysis-panel-message">No new symbols detected in the selected period.</p>
             ) : (
               <div className="stock-analysis-table-shell">
                 <CommonTable
-                  data={newStocks}
-                  columns={['symbol', 'is_watchlist']}
+                  data={visibleNewStocks.map((row) => ({
+                    ...row,
+                    removeAction: (
+                      <button
+                        type="button"
+                        className="table-action-btn table-action-danger"
+                        onClick={() => removeNewStock(row.symbol)}
+                        aria-label={`Remove ${row.symbol} from new stocks`}
+                        title="Hide this symbol from the list"
+                      >
+                        Remove
+                      </button>
+                    ),
+                  }))}
+                  columns={['symbol', 'volume', 'is_watchlist', 'removeAction']}
+                  columnLabels={{ removeAction: 'Action', volume: 'Volume' }}
                   columnLinks={{
                     symbol: (row) => buildNepseAlphaChartUrl(String(row.symbol || '')),
                   }}
                 />
+                {dismissedNewStocks.length > 0 && (
+                  <p className="stock-analysis-panel-message stock-analysis-muted-note">
+                    {dismissedNewStocks.length} hidden symbol(s) will stay removed until you press Show all.
+                  </p>
+                )}
               </div>
             )}
           </div>

@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 import asyncio
 import sys
 from typing import Dict, List, Optional, Type
-from fastapi import FastAPI, HTTPException, Depends, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Depends, Query, WebSocket, WebSocketDisconnect, Body
 from fastapi.responses import FileResponse, JSONResponse
 import websockets
 from database import SessionLocal, ensure_performance_indexes, ensure_read_session, get_db, get_db_session
@@ -3199,6 +3199,20 @@ async def market_analysis_new_stocks(days: int = Query(15, ge=1, le=365), db: Se
     from utils.market_data.request_workers import worker_get_new_stocks
 
     return await asyncio.to_thread(worker_get_new_stocks, days)
+
+
+@app.post("/market_analysis/new_stocks/{symbol}/remove")
+async def market_analysis_remove_new_stock(symbol: str):
+    from utils.market_data.request_workers import worker_update_new_stocks_watchlist
+
+    return await asyncio.to_thread(worker_update_new_stocks_watchlist, [symbol], is_watchlist=False)
+
+
+@app.post("/market_analysis/new_stocks/restore")
+async def market_analysis_restore_new_stocks(symbols: List[str] = Body(default_factory=list)):
+    from utils.market_data.request_workers import worker_update_new_stocks_watchlist
+
+    return await asyncio.to_thread(worker_update_new_stocks_watchlist, symbols, is_watchlist=True)
 
 
 @app.get("/market_analysis/data")

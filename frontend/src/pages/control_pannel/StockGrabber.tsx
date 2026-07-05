@@ -2,8 +2,9 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import './StockGrabber.css';
 import ErrorMessage from '../../components/ErrorMessage';
 import NepseAlphaSymbolLink from '../../components/NepseAlphaSymbolLink';
+import CommonTable from '../../components/table/Table';
 import { GrabberControls } from '../../types/monitoring';
-import { buildWebSocketUrl } from '../../utils/api';
+import { buildWebSocketUrl, fetchJson } from '../../utils/api';
 
 const getApiUrl = () => localStorage.getItem('apiUrl') || window.location.origin;
 
@@ -53,6 +54,12 @@ interface StockGrabberResponse {
   volume?: number;
   lastTradedTime?: string;
   delay_details?: OrderDelayDetails;
+}
+
+interface NewStockRow {
+  symbol: string;
+  is_watchlist?: boolean;
+  volume?: number;
 }
 
 interface OrderDelayDetails {
@@ -246,6 +253,8 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
     ),
   );
   const [selectedDelay, setSelectedDelay] = useState<OrderDelayRecord | null>(null);
+  const [newStocks, setNewStocks] = useState<NewStockRow[]>([]);
+  const [newStocksLoading, setNewStocksLoading] = useState(false);
   const [liveStats, setLiveStats] = useState<LiveStats>({
     ltp: null,
     changePct: null,
@@ -982,6 +991,20 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
 
   const changePositive = (liveStats.changePct ?? 0) >= 0;
   const visibleEvents = showEvents ? activity.slice(0, 3) : activity.slice(0, 1);
+  const loadNewStocks = useCallback(async () => {
+    setNewStocksLoading(true);
+    try {
+      const response = await fetchJson<{ symbols?: NewStockRow[] }>('/market_analysis/new_stocks?days=15');
+      if (response.ok) {
+        setNewStocks(response.data.symbols || []);
+      }
+    } finally {
+      setNewStocksLoading(false);
+    }
+  }, []);
+  useEffect(() => {
+    void loadNewStocks();
+  }, [loadNewStocks]);
   const activeTopBuy = liveStats.topBuy.filter((row) => Number(row.price || 0) > 0 || Number(row.quantity || 0) > 0);
   const activeTopSell = liveStats.topSell.filter((row) => Number(row.price || 0) > 0 || Number(row.quantity || 0) > 0);
 
@@ -1328,6 +1351,32 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
           </div>
         </div>
       )}
+
+      <div className="sg-new-stocks-panel">
+        <div className="sg-new-stocks-header">
+          <div>
+            <h3>New / IPO watchlist</h3>
+            <p>Filtered New Stocks table with volume for quick grabber checks.</p>
+          </div>
+          <button type="button" className="sg-refresh-btn" onClick={() => { void loadNewStocks(); }} disabled={newStocksLoading}>
+            {newStocksLoading ? 'Refreshing...' : 'Refresh'}
+          </button>
+        </div>
+        {newStocksLoading && newStocks.length === 0 ? (
+          <p className="sg-new-stocks-empty">Loading new IPO symbols…</p>
+        ) : newStocks.length === 0 ? (
+          <p className="sg-new-stocks-empty">No new symbols found.</p>
+        ) : (
+          <CommonTable
+            data={newStocks}
+            columns={['symbol', 'volume', 'is_watchlist']}
+            columnLabels={{ volume: 'Volume', is_watchlist: 'Watchlist' }}
+            columnLinks={{
+              symbol: (row) => `https://nepsealpha.com/trading/chart?symbol=${encodeURIComponent(String(row.symbol || ''))}`,
+            }}
+          />
+        )}
+      </div>
     </div>
   );
 };

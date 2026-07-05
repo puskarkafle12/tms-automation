@@ -35,6 +35,17 @@ describe('scheduledOrderDisplay', () => {
     expect(formatScheduledTriggerPrice(order)).toBe('Rs. 504.49 (est.)');
   });
 
+  test('falls back to fixed price order price when no trigger is stored', () => {
+    const order = {
+      strategy_type: 'Fixed Price Buy',
+      trigger_price: null,
+      price: 190,
+      requested_price: 190,
+      strategy_config: {},
+    };
+    expect(formatScheduledTriggerPrice(order)).toBe('Rs. 190.00 (est.)');
+  });
+
   test('shows quantity summary from stored snapshot', () => {
     const order = {
       qty: 54,

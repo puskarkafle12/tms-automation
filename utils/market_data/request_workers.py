@@ -17,6 +17,7 @@ from utils.market_data.repository import (
     get_table_display_metadata,
     load_latest_daily_stock_rows,
     load_table_rows,
+    set_new_symbol_watchlist_status,
 )
 from utils.market_data.screen_presets import ensure_market_screen_presets, list_market_screen_presets
 from utils.market_data.sql_screener import MarketSqlError
@@ -69,6 +70,17 @@ def worker_get_new_stocks(days: int) -> Dict[str, Any]:
     try:
         ensure_read_session(db)
         return {"days": days, "symbols": get_new_symbols(db, days=days)}
+    finally:
+        db.close()
+
+
+def worker_update_new_stocks_watchlist(symbols: List[str], *, is_watchlist: bool) -> Dict[str, Any]:
+    db = SessionLocal()
+    try:
+        ensure_read_session(db)
+        updated = set_new_symbol_watchlist_status(db, symbols, is_watchlist=is_watchlist)
+        db.commit()
+        return {"updated": updated, "is_watchlist": is_watchlist}
     finally:
         db.close()
 

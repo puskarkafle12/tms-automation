@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
 
 from database import ensure_read_session
@@ -19,6 +20,41 @@ from utils.market_data.canonical_fields import (
     ordered_columns_for_source,
 )
 from utils.external_data_sources.nepse_alpha.screener import flatten_nepse_alpha_for_screener
+
+_EXCLUDED_NEW_SYMBOL_SECTOR_HINTS = (
+    "mutual fund",
+    "corporate debenture",
+    "debenture",
+    "bond",
+    "bonds",
+    "promotor share",
+    "promoter share",
+)
+
+_EQUITY_SECTOR_HINTS = (
+    "commercial bank",
+    "development bank",
+    "finance",
+    "hydro power",
+    "hotel",
+    "insurance",
+    "investment",
+    "life insurance",
+    "microfinance",
+    "manufacturing",
+    "non life insurance",
+    "trading",
+)
+
+_NON_EQUITY_SYMBOL_SUFFIXES = (
+    "PO",
+    "LP",
+    "BP",
+    "SP",
+    "CP",
+    "B",
+    "IP",
+)
 
 
 def _json_dump(value: Any) -> str:
@@ -167,6 +203,11 @@ def get_new_symbols(db: Session, *, days: int = 15) -> List[Dict[str, Any]]:
     first_snapshot = db.execute(
         text("SELECT MIN(snapshot_date) FROM merolagani_daily_snapshots"),
     ).scalar()
+    latest_rows = {
+        extract_symbol(row): row
+        for row in load_latest_daily_stock_rows(db)
+        if extract_symbol(row)
+    }
     rows = db.execute(
         text(
             """
@@ -174,12 +215,124 @@ def get_new_symbols(db: Session, *, days: int = 15) -> List[Dict[str, Any]]:
             FROM market_symbol_registry
             WHERE first_seen_date >= :cutoff
               AND (:first_snapshot IS NULL OR first_seen_date > :first_snapshot)
+              AND COALESCE(is_watchlist, TRUE) = TRUE
             ORDER BY first_seen_date DESC, symbol ASC
             """
         ),
         {"cutoff": cutoff, "first_snapshot": first_snapshot},
     ).mappings().all()
-    return [dict(row) for row in rows]
+    output: List[Dict[str, Any]] = []
+    for row in rows:
+        symbol = str(row["symbol"]).strip().upper()
+        snapshot_row = latest_rows.get(symbol, {})
+        sector = _extract_text_value(snapshot_row, {"ml_sector", "sector", "Sector"})
+        volume = _extract_numeric_value(snapshot_row, {"ml_quantity", "Qty.", "qty", "volume"})
+        if _should_include_new_symbol(symbol=symbol, sector=sector, cutoff=cutoff):
+            payload = dict(row)
+            if sector:
+                payload["sector"] = sector
+            if volume is not None:
+                payload["volume"] = volume
+            output.append(payload)
+    return output
+
+
+def _extract_text_value(row: Dict[str, Any], keys: set[str]) -> str:
+    for key in keys:
+        value = row.get(key)
+        if value is None:
+            continue
+        text_value = str(value).strip()
+        if text_value:
+            return text_value
+    return ""
+
+
+def _extract_numeric_value(row: Dict[str, Any], keys: set[str]) -> Optional[float]:
+    for key in keys:
+        value = row.get(key)
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            return float(value)
+        text_value = str(value).strip().replace(",", "")
+        if not text_value or text_value in {"-", "N/A", "n/a"}:
+            continue
+        try:
+            return float(text_value)
+        except ValueError:
+            continue
+    return None
+
+
+def _parse_listing_date(value: str) -> Optional[date]:
+    text = str(value or "").strip()
+    if not text or text in {"-", "N/A", "n/a"}:
+        return None
+    for fmt in (
+        "%Y-%m-%d",
+        "%Y/%m/%d",
+        "%d-%m-%Y",
+        "%d/%m/%Y",
+        "%d %b %Y",
+        "%d %B %Y",
+    ):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(text).date()
+    except ValueError:
+        return None
+
+
+def _sector_looks_like_equity(sector: str) -> bool:
+    normalized = re.sub(r"\s+", " ", str(sector or "").strip().lower())
+    if not normalized:
+        return False
+    if any(hint in normalized for hint in _EXCLUDED_NEW_SYMBOL_SECTOR_HINTS):
+        return False
+    return any(hint in normalized for hint in _EQUITY_SECTOR_HINTS)
+
+
+def _symbol_looks_like_equity(symbol: str) -> bool:
+    normalized = re.sub(r"\s+", "", str(symbol or "").strip().upper())
+    if not normalized:
+        return False
+    if any(char.isdigit() for char in normalized):
+        return False
+    if any(normalized.endswith(suffix) for suffix in _NON_EQUITY_SYMBOL_SUFFIXES):
+        return False
+    if len(normalized) < 3:
+        return False
+    return True
+
+
+def _should_include_new_symbol(*, symbol: str, sector: str, cutoff: date) -> bool:
+    if sector:
+        return _sector_looks_like_equity(sector)
+    return _symbol_looks_like_equity(symbol)
+
+
+def set_new_symbol_watchlist_status(db: Session, symbols: List[str], *, is_watchlist: bool) -> int:
+    normalized_symbols = sorted({str(symbol or "").strip().upper() for symbol in symbols if str(symbol or "").strip()})
+    if not normalized_symbols:
+        return 0
+    result = db.execute(
+        text(
+            """
+            UPDATE market_symbol_registry
+            SET is_watchlist = :is_watchlist,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE symbol IN :symbols
+            """
+        ).bindparams(bindparam("symbols", expanding=True)),
+        {"is_watchlist": is_watchlist, "symbols": normalized_symbols},
+    )
+    return int(result.rowcount or 0)
 
 
 def upsert_screener_cache_row(

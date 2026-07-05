@@ -48,6 +48,11 @@ const firstDepthPrice = (rows: unknown): number | null => {
   return null;
 };
 
+const numericValue = (value: unknown): number | null => {
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) && numberValue > 0 ? numberValue : null;
+};
+
 export function buildStrategyDetailLayout(
   order: ScheduledOrderLike & Record<string, any>,
   helpers: DetailHelpers,
@@ -63,10 +68,21 @@ export function buildStrategyDetailLayout(
 
   const primary: StrategyDetailItem[] = [];
   const secondary: StrategyDetailItem[] = [];
+  const isFixedPrice = strategy === 'Fixed Price Buy' || strategy === 'Fixed Price Sell';
 
   const triggerDisplay = formatScheduledTriggerPrice(order);
   if (triggerDisplay !== '—') {
     primary.push({ label: 'Est. Trigger Price', value: triggerDisplay });
+  } else {
+    const config = (order.strategy_config || {}) as Record<string, unknown>;
+    const baseline = config.schedule_baseline as Record<string, unknown> | undefined;
+    const fallbackTrigger =
+      numericValue(config.trigger_price) ??
+      numericValue(baseline?.trigger_price) ??
+      (isFixedPrice ? numericValue(order.requested_price ?? order.price) : null);
+    if (fallbackTrigger != null) {
+      primary.push({ label: 'Est. Trigger Price', value: helpers.formatCurrency(fallbackTrigger) });
+    }
   }
   if (snapshot?.trigger_strategy_text) {
     primary.push({ label: 'Strategy Condition', value: snapshot.trigger_strategy_text });
@@ -123,7 +139,7 @@ export function buildStrategyDetailLayout(
     if (typeof config.query_text === 'string' && config.query_text.trim()) {
       secondary.push({ label: 'Strategy Query', value: config.query_text.trim(), kind: 'query' });
     }
-  } else if (strategy === 'Fixed Price Buy' || strategy === 'Fixed Price Sell') {
+  } else if (isFixedPrice) {
     pushDetail(primary, strategy.includes('Buy') ? 'Buy Price' : 'Sell Price', order.price, helpers.formatCurrency);
   } else if (strategy === 'Capital Protection Sell') {
     pushDetail(primary, 'Stop Loss Price', order.stop_loss_price, helpers.formatCurrency);

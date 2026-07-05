@@ -20,9 +20,12 @@ export interface SchedulePreviewSnapshot {
 
 export interface ScheduledOrderLike {
   trigger_price?: number | null;
+  strategy_type?: string | null;
   strategy_config?: Record<string, unknown> | null;
   current_price?: number | null;
   last_checked_ltp?: number | null;
+  price?: number | null;
+  requested_price?: number | null;
   qty?: number;
   status?: string;
 }
@@ -38,9 +41,33 @@ export function readSchedulePreviewSnapshot(
   return snapshot as SchedulePreviewSnapshot;
 }
 
+export function resolveScheduledTriggerPrice(order: ScheduledOrderLike): number | null {
+  const snapshot = readSchedulePreviewSnapshot(order);
+  const config = order.strategy_config || {};
+  const baseline = config.schedule_baseline as Record<string, unknown> | undefined;
+  const strategy = String(order.strategy_type || '').toLowerCase();
+  const isFixedPrice = strategy.includes('fixed price');
+  const candidates = [
+    order.trigger_price,
+    snapshot?.estimated_trigger_price,
+    config.trigger_price,
+    baseline?.trigger_price,
+    isFixedPrice ? (order.requested_price ?? order.price) : null,
+  ];
+
+  for (const candidate of candidates) {
+    const value = Number(candidate);
+    if (Number.isFinite(value) && value > 0) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
 export function formatScheduledTriggerPrice(order: ScheduledOrderLike): string {
   const snapshot = readSchedulePreviewSnapshot(order);
-  const price = order.trigger_price ?? snapshot?.estimated_trigger_price;
+  const price = resolveScheduledTriggerPrice(order);
   if (price == null || Number(price) <= 0) {
     if (snapshot?.estimated_trigger_price_display && snapshot.estimated_trigger_price_display !== '—') {
       return formatEstimatePriceDisplay(snapshot.estimated_trigger_price_display, {
