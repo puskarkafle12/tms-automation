@@ -90,9 +90,10 @@ RUN set -eux; \
       'deb [signed-by=/usr/share/keyrings/openziti.gpg] https://packages.openziti.org/zitipax-openziti-deb-stable debian main' \
       > /etc/apt/sources.list.d/openziti-release.list; \
     apt-get update; \
-    apt-get install -y --no-install-recommends zrok2; \
+    apt-get install -y --no-install-recommends zrok zrok2; \
+    ln -sf /usr/bin/zrok /usr/local/bin/zrok; \
     ln -sf /usr/bin/zrok2 /usr/local/bin/zrok2; \
-    ln -sf /usr/bin/zrok2 /usr/local/bin/zrok; \
+    zrok version; \
     zrok2 version
 
 WORKDIR /app

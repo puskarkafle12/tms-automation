@@ -23,12 +23,19 @@ services:
       NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:-}
       NGROK_DOMAIN: ${NGROK_DOMAIN:-}
       ZROK_ENV_TOKEN: ${ZROK_ENV_TOKEN:-}
+      ZROK_API_ENDPOINT: ${ZROK_API_ENDPOINT:-}
       ZROK_RESERVED_NAME: ${ZROK_RESERVED_NAME:-tmsautomationlive}
     env_file:
       - .env
     volumes:
       - tms_postgres_data:/var/lib/postgresql/data
+      - tms_zrok_config:/root/.config/zrok
+      - tms_zrok_home:/root/.zrok
 
 volumes:
   tms_postgres_data:
     name: tms-automation_tms_postgres_data
+  tms_zrok_config:
+    name: tms-automation_tms_zrok_config
+  tms_zrok_home:
+    name: tms-automation_tms_zrok_home

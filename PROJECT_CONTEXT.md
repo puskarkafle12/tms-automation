@@ -35,6 +35,20 @@ Read this file first before opening other files. Keep future work targeted.
 - Persistent DB volume: `tms-automation_tms_postgres_data` mounted at `/var/lib/postgresql/data`.
 - Do not remove Docker volumes or reset database data.
 
+## Zrok Troubleshooting Notes
+- This project may use zrok v2 tokens. v2 tokens must run with `zrok2` and `ZROK_API_ENDPOINT=https://api-v2.zrok.io`; using a v2 token with `zrok` or `api-v1` causes `401 enableUnauthorized`.
+- The all-in-one Docker image should keep both `zrok` and `zrok2` installed. `docker-entrypoint-all-in-one.sh` chooses `zrok2` for `api-v2` and `zrok` for v1 endpoints.
+- If `tmsautomationlive.shares.zrok.io` is stuck with `shareConflict`, inspect names/shares:
+  `docker exec tms-automation zrok2 list names -n public`
+  `docker exec tms-automation zrok2 list shares --json`
+- To free the reserved zrok name, delete the temporary share first if needed, then delete the name:
+  `docker exec tms-automation zrok2 delete share <shareToken> --envzid <envZId>`
+  `docker exec tms-automation zrok2 delete name tmsautomationlive -n public`
+- Restart and verify after cleanup:
+  `ENVIRONMENT=prod ./scripts/run_latest_commit_docker.sh --force-recreate`
+  `docker exec tms-automation cat /tmp/public-urls.txt`
+- Expected fixed URL: `https://tmsautomationlive.shares.zrok.io`.
+
 ## Tests
 - Python unit tests: `unit_tests/`.
 - Frontend build/test scripts: `frontend/package.json`.
