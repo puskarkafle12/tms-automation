@@ -28,6 +28,7 @@ services:
       ZROK_API_ENDPOINT: ${ZROK_API_ENDPOINT:-}
       ZROK_RESERVED_NAME: ${ZROK_RESERVED_NAME:-tmsautomationlive}
       ZROK_STALE_ENV_ZIDS: ${ZROK_STALE_ENV_ZIDS:-}
+      ZROK_RESET_SHARES: ${ZROK_RESET_SHARES:-all}
     env_file:
       - .env
     volumes:

@@ -42,6 +42,7 @@ Read this file first before opening other files. Keep future work targeted.
 - Store endpoint-specific tokens as `ZROK_V2_ENV_TOKEN` and `ZROK_V1_ENV_TOKEN`. `ZROK_ENV_TOKEN` is kept as a compatibility fallback.
 - zrok v2 stores its enabled environment under `/root/.zrok2`; keep the `tms_zrok2_home` Docker volume mounted there or a container recreate can lose the enabled state and then fail with `401 enableUnauthorized`.
 - If prod zrok enable fails because old Docker environments/shares are stale, set `ZROK_STALE_ENV_ZIDS` to the stale EnvZId(s). Startup will delete them with the zrok2 account token and retry enable.
+- On prod startup, `ZROK_RESET_SHARES=all` deletes existing zrok shares before recreating the same reserved endpoint. It should not fall back to a random zrok endpoint.
 - If `tmsautomationlive.shares.zrok.io` is stuck with `shareConflict`, inspect names/shares:
   `docker exec tms-automation zrok2 list names -n public`
   `docker exec tms-automation zrok2 list shares --json`

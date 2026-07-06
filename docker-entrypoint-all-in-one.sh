@@ -17,6 +17,7 @@ set -euo pipefail
 : "${ZROK_SHARE_LABEL:=TMS Automation zrok}"
 : "${ZROK_RESERVED_NAME:=tmsautomationlive}"
 : "${ZROK_STALE_ENV_ZIDS:=}"
+: "${ZROK_RESET_SHARES:=all}"
 : "${ENVIRONMENT:=test}"
 : "${TUNNEL_PROVIDER:=ngrok}"
 
@@ -125,7 +126,7 @@ wait_for_zrok_url() {
   return 1
 }
 
-get_zrok_share_binding() {
+get_zrok_share_bindings() {
   local ZROK_BIN="${1:-}"
   "$ZROK_BIN" list shares --json 2>/dev/null | python3 -c '
 import json
@@ -134,18 +135,20 @@ import sys
 
 target_name = os.environ.get("ZROK_RESERVED_NAME", "")
 target_endpoint = f"{target_name}.shares.zrok.io"
+target_url = "http://127.0.0.1:80"
+reset_all = (os.environ.get("ZROK_RESET_SHARES") or "").lower() == "all"
 try:
     payload = json.load(sys.stdin)
 except Exception:
     sys.exit(0)
 for share in payload.get("shares") or []:
     endpoints = share.get("frontendEndpoints") or []
-    if target_endpoint in endpoints:
+    target = (share.get("target") or "").strip()
+    if reset_all or target_endpoint in endpoints or target == target_url:
         token = share.get("shareToken") or ""
         env_zid = share.get("envZId") or ""
         if token and env_zid:
             print(f"{token}|{env_zid}")
-            break
 '
 }
 
@@ -229,15 +232,20 @@ for share in payload.get("shares") or []:
 
 repair_zrok_share_binding() {
   local ZROK_BIN="${1:-}"
-  local binding token env_zid
-  binding="$(get_zrok_share_binding "$ZROK_BIN" || true)"
-  if [ -z "$binding" ]; then
+  local bindings binding token env_zid
+  bindings="$(get_zrok_share_bindings "$ZROK_BIN" || true)"
+  if [ -z "$bindings" ]; then
     return 0
   fi
-  token="${binding%%|*}"
-  env_zid="${binding#*|}"
-  echo "Removing stale zrok share '$token' ..."
-  "$ZROK_BIN" delete share "$token" --envzid "$env_zid" >>"$ZROK_LOG" 2>&1 || true
+  while IFS= read -r binding; do
+    [ -n "$binding" ] || continue
+    token="${binding%%|*}"
+    env_zid="${binding#*|}"
+    echo "Removing zrok share '$token' from environment '$env_zid' ..."
+    "$ZROK_BIN" delete share "$token" --envzid "$env_zid" >>"$ZROK_LOG" 2>&1 || true
+  done <<EOF
+$bindings
+EOF
 }
 
 start_zrok_tunnel() {
@@ -295,7 +303,18 @@ start_zrok_tunnel() {
     fi
   fi
 
-  if ensure_zrok_reserved_name "$ZROK_BIN"; then
+  reset_zrok_environment() {
+    echo "Resetting local zrok environment and re-enabling..."
+    "$ZROK_BIN" disable >>"$ZROK_LOG" 2>&1 || true
+    "$ZROK_BIN" enable --headless "$ZROK_SELECTED_TOKEN" >>"$ZROK_LOG" 2>&1 || zrok_environment_enabled "$ZROK_BIN"
+  }
+
+  if ! ensure_zrok_reserved_name "$ZROK_BIN"; then
+    echo "zrok reserved name setup failed for '$ZROK_RESERVED_NAME'."
+    return 1
+  fi
+
+  for share_attempt in 1 2 3; do
     repair_zrok_share_binding "$ZROK_BIN"
     echo "Starting zrok reserved share '$ZROK_SHARE_LABEL' as 'public:$ZROK_RESERVED_NAME' ..."
     "$ZROK_BIN" share public http://127.0.0.1:80 -n "public:$ZROK_RESERVED_NAME" --headless >>"$ZROK_LOG" 2>&1 &
@@ -303,13 +322,20 @@ start_zrok_tunnel() {
     for _ in $(seq 1 30); do
       if grep -q 'shareConflict' "$ZROK_LOG" 2>/dev/null; then
         kill "$ZROK_PID" >/dev/null 2>&1 || true
-        echo "Reserved zrok share failed; falling back to public share."
+        echo "Reserved zrok share conflict detected; deleting stale matching shares before retry."
+        repair_zrok_share_binding "$ZROK_BIN"
         break
       fi
       local_url="$(grep -Eo 'https://[^[:space:]]+|[-a-z0-9]+\.shares\.zrok\.io' "$ZROK_LOG" 2>/dev/null | tail -1 || true)"
       if [ -n "$local_url" ]; then
         if [[ "$local_url" != https://* ]]; then
           local_url="https://$local_url"
+        fi
+        sleep 3
+        if ! kill -0 "$ZROK_PID" >/dev/null 2>&1; then
+          echo "Reserved zrok share printed '$local_url' but backend process exited; retrying."
+          reset_zrok_environment || true
+          break
         fi
         print_public_url_banner "$ZROK_SHARE_LABEL" "$local_url" "zrok public share."
         return 0
@@ -320,14 +346,11 @@ start_zrok_tunnel() {
       wait_for_zrok_url
       return $?
     fi
-  else
-    echo "zrok reserved name setup failed; falling back to public share."
-  fi
+    echo "Reserved zrok share attempt $share_attempt failed."
+  done
 
-  echo "Starting zrok public share '$ZROK_SHARE_LABEL' on http://127.0.0.1:80 ..."
-  "$ZROK_BIN" share public http://127.0.0.1:80 --headless >>"$ZROK_LOG" 2>&1 &
-  ZROK_PID="$!"
-  wait_for_zrok_url
+  echo "zrok reserved share failed for '$ZROK_RESERVED_NAME'; not creating a random new endpoint."
+  return 1
 }
 
 mkdir -p "$PGDATA"
