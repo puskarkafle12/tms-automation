@@ -16,7 +16,9 @@ set -euo pipefail
 : "${ZROK_API_ENDPOINT:=https://api-v2.zrok.io}"
 : "${ZROK_SHARE_LABEL:=TMS Automation zrok}"
 : "${ZROK_RESERVED_NAME:=tmsautomationlive}"
+: "${ZROK_STALE_ENV_ZIDS:=}"
 : "${ENVIRONMENT:=test}"
+: "${TUNNEL_PROVIDER:=ngrok}"
 
 export DB_USER DB_PASSWORD DB_HOST DB_NAME FRONTEND_SEED_USER FRONTEND_SEED_PASSWORD ENVIRONMENT
 
@@ -152,6 +154,26 @@ zrok_environment_enabled() {
   "$ZROK_BIN" status 2>/dev/null | grep -q 'EnvZId'
 }
 
+delete_configured_zrok_stale_environments() {
+  local ZROK_BIN="${1:-}"
+  local token="${2:-}"
+  local env_zid
+
+  if [ -z "$ZROK_STALE_ENV_ZIDS" ] || [ -z "$token" ]; then
+    return 1
+  fi
+  if [[ "$ZROK_API_ENDPOINT" != *api-v2* ]]; then
+    echo "Skipping configured stale environment cleanup; automated environment delete is only supported for zrok2."
+    return 1
+  fi
+
+  for env_zid in $ZROK_STALE_ENV_ZIDS; do
+    echo "Deleting configured stale zrok environment '$env_zid' ..."
+    "$ZROK_BIN" delete environment "$env_zid" --account-token "$token" --force >>"$ZROK_LOG" 2>&1 || true
+  done
+  return 0
+}
+
 select_zrok_binary() {
   if [[ "$ZROK_API_ENDPOINT" == *api-v2* ]]; then
     command -v zrok2 2>/dev/null || command -v zrok 2>/dev/null || true
@@ -259,8 +281,17 @@ start_zrok_tunnel() {
   if [ "$enable_ok" -ne 1 ]; then
     if zrok_environment_enabled "$ZROK_BIN"; then
       echo "zrok environment already enabled; reusing existing state."
+    elif delete_configured_zrok_stale_environments "$ZROK_BIN" "$ZROK_SELECTED_TOKEN"; then
+      echo "Retrying zrok enable after stale environment cleanup..."
+      if "$ZROK_BIN" enable --headless "$ZROK_SELECTED_TOKEN" >>"$ZROK_LOG" 2>&1 || zrok_environment_enabled "$ZROK_BIN"; then
+        enable_ok=1
+      else
+        echo "zrok enable failed after stale environment cleanup."
+        return 1
+      fi
     else
       echo "zrok enable failed."
+      echo "If this prod Docker host has stale zrok resources, set ZROK_STALE_ENV_ZIDS to the stale EnvZId(s), for example: ZROK_STALE_ENV_ZIDS='wuBmwM.R0j'."
       return 1
     fi
   fi
@@ -358,13 +389,34 @@ echo "Starting Nginx reverse proxy on http://0.0.0.0:80"
 nginx
 
 if [ "$ENVIRONMENT" = "production" ] || [ "$ENVIRONMENT" = "prod" ]; then
-  start_ngrok_tunnel >/tmp/ngrok-start.log 2>&1 &
-  NGROK_WAIT_PID="$!"
-  start_zrok_tunnel >/tmp/zrok-start.log 2>&1 &
-  ZROK_WAIT_PID="$!"
+  case "${TUNNEL_PROVIDER,,}" in
+    ngrok)
+      start_ngrok_tunnel >/tmp/ngrok-start.log 2>&1 &
+      NGROK_WAIT_PID="$!"
+      ;;
+    zrok)
+      start_zrok_tunnel >/tmp/zrok-start.log 2>&1 &
+      ZROK_WAIT_PID="$!"
+      ;;
+    both)
+      start_ngrok_tunnel >/tmp/ngrok-start.log 2>&1 &
+      NGROK_WAIT_PID="$!"
+      start_zrok_tunnel >/tmp/zrok-start.log 2>&1 &
+      ZROK_WAIT_PID="$!"
+      ;;
+    none|local|test|"")
+      echo "TUNNEL_PROVIDER=$TUNNEL_PROVIDER — public tunnels disabled."
+      print_public_url_banner "local" "http://localhost:3000" "Open this URL on your machine."
+      ;;
+    *)
+      echo "Unknown TUNNEL_PROVIDER=$TUNNEL_PROVIDER; falling back to ngrok for production mode."
+      start_ngrok_tunnel >/tmp/ngrok-start.log 2>&1 &
+      NGROK_WAIT_PID="$!"
+      ;;
+  esac
 else
-  echo "ENVIRONMENT=$ENVIRONMENT — ngrok disabled (local/test mode)."
-  print_public_url_banner "local" "http://localhost:3000" "Open this URL on your machine. Set ENVIRONMENT=prod in .env to enable tunnels."
+  echo "ENVIRONMENT=$ENVIRONMENT — public tunnels disabled (local/test mode)."
+  print_public_url_banner "local" "http://localhost:3000" "Open this URL on your machine. Set ENVIRONMENT=prod to enable tunnels."
 fi
 
 echo "Starting TMS Automation backend on http://127.0.0.1:8000"
