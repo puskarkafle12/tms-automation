@@ -249,7 +249,6 @@ start_zrok_tunnel() {
 
   mkdir -p "$(dirname "$ZROK_LOG")"
   : > "$ZROK_LOG"
-  touch_public_urls_file
 
   ZROK_BIN="$(select_zrok_binary)"
   if [ -z "$ZROK_BIN" ]; then
@@ -389,6 +388,8 @@ echo "Starting Nginx reverse proxy on http://0.0.0.0:80"
 nginx
 
 if [ "$ENVIRONMENT" = "production" ] || [ "$ENVIRONMENT" = "prod" ]; then
+  rm -f "$PUBLIC_URL_FILE"
+  touch_public_urls_file
   case "${TUNNEL_PROVIDER,,}" in
     ngrok)
       start_ngrok_tunnel >/tmp/ngrok-start.log 2>&1 &
