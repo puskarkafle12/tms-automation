@@ -7,6 +7,11 @@ import {
   type StrategyDetailItem,
   type StrategyDetailLayout,
 } from './scheduledOrderDisplay';
+import {
+  apiTimestampToUtcMs,
+  NEPAL_TIME_ZONE,
+  isApiTimestamp,
+} from '../../utils/nepalTime';
 
 type DetailHelpers = {
   formatStrategyType: (strategy: unknown, side: unknown) => string;
@@ -51,6 +56,89 @@ const firstDepthPrice = (rows: unknown): number | null => {
 const numericValue = (value: unknown): number | null => {
   const numberValue = Number(value);
   return Number.isFinite(numberValue) && numberValue > 0 ? numberValue : null;
+};
+
+const stockQuoteCheckCount = (order: Record<string, any>): number | null =>
+  numericValue(
+    order.tms_scan_count ??
+    order.scanning_count ??
+    order.strategy_config?.tms_scan_count ??
+    order.socket_message_count ??
+    order.strategy_config?.last_socket_message_count,
+  );
+
+const isLiveSocketSnapshot = (order: Record<string, any>): boolean =>
+  Boolean(order.socket_quote && ['connected', 'live'].includes(String(order.socket_status || '').toLowerCase()));
+
+const socketStatusValue = (order: Record<string, any>): string =>
+  String(order.socket_status || order.strategy_config?.last_socket_status || '').trim().toLowerCase();
+
+const quoteSourceDisplay = (order: Record<string, any>): string => {
+  if (isLiveSocketSnapshot(order)) {
+    return 'Live socket';
+  }
+  if (socketStatusValue(order) === 'paused_market_closed') {
+    return 'Stock quote polling (market closed)';
+  }
+  const source = String(order.strategy_config?.last_tms_quote_source || '').trim().toLowerCase();
+  if (source === 'fixed') {
+    return 'Fixed stock quote polling';
+  }
+  return 'Stock quote polling';
+};
+
+const socketStatusDisplay = (order: Record<string, any>): string => {
+  const status = socketStatusValue(order);
+  if (!status) {
+    return '';
+  }
+  if (isLiveSocketSnapshot(order)) {
+    return status;
+  }
+  if (status === 'paused_market_closed') {
+    return 'paused - market closed';
+  }
+  if (['failed', 'closed', 'auth_failed'].includes(status)) {
+    return `${status} - using stock quote polling`;
+  }
+  return status;
+};
+
+const formatSocketReceivedAt = (value: unknown): string => {
+  if (!isRealValue(value)) return '';
+  if (isApiTimestamp(value)) {
+    const utcMs = apiTimestampToUtcMs(value.utc);
+    if (utcMs != null) {
+      return new Intl.DateTimeFormat('en-US', {
+        timeZone: NEPAL_TIME_ZONE,
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: true,
+      }).format(new Date(utcMs));
+    }
+    return value.display || '';
+  }
+  if (typeof value === 'string') {
+    const utcMs = apiTimestampToUtcMs(value);
+    if (utcMs != null) {
+      return new Intl.DateTimeFormat('en-US', {
+        timeZone: NEPAL_TIME_ZONE,
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: true,
+      }).format(new Date(utcMs));
+    }
+    return value;
+  }
+  return String(value);
 };
 
 export function buildStrategyDetailLayout(
@@ -154,16 +242,25 @@ export function buildStrategyDetailLayout(
     order.monitoring_active === true ? 'Yes' : order.monitoring_active === false ? 'No' : undefined,
   );
   pushDetail(secondary, 'Live Status', helpers.formatLiveScanStatus(order));
-  pushDetail(secondary, 'TMS Price Scans', order.tms_scan_count ?? order.scanning_count, helpers.formatScanCount);
+  pushDetail(secondary, 'Stock Quote Checks', stockQuoteCheckCount(order), helpers.formatScanCount);
   if (order.requires_nepse_alpha === false) {
     secondary.push({ label: 'Nepse Alpha', value: 'Not used by this strategy', kind: 'muted' });
   } else {
     pushDetail(secondary, 'Nepse Alpha Scans', order.nepse_alpha_scan_count, helpers.formatScanCount);
   }
-  pushDetail(secondary, 'Quote Source', order.socket_quote ? 'socket' : order.strategy_config?.last_tms_quote_source);
-  pushDetail(secondary, 'Socket Status', order.socket_status || order.strategy_config?.last_socket_status);
-  pushDetail(secondary, 'Socket Last Received', order.socket_last_received_at || order.strategy_config?.last_socket_received_at, helpers.formatDateTime);
-  pushDetail(secondary, 'Socket Messages', order.socket_message_count || order.strategy_config?.last_socket_message_count, helpers.formatScanCount);
+  pushDetail(
+    secondary,
+    'Stock Quote Source',
+    quoteSourceDisplay(order),
+  );
+  pushDetail(secondary, 'Stock Quote Socket', socketStatusDisplay(order));
+  pushDetail(
+    secondary,
+    'Last Socket Update',
+    order.socket_last_received_at || order.strategy_config?.last_socket_received_at,
+    formatSocketReceivedAt,
+  );
+  pushDetail(secondary, 'Socket Updates', order.socket_message_count || order.strategy_config?.last_socket_message_count, helpers.formatScanCount);
   pushDetail(primary, 'Top Buy', firstDepthPrice(order.socket_top_buy), helpers.formatCurrency);
   pushDetail(primary, 'Top Sell', firstDepthPrice(order.socket_top_sell), helpers.formatCurrency);
 

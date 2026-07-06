@@ -14,6 +14,7 @@ from utils.market_status import get_market_hours_status, get_nepal_now
 
 SOCKET_QUOTE_FRESH_SECONDS = 8.0
 SOCKET_QUOTE_WAIT_SECONDS = 2.0
+SOCKET_STREAM_STALE_SECONDS = 20.0
 AUTH_ERROR_MARKERS = (
     "401",
     "unauthorized",
@@ -93,6 +94,16 @@ def _market_is_open_now() -> bool:
     return bool(get_market_hours_status(get_nepal_now())["market_hours_open"])
 
 
+def is_live_socket_snapshot(snapshot: Optional[dict]) -> bool:
+    if not snapshot:
+        return False
+    if not snapshot.get("quote"):
+        return False
+    if snapshot.get("status") not in {"connected", "live"}:
+        return False
+    return bool(snapshot.get("fresh"))
+
+
 class LiveQuoteSocketManager:
     """Shared TMS stockquote sockets keyed by symbol to avoid duplicate streams."""
 
@@ -141,9 +152,10 @@ class LiveQuoteSocketManager:
         security_id: str,
         *,
         force_restart: bool = False,
+        allow_market_closed: bool = False,
     ) -> dict:
         key = self._key(symbol)
-        market_open = _market_is_open_now()
+        market_open = allow_market_closed or _market_is_open_now()
         if not market_open:
             await self.close_symbol(key)
             return {
@@ -171,13 +183,30 @@ class LiveQuoteSocketManager:
                 stream["market_open"] = market_open
                 stream.setdefault("quote_event", asyncio.Event())
                 task = stream.get("task")
-                if task is not None and not task.done():
-                    if not force_restart:
-                        return self.get_snapshot(key) or {}
+                snapshot = self.get_snapshot(key)
+                task_done = bool(task is not None and task.done())
+                stream_is_stale = (
+                    snapshot is not None
+                    and not is_live_socket_snapshot(snapshot)
+                    and not snapshot.get("auth_failed")
+                    and (
+                        not snapshot.get("last_received_at")
+                        or (
+                            float(stream.get("last_received_monotonic") or 0.0) > 0
+                            and time.monotonic() - float(stream.get("last_received_monotonic") or 0.0)
+                            >= SOCKET_STREAM_STALE_SECONDS
+                        )
+                    )
+                )
+                snapshot_auth_failed = bool(snapshot and snapshot.get("auth_failed"))
+                should_restart = force_restart or stream_is_stale or (task_done and not snapshot_auth_failed)
+                if task is not None:
+                    if not should_restart:
+                        if snapshot and snapshot.get("auth_failed"):
+                            return snapshot
+                        return snapshot or {}
                     old_task = task
                     self._streams.pop(key, None)
-                elif not force_restart:
-                    return self.get_snapshot(key) or {}
 
             stream = {
                 "symbol": key,
@@ -196,7 +225,12 @@ class LiveQuoteSocketManager:
                 "quote": (stream or {}).get("quote") if stream else None,
                 "market_open": market_open,
             }
-            task = asyncio.create_task(self._run_stream(tms_user, key, str(security_id)))
+            task = asyncio.create_task(self._run_stream(
+                tms_user,
+                key,
+                str(security_id),
+                allow_market_closed=allow_market_closed,
+            ))
             stream["task"] = task
             self._streams[key] = stream
         if old_task is not None:
@@ -207,10 +241,16 @@ class LiveQuoteSocketManager:
                 pass
         return self.get_snapshot(key) or {}
 
-    async def wait_for_quote(self, symbol: str, *, timeout: float = SOCKET_QUOTE_WAIT_SECONDS) -> Optional[dict]:
+    async def wait_for_quote(
+        self,
+        symbol: str,
+        *,
+        timeout: float = SOCKET_QUOTE_WAIT_SECONDS,
+        allow_market_closed: bool = False,
+    ) -> Optional[dict]:
         deadline = time.monotonic() + max(0.0, timeout)
         while time.monotonic() < deadline:
-            if not _market_is_open_now():
+            if not allow_market_closed and not _market_is_open_now():
                 return self.get_snapshot(symbol)
             snapshot = self.get_snapshot(symbol)
             if snapshot and snapshot.get("quote"):
@@ -224,11 +264,12 @@ class LiveQuoteSocketManager:
         *,
         after_message_count: int = 0,
         timeout: float = SOCKET_QUOTE_WAIT_SECONDS,
+        allow_market_closed: bool = False,
     ) -> Optional[dict]:
         key = self._key(symbol)
         deadline = time.monotonic() + max(0.0, timeout)
         while time.monotonic() < deadline:
-            if not _market_is_open_now():
+            if not allow_market_closed and not _market_is_open_now():
                 return None
             stream = self._streams.get(key)
             if not stream:
@@ -308,11 +349,18 @@ class LiveQuoteSocketManager:
         snapshot = self.get_snapshot(symbol) or {}
         return bool(snapshot.get("auth_failed"))
 
-    async def _run_stream(self, tms_user: Any, symbol: str, security_id: str) -> None:
+    async def _run_stream(
+        self,
+        tms_user: Any,
+        symbol: str,
+        security_id: str,
+        *,
+        allow_market_closed: bool = False,
+    ) -> None:
         key = self._key(symbol)
         stream = self._streams[key]
         try:
-            if not _market_is_open_now():
+            if not allow_market_closed and not _market_is_open_now():
                 stream["status"] = "closed"
                 stream["market_open"] = False
                 return
@@ -348,7 +396,7 @@ class LiveQuoteSocketManager:
                 stream["status"] = "live"
 
                 while True:
-                    if not _market_is_open_now():
+                    if not allow_market_closed and not _market_is_open_now():
                         stream["status"] = "closed"
                         stream["market_open"] = False
                         return
@@ -392,7 +440,11 @@ class LiveQuoteSocketManager:
                 stream["status"] = "closed"
                 stream["market_open"] = False
         finally:
-            if not _market_is_open_now() and stream.get("status") not in {"auth_failed", "failed"}:
+            if (
+                not allow_market_closed
+                and not _market_is_open_now()
+                and stream.get("status") not in {"auth_failed", "failed"}
+            ):
                 stream["status"] = "closed"
                 stream["market_open"] = False
             event = stream.get("quote_event")

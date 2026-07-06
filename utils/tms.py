@@ -24,7 +24,7 @@ from utils.base_functions import (
     save_tokens,
     summarize_login_message,
 )
-from utils.live_quote_socket import live_quote_manager
+from utils.live_quote_socket import is_live_socket_snapshot, live_quote_manager
 
 class TmsUser:
     DEFAULT_TIMEOUT = aiohttp.ClientTimeout(total=12, connect=4, sock_read=8)
@@ -1783,6 +1783,9 @@ class TmsUser:
 
         await self._ensure_session()
         last_quote_signature = ""
+        socket_fallback_logged = False
+        socket_miss_count = 0
+        next_socket_restart_at = 0.0
         if self.scan_mode == "socket":
             await live_quote_manager.ensure_stream(
                 self,
@@ -1808,18 +1811,59 @@ class TmsUser:
                     live_snapshot = live_quote_manager.get_snapshot(self.stock_symbol)
                     quote_source = "fixed"
                 else:
+                    loop_now = asyncio.get_event_loop().time()
                     live_snapshot = await live_quote_manager.wait_for_next_distinct_quote(
                         self.stock_symbol,
                         after_signature=last_quote_signature,
                         timeout=self._stock_grabber_socket_wait_seconds,
                     )
-                    response = (live_snapshot or {}).get("quote")
-                    quote_source = "socket"
+                    socket_state = live_snapshot or live_quote_manager.get_snapshot(self.stock_symbol)
+                    if is_live_socket_snapshot(socket_state):
+                        response = (socket_state or {}).get("quote")
+                        live_snapshot = socket_state
+                        quote_source = "socket"
+                        socket_miss_count = 0
+                        socket_fallback_logged = False
+                    else:
+                        socket_miss_count += 1
+                        if loop_now >= next_socket_restart_at:
+                            status = (socket_state or {}).get("status")
+                            if status in {"failed", "closed", "auth_failed"}:
+                                await live_quote_manager.close_symbol(self.stock_symbol)
+                            await live_quote_manager.ensure_stream(
+                                self,
+                                self.stock_symbol,
+                                str(id),
+                                force_restart=status in {"failed", "closed"},
+                            )
+                            next_socket_restart_at = loop_now + 5.0
+
+                        response = await self.get_stock_details_async(
+                            str(id),
+                            max_retries=1,
+                            force_refresh=True,
+                        )
+                        live_snapshot = socket_state
+                        quote_source = "http"
+                        if not socket_fallback_logged:
+                            socket_status = (socket_state or {}).get("status") or "not_ready"
+                            self.updates.append({
+                                "status": "warn",
+                                "message": (
+                                    f"Live socket {socket_status}; using stock quote polling "
+                                    "while reconnecting."
+                                ),
+                                "quote_source": "http",
+                                "socket_status": socket_status,
+                                "socket_last_received_at": (socket_state or {}).get("last_received_at"),
+                                "socket_message_count": (socket_state or {}).get("message_count"),
+                            })
+                            socket_fallback_logged = True
                 self.total_requests += 1
                 self.trial_requests += 1
 
                 if response is None:
-                    await asyncio.sleep(0.05 if self.scan_mode == "fixed" else 0.0)
+                    await asyncio.sleep(0.05 if self.scan_mode == "fixed" else 0.1)
                     continue
 
                 if response.get('status') == '401' and response.get('message') == 'ACCESS_TOKEN_EXPIRED':
@@ -1911,6 +1955,8 @@ class TmsUser:
                     return response
 
                 if self.scan_mode == "fixed":
+                    await asyncio.sleep(1.0 / max(0.5, float(self.request_per_sec or self.min_request_per_sec)))
+                elif quote_source == "http":
                     await asyncio.sleep(1.0 / max(0.5, float(self.request_per_sec or self.min_request_per_sec)))
 
             except asyncio.CancelledError:

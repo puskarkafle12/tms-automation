@@ -3,7 +3,8 @@ import './StockGrabber.css';
 import ErrorMessage from '../../components/ErrorMessage';
 import NepseAlphaSymbolLink from '../../components/NepseAlphaSymbolLink';
 import { GrabberControls } from '../../types/monitoring';
-import { buildWebSocketUrl, fetchJson } from '../../utils/api';
+import { buildWebSocketUrl } from '../../utils/api';
+import { NEPAL_TIME_ZONE } from '../../utils/nepalTime';
 
 const getApiUrl = () => localStorage.getItem('apiUrl') || window.location.origin;
 
@@ -170,6 +171,14 @@ const ORDER_DELAY_STORAGE_KEY = 'stock_grabber_order_delay_history';
 const formatDepthNumber = (value?: number | null) =>
   Number.isFinite(Number(value)) ? Number(value).toLocaleString('en-NP') : '-';
 
+const formatQuoteSourceLabel = (source?: string | null) => {
+  const normalized = String(source || '').trim().toLowerCase();
+  if (normalized === 'socket') return 'Live socket';
+  if (normalized === 'fixed') return 'Fixed stock quote polling';
+  if (normalized === 'http') return 'Stock quote polling';
+  return source || '-';
+};
+
 const MiniDepth: React.FC<{ title: string; rows: QuoteLevel[] }> = ({ title, rows }) => (
   <div className="sg-depth-card">
     <span className="sg-depth-title">{title}</span>
@@ -271,6 +280,11 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
 
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pollingInFlightRef = useRef(false);
+  const quoteSocketRef = useRef<WebSocket | null>(null);
+  const quoteSocketReconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const quoteSocketRetryRef = useRef(0);
+  const quoteSocketClosedByUserRef = useRef(false);
+  const quoteSocketConnectionIdRef = useRef(0);
   const flashTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const startRef = useRef<(force?: boolean) => void>(() => {});
   const stopRef = useRef<() => void>(() => {});
@@ -323,11 +337,15 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
     });
   }, [onStateChange]);
 
-  const mergeScanCount = useCallback((sessionCount?: number, floor = 0) => {
-    if (sessionCount === undefined) {
-      return floor;
+  const mergeScanCount = useCallback((sessionCount?: number, socketCount?: number, floor = 0) => {
+    const candidates = [floor];
+    if (sessionCount !== undefined && Number.isFinite(sessionCount)) {
+      candidates.push(sessionCount);
     }
-    return Math.max(floor, sessionCount);
+    if (socketCount !== undefined && Number.isFinite(socketCount)) {
+      candidates.push(socketCount);
+    }
+    return Math.max(...candidates);
   }, []);
 
   const addEvent = useCallback((type: ActivityItem['type'], icon: string, text: string) => {
@@ -356,6 +374,12 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
 
   const processUpdate = useCallback((update: StockGrabberResponse) => {
     const status = update.status || '';
+    const socketMessageCount = update.socket_message_count !== undefined
+      ? Number(update.socket_message_count)
+      : undefined;
+    const totalFetchCount = update.total_fetch_count !== undefined
+      ? Number(update.total_fetch_count)
+      : undefined;
 
     if (status === 'update' || status === 'socket') {
       setConnectionStatus('live');
@@ -364,11 +388,11 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
         ...prev,
         changePct: update.change_percentage ?? prev.changePct,
         fetchRate: update.fetch_rate ?? prev.fetchRate,
-        totalFetches: mergeScanCount(update.total_fetch_count, prev.totalFetches),
+        totalFetches: mergeScanCount(totalFetchCount, socketMessageCount, prev.totalFetches),
         quoteSource: update.quote_source ?? prev.quoteSource,
         socketStatus: update.socket_status ?? prev.socketStatus,
         socketLastReceivedAt: update.socket_last_received_at ?? prev.socketLastReceivedAt,
-        socketMessageCount: update.socket_message_count ?? prev.socketMessageCount,
+        socketMessageCount: socketMessageCount ?? prev.socketMessageCount,
         topBuy: update.topBuy ?? prev.topBuy,
         topSell: update.topSell ?? prev.topSell,
         volume: update.volume ?? prev.volume,
@@ -417,7 +441,7 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
         if (update.total_fetch_count !== undefined) {
           setLiveStats((prev) => ({
             ...prev,
-            totalFetches: mergeScanCount(update.total_fetch_count, prev.totalFetches),
+            totalFetches: mergeScanCount(totalFetchCount, socketMessageCount, prev.totalFetches),
             quoteSource: update.quote_source ?? prev.quoteSource,
             socketStatus: update.socket_status ?? prev.socketStatus,
             socketLastReceivedAt: update.socket_last_received_at ?? prev.socketLastReceivedAt,
@@ -473,7 +497,7 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
       setLiveStats((prev) => ({
         ...prev,
         fetchRate: update.fetchDetails?.fetchRate ?? prev.fetchRate,
-        totalFetches: mergeScanCount(update.fetchDetails?.totalFetchCount, prev.totalFetches),
+        totalFetches: mergeScanCount(update.fetchDetails?.totalFetchCount, socketMessageCount, prev.totalFetches),
       }));
     }
 
@@ -515,15 +539,165 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
     notifyStateChange();
   }, [notifyStateChange, onRunningChange]);
 
+  const closeQuoteSocket = useCallback((markClosedByUser = true) => {
+    quoteSocketConnectionIdRef.current += 1;
+    if (quoteSocketReconnectRef.current) {
+      clearTimeout(quoteSocketReconnectRef.current);
+      quoteSocketReconnectRef.current = null;
+    }
+    const socket = quoteSocketRef.current;
+    quoteSocketRef.current = null;
+    if (markClosedByUser) {
+      quoteSocketClosedByUserRef.current = true;
+    }
+    if (socket) {
+      socket.onopen = null;
+      socket.onmessage = null;
+      socket.onerror = null;
+      socket.onclose = null;
+      try {
+        socket.close();
+      } catch {
+        // ignore socket shutdown errors
+      }
+    }
+  }, []);
+
+  const openQuoteSocket = useCallback(() => {
+    if (!isRunningRef.current || !sessionIdRef.current) {
+      return;
+    }
+    const clientId = formDataRef.current.client_id.trim();
+    const symbol = formDataRef.current.stock_symbol.trim().toUpperCase();
+    if (!clientId || !symbol) {
+      return;
+    }
+
+    quoteSocketClosedByUserRef.current = false;
+    closeQuoteSocket(false);
+    const connectionId = quoteSocketConnectionIdRef.current;
+
+    const socketUrl = buildWebSocketUrl('/ws/stock_quote', {
+      client_id: clientId,
+      symbol,
+    });
+    const socket = new WebSocket(socketUrl);
+    quoteSocketRef.current = socket;
+
+    socket.onopen = () => {
+      if (connectionId !== quoteSocketConnectionIdRef.current) {
+        return;
+      }
+      quoteSocketRetryRef.current = 0;
+      if (isRunningRef.current) {
+        setConnectionStatus('live');
+      }
+    };
+
+    socket.onmessage = (event) => {
+      try {
+        if (connectionId !== quoteSocketConnectionIdRef.current) {
+          return;
+        }
+        const data = JSON.parse(String(event.data || '{}'));
+        if (data?.type === 'error') {
+          const message = data.message || 'Live socket error';
+          setError(message);
+          addEvent('warn', '⚠', message);
+          if (/auth|token|login/i.test(String(message))) {
+            closeQuoteSocket(false);
+          }
+          return;
+        }
+        if (data?.type === 'market_closed') {
+          processUpdate({
+            status: 'waiting',
+            message: data.message || 'Waiting for market to open',
+            quote_source: data.socket?.source || 'http',
+            socket_status: data.socket?.status,
+            socket_last_received_at: data.socket?.last_received_at,
+            socket_message_count: data.socket?.message_count,
+          });
+          return;
+        }
+        const quote = data?.quote || data?.socket?.quote;
+        if (!quote) {
+          if (data?.socket) {
+            setLiveStats((prev) => ({
+              ...prev,
+              quoteSource: data.quote_source ?? prev.quoteSource,
+              socketStatus: data.socket?.status ?? prev.socketStatus,
+              socketLastReceivedAt: data.socket?.last_received_at ?? prev.socketLastReceivedAt,
+              socketMessageCount: Number(data.socket?.message_count ?? prev.socketMessageCount ?? 0),
+            }));
+          }
+          return;
+        }
+        processUpdate({
+          status: 'socket',
+          symbol: data?.security?.symbol || symbol,
+          quote_source: data?.quote_source || 'socket',
+          socket_status: data?.socket?.status,
+          socket_last_received_at: data?.socket?.last_received_at,
+          socket_message_count: data?.socket?.message_count,
+          ltp: quote.ltp,
+          change_percentage: quote.changePercentage,
+          topBuy: quote.topBuy || [],
+          topSell: quote.topSell || [],
+          volume: quote.volume,
+          lastTradedTime: quote.lastTradedTime,
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Failed to parse live socket update';
+        setError(message);
+      }
+    };
+
+    socket.onerror = () => {
+      if (connectionId !== quoteSocketConnectionIdRef.current) {
+        return;
+      }
+      if (isRunningRef.current) {
+        setConnectionStatus('connecting');
+      }
+    };
+
+    socket.onclose = (event) => {
+      if (connectionId !== quoteSocketConnectionIdRef.current) {
+        return;
+      }
+      quoteSocketRef.current = null;
+      if (quoteSocketReconnectRef.current) {
+        clearTimeout(quoteSocketReconnectRef.current);
+        quoteSocketReconnectRef.current = null;
+      }
+      if (!isRunningRef.current || quoteSocketClosedByUserRef.current) {
+        return;
+      }
+      if (event.code === 1008) {
+        setConnectionStatus('idle');
+        return;
+      }
+      const delay = Math.min(15000, 1000 * (2 ** Math.min(quoteSocketRetryRef.current, 4)));
+      quoteSocketRetryRef.current += 1;
+      quoteSocketReconnectRef.current = setTimeout(() => {
+        if (isRunningRef.current && !quoteSocketClosedByUserRef.current) {
+          openQuoteSocket();
+        }
+      }, delay);
+    };
+  }, [addEvent, closeQuoteSocket, processUpdate]);
+
   const resetSession = useCallback(() => {
     setRunning(false);
     setConnectionStatus('stopped');
     stopPolling();
+    closeQuoteSocket(true);
     sessionIdRef.current = null;
     isStartingRef.current = false;
     stableLoggedRef.current = false;
     notifyStateChange();
-  }, [notifyStateChange, setRunning, stopPolling]);
+  }, [closeQuoteSocket, notifyStateChange, setRunning, stopPolling]);
 
   const restartGrabber = useCallback(async () => {
     if (isRestartingRef.current || isStartingRef.current) {
@@ -531,6 +705,7 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
     }
     isRestartingRef.current = true;
     stopPolling();
+    closeQuoteSocket(false);
     const oldSession = sessionIdRef.current;
     sessionIdRef.current = null;
     isRunningRef.current = false;
@@ -560,7 +735,7 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
     isRestartingRef.current = false;
     onFocusCard?.();
     await startRef.current(true);
-  }, [addEvent, onFocusCard, setRunning, stopPolling]);
+  }, [addEvent, closeQuoteSocket, onFocusCard, setRunning, stopPolling]);
 
   const beginPolling = useCallback(() => {
     if (pollingRef.current) {
@@ -644,13 +819,14 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
       addEvent('info', '🔌', 'Reconnected to running scanner');
       notifyStateChange();
       beginPolling();
+      openQuoteSocket();
     } catch {
       sessionIdRef.current = null;
       isStartingRef.current = false;
       addEvent('warn', '🔄', 'Session lost — restarting scanner…');
       await startRef.current(true);
     }
-  }, [addEvent, beginPolling, notifyStateChange, onFocusCard, processUpdate, setRunning]);
+  }, [addEvent, beginPolling, notifyStateChange, onFocusCard, openQuoteSocket, processUpdate, setRunning]);
 
   const startStockGrabber = async (force = false) => {
     clearFetchSpeedTest();
@@ -726,6 +902,7 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
       notifyStateChange();
       onFocusCard?.();
       beginPolling();
+      openQuoteSocket();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to start monitor');
       resetSession();
@@ -752,6 +929,7 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to stop monitor');
     } finally {
+      closeQuoteSocket(true);
       resetSession();
     }
   };
@@ -780,7 +958,7 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
     const startedAt = performance.now();
     let liveUpdates = 0;
     let errors = 0;
-    let lastSocketMessageCount = 0;
+    let lastSocketMessageCount: number | null = null;
     let measuredElapsedSeconds: number | null = null;
     let measuredRate: number | null = null;
     let fixedTestHost = '';
@@ -790,6 +968,7 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
         const socketUrl = buildWebSocketUrl('/ws/stock_quote', {
           client_id: formDataRef.current.client_id,
           symbol: formDataRef.current.stock_symbol,
+          allow_market_closed: true,
         });
         const socket = new WebSocket(socketUrl);
         let finished = false;
@@ -827,7 +1006,10 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
             const socketState = data?.socket || null;
             const socketMessageCount = Number(socketState?.message_count ?? socketState?.messageCount ?? 0);
             if (socketMessageCount > 0) {
-              if (socketMessageCount > lastSocketMessageCount) {
+              if (lastSocketMessageCount === null) {
+                lastSocketMessageCount = socketMessageCount;
+                liveUpdates += 1;
+              } else if (socketMessageCount > lastSocketMessageCount) {
                 liveUpdates += socketMessageCount - lastSocketMessageCount;
                 lastSocketMessageCount = socketMessageCount;
               }
@@ -971,8 +1153,9 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
 
   useEffect(() => () => {
     stopPolling();
+    closeQuoteSocket(true);
     if (flashTimeoutRef.current) clearTimeout(flashTimeoutRef.current);
-  }, [stopPolling]);
+  }, [closeQuoteSocket, stopPolling]);
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
     const { name, value } = e.target;
@@ -990,6 +1173,12 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
   const visibleEvents = showEvents ? activity.slice(0, 3) : activity.slice(0, 1);
   const activeTopBuy = liveStats.topBuy.filter((row) => Number(row.price || 0) > 0 || Number(row.quantity || 0) > 0);
   const activeTopSell = liveStats.topSell.filter((row) => Number(row.price || 0) > 0 || Number(row.quantity || 0) > 0);
+  const isSocketPollingFallback = isRunning
+    && formData.scan_mode === 'socket'
+    && liveStats.quoteSource === 'http';
+  const statusLabel = isSocketPollingFallback
+    ? 'Live via stock quote polling - socket reconnecting'
+    : CONNECTION_LABELS[connectionStatus];
 
   const buildSparkline = () => {
     if (priceHistory.length < 2) return null;
@@ -1079,8 +1268,8 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
             </span>
           </div>
           <div className="sg-metric">
-            <span className="sg-metric-label">Source</span>
-            <span className="sg-metric-value">{liveStats.quoteSource || '—'}</span>
+            <span className="sg-metric-label">Stock Quote</span>
+            <span className="sg-metric-value">{formatQuoteSourceLabel(liveStats.quoteSource)}</span>
           </div>
           <div className="sg-metric">
             <span className="sg-metric-label">Socket</span>
@@ -1097,7 +1286,20 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
           <div className="sg-socket-meta">
             <span>Socket messages: {liveStats.socketMessageCount ?? 0}</span>
             {liveStats.volume !== null && <span>Volume: {liveStats.volume.toLocaleString()}</span>}
-            {liveStats.socketLastReceivedAt && <span>Last socket: {new Date(liveStats.socketLastReceivedAt).toLocaleTimeString()}</span>}
+            {liveStats.socketLastReceivedAt && (
+              <span>
+                Last socket: {new Intl.DateTimeFormat('en-US', {
+                  timeZone: NEPAL_TIME_ZONE,
+                  year: 'numeric',
+                  month: 'short',
+                  day: 'numeric',
+                  hour: '2-digit',
+                  minute: '2-digit',
+                  second: '2-digit',
+                  hour12: true,
+                }).format(new Date(liveStats.socketLastReceivedAt))}
+              </span>
+            )}
           </div>
         )}
 
@@ -1131,7 +1333,7 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
 
         <div className={`sg-status-strip ${connectionStatus}`}>
           <span className="sg-status-dot" />
-          <span>{CONNECTION_LABELS[connectionStatus]}</span>
+          <span>{statusLabel}</span>
         </div>
 
         {activity.length > 0 && (

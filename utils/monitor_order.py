@@ -20,7 +20,7 @@ from sqlalchemy import or_, update
 from utils.strategy_builder.constants import RULE_BASED_STRATEGIES
 from utils.log_sender import consume_monitor_scan_count_resets, store_or_update_logs
 from utils.market_gate import resolve_market_gate
-from utils.live_quote_socket import live_quote_manager
+from utils.live_quote_socket import is_live_socket_snapshot, live_quote_manager
 from utils.tms import TmsUser
 from utils.strategies.normalize import normalize_tms_quote
 from utils.strategies.order_context import build_scanner_memory, update_scan_history
@@ -675,7 +675,7 @@ async def monitor_order_task_func():
                                 socket_state = live_snapshot or live_quote_manager.get_snapshot(order.script_name)
                                 if socket_state and socket_state.get("quote"):
                                     quote = socket_state["quote"]
-                                    quote_source = "socket"
+                                    quote_source = "socket" if is_live_socket_snapshot(socket_state) else "http"
                                     _record_monitor_socket_success(monitor_socket_key)
                                     break
                                 if socket_state and (

@@ -205,7 +205,7 @@ const StockGrabberPage: React.FC = () => {
           <p className="panel-subtitle">Configure client and symbol, then use Start in the control panel above.</p>
         </div>
         <div className="stock-grabber-add-form">
-          <div className="form-group">
+          <div className="form-group stock-grabber-client-field">
             <label htmlFor="sgClientId">Client ID</label>
             <select
               id="sgClientId"
@@ -226,7 +226,7 @@ const StockGrabberPage: React.FC = () => {
               <span className="stock-grabber-hint">Log in via TMS Login tab first.</span>
             )}
           </div>
-          <div className="form-group">
+          <div className="form-group stock-grabber-ipo-field">
             <label htmlFor="sgWatchlist">New IPO watchlist</label>
             <select
               id="sgWatchlist"
@@ -248,11 +248,11 @@ const StockGrabberPage: React.FC = () => {
                 </option>
               ))}
             </select>
-            <span className="stock-grabber-hint">
+            <span className="stock-grabber-hint stock-grabber-hint-muted">
               Picks from the new / IPO watchlist and fills the symbol below.
             </span>
           </div>
-          <div className="form-group">
+          <div className="form-group stock-grabber-symbol-field">
             <label htmlFor="sgSymbol">Stock Symbol</label>
             <input
               id="sgSymbol"
@@ -265,7 +265,7 @@ const StockGrabberPage: React.FC = () => {
           </div>
           <button
             type="button"
-            className="btn btn-success"
+            className="btn btn-success stock-grabber-add-button"
             onClick={addGrabber}
             disabled={
               !newClientId.trim()

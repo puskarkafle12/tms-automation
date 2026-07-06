@@ -85,7 +85,7 @@ from utils.strategy_builder.reference_display import (
     display_values_for_scheduled_order,
     display_values_from_strategy_config,
 )
-from utils.live_quote_socket import live_quote_manager
+from utils.live_quote_socket import is_live_socket_snapshot, live_quote_manager
 
 app = FastAPI(debug=True)
 app.include_router(strategy_builder_router)
@@ -1052,7 +1052,7 @@ async def get_stock_grabber_updates(session_id: str):
             updates.append({
                 "status": "socket",
                 "symbol": tms_user.stock_symbol,
-                "quote_source": "socket" if quote else None,
+                "quote_source": "socket" if is_live_socket_snapshot(live_snapshot) else "http",
                 "socket_status": live_snapshot.get("status"),
                 "socket_last_received_at": live_snapshot.get("last_received_at"),
                 "socket_message_count": live_snapshot.get("message_count"),
@@ -1604,7 +1604,15 @@ def _serialize_scheduled_order(order: ScheduledOrder) -> dict:
     display_reference_captured_at = order.reference_ltp_captured_at
     if display_reference_captured_at is None:
         display_reference_captured_at = reference_display.reference_ltp_captured_at
+    market_open = get_market_hours_status()["market_hours_open"]
     live_snapshot = live_quote_manager.get_snapshot(order.script_name)
+    if not market_open and not live_snapshot:
+        live_snapshot = {
+            "status": "paused_market_closed",
+            "last_received_at": None,
+            "message_count": None,
+            "quote": None,
+        }
     live_quote = (live_snapshot or {}).get("quote") or {}
 
     return {
@@ -2704,8 +2712,16 @@ async def get_order_status_logs(
 
     scheduled_payload = []
     monitor_phase = tms_config.scheduled_phase if tms_config.is_running else "stopped"
+    market_open = get_market_hours_status()["market_hours_open"]
     for order in scheduled_orders:
         live_snapshot = live_quote_manager.get_snapshot(order.script_name)
+        if not market_open and not live_snapshot:
+            live_snapshot = {
+                "status": "paused_market_closed",
+                "last_received_at": None,
+                "message_count": None,
+                "quote": None,
+            }
         live_quote = (live_snapshot or {}).get("quote") or {}
         scan_log = scan_logs.get((order.client_id, order.script_name))
         scanning_count = int(scan_log.scanning_count or 0) if scan_log else 0
@@ -2991,9 +3007,9 @@ async def get_stock_quote(
         source = "http"
         if normalized_transport != "http" and market_open:
             await live_quote_manager.ensure_stream(tms_user_instance, symbol, str(security["id"]))
-            live_snapshot = await live_quote_manager.wait_for_quote(symbol)
-            quote = (live_snapshot or {}).get("quote")
-            source = "socket" if quote else "http"
+        live_snapshot = await live_quote_manager.wait_for_quote(symbol)
+        quote = (live_snapshot or {}).get("quote")
+        source = "socket" if is_live_socket_snapshot(live_snapshot) else "http"
         if quote is None:
             quote = await tms_user_instance.get_stock_details_async(
                 str(security["id"]),
@@ -3026,7 +3042,12 @@ async def get_stock_quote(
 
 
 @app.websocket("/ws/stock_quote")
-async def websocket_stock_quote(websocket: WebSocket, client_id: str, symbol: str):
+async def websocket_stock_quote(
+    websocket: WebSocket,
+    client_id: str,
+    symbol: str,
+    allow_market_closed: bool = Query(False),
+):
     db = SessionLocal()
     normalized_symbol = str(symbol or "").strip().upper()
     try:
@@ -3050,7 +3071,7 @@ async def websocket_stock_quote(websocket: WebSocket, client_id: str, symbol: st
                 pass
             await websocket.close(code=1001)
 
-        if not get_market_hours_status()["market_hours_open"]:
+        if not allow_market_closed and not get_market_hours_status()["market_hours_open"]:
             await close_for_market_closed()
             return
 
@@ -3064,16 +3085,24 @@ async def websocket_stock_quote(websocket: WebSocket, client_id: str, symbol: st
             await websocket.close(code=1008)
             return
 
-        await live_quote_manager.ensure_stream(tms_user_instance, normalized_symbol, str(security["id"]))
-        if not get_market_hours_status()["market_hours_open"]:
+        await live_quote_manager.ensure_stream(
+            tms_user_instance,
+            normalized_symbol,
+            str(security["id"]),
+            allow_market_closed=allow_market_closed,
+        )
+        if not allow_market_closed and not get_market_hours_status()["market_hours_open"]:
             await close_for_market_closed()
             return
-        live_snapshot = await live_quote_manager.wait_for_quote(normalized_symbol)
+        live_snapshot = await live_quote_manager.wait_for_quote(
+            normalized_symbol,
+            allow_market_closed=allow_market_closed,
+        )
 
         async def send_snapshot(snapshot: Optional[dict]) -> None:
             live_state = snapshot or live_quote_manager.get_snapshot(normalized_symbol)
             quote = (live_state or {}).get("quote")
-            source = "socket" if quote else "http"
+            source = "socket" if is_live_socket_snapshot(live_state) else "http"
             payload = {
                 "type": "quote",
                 "security": security,
@@ -3104,25 +3133,42 @@ async def websocket_stock_quote(websocket: WebSocket, client_id: str, symbol: st
             return
 
         while True:
-            if not get_market_hours_status()["market_hours_open"]:
+            if not allow_market_closed and not get_market_hours_status()["market_hours_open"]:
                 await close_for_market_closed(live_quote_manager.get_snapshot(normalized_symbol))
                 return
             snapshot = await live_quote_manager.wait_for_next_quote(
                 normalized_symbol,
                 after_message_count=last_message_count,
                 timeout=25.0,
+                allow_market_closed=allow_market_closed,
             )
             if snapshot and snapshot.get("quote"):
                 last_message_count = int(snapshot.get("message_count") or last_message_count)
                 await send_snapshot(snapshot)
                 continue
             current_snapshot = live_quote_manager.get_snapshot(normalized_symbol) or {}
-            if not get_market_hours_status()["market_hours_open"]:
+            if not allow_market_closed and not get_market_hours_status()["market_hours_open"]:
                 await close_for_market_closed(current_snapshot)
                 return
             if current_snapshot.get("auth_failed") or current_snapshot.get("status") == "auth_failed":
                 await close_for_auth_failure(current_snapshot)
                 return
+            if current_snapshot.get("status") in {"failed", "closed"}:
+                await live_quote_manager.close_symbol(normalized_symbol)
+                await live_quote_manager.ensure_stream(
+                    tms_user_instance,
+                    normalized_symbol,
+                    str(security["id"]),
+                    force_restart=True,
+                    allow_market_closed=allow_market_closed,
+                )
+                restarted_snapshot = await live_quote_manager.wait_for_quote(
+                    normalized_symbol,
+                    allow_market_closed=allow_market_closed,
+                )
+                await send_snapshot(restarted_snapshot)
+                last_message_count = int((restarted_snapshot or {}).get("message_count") or 0)
+                continue
             await websocket.send_json({
                 "type": "heartbeat",
                 "socket": current_snapshot,
