@@ -39,6 +39,10 @@ import config.tms_config as config
 
 
 MAX_PRICE_FETCH_CONCURRENCY = 1
+MONITOR_SOCKET_RETRY_ATTEMPTS = 3
+MONITOR_SOCKET_RETRY_DELAY_SECONDS = 20
+MONITOR_SOCKET_FALLBACK_COOLDOWN_SECONDS = 60.0
+MONITOR_SOCKET_FAILURE_THRESHOLD = 3
 TERMINAL_STATUSES = {
     "order_placed",
     "Executed",
@@ -48,6 +52,8 @@ TERMINAL_STATUSES = {
     "Blocked by slippage",
     "BlockedByLotRule",
 }
+
+_monitor_socket_failure_state: Dict[tuple[str, str], Dict[str, float | int]] = {}
 ACTIVE_STATUSES = {
     "pending",
     "Waiting",
@@ -137,6 +143,7 @@ class OrderQuoteSnapshot:
     current_price: Optional[float]
     quote: Optional[dict] = None
     high_price: Optional[float] = None
+    quote_source: str = "http"
     error_message: Optional[str] = None
 
 
@@ -192,6 +199,39 @@ def _load_monitor_cycle_data():
 
 def _status_log_from_order(order: ScheduledOrder) -> OrderStatusLog:
     return status_log_from_scheduled_order(order)
+
+
+def _monitor_socket_key(order: PendingOrderSnapshot) -> tuple[str, str]:
+    return (order.client_id, order.script_name.strip().upper())
+
+
+def _monitor_socket_polling_only(key: tuple[str, str]) -> bool:
+    state = _monitor_socket_failure_state.get(key)
+    if not state:
+        return False
+    fallback_until = float(state.get("fallback_until") or 0.0)
+    return fallback_until > 0 and time.monotonic() < fallback_until
+
+
+def _record_monitor_socket_success(key: tuple[str, str]) -> None:
+    _monitor_socket_failure_state.pop(key, None)
+
+
+def _record_monitor_socket_failure(key: tuple[str, str], *, terminal: bool = False) -> None:
+    now = time.monotonic()
+    state = _monitor_socket_failure_state.get(key, {"failures": 0, "fallback_until": 0.0})
+    failures = MONITOR_SOCKET_FAILURE_THRESHOLD if terminal else int(state.get("failures") or 0) + 1
+    if failures >= MONITOR_SOCKET_FAILURE_THRESHOLD:
+        state = {
+            "failures": 0,
+            "fallback_until": now + MONITOR_SOCKET_FALLBACK_COOLDOWN_SECONDS,
+        }
+    else:
+        state = {
+            "failures": failures,
+            "fallback_until": 0.0,
+        }
+    _monitor_socket_failure_state[key] = state
 
 
 async def _handle_recovery_watch(
@@ -584,6 +624,7 @@ async def monitor_order_task_func():
 
                 async def fetch_order_snapshot(order: PendingOrderSnapshot) -> OrderQuoteSnapshot:
                     key = (order.client_id, order.script_name)
+                    monitor_socket_key = _monitor_socket_key(order)
                     count_dict[key] = count_dict.get(key, 0) + 1
                     scan_count = count_dict[key]
 
@@ -614,19 +655,48 @@ async def monitor_order_task_func():
                                 error_message=f"Security not found for {order.script_name}",
                             )
 
-                        await live_quote_manager.ensure_stream(
-                            tms_user,
-                            order.script_name,
-                            str(security_details["id"]),
-                        )
-                        live_snapshot = await live_quote_manager.wait_for_quote(order.script_name)
-                        quote = (live_snapshot or {}).get("quote")
+                        live_snapshot = None
+                        quote = None
+                        quote_source = "http"
+                        socket_state = None
+
+                        if not _monitor_socket_polling_only(monitor_socket_key):
+                            await live_quote_manager.ensure_stream(
+                                tms_user,
+                                order.script_name,
+                                str(security_details["id"]),
+                            )
+                            for attempt in range(MONITOR_SOCKET_RETRY_ATTEMPTS):
+                                live_snapshot = await live_quote_manager.wait_for_next_distinct_quote(
+                                    order.script_name,
+                                    after_signature=str((live_snapshot or {}).get("quote_signature") or ""),
+                                    timeout=0.5,
+                                )
+                                socket_state = live_snapshot or live_quote_manager.get_snapshot(order.script_name)
+                                if socket_state and socket_state.get("quote"):
+                                    quote = socket_state["quote"]
+                                    quote_source = "socket"
+                                    _record_monitor_socket_success(monitor_socket_key)
+                                    break
+                                if socket_state and (
+                                    socket_state.get("auth_failed")
+                                    or socket_state.get("status") in {"auth_failed", "failed", "closed"}
+                                ):
+                                    await live_quote_manager.close_symbol(order.script_name)
+                                    _record_monitor_socket_failure(monitor_socket_key, terminal=True)
+                                    break
+                                if attempt < MONITOR_SOCKET_RETRY_ATTEMPTS - 1:
+                                    await asyncio.sleep(MONITOR_SOCKET_RETRY_DELAY_SECONDS)
+                            else:
+                                _record_monitor_socket_failure(monitor_socket_key)
+
                         if quote is None:
                             async with price_fetch_sem:
                                 quote = await tms_user.get_stock_details_async(
                                     security_details["id"],
                                     max_retries=3,
                                     retry_backoff=True,
+                                    force_refresh=True,
                                 )
                         if quote is None:
                             return OrderQuoteSnapshot(
@@ -644,6 +714,7 @@ async def monitor_order_task_func():
                             current_price=quote.get("ltp"),
                             quote=quote,
                             high_price=quote.get("high") or quote.get("dayHigh"),
+                            quote_source=quote_source,
                         )
                     except Exception as exc:
                         return OrderQuoteSnapshot(
@@ -733,7 +804,7 @@ async def monitor_order_task_func():
                         if live_snapshot:
                             updated_config = {
                                 **(updated_config or {}),
-                                "last_tms_quote_source": "socket" if snapshot.quote else "http",
+                                "last_tms_quote_source": snapshot.quote_source,
                                 "last_socket_status": live_snapshot.get("status"),
                                 "last_socket_received_at": live_snapshot.get("last_received_at"),
                                 "last_socket_message_count": live_snapshot.get("message_count"),

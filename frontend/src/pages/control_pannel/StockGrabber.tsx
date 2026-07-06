@@ -2,7 +2,6 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import './StockGrabber.css';
 import ErrorMessage from '../../components/ErrorMessage';
 import NepseAlphaSymbolLink from '../../components/NepseAlphaSymbolLink';
-import CommonTable from '../../components/table/Table';
 import { GrabberControls } from '../../types/monitoring';
 import { buildWebSocketUrl, fetchJson } from '../../utils/api';
 
@@ -15,6 +14,7 @@ interface StockGrabberRequest {
   request_per_sec: number;
   scan_mode: 'socket' | 'fixed';
   stop_buy_after_percent: number;
+  stop_buy_after_volume: number;
   broker_no: string;
   resume_scan_count?: number;
   resume_previous_ltp?: number;
@@ -54,12 +54,6 @@ interface StockGrabberResponse {
   volume?: number;
   lastTradedTime?: string;
   delay_details?: OrderDelayDetails;
-}
-
-interface NewStockRow {
-  symbol: string;
-  is_watchlist?: boolean;
-  volume?: number;
 }
 
 interface OrderDelayDetails {
@@ -130,6 +124,7 @@ interface GrabberPersistState {
   request_per_sec: number;
   scan_mode: 'socket' | 'fixed';
   stop_buy_after_percent: number;
+  stop_buy_after_volume: number;
   scanCount: number;
   stableRate: number | null;
 }
@@ -145,6 +140,7 @@ interface StockGrabberProps {
   initialOrderQuantity?: number;
   initialRequestPerSec?: number;
   initialStopBuyAfterPercent?: number;
+  initialStopBuyAfterVolume?: number;
   symbolAlreadyRunning?: boolean;
   onRemove: () => void;
   onRunningChange?: (running: boolean) => void;
@@ -215,6 +211,7 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
   initialOrderQuantity,
   initialRequestPerSec,
   initialStopBuyAfterPercent,
+  initialStopBuyAfterVolume,
   symbolAlreadyRunning = false,
   onRemove,
   onRunningChange,
@@ -230,6 +227,7 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
     request_per_sec: initialRequestPerSec ?? 3,
     scan_mode: 'socket',
     stop_buy_after_percent: initialStopBuyAfterPercent ?? 15,
+    stop_buy_after_volume: initialStopBuyAfterVolume ?? 5000,
     broker_no: '35',
   });
   const [isRunning, setIsRunning] = useState(false);
@@ -253,8 +251,6 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
     ),
   );
   const [selectedDelay, setSelectedDelay] = useState<OrderDelayRecord | null>(null);
-  const [newStocks, setNewStocks] = useState<NewStockRow[]>([]);
-  const [newStocksLoading, setNewStocksLoading] = useState(false);
   const [liveStats, setLiveStats] = useState<LiveStats>({
     ltp: null,
     changePct: null,
@@ -321,6 +317,7 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
       request_per_sec: formDataRef.current.request_per_sec,
       scan_mode: formDataRef.current.scan_mode,
       stop_buy_after_percent: formDataRef.current.stop_buy_after_percent,
+      stop_buy_after_volume: formDataRef.current.stop_buy_after_volume,
       scanCount: liveStatsRef.current.totalFetches,
       stableRate: liveStatsRef.current.stableRate,
     });
@@ -981,7 +978,7 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
     const { name, value } = e.target;
     setFormData((prev) => ({
       ...prev,
-      [name]: name === 'order_quantity' || name === 'request_per_sec' || name === 'stop_buy_after_percent'
+      [name]: name === 'order_quantity' || name === 'request_per_sec' || name === 'stop_buy_after_percent' || name === 'stop_buy_after_volume'
         ? parseFloat(value) || 0
         : name === 'scan_mode'
           ? (value === 'fixed' ? 'fixed' : 'socket')
@@ -991,20 +988,6 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
 
   const changePositive = (liveStats.changePct ?? 0) >= 0;
   const visibleEvents = showEvents ? activity.slice(0, 3) : activity.slice(0, 1);
-  const loadNewStocks = useCallback(async () => {
-    setNewStocksLoading(true);
-    try {
-      const response = await fetchJson<{ symbols?: NewStockRow[] }>('/market_analysis/new_stocks?days=15');
-      if (response.ok) {
-        setNewStocks(response.data.symbols || []);
-      }
-    } finally {
-      setNewStocksLoading(false);
-    }
-  }, []);
-  useEffect(() => {
-    void loadNewStocks();
-  }, [loadNewStocks]);
   const activeTopBuy = liveStats.topBuy.filter((row) => Number(row.price || 0) > 0 || Number(row.quantity || 0) > 0);
   const activeTopSell = liveStats.topSell.filter((row) => Number(row.price || 0) > 0 || Number(row.quantity || 0) > 0);
 
@@ -1267,6 +1250,23 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
               />
               <span className="sg-settings-hint">Stops new buys at or above this day change. Max 15%.</span>
             </div>
+            <div className="form-group">
+              <label htmlFor={`stop-volume-${instanceId}`}>Stop Buy After Volume</label>
+              <input
+                id={`stop-volume-${instanceId}`}
+                type="number"
+                name="stop_buy_after_volume"
+                className="input"
+                value={formData.stop_buy_after_volume}
+                onChange={handleInputChange}
+                disabled={isRunning}
+                min={0}
+                step={1}
+              />
+              <span className="sg-settings-hint">
+                Grabber stops when volume exceeds this value. Default is 5,000.
+              </span>
+            </div>
           </div>
         </div>
       )}
@@ -1352,31 +1352,6 @@ const StockGrabber: React.FC<StockGrabberProps> = ({
         </div>
       )}
 
-      <div className="sg-new-stocks-panel">
-        <div className="sg-new-stocks-header">
-          <div>
-            <h3>New / IPO watchlist</h3>
-            <p>Filtered New Stocks table with volume for quick grabber checks.</p>
-          </div>
-          <button type="button" className="sg-refresh-btn" onClick={() => { void loadNewStocks(); }} disabled={newStocksLoading}>
-            {newStocksLoading ? 'Refreshing...' : 'Refresh'}
-          </button>
-        </div>
-        {newStocksLoading && newStocks.length === 0 ? (
-          <p className="sg-new-stocks-empty">Loading new IPO symbols…</p>
-        ) : newStocks.length === 0 ? (
-          <p className="sg-new-stocks-empty">No new symbols found.</p>
-        ) : (
-          <CommonTable
-            data={newStocks}
-            columns={['symbol', 'volume', 'is_watchlist']}
-            columnLabels={{ volume: 'Volume', is_watchlist: 'Watchlist' }}
-            columnLinks={{
-              symbol: (row) => `https://nepsealpha.com/trading/chart?symbol=${encodeURIComponent(String(row.symbol || ''))}`,
-            }}
-          />
-        )}
-      </div>
     </div>
   );
 };

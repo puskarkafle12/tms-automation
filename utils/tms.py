@@ -1611,14 +1611,16 @@ class TmsUser:
 
             if not self._allow_full_login_on_refresh:
                 self._auth_refresh_failed_at = monotonic_time.monotonic()
+                logout_user(self.client_id, summarize_login_message(reason))
                 raise LoginFailedException("TMS token refresh failed; full captcha login skipped")
 
             try:
                 result = await self._full_login_and_persist()
                 self._auth_refresh_failed_at = 0.0
                 return result
-            except Exception:
+            except Exception as exc:
                 self._auth_refresh_failed_at = monotonic_time.monotonic()
+                logout_user(self.client_id, summarize_login_message(str(exc) or reason))
                 raise
 
     async def _authenticated_request(
@@ -1938,6 +1940,7 @@ class TmsUser:
         session_id: str,
         max_order_limit: int = 4,
         stop_buy_after_percent: float = NEPSE_INTRADAY_LIMIT_PERCENT,
+        stop_buy_after_volume: float = 5000.0,
     ) -> Dict:
         self.order_quantity = order_quantity
         max_order_limit = 4 if not max_order_limit or int(max_order_limit) < 1 else int(max_order_limit)
@@ -1951,6 +1954,7 @@ class TmsUser:
             max(0, configured_stop),
         )
         self.stop_buy_after_percent = stop_buy_after_percent
+        self.stop_buy_after_volume = max(0.0, float(stop_buy_after_volume or 0.0))
 
         await self._ensure_session()
 
@@ -1992,6 +1996,30 @@ class TmsUser:
                     continue
 
                 change_percentage = float(stock_details.get('changePercentage', 0) or 0)
+                volume_value_raw = stock_details.get('volume')
+                try:
+                    volume_value = float(volume_value_raw) if volume_value_raw is not None else None
+                except (TypeError, ValueError):
+                    volume_value = None
+
+                if volume_value is not None and volume_value > self.stop_buy_after_volume:
+                    message = (
+                        f"Stopped buying {self.stock_symbol}: volume {volume_value:,.0f} "
+                        f"exceeded stop threshold {self.stop_buy_after_volume:,.0f}"
+                    )
+                    self.updates.append({
+                        "status": "completed",
+                        "message": message,
+                        "total_orders": len(total_orders),
+                        "volume": volume_value,
+                        "stop_reason": "stop_buy_after_volume",
+                    })
+                    return {
+                        "message": message,
+                        "totalOrders": total_orders,
+                        "stop_reason": "stop_buy_after_volume",
+                    }
+
                 if is_stock_grabber_stop_reached(change_percentage, stop_buy_after_percent):
                     message = (
                         f"Stopped buying {self.stock_symbol}: change {change_percentage}% "

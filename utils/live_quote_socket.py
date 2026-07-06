@@ -9,9 +9,21 @@ from typing import Any, Dict, Optional
 
 import websockets
 
+from utils.market_status import get_market_hours_status, get_nepal_now
+
 
 SOCKET_QUOTE_FRESH_SECONDS = 8.0
 SOCKET_QUOTE_WAIT_SECONDS = 2.0
+AUTH_ERROR_MARKERS = (
+    "401",
+    "unauthorized",
+    "authentication",
+    "auth failed",
+    "auth failure",
+    "logged out",
+    "session expired",
+    "token expired",
+)
 
 
 def _utc_now_iso() -> str:
@@ -72,6 +84,15 @@ def _quote_signature(quote: Optional[dict]) -> str:
     return json.dumps(payload, sort_keys=True, default=str)
 
 
+def _looks_like_auth_error(exc: BaseException | str) -> bool:
+    message = str(exc or "").strip().lower()
+    return any(marker in message for marker in AUTH_ERROR_MARKERS)
+
+
+def _market_is_open_now() -> bool:
+    return bool(get_market_hours_status(get_nepal_now())["market_hours_open"])
+
+
 class LiveQuoteSocketManager:
     """Shared TMS stockquote sockets keyed by symbol to avoid duplicate streams."""
 
@@ -96,11 +117,13 @@ class LiveQuoteSocketManager:
             "message_count": int(stream.get("message_count") or 0),
             "error_count": int(stream.get("error_count") or 0),
             "last_error": stream.get("last_error"),
+            "auth_failed": bool(stream.get("auth_failed")),
             "started_at": stream.get("started_at"),
             "last_received_at": stream.get("last_received_at"),
             "last_requested_at": stream.get("last_requested_at"),
             "quote_signature": stream.get("quote_signature"),
             "quote": quote,
+            "market_open": bool(stream.get("market_open")),
             "fresh": self.is_fresh(symbol),
         }
 
@@ -120,11 +143,32 @@ class LiveQuoteSocketManager:
         force_restart: bool = False,
     ) -> dict:
         key = self._key(symbol)
+        market_open = _market_is_open_now()
+        if not market_open:
+            await self.close_symbol(key)
+            return {
+                "symbol": key,
+                "security_id": str(security_id),
+                "status": "closed",
+                "source": "socket",
+                "message_count": 0,
+                "error_count": 0,
+                "last_error": None,
+                "auth_failed": False,
+                "started_at": None,
+                "last_received_at": None,
+                "last_requested_at": _utc_now_iso(),
+                "quote_signature": "",
+                "quote": None,
+                "market_open": False,
+                "fresh": False,
+            }
         old_task: Optional[asyncio.Task] = None
         async with self._lock:
             stream = self._streams.get(key)
             if stream:
                 stream["last_requested_at"] = _utc_now_iso()
+                stream["market_open"] = market_open
                 stream.setdefault("quote_event", asyncio.Event())
                 task = stream.get("task")
                 if task is not None and not task.done():
@@ -143,12 +187,14 @@ class LiveQuoteSocketManager:
                 "quote_event": asyncio.Event(),
                 "error_count": int((stream or {}).get("error_count") or 0),
                 "last_error": None,
+                "auth_failed": False,
                 "started_at": _utc_now_iso(),
                 "last_requested_at": _utc_now_iso(),
                 "last_received_at": None,
                 "last_received_monotonic": 0.0,
                 "quote_signature": "",
                 "quote": (stream or {}).get("quote") if stream else None,
+                "market_open": market_open,
             }
             task = asyncio.create_task(self._run_stream(tms_user, key, str(security_id)))
             stream["task"] = task
@@ -164,6 +210,8 @@ class LiveQuoteSocketManager:
     async def wait_for_quote(self, symbol: str, *, timeout: float = SOCKET_QUOTE_WAIT_SECONDS) -> Optional[dict]:
         deadline = time.monotonic() + max(0.0, timeout)
         while time.monotonic() < deadline:
+            if not _market_is_open_now():
+                return self.get_snapshot(symbol)
             snapshot = self.get_snapshot(symbol)
             if snapshot and snapshot.get("quote"):
                 return snapshot
@@ -180,6 +228,8 @@ class LiveQuoteSocketManager:
         key = self._key(symbol)
         deadline = time.monotonic() + max(0.0, timeout)
         while time.monotonic() < deadline:
+            if not _market_is_open_now():
+                return None
             stream = self._streams.get(key)
             if not stream:
                 return None
@@ -207,6 +257,8 @@ class LiveQuoteSocketManager:
         key = self._key(symbol)
         deadline = time.monotonic() + max(0.0, timeout)
         while time.monotonic() < deadline:
+            if not _market_is_open_now():
+                return None
             stream = self._streams.get(key)
             if not stream:
                 return None
@@ -252,10 +304,19 @@ class LiveQuoteSocketManager:
                 except asyncio.CancelledError:
                     pass
 
+    def is_authentication_failed(self, symbol: str) -> bool:
+        snapshot = self.get_snapshot(symbol) or {}
+        return bool(snapshot.get("auth_failed"))
+
     async def _run_stream(self, tms_user: Any, symbol: str, security_id: str) -> None:
         key = self._key(symbol)
         stream = self._streams[key]
         try:
+            if not _market_is_open_now():
+                stream["status"] = "closed"
+                stream["market_open"] = False
+                return
+
             login_response = tms_user.login_response or {}
             request_owner = str(login_response.get("request_owner") or "").strip()
             client_dealer_id = str(login_response.get("client_dealer_id") or "").strip()
@@ -279,6 +340,7 @@ class LiveQuoteSocketManager:
 
             async with websockets.connect(socket_url, **_connect_kwargs(headers)) as websocket:
                 stream["status"] = "connected"
+                stream["market_open"] = True
                 await websocket.send(json.dumps({
                     "header": {"channel": "@control", "transaction": "start_stockquote"},
                     "payload": {"argument": str(security_id)},
@@ -286,7 +348,14 @@ class LiveQuoteSocketManager:
                 stream["status"] = "live"
 
                 while True:
-                    message = await websocket.recv()
+                    if not _market_is_open_now():
+                        stream["status"] = "closed"
+                        stream["market_open"] = False
+                        return
+                    try:
+                        message = await asyncio.wait_for(websocket.recv(), timeout=10.0)
+                    except asyncio.TimeoutError:
+                        continue
                     frames = json.loads(message)
                     for frame in frames if isinstance(frames, list) else [frames]:
                         header = frame.get("header") or {}
@@ -308,11 +377,27 @@ class LiveQuoteSocketManager:
                             event.set()
         except asyncio.CancelledError:
             stream["status"] = "closed"
+            stream["market_open"] = False
             raise
         except Exception as exc:
-            stream["status"] = "failed"
             stream["last_error"] = str(exc)
             stream["error_count"] = int(stream.get("error_count") or 0) + 1
+            if _looks_like_auth_error(exc):
+                stream["status"] = "auth_failed"
+                stream["auth_failed"] = True
+            else:
+                stream["status"] = "failed"
+                stream["auth_failed"] = False
+            if not _market_is_open_now():
+                stream["status"] = "closed"
+                stream["market_open"] = False
+        finally:
+            if not _market_is_open_now() and stream.get("status") not in {"auth_failed", "failed"}:
+                stream["status"] = "closed"
+                stream["market_open"] = False
+            event = stream.get("quote_event")
+            if event:
+                event.set()
 
 
 live_quote_manager = LiveQuoteSocketManager()

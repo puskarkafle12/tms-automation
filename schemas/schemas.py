@@ -61,6 +61,7 @@ class StockGrabberRequest(BaseModel):
     order_quantity: int
     max_order_limit: Optional[int] = 0
     stop_buy_after_percent: Optional[float] = 15.0
+    stop_buy_after_volume: Optional[float] = 5000.0
     request_per_sec: Optional[float] = 2.0
     scan_mode: Optional[Literal["socket", "fixed"]] = "socket"
     resume_scan_count: Optional[int] = 0

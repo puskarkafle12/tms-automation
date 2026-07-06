@@ -789,6 +789,7 @@ async def _run_stock_grabber_task(
     order_quantity: int,
     max_order_limit: int,
     stop_buy_after_percent: float,
+    stop_buy_after_volume: float,
 ) -> None:
     from datetime import timezone
 
@@ -815,6 +816,7 @@ async def _run_stock_grabber_task(
                     session_id=session_id,
                     max_order_limit=max_order_limit,
                     stop_buy_after_percent=stop_buy_after_percent,
+                    stop_buy_after_volume=stop_buy_after_volume,
                 )
                 placed = len(result.get("totalOrders") or [])
                 if placed > 0 or result.get("message") == "ACCESS_TOKEN_EXPIRED" or result.get("stop_reason"):
@@ -860,6 +862,8 @@ async def stock_grabber(request: StockGrabberRequest, db: Session = Depends(get_
     max_order_limit = int(request.max_order_limit) if request.max_order_limit and int(request.max_order_limit) > 0 else 4
     configured_stop = 15.0 if request.stop_buy_after_percent is None else float(request.stop_buy_after_percent)
     stop_buy_after_percent = min(15.0, max(0.0, configured_stop))
+    configured_volume_stop = 5000.0 if request.stop_buy_after_volume is None else float(request.stop_buy_after_volume)
+    stop_buy_after_volume = max(0.0, configured_volume_stop)
 
     tms_user = TmsUser(
         broker_no=user.broker_no,
@@ -881,6 +885,7 @@ async def stock_grabber(request: StockGrabberRequest, db: Session = Depends(get_
             request.order_quantity,
             max_order_limit,
             stop_buy_after_percent,
+            stop_buy_after_volume,
         )
     )
     running_tasks[session_id] = task
@@ -1082,6 +1087,7 @@ async def active_stock_grabbers():
             "request_per_sec": tms_user.request_per_sec,
             "scan_mode": getattr(tms_user, "scan_mode", "socket"),
             "stop_buy_after_percent": getattr(tms_user, "stop_buy_after_percent", 15.0),
+            "stop_buy_after_volume": getattr(tms_user, "stop_buy_after_volume", 5000.0),
             "stable_rate": tms_user.stable_rate,
             "phase": tms_config.grabber_phase.get(session_id, "armed"),
             "status_message": tms_config.grabber_status_message.get(session_id, ""),
@@ -1402,6 +1408,40 @@ def _record_tms_login_failure(
     session.status = "logged_out"
     session.broker_no = broker_no or session.broker_no
     session.message = summarize_login_message(message)
+    session.tokens = {}
+    db.commit()
+
+
+async def _reconcile_logged_in_sessions(db: Session) -> None:
+    sessions = db.query(LoggedInUsers).filter(LoggedInUsers.status == "logged_in").all()
+    if not sessions:
+        return
+
+    for session in sessions:
+        user = db.query(User).filter(User.client_id == session.client_id).first()
+        if not user:
+            session.status = "logged_out"
+            session.tokens = {}
+            session.message = summarize_login_message("Account removed")
+            continue
+
+        try:
+            await get_cached_tms_user(user, allow_full_login=False)
+        except LoginFailedException as exc:
+            _record_tms_login_failure(
+                db,
+                client_id=session.client_id,
+                broker_no=user.broker_no,
+                message=exc.message,
+            )
+        except Exception as exc:
+            _record_tms_login_failure(
+                db,
+                client_id=session.client_id,
+                broker_no=user.broker_no,
+                message=str(exc),
+            )
+
     db.commit()
 
 
@@ -1799,6 +1839,7 @@ async def _get_script_high(tms_user: TmsUser, script_name: str) -> Optional[floa
 
 @app.get("/tms-accounts/")
 async def list_tms_accounts(db: Session = Depends(get_db)):
+    await _reconcile_logged_in_sessions(db)
     users = db.query(User).order_by(User.client_id).all()
     sessions = {
         session.client_id: session
@@ -2253,23 +2294,7 @@ async def add_order(order_data: OrderCreateRequest, db: Session = Depends(get_db
 @app.get("/logged_in_clients/")
 async def get_logged_in_clients(db: Session = Depends(get_db)):
     try:
-        stale_sessions = (
-            db.query(LoggedInUsers)
-            .filter(LoggedInUsers.status != "logged_in", LoggedInUsers.tokens.isnot(None))
-            .all()
-        )
-        for session in stale_sessions:
-            if not session.tokens:
-                continue
-            user = db.query(User).filter(User.client_id == session.client_id).first()
-            if not user or not user.auto_login:
-                continue
-            try:
-                await get_cached_tms_user(user, allow_full_login=True)
-            except LoginFailedException:
-                continue
-            except Exception:
-                continue
+        await _reconcile_logged_in_sessions(db)
 
         logged_in_users = db.query(LoggedInUsers).filter(
             LoggedInUsers.status == "logged_in").all()
@@ -2959,11 +2984,12 @@ async def get_stock_quote(
         if not security or not security.get("id"):
             raise HTTPException(status_code=404, detail=f"Security not found for {symbol}")
 
+        market_open = get_market_hours_status()["market_hours_open"]
         normalized_transport = str(transport or "auto").strip().lower()
         live_snapshot = None
         quote = None
         source = "http"
-        if normalized_transport != "http":
+        if normalized_transport != "http" and market_open:
             await live_quote_manager.ensure_stream(tms_user_instance, symbol, str(security["id"]))
             live_snapshot = await live_quote_manager.wait_for_quote(symbol)
             quote = (live_snapshot or {}).get("quote")
@@ -3011,6 +3037,23 @@ async def websocket_stock_quote(websocket: WebSocket, client_id: str, symbol: st
             await websocket.close(code=1008)
             return
 
+        async def close_for_market_closed(snapshot: Optional[dict] = None) -> None:
+            live_state = snapshot or live_quote_manager.get_snapshot(normalized_symbol) or {}
+            await live_quote_manager.close_symbol(normalized_symbol)
+            try:
+                await websocket.send_json({
+                    "type": "market_closed",
+                    "message": outside_market_hours_message(),
+                    "socket": live_state,
+                })
+            except Exception:
+                pass
+            await websocket.close(code=1001)
+
+        if not get_market_hours_status()["market_hours_open"]:
+            await close_for_market_closed()
+            return
+
         tms_user_instance = await get_cached_tms_user(user)
         security = await tms_user_instance.get_security_id(normalized_symbol)
         if not security or not security.get("id"):
@@ -3022,6 +3065,9 @@ async def websocket_stock_quote(websocket: WebSocket, client_id: str, symbol: st
             return
 
         await live_quote_manager.ensure_stream(tms_user_instance, normalized_symbol, str(security["id"]))
+        if not get_market_hours_status()["market_hours_open"]:
+            await close_for_market_closed()
+            return
         live_snapshot = await live_quote_manager.wait_for_quote(normalized_symbol)
 
         async def send_snapshot(snapshot: Optional[dict]) -> None:
@@ -3037,10 +3083,30 @@ async def websocket_stock_quote(websocket: WebSocket, client_id: str, symbol: st
             }
             await websocket.send_json(payload)
 
+        async def close_for_auth_failure(snapshot: Optional[dict]) -> None:
+            live_state = snapshot or live_quote_manager.get_snapshot(normalized_symbol) or {}
+            message = str(live_state.get("last_error") or "Authentication expired. Please log in again.")
+            try:
+                await websocket.send_json({
+                    "type": "error",
+                    "message": message,
+                    "socket": live_state,
+                })
+            except Exception:
+                pass
+            await live_quote_manager.close_symbol(normalized_symbol)
+            await websocket.close(code=1008)
+
         await send_snapshot(live_snapshot)
         last_message_count = int((live_snapshot or {}).get("message_count") or 0)
+        if live_quote_manager.is_authentication_failed(normalized_symbol):
+            await close_for_auth_failure(live_snapshot)
+            return
 
         while True:
+            if not get_market_hours_status()["market_hours_open"]:
+                await close_for_market_closed(live_quote_manager.get_snapshot(normalized_symbol))
+                return
             snapshot = await live_quote_manager.wait_for_next_quote(
                 normalized_symbol,
                 after_message_count=last_message_count,
@@ -3050,9 +3116,16 @@ async def websocket_stock_quote(websocket: WebSocket, client_id: str, symbol: st
                 last_message_count = int(snapshot.get("message_count") or last_message_count)
                 await send_snapshot(snapshot)
                 continue
+            current_snapshot = live_quote_manager.get_snapshot(normalized_symbol) or {}
+            if not get_market_hours_status()["market_hours_open"]:
+                await close_for_market_closed(current_snapshot)
+                return
+            if current_snapshot.get("auth_failed") or current_snapshot.get("status") == "auth_failed":
+                await close_for_auth_failure(current_snapshot)
+                return
             await websocket.send_json({
                 "type": "heartbeat",
-                "socket": live_quote_manager.get_snapshot(normalized_symbol),
+                "socket": current_snapshot,
             })
     except WebSocketDisconnect:
         return
@@ -3476,6 +3549,7 @@ async def monitoring_status():
             "stock_symbol": tms_user.stock_symbol,
             "scan_count": getattr(tms_user, "scan_count", 0),
             "stop_buy_after_percent": getattr(tms_user, "stop_buy_after_percent", 15.0),
+            "stop_buy_after_volume": getattr(tms_user, "stop_buy_after_volume", 5000.0),
             "phase": phase,
             "status_message": tms_config.grabber_status_message.get(session_id, ""),
             "started_at": started_at.isoformat() if started_at else None,

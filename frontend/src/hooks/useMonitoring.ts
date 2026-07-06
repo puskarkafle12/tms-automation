@@ -18,6 +18,8 @@ const startGrabberViaApi = async (grabber: StockGrabberInstance): Promise<{ ok: 
         request_per_sec: grabber.request_per_sec ?? 3,
         scan_mode: grabber.scan_mode ?? 'socket',
         max_order_limit: 4,
+        stop_buy_after_percent: grabber.stop_buy_after_percent ?? 15,
+        stop_buy_after_volume: grabber.stop_buy_after_volume ?? 5000,
         resume_scan_count: grabber.scanCount ?? 0,
         resume_stable_rate: grabber.stableRate ?? null,
       }),

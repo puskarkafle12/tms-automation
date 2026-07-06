@@ -57,6 +57,7 @@ def logout_user(client_id: str,message):
         if user:
             user.status = "logged_out"
             user.message = message
+            user.tokens = {}
             db.commit()
             return True
         return False

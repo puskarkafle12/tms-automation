@@ -85,7 +85,8 @@ class TestTmsAuthFlow(unittest.IsolatedAsyncioTestCase):
 
         user._full_login_and_persist.assert_awaited_once()
 
-    async def test_refresh_authentication_can_skip_full_captcha_login(self):
+    @patch("utils.tms.logout_user")
+    async def test_refresh_authentication_can_skip_full_captcha_login(self, logout_user_mock):
         from exceptions.login_exceptions import LoginFailedException
 
         user = self.TmsUser(broker_no="35", username="client1", password="enc-pass")
@@ -99,6 +100,7 @@ class TestTmsAuthFlow(unittest.IsolatedAsyncioTestCase):
             await user._refresh_authentication()
 
         user._full_login_and_persist.assert_not_awaited()
+        logout_user_mock.assert_called_once()
 
     async def test_full_login_is_serialized(self):
         user1 = self.TmsUser(broker_no="35", username="client1", password="enc-pass")

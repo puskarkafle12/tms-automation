@@ -20,6 +20,12 @@ import {
 
 export type { StockGrabberInstance };
 
+interface NewStockRow {
+  symbol: string;
+  volume?: number;
+  is_watchlist?: boolean;
+}
+
 const stripRuntimeGrabberState = (grabbers: StockGrabberInstance[]): StockGrabberInstance[] =>
   grabbers.map((grabber) => ({
     ...grabber,
@@ -33,6 +39,8 @@ const StockGrabberPage: React.FC = () => {
   const [loggedInClientIDs, setLoggedInClientIDs] = useState<string[]>([]);
   const [newClientId, setNewClientId] = useState('');
   const [newStockSymbol, setNewStockSymbol] = useState('CREST');
+  const [newStocks, setNewStocks] = useState<NewStockRow[]>([]);
+  const [newStocksLoading, setNewStocksLoading] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
   const grabberControlsRef = useRef<Map<string, GrabberControls>>(new Map());
   const cardRefs = useRef<Map<string, HTMLDivElement>>(new Map());
@@ -62,14 +70,27 @@ const StockGrabberPage: React.FC = () => {
     await syncMonitoringStatus();
   }, []);
 
+  const loadNewStocks = useCallback(async () => {
+    setNewStocksLoading(true);
+    try {
+      const response = await fetchJson<{ symbols?: NewStockRow[] }>('/market_analysis/new_stocks?days=15');
+      if (response.ok) {
+        setNewStocks(response.data.symbols || []);
+      }
+    } finally {
+      setNewStocksLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     fetchLoggedInClients();
+    void loadNewStocks();
     void reconcileActiveGrabbers().finally(() => setHydrated(true));
     const interval = window.setInterval(() => {
       void reconcileActiveGrabbers();
     }, 10000);
     return () => window.clearInterval(interval);
-  }, [fetchLoggedInClients, reconcileActiveGrabbers]);
+  }, [fetchLoggedInClients, loadNewStocks, reconcileActiveGrabbers]);
 
   useEffect(() => {
     if (!hydrated) {
@@ -106,6 +127,9 @@ const StockGrabberPage: React.FC = () => {
     });
   }, []);
 
+  const formatWatchlistVolume = useCallback((value?: number) =>
+    Number.isFinite(Number(value)) ? Number(value).toLocaleString('en-NP') : '-', []);
+
   const addGrabber = () => {
     const clientId = newClientId.trim();
     const stockSymbol = newStockSymbol.trim().toUpperCase();
@@ -124,7 +148,13 @@ const StockGrabberPage: React.FC = () => {
     const id = `${clientId}-${stockSymbol}-${Date.now()}`;
     setGrabbers((prev) => dedupeGrabbers([
       ...prev,
-      { id, client_id: clientId, stock_symbol: stockSymbol, scan_mode: 'socket' },
+      {
+        id,
+        client_id: clientId,
+        stock_symbol: stockSymbol,
+        scan_mode: 'socket',
+        stop_buy_after_volume: 5000,
+      },
     ]));
   };
 
@@ -195,6 +225,32 @@ const StockGrabberPage: React.FC = () => {
             {loggedInClientIDs.length === 0 && (
               <span className="stock-grabber-hint">Log in via TMS Login tab first.</span>
             )}
+          </div>
+          <div className="form-group">
+            <label htmlFor="sgWatchlist">New IPO watchlist</label>
+            <select
+              id="sgWatchlist"
+              className="select"
+              value={newStockSymbol}
+              onChange={(e) => setNewStockSymbol(e.target.value.toUpperCase())}
+              disabled={newStocksLoading || newStocks.length === 0}
+            >
+              <option value="">
+                {newStocksLoading
+                  ? 'Loading new IPO symbols…'
+                  : newStocks.length > 0
+                    ? 'Select a new IPO'
+                    : 'No new IPO symbols'}
+              </option>
+              {newStocks.map((row) => (
+                <option key={row.symbol} value={row.symbol}>
+                  {row.symbol} · Vol {formatWatchlistVolume(row.volume)}
+                </option>
+              ))}
+            </select>
+            <span className="stock-grabber-hint">
+              Picks from the new / IPO watchlist and fills the symbol below.
+            </span>
           </div>
           <div className="form-group">
             <label htmlFor="sgSymbol">Stock Symbol</label>
@@ -269,6 +325,7 @@ const StockGrabberPage: React.FC = () => {
                 initialOrderQuantity={grabber.order_quantity}
                 initialRequestPerSec={grabber.request_per_sec}
                 initialStopBuyAfterPercent={grabber.stop_buy_after_percent}
+                initialStopBuyAfterVolume={grabber.stop_buy_after_volume}
                 onRemove={() => removeGrabber(grabber.id)}
                 onRegisterControls={registerControls}
                 onUnregisterControls={unregisterControls}
