@@ -19,10 +19,12 @@ services:
       FRONTEND_SEED_USER: admin
       FRONTEND_SEED_PASSWORD: admin
       ENVIRONMENT: ${ENVIRONMENT:-prod}
-      TUNNEL_PROVIDER: ngrok
+      TUNNEL_PROVIDER: ${TUNNEL_PROVIDER:-ngrok}
       NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:-}
       NGROK_DOMAIN: ${NGROK_DOMAIN:-}
       ZROK_ENV_TOKEN: ${ZROK_ENV_TOKEN:-}
+      ZROK_V1_ENV_TOKEN: ${ZROK_V1_ENV_TOKEN:-}
+      ZROK_V2_ENV_TOKEN: ${ZROK_V2_ENV_TOKEN:-}
       ZROK_API_ENDPOINT: ${ZROK_API_ENDPOINT:-}
       ZROK_RESERVED_NAME: ${ZROK_RESERVED_NAME:-tmsautomationlive}
     env_file:
@@ -31,6 +33,7 @@ services:
       - tms_postgres_data:/var/lib/postgresql/data
       - tms_zrok_config:/root/.config/zrok
       - tms_zrok_home:/root/.zrok
+      - tms_zrok2_home:/root/.zrok2
 
 volumes:
   tms_postgres_data:
@@ -39,3 +42,5 @@ volumes:
     name: tms-automation_tms_zrok_config
   tms_zrok_home:
     name: tms-automation_tms_zrok_home
+  tms_zrok2_home:
+    name: tms-automation_tms_zrok2_home

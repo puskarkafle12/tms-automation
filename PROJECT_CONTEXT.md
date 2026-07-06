@@ -38,6 +38,8 @@ Read this file first before opening other files. Keep future work targeted.
 ## Zrok Troubleshooting Notes
 - This project may use zrok v2 tokens. v2 tokens must run with `zrok2` and `ZROK_API_ENDPOINT=https://api-v2.zrok.io`; using a v2 token with `zrok` or `api-v1` causes `401 enableUnauthorized`.
 - The all-in-one Docker image should keep both `zrok` and `zrok2` installed. `docker-entrypoint-all-in-one.sh` chooses `zrok2` for `api-v2` and `zrok` for v1 endpoints.
+- Store endpoint-specific tokens as `ZROK_V2_ENV_TOKEN` and `ZROK_V1_ENV_TOKEN`. `ZROK_ENV_TOKEN` is kept as a compatibility fallback.
+- zrok v2 stores its enabled environment under `/root/.zrok2`; keep the `tms_zrok2_home` Docker volume mounted there or a container recreate can lose the enabled state and then fail with `401 enableUnauthorized`.
 - If `tmsautomationlive.shares.zrok.io` is stuck with `shareConflict`, inspect names/shares:
   `docker exec tms-automation zrok2 list names -n public`
   `docker exec tms-automation zrok2 list shares --json`

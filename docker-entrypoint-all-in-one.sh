@@ -11,6 +11,8 @@ set -euo pipefail
 : "${NGROK_AUTHTOKEN:=}"
 : "${NGROK_DOMAIN:=}"
 : "${ZROK_ENV_TOKEN:=}"
+: "${ZROK_V1_ENV_TOKEN:=}"
+: "${ZROK_V2_ENV_TOKEN:=}"
 : "${ZROK_API_ENDPOINT:=https://api-v2.zrok.io}"
 : "${ZROK_SHARE_LABEL:=TMS Automation zrok}"
 : "${ZROK_RESERVED_NAME:=tmsautomationlive}"
@@ -107,7 +109,7 @@ start_ngrok_tunnel() {
 wait_for_zrok_url() {
   local url=""
   for _ in $(seq 1 60); do
-    url="$(grep -Eo 'https://[^[:space:]]+|[-a-z0-9]+\\.shares\\.zrok\\.io' "$ZROK_LOG" 2>/dev/null | tail -1 || true)"
+    url="$(grep -Eo 'https://[^[:space:]]+|[-a-z0-9]+\.shares\.zrok\.io' "$ZROK_LOG" 2>/dev/null | tail -1 || true)"
     if [ -n "$url" ]; then
       if [[ "$url" != https://* ]]; then
         url="https://$url"
@@ -155,6 +157,14 @@ select_zrok_binary() {
     command -v zrok2 2>/dev/null || command -v zrok 2>/dev/null || true
   else
     command -v zrok 2>/dev/null || command -v zrok2 2>/dev/null || true
+  fi
+}
+
+select_zrok_token() {
+  if [[ "$ZROK_API_ENDPOINT" == *api-v2* ]]; then
+    printf '%s' "${ZROK_V2_ENV_TOKEN:-${ZROK_ENV_TOKEN:-}}"
+  else
+    printf '%s' "${ZROK_V1_ENV_TOKEN:-${ZROK_ENV_TOKEN:-}}"
   fi
 }
 
@@ -209,8 +219,9 @@ repair_zrok_share_binding() {
 }
 
 start_zrok_tunnel() {
-  if [ -z "$ZROK_ENV_TOKEN" ]; then
-    echo "ZROK_ENV_TOKEN is missing."
+  ZROK_SELECTED_TOKEN="$(select_zrok_token)"
+  if [ -z "$ZROK_SELECTED_TOKEN" ]; then
+    echo "zrok token is missing for endpoint '$ZROK_API_ENDPOINT'."
     return 1
   fi
 
@@ -231,7 +242,21 @@ start_zrok_tunnel() {
   }
 
   echo "Ensuring zrok environment is enabled..."
-  if ! "$ZROK_BIN" enable --headless "$ZROK_ENV_TOKEN" >>"$ZROK_LOG" 2>&1; then
+  local enable_ok=0
+  for attempt in $(seq 1 5); do
+    if "$ZROK_BIN" enable --headless "$ZROK_SELECTED_TOKEN" >>"$ZROK_LOG" 2>&1; then
+      enable_ok=1
+      break
+    fi
+    if zrok_environment_enabled "$ZROK_BIN"; then
+      enable_ok=1
+      break
+    fi
+    echo "zrok enable attempt $attempt failed; retrying..." >>"$ZROK_LOG"
+    sleep "$attempt"
+  done
+
+  if [ "$enable_ok" -ne 1 ]; then
     if zrok_environment_enabled "$ZROK_BIN"; then
       echo "zrok environment already enabled; reusing existing state."
     else
@@ -251,7 +276,7 @@ start_zrok_tunnel() {
         echo "Reserved zrok share failed; falling back to public share."
         break
       fi
-      local_url="$(grep -Eo 'https://[^[:space:]]+|[-a-z0-9]+\\.shares\\.zrok\\.io' "$ZROK_LOG" 2>/dev/null | tail -1 || true)"
+      local_url="$(grep -Eo 'https://[^[:space:]]+|[-a-z0-9]+\.shares\.zrok\.io' "$ZROK_LOG" 2>/dev/null | tail -1 || true)"
       if [ -n "$local_url" ]; then
         if [[ "$local_url" != https://* ]]; then
           local_url="https://$local_url"
