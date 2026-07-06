@@ -209,6 +209,14 @@ ensure_zrok_reserved_name() {
   fi
 }
 
+recreate_zrok_reserved_name() {
+  local ZROK_BIN="${1:-}"
+
+  echo "Recreating zrok reserved name '$ZROK_RESERVED_NAME' in namespace public..."
+  "$ZROK_BIN" delete name -n public "$ZROK_RESERVED_NAME" >>"$ZROK_LOG" 2>&1 || true
+  "$ZROK_BIN" create name -n public "$ZROK_RESERVED_NAME" >>"$ZROK_LOG" 2>&1 || ensure_zrok_reserved_name "$ZROK_BIN"
+}
+
 get_existing_zrok_share_url() {
   local ZROK_BIN="${1:-}"
   "$ZROK_BIN" list shares --json 2>/dev/null | python3 -c '
@@ -315,28 +323,46 @@ start_zrok_tunnel() {
   fi
 
   for share_attempt in 1 2 3; do
+    local share_attempt_log="/tmp/zrok-share-attempt-${share_attempt}.log"
+    : > "$share_attempt_log"
     repair_zrok_share_binding "$ZROK_BIN"
     echo "Starting zrok reserved share '$ZROK_SHARE_LABEL' as 'public:$ZROK_RESERVED_NAME' ..."
-    "$ZROK_BIN" share public http://127.0.0.1:80 -n "public:$ZROK_RESERVED_NAME" --headless >>"$ZROK_LOG" 2>&1 &
+    "$ZROK_BIN" share public http://127.0.0.1:80 -n "public:$ZROK_RESERVED_NAME" --headless >>"$share_attempt_log" 2>&1 &
     ZROK_PID="$!"
     for _ in $(seq 1 30); do
-      if grep -q 'shareConflict' "$ZROK_LOG" 2>/dev/null; then
+      if grep -q 'shareUnauthorized' "$share_attempt_log" 2>/dev/null; then
         kill "$ZROK_PID" >/dev/null 2>&1 || true
-        echo "Reserved zrok share conflict detected; deleting stale matching shares before retry."
-        repair_zrok_share_binding "$ZROK_BIN"
+        cat "$share_attempt_log" >>"$ZROK_LOG"
+        echo "Reserved zrok share was unauthorized; resetting local zrok environment before retry."
+        reset_zrok_environment || true
+        ensure_zrok_reserved_name "$ZROK_BIN" || true
         break
       fi
-      local_url="$(grep -Eo 'https://[^[:space:]]+|[-a-z0-9]+\.shares\.zrok\.io' "$ZROK_LOG" 2>/dev/null | tail -1 || true)"
+      if grep -q 'shareConflict' "$share_attempt_log" 2>/dev/null; then
+        kill "$ZROK_PID" >/dev/null 2>&1 || true
+        cat "$share_attempt_log" >>"$ZROK_LOG"
+        echo "Reserved zrok share conflict detected; recreating the reserved name before retry."
+        repair_zrok_share_binding "$ZROK_BIN"
+        recreate_zrok_reserved_name "$ZROK_BIN" || true
+        break
+      fi
+      if ! kill -0 "$ZROK_PID" >/dev/null 2>&1; then
+        cat "$share_attempt_log" >>"$ZROK_LOG"
+        break
+      fi
+      local_url="$(grep -Eo 'https://[^[:space:]]+|[-a-z0-9]+\.shares\.zrok\.io' "$share_attempt_log" 2>/dev/null | tail -1 || true)"
       if [ -n "$local_url" ]; then
         if [[ "$local_url" != https://* ]]; then
           local_url="https://$local_url"
         fi
         sleep 3
         if ! kill -0 "$ZROK_PID" >/dev/null 2>&1; then
+          cat "$share_attempt_log" >>"$ZROK_LOG"
           echo "Reserved zrok share printed '$local_url' but backend process exited; retrying."
           reset_zrok_environment || true
           break
         fi
+        cat "$share_attempt_log" >>"$ZROK_LOG"
         print_public_url_banner "$ZROK_SHARE_LABEL" "$local_url" "zrok public share."
         return 0
       fi
