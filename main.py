@@ -60,14 +60,16 @@ from datetime import date, datetime, timedelta
 from utils.tms_user_loader import load_tms_users_instances
 from utils.api_time import format_api_timestamp, get_server_time_payload
 from utils.market_status import (
+    MARKET_LIVE_POLL_INTERVAL_SECONDS,
+    MARKET_POLL_HOURS_LABEL,
     format_nepal_datetime,
     get_market_hours_status,
     get_nepal_now,
-    is_market_live,
+    is_market_polling_window,
     nepal_date_utc_bounds,
     outside_market_hours_message,
-    parse_session_check_response,
 )
+from utils.market_live_state import get_shared_dna_session
 import config.tms_config as tms_config
 from config.app_build_info import get_app_build_info
 from utils.external_data_sources.nepse_alpha.ai_query import ScreenerAiError, test_all_llm_connections
@@ -103,7 +105,7 @@ tms_user_cache: Dict[str, TmsUser] = {}
 tms_user_cache_touched: Dict[str, float] = {}
 tms_user_cache_ttl = 300.0
 market_status_cache: Optional[tuple[float, dict]] = None
-MARKET_STATUS_CACHE_TTL_SECONDS = 60.0
+MARKET_STATUS_CACHE_TTL_SECONDS = float(MARKET_LIVE_POLL_INTERVAL_SECONDS)
 
 async def invalidate_cached_tms_user(client_id: str) -> None:
     cached = tms_user_cache.pop(client_id, None)
@@ -807,7 +809,7 @@ async def _run_stock_grabber_task(
                 stock_grabber_updates[session_id].append(
                     {"status": "waiting", "message": gate["message"]}
                 )
-                await asyncio.sleep(tms_config.monitor_interval)
+                await asyncio.sleep(MARKET_LIVE_POLL_INTERVAL_SECONDS)
                 continue
 
             try:
@@ -821,6 +823,9 @@ async def _run_stock_grabber_task(
                 placed = len(result.get("totalOrders") or [])
                 if placed > 0 or result.get("message") == "ACCESS_TOKEN_EXPIRED" or result.get("stop_reason"):
                     break
+                if result.get("message") == "MARKET_NOT_LIVE":
+                    await asyncio.sleep(MARKET_LIVE_POLL_INTERVAL_SECONDS)
+                    continue
                 tms_user.updates.append({
                     "status": "scanning",
                     "message": "Scan interrupted — resuming price watch…",
@@ -1175,12 +1180,15 @@ async def get_market_status(db: Session = Depends(get_db)):
 
     now = get_nepal_now()
     hours = get_market_hours_status(now)
+    polling_window = is_market_polling_window(now)
     nepal = format_nepal_datetime(now)
 
     tms_session_active = False
     tms_session_message = "DNA logged off"
     dna_status = None
     market_live_from_api = None
+    exchange_market_phase = None
+    exchange_current_sessions = []
     client_id = None
     broker_no = None
     session_data = None
@@ -1207,13 +1215,16 @@ async def get_market_status(db: Session = Depends(get_db)):
             async with asyncio.timeout(8):
                 if not user:
                     await tms_user.try_cached_login()
-                session_payload = await tms_user.check_exchange_session()
-                parsed = parse_session_check_response(session_payload)
-                tms_session_active = parsed["session_active"]
-                tms_session_message = parsed["session_message"]
-                dna_status = parsed.get("dna_status")
-                market_live_from_api = parsed["market_live_from_api"]
-                session_data = parsed["session_data"]
+                if polling_window:
+                    dna = await get_shared_dna_session([tms_user])
+                    tms_session_active = dna["session_active"]
+                    tms_session_message = dna["session_message"]
+                    dna_status = dna.get("dna_status")
+                    session_data = dna["session_data"]
+                    market_live_from_api = tms_session_active
+                    exchange_market_phase = "open" if tms_session_active else "closed"
+                else:
+                    tms_session_message = f"Waiting for DNA market-check window ({MARKET_POLL_HOURS_LABEL})"
         except TimeoutError:
             tms_session_message = "Session check timed out"
         except LoginFailedException as exc:
@@ -1223,19 +1234,17 @@ async def get_market_status(db: Session = Depends(get_db)):
         finally:
             if temp_tms_user:
                 await temp_tms_user.close()
-    elif hours["market_hours_open"]:
+    elif polling_window:
         tms_session_message = "No TMS client logged in"
     else:
-        tms_session_message = outside_market_hours_message()
+        tms_session_message = f"Waiting for DNA market-check window ({MARKET_POLL_HOURS_LABEL})"
 
-    market_live = is_market_live(hours, tms_session_active)
+    market_live = market_live_from_api is True
 
-    if not hours["is_trading_day"]:
-        market_phase = "closed_weekend"
-    elif hours["is_pre_open"]:
-        market_phase = "pre_open"
-    elif hours["is_continuous"]:
-        market_phase = "open"
+    if exchange_market_phase in {"open", "pre_open", "closed"}:
+        market_phase = exchange_market_phase
+    elif polling_window:
+        market_phase = "checking"
     else:
         market_phase = "closed"
 
@@ -1251,12 +1260,18 @@ async def get_market_status(db: Session = Depends(get_db)):
         "is_pre_open": hours["is_pre_open"],
         "is_continuous_session": hours["is_continuous"],
         "market_hours_open": hours["market_hours_open"],
+        "market_polling_window": polling_window,
+        "market_live_poll_interval_seconds": MARKET_LIVE_POLL_INTERVAL_SECONDS,
+        "market_status_source": "shared_tms_dna_session",
+        "dna_status_source": "shared_tms_dna_session",
         "market_phase": market_phase,
         "tms_session_active": tms_session_active,
         "tms_session_message": tms_session_message,
         "dna_status": dna_status,
         "market_live": market_live,
         "market_live_from_api": market_live_from_api,
+        "exchange_market_phase": exchange_market_phase,
+        "exchange_current_sessions": exchange_current_sessions,
         "client_id": client_id,
         "broker_no": broker_no,
         "session_data": session_data,
@@ -2711,7 +2726,8 @@ async def get_order_status_logs(
                 scan_logs[(scan_log.client_id, scan_log.script_name)] = scan_log
 
     scheduled_payload = []
-    monitor_phase = tms_config.scheduled_phase if tms_config.is_running else "stopped"
+    scheduler_status = get_scheduler_display_status()
+    monitor_phase = scheduler_status["scheduled_phase"]
     market_open = get_market_hours_status()["market_hours_open"]
     for order in scheduled_orders:
         live_snapshot = live_quote_manager.get_snapshot(order.script_name)
@@ -2733,7 +2749,7 @@ async def get_order_status_logs(
         )
         last_monitor_message = _last_monitor_log_line(scan_log, current_price=current_price_val)
         live_status_fields = _compute_scheduled_live_status(
-            monitoring_active=tms_config.is_running,
+            monitoring_active=scheduler_status["scheduled_orders_active"],
             monitor_phase=monitor_phase,
             scanning_count=scanning_count,
             last_monitor_message=last_monitor_message,
@@ -2837,9 +2853,9 @@ async def get_order_status_logs(
     combined_results = {
         "order_logs": [serialize_order_status_log(log) for log in order_logs],
         "scheduled_orders": scheduled_payload,
-        "monitoring_active": tms_config.is_running,
+        "monitoring_active": scheduler_status["scheduled_orders_active"],
         "monitor_phase": monitor_phase,
-        "monitor_status_message": tms_config.scheduled_status_message,
+        "monitor_status_message": scheduler_status["scheduled_status_message"],
         "scheduled_started_at": format_api_timestamp(tms_config.scheduled_started_at),
         "monitor_interval": tms_config.monitor_interval,
         "server_time": get_server_time_payload()["now"],

@@ -36,6 +36,12 @@ class ApiTimeTest(unittest.TestCase):
         ).replace(hour=12)
         self.assertEqual(seconds_until_market_open(during), 0.0)
 
+    def test_sunday_waits_until_monday_open(self):
+        sunday = datetime(2026, 6, 21, 12, 0, tzinfo=NEPAL_TZ)
+        monday_open = datetime(2026, 6, 22, 11, 0, tzinfo=NEPAL_TZ)
+
+        self.assertEqual(seconds_until_market_open(sunday), (monday_open - sunday).total_seconds())
+
 
 if __name__ == "__main__":
     unittest.main()

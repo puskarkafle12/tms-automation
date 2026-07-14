@@ -743,12 +743,23 @@ class TmsUser:
         url = f"https://tms{self.broker_no}.nepsetms.com.np/tmsapi/dnaApi/exchange/sessionCheck"
         _, payload = await self._authenticated_request("GET", url, expected_statuses={200})
         try:
-            from utils.market_status import get_market_hours_status, is_market_live, parse_session_check_response
+            from utils.market_status import parse_session_check_response
 
             parsed = parse_session_check_response(payload)
-            self.set_market_live_override(is_market_live(get_market_hours_status(), parsed["session_active"]))
+            self.set_market_live_override(parsed["session_active"])
         except Exception:
-            pass
+            self.set_market_live_override(False)
+        return payload
+
+    async def get_current_market_session(self) -> Dict:
+        """Return the exchange's active market session (pre-open, continuous, etc.)."""
+        url = f"https://tms{self.broker_no}.nepsetms.com.np/tmsapi/markettypes/currentSession"
+        _, payload = await self._authenticated_request(
+            "GET",
+            url,
+            expected_statuses={200},
+            bypass_non_live_cache=True,
+        )
         return payload
 
     async def get_order_book(self):
@@ -1417,10 +1428,9 @@ class TmsUser:
 
     @classmethod
     def is_non_live_tms_cache_enabled(cls) -> bool:
-        from utils.market_status import get_market_hours_status
+        from utils.market_status import is_market_polling_window
 
-        hours = get_market_hours_status()
-        if not hours["market_hours_open"]:
+        if not is_market_polling_window():
             return True
 
         if cls._market_live_override:
@@ -1432,9 +1442,9 @@ class TmsUser:
 
     @classmethod
     def tms_request_cache_status(cls) -> Dict[str, Any]:
-        from utils.market_status import get_market_hours_status
+        from utils.market_status import is_market_polling_window
 
-        hours = get_market_hours_status()
+        polling_window = is_market_polling_window()
         override_live = None
         if cls._market_live_override:
             checked_at, market_live = cls._market_live_override
@@ -1444,7 +1454,7 @@ class TmsUser:
         enabled = cls.is_non_live_tms_cache_enabled()
         if enabled:
             reason = "market_not_live"
-        elif hours["market_hours_open"]:
+        elif polling_window:
             reason = "market_live_or_unverified_during_market_hours"
         else:
             reason = "disabled"
@@ -1773,6 +1783,9 @@ class TmsUser:
         return None
 
     async def price_scanner(self, id: str, previous_ltp: float, session_id: str) -> Dict:
+        from utils.market_live_state import get_shared_dna_session
+        from utils.market_status import MARKET_LIVE_POLL_INTERVAL_SECONDS
+
         fetch_count = 0
         start_time = asyncio.get_event_loop().time()
         reset_time = 4
@@ -1786,6 +1799,7 @@ class TmsUser:
         socket_fallback_logged = False
         socket_miss_count = 0
         next_socket_restart_at = 0.0
+        next_market_session_check_at = 0.0
         if self.scan_mode == "socket":
             await live_quote_manager.ensure_stream(
                 self,
@@ -1796,6 +1810,27 @@ class TmsUser:
 
         while True:
             try:
+                loop_clock = asyncio.get_event_loop().time()
+                if loop_clock >= next_market_session_check_at:
+                    try:
+                        dna_session = await get_shared_dna_session([self])
+                    except Exception as exc:
+                        self.updates.append({
+                            "status": "waiting",
+                            "message": f"TMS market status unavailable ({exc}) — scanning paused",
+                        })
+                        return {"message": "MARKET_NOT_LIVE", "market_live": False}
+
+                    if not dna_session["session_active"]:
+                        self.updates.append({
+                            "status": "waiting",
+                            "message": "DNA is not SUCCESS — scanning paused",
+                        })
+                        return {"message": "MARKET_NOT_LIVE", "market_live": False}
+                    next_market_session_check_at = (
+                        loop_clock + MARKET_LIVE_POLL_INTERVAL_SECONDS
+                    )
+
                 elapsed_time = asyncio.get_event_loop().time() - start_time
                 fetch_rate = fetch_count / elapsed_time if elapsed_time > 0 else 0
                 if elapsed_time >= reset_time:
@@ -2031,6 +2066,9 @@ class TmsUser:
                             previous_ltp = float(baseline['ltp'])
 
                 stock_details = await self.price_scanner(security_id, previous_ltp, session_id)
+
+                if stock_details.get('message') == 'MARKET_NOT_LIVE':
+                    return {"message": "MARKET_NOT_LIVE", "totalOrders": total_orders}
 
                 if stock_details.get('message') == 'ACCESS_TOKEN_EXPIRED':
                     self.updates.append({"status": "failed", "message": "Access token expired — login again"})

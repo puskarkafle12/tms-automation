@@ -27,7 +27,7 @@ DEFAULTS: Dict[str, Any] = {
     "default_execution_mode": "live",
     "enable_scan_staggering": True,
     "nepse_alpha_interval_seconds": 1800,
-    "monitor_tick_seconds": 5,
+    "monitor_tick_seconds": 3,
     "max_price_fetch_concurrency": 5,
 }
 

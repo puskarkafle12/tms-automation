@@ -20,7 +20,7 @@ class PortalSettingsTest(unittest.TestCase):
         normalized = normalize_portal_settings({})
         self.assertTrue(normalized["enable_scan_staggering"])
         self.assertEqual(normalized["nepse_alpha_interval_seconds"], 1800)
-        self.assertEqual(normalized["monitor_tick_seconds"], 5)
+        self.assertEqual(normalized["monitor_tick_seconds"], 3)
         self.assertEqual(normalized["max_price_fetch_concurrency"], 5)
 
     def test_normalize_clamps_orchestration_values(self):

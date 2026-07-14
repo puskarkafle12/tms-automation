@@ -23,23 +23,24 @@ const buildStatusTitle = (status: MarketStatus | null) => {
   const parts = [
     dnaStatus,
     status.tms_session_message,
-    `Pre-open: Sun–Fri 10:30 AM–10:45 AM NPT`,
-    `Trading hours: Sun–Fri 11:00 AM–3:00 PM NPT`,
+    `DNA market check: Sun–Fri 11:00 AM–3:00 PM NPT`,
   ];
 
-  if (!status.is_trading_day) {
-    parts.push('Weekend / non-trading day');
+  if (status.market_phase === 'open') {
+    parts.push('DNA status is SUCCESS');
   } else if (status.market_phase === 'pre_open') {
     parts.push('Pre-open session');
-  } else if (!status.market_hours_open) {
-    parts.push('Outside market hours');
+  } else if (status.market_phase === 'checking') {
+    parts.push('Checking the shared TMS market session');
+  } else if (!status.market_polling_window) {
+    parts.push('Outside the Sun–Fri market polling window');
   }
 
   if (status.client_id) {
     parts.push(`Checked via ${status.client_id}`);
   }
 
-  parts.push('Live execution requires market open and an active DNA session');
+  parts.push('DNA SUCCESS is the sole market-live signal');
 
   return parts.filter(Boolean).join(' · ');
 };
@@ -97,10 +98,17 @@ const MarketStatusBar: React.FC = () => {
     : serverUtcRef.current + (Date.now() - anchorMsRef.current);
   const liveClock = liveUtcMs == null ? null : formatNepalClockFromUtcMs(liveUtcMs);
 
-  const isMarketOpen = status?.market_live ?? false;
+  const isMarketOpen = status?.market_phase === 'open';
   const isPreOpen = status?.market_phase === 'pre_open';
+  const isChecking = status?.market_phase === 'checking';
   const statusClass = isMarketOpen ? 'live' : isPreOpen ? 'pre-open' : 'closed';
-  const statusLabel = isMarketOpen ? 'Market Open' : isPreOpen ? 'Pre Open' : 'Market Closed';
+  const statusLabel = isMarketOpen
+    ? 'Market Open'
+    : isPreOpen
+      ? 'Pre Open'
+      : isChecking
+        ? 'Checking Market'
+        : 'Market Closed';
   const pillTitle = buildStatusTitle(status);
   const clockTime = liveClock?.time || status?.nepal_time_formatted || status?.server_time?.time || '--:--:--';
   const clockDate = liveClock?.date || status?.nepal_date_formatted || status?.server_time?.date || '';

@@ -1,56 +1,51 @@
 from typing import Dict, Optional
 
-from config.app_environment import is_testing
-from utils.market_status import MARKET_HOURS_LABEL, is_market_hours_open, parse_session_check_response
+from utils.market_status import (
+    MARKET_POLL_HOURS_LABEL,
+    is_market_polling_window,
+)
+from utils.market_live_state import get_shared_dna_session
 from utils.tms import TmsUser
 
 
-async def _check_tms_session(tms_users_instances: Dict[str, TmsUser]) -> tuple[bool, str]:
+async def _check_tms_session(
+    tms_users_instances: Dict[str, TmsUser],
+) -> tuple[bool, str, Optional[bool], Optional[str]]:
     if not tms_users_instances:
-        return False, "No logged-in TMS clients"
+        return False, "No logged-in TMS clients", None, None
 
-    for tms_user in tms_users_instances.values():
-        try:
-            payload = await tms_user.check_exchange_session()
-            parsed = parse_session_check_response(payload)
-            return parsed["session_active"], parsed["session_message"]
-        except Exception:
-            continue
-
-    return False, "Unable to check TMS session"
+    dna = await get_shared_dna_session(tms_users_instances.values())
+    return (
+        dna["session_active"],
+        dna["session_message"],
+        dna["session_active"],
+        "open" if dna["session_active"] else "closed",
+    )
 
 
 async def resolve_market_gate(tms_users_instances: Optional[Dict[str, TmsUser]] = None) -> dict:
     users = tms_users_instances or {}
-    market_open = is_market_hours_open()
+    polling_window = is_market_polling_window()
 
-    if not market_open and not is_testing():
+    if not polling_window:
         return {
             "can_scan": False,
             "can_execute": False,
             "phase": "waiting_hours",
-            "message": f"Market closed — waiting for trading hours ({MARKET_HOURS_LABEL})",
+            "message": f"Waiting to poll TMS market status ({MARKET_POLL_HOURS_LABEL})",
             "session_active": False,
         }
 
-    session_active, session_message = await _check_tms_session(users)
+    session_active, session_message, market_live_from_api, exchange_phase = await _check_tms_session(users)
 
-    if is_testing() and not market_open:
-        return {
-            "can_scan": True,
-            "can_execute": True,
-            "phase": "active",
-            "message": "Test mode — scanning outside market hours",
-            "session_active": session_active,
-        }
-
-    if not session_active:
+    if market_live_from_api is not True:
         return {
             "can_scan": False,
             "can_execute": False,
-            "phase": "waiting_session",
-            "message": f"Waiting for TMS session — {session_message}",
-            "session_active": False,
+            "phase": "waiting_exchange",
+            "message": f"DNA is not SUCCESS — market scanning paused ({session_message})",
+            "session_active": session_active,
+            "exchange_phase": exchange_phase,
         }
 
     return {
@@ -59,4 +54,5 @@ async def resolve_market_gate(tms_users_instances: Optional[Dict[str, TmsUser]] 
         "phase": "active",
         "message": "Market open — scanning prices",
         "session_active": True,
+        "exchange_phase": exchange_phase,
     }

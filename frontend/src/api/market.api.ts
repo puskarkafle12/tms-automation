@@ -14,12 +14,18 @@ export interface MarketStatus {
   is_pre_open: boolean;
   is_continuous_session: boolean;
   market_hours_open: boolean;
-  market_phase: 'open' | 'pre_open' | 'closed' | 'closed_weekend';
+  market_polling_window?: boolean;
+  market_live_poll_interval_seconds?: number;
+  market_status_source?: string;
+  dna_status_source?: string;
+  market_phase: 'open' | 'pre_open' | 'closed' | 'checking';
   tms_session_active: boolean;
   tms_session_message: string;
   dna_status?: string | null;
   market_live: boolean;
   market_live_from_api: boolean | null;
+  exchange_market_phase?: 'open' | 'pre_open' | 'closed' | null;
+  exchange_current_sessions?: string[];
   client_id: string | null;
   broker_no: string | null;
 }

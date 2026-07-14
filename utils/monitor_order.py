@@ -20,6 +20,7 @@ from sqlalchemy import or_, update
 from utils.strategy_builder.constants import RULE_BASED_STRATEGIES
 from utils.log_sender import consume_monitor_scan_count_resets, store_or_update_logs
 from utils.market_gate import resolve_market_gate
+from utils.market_status import MARKET_LIVE_POLL_INTERVAL_SECONDS
 from utils.live_quote_socket import is_live_socket_snapshot, live_quote_manager
 from utils.tms import TmsUser
 from utils.strategies.normalize import normalize_tms_quote
@@ -531,7 +532,10 @@ async def monitor_order_task_func():
                 nepse_interval = int(
                     portal_settings.get("nepse_alpha_interval_seconds") or config.nepse_alpha_interval_seconds or 1800
                 )
-                tick_seconds = int(portal_settings.get("monitor_tick_seconds") or config.monitor_tick_seconds or 1)
+                tick_seconds = min(
+                    MARKET_LIVE_POLL_INTERVAL_SECONDS,
+                    int(portal_settings.get("monitor_tick_seconds") or config.monitor_tick_seconds or 1),
+                )
                 stagger_enabled = bool(
                     portal_settings.get("enable_scan_staggering", config.enable_scan_staggering)
                 )

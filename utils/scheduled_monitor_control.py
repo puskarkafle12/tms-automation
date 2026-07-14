@@ -11,14 +11,16 @@ from database import SessionLocal
 from models.logged_in_user import LoggedInUsers
 from models.scheduled_order import ScheduledOrder
 from utils.log_sender import delete_order_log_scan_count
-from utils.api_time import seconds_until_market_open
-from utils.market_status import get_market_hours_status, get_nepal_now
+from utils.market_status import (
+    MARKET_LIVE_POLL_INTERVAL_SECONDS,
+    get_nepal_now,
+    is_market_polling_window,
+)
 from utils.monitor_order import monitor_order_task_func
 
 logger = logging.getLogger(__name__)
 
-SUPERVISOR_INTERVAL_SECONDS = 5
-MARKET_OPEN_WAKE_WINDOW_SECONDS = 120
+SUPERVISOR_INTERVAL_SECONDS = MARKET_LIVE_POLL_INTERVAL_SECONDS
 
 
 def has_logged_in_tms_users() -> bool:
@@ -39,8 +41,7 @@ def should_auto_run_scheduler() -> bool:
         return False
     if is_testing():
         return True
-    hours = get_market_hours_status(get_nepal_now())
-    return bool(hours["market_hours_open"])
+    return is_market_polling_window(get_nepal_now())
 
 
 def should_keep_scheduler_running() -> bool:
@@ -48,8 +49,7 @@ def should_keep_scheduler_running() -> bool:
         return False
     if is_testing():
         return True
-    hours = get_market_hours_status(get_nepal_now())
-    return bool(hours["market_hours_open"])
+    return is_market_polling_window(get_nepal_now())
 
 
 def get_scheduler_display_status() -> dict:
@@ -66,11 +66,10 @@ def get_scheduler_display_status() -> dict:
             "scheduled_auto_mode": True,
         }
 
-    hours = get_market_hours_status(get_nepal_now())
-    market_open = bool(hours["market_hours_open"])
+    polling_window = is_market_polling_window(get_nepal_now())
     logged_in = has_logged_in_tms_users()
 
-    if not market_open and not is_testing():
+    if not polling_window and not is_testing():
         return {
             "scheduled_orders_active": False,
             "scheduled_scanning": False,
@@ -78,7 +77,7 @@ def get_scheduler_display_status() -> dict:
             "scheduled_status_message": "Auto — waiting for market to open",
             "scheduled_auto_mode": True,
         }
-    if not market_open and is_testing():
+    if not polling_window and is_testing():
         if not logged_in:
             return {
                 "scheduled_orders_active": False,
@@ -131,10 +130,9 @@ async def start_scheduled_order_monitor(*, reset_logs: bool = False) -> bool:
         tms_config.scheduled_phase = "armed"
         tms_config.scheduled_status_message = "Test mode — monitor running (market hours bypassed)"
     else:
-        hours = get_market_hours_status(get_nepal_now())
-        if hours["market_hours_open"]:
-            tms_config.scheduled_phase = "active"
-            tms_config.scheduled_status_message = "Monitoring scheduled orders"
+        if is_market_polling_window(get_nepal_now()):
+            tms_config.scheduled_phase = "armed"
+            tms_config.scheduled_status_message = "Checking TMS live market session"
         else:
             tms_config.scheduled_phase = "waiting_hours"
             tms_config.scheduled_status_message = "Auto — waiting for market"
@@ -165,8 +163,6 @@ async def stop_scheduled_order_monitor() -> bool:
 async def scheduled_monitor_supervisor_loop() -> None:
     while True:
         try:
-            logged_in = has_logged_in_tms_users()
-
             if should_auto_run_scheduler() and not tms_config.is_running:
                 await start_scheduled_order_monitor(reset_logs=False)
             elif tms_config.is_running and not should_keep_scheduler_running():
@@ -180,15 +176,4 @@ async def scheduled_monitor_supervisor_loop() -> None:
             await asyncio.sleep(SUPERVISOR_INTERVAL_SECONDS)
             continue
 
-        hours = get_market_hours_status(get_nepal_now())
-        if hours["market_hours_open"]:
-            await asyncio.sleep(SUPERVISOR_INTERVAL_SECONDS)
-            continue
-
-        wait_seconds = seconds_until_market_open()
-        if wait_seconds <= 1:
-            await asyncio.sleep(1)
-        elif wait_seconds <= MARKET_OPEN_WAKE_WINDOW_SECONDS:
-            await asyncio.sleep(min(wait_seconds, 1))
-        else:
-            await asyncio.sleep(min(wait_seconds, SUPERVISOR_INTERVAL_SECONDS))
+        await asyncio.sleep(SUPERVISOR_INTERVAL_SECONDS)

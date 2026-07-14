@@ -290,7 +290,7 @@ RULE "Order Book Strength Test" FOR SYMBOL "EBL" {
 SIDE BUY
 RULE "Timed Quality Buy Test" FOR SYMBOL "NABIL" {
     USE STRATEGY "Time-Based Buy"
-    EXPIRY_TIME "2026-06-22T14:45"
+    EXPIRY_TIME "2099-06-22T14:45"
     WRAPPED_STRATEGY "Quality Pullback Recovery Buy"
     ORDER QUANTITY 10
     EXECUTE ONCE PER SYMBOL
