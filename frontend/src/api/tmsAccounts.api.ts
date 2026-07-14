@@ -60,6 +60,12 @@ export interface LoginAllResponse {
   }>;
 }
 
+export interface TmsLoginStartResponse {
+  status: 'accepted';
+  message: string;
+  client_id: string;
+}
+
 export interface ScheduledOrder {
   order_id?: number;
   client_id: string;
@@ -172,8 +178,10 @@ export const clearScheduledOrders = async () => {
   return response.data;
 };
 
-export const loginTmsAccount = async (clientId: string) => {
-  const response = await axios.post(`${getApiUrl()}/tms-accounts/${encodeURIComponent(clientId)}/login`);
+export const loginTmsAccount = async (clientId: string): Promise<TmsLoginStartResponse> => {
+  const response = await axios.post<TmsLoginStartResponse>(
+    `${getApiUrl()}/tms-accounts/${encodeURIComponent(clientId)}/login`,
+  );
   return response.data;
 };
 

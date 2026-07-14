@@ -276,6 +276,11 @@
   color: var(--color-text-muted);
 }
 
+.tms-status-logging_in {
+  background: var(--color-warning-soft, #fff7d6);
+  color: var(--color-warning, #8a5a00);
+}
+
 .tms-status-error {
   background: var(--color-danger-soft);
   color: var(--color-danger);

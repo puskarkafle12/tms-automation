@@ -67,7 +67,7 @@ const statusDisplayText = (account: TmsAccount, now: number) => {
 };
 
 const statusClassName = (account: TmsAccount) => {
-  const hasError = account.session_status !== 'logged_in' && Boolean(account.session_message);
+  const hasError = !['logged_in', 'logging_in'].includes(account.session_status) && Boolean(account.session_message);
   return `tms-status ${hasError ? 'tms-status-error' : `tms-status-${account.session_status}`}`;
 };
 
@@ -144,6 +144,18 @@ const Login: React.FC = () => {
   useEffect(() => {
     loadAccounts();
   }, [loadAccounts]);
+
+  const loginInProgress = accounts.some((account) => account.session_status === 'logging_in');
+
+  useEffect(() => {
+    if (!loginInProgress) {
+      return undefined;
+    }
+    const timer = window.setInterval(() => {
+      void loadAccounts({ silent: true });
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [loadAccounts, loginInProgress]);
 
   useEffect(() => {
     let cancelled = false;
@@ -402,7 +414,10 @@ const Login: React.FC = () => {
     }
   };
 
-  const formatLoginResponse = (response: { message?: Record<string, string> }) => {
+  const formatLoginResponse = (response: { message?: string | Record<string, string> }) => {
+    if (typeof response?.message === 'string') {
+      return response.message;
+    }
     const payload = response?.message || {};
     const loginMessage = payload.message || 'TMS login successful';
     const expiryNote = payload.password_expiry ? ` Expiry: ${payload.password_expiry}.` : '';
@@ -617,10 +632,15 @@ const Login: React.FC = () => {
                       <button
                         type="button"
                         className="btn btn-primary btn-sm"
-                        disabled={actionLoading === `login-${account.client_id}`}
+                        disabled={
+                          actionLoading === `login-${account.client_id}`
+                          || account.session_status === 'logging_in'
+                        }
                         onClick={() => handleLoginStored(account)}
                       >
-                        {actionLoading === `login-${account.client_id}` ? 'Logging in...' : 'Login'}
+                        {actionLoading === `login-${account.client_id}` || account.session_status === 'logging_in'
+                          ? 'Logging in...'
+                          : 'Login'}
                       </button>
                       <button
                         type="button"

@@ -96,6 +96,7 @@ FRONTEND_BUILD_DIR = Path(__file__).resolve().parent / "frontend" / "build"
 
 # Store running tasks and updates
 running_tasks: Dict[str, asyncio.Task] = {}
+tms_login_tasks: Dict[str, asyncio.Task] = {}
 scheduled_supervisor_task: Optional[asyncio.Task] = None
 market_data_scheduler_task: Optional[asyncio.Task] = None
 running_grabbers: Dict[str, TmsUser] = {}
@@ -734,6 +735,13 @@ async def _refresh_trade_cache_background(
 @app.on_event("shutdown")
 async def close_cached_tms_users() -> None:
     global scheduled_supervisor_task, market_data_scheduler_task
+    login_tasks = list(tms_login_tasks.values())
+    for task in login_tasks:
+        if not task.done():
+            task.cancel()
+    if login_tasks:
+        await asyncio.gather(*login_tasks, return_exceptions=True)
+    tms_login_tasks.clear()
     if scheduled_supervisor_task is not None and not scheduled_supervisor_task.done():
         scheduled_supervisor_task.cancel()
         try:
@@ -1427,7 +1435,84 @@ def _record_tms_login_failure(
     db.commit()
 
 
+def _record_tms_login_pending(db: Session, *, client_id: str, broker_no: Optional[str]) -> None:
+    session = db.query(LoggedInUsers).filter(LoggedInUsers.client_id == client_id).first()
+    if not session:
+        session = LoggedInUsers(
+            client_id=client_id,
+            tokens={},
+            broker_no=broker_no or "",
+        )
+        db.add(session)
+    session.status = "logging_in"
+    session.broker_no = broker_no or session.broker_no
+    session.message = "Login in progress"
+    db.commit()
+
+
+async def _run_tms_account_login(client_id: str) -> None:
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.client_id == client_id).first()
+        if not user:
+            return
+
+        await invalidate_cached_tms_user(client_id)
+        tms_instance = await get_cached_tms_user(user, request_per_sec=5, allow_full_login=True)
+        try:
+            await tms_instance.get_client_collateral(force_refresh=True)
+        except Exception:
+            pass
+
+        db.expire_all()
+        session = db.query(LoggedInUsers).filter(LoggedInUsers.client_id == client_id).first()
+        if not session:
+            session = LoggedInUsers(client_id=client_id, tokens={}, broker_no=user.broker_no)
+            db.add(session)
+        session.status = "logged_in"
+        session.message = "Logged in"
+        session.last_login_at = datetime.utcnow()
+        db.commit()
+    except asyncio.CancelledError:
+        raise
+    except LoginFailedException as exc:
+        _record_tms_login_failure(
+            db,
+            client_id=client_id,
+            broker_no=getattr(locals().get("user"), "broker_no", None),
+            message=exc.message,
+        )
+    except Exception as exc:
+        logging.exception("Background TMS login failed for %s", client_id)
+        _record_tms_login_failure(
+            db,
+            client_id=client_id,
+            broker_no=getattr(locals().get("user"), "broker_no", None),
+            message=str(exc) or "Login failed",
+        )
+    finally:
+        db.close()
+
+
+def _remove_finished_tms_login_task(client_id: str, task: asyncio.Task) -> None:
+    if tms_login_tasks.get(client_id) is task:
+        tms_login_tasks.pop(client_id, None)
+
+
 async def _reconcile_logged_in_sessions(db: Session) -> None:
+    interrupted_sessions = [
+        session
+        for session in db.query(LoggedInUsers).all()
+        if session.status == "logging_in"
+    ]
+    for session in interrupted_sessions:
+        task = tms_login_tasks.get(session.client_id)
+        if not task or task.done():
+            session.status = "logged_out"
+            session.message = summarize_login_message("Login interrupted; please try again")
+    if interrupted_sessions:
+        db.commit()
+
     sessions = db.query(LoggedInUsers).filter(LoggedInUsers.status == "logged_in").all()
     if not sessions:
         return
@@ -1967,6 +2052,11 @@ async def delete_tms_account(client_id: str, db: Session = Depends(get_db)):
     if not user:
         raise HTTPException(status_code=404, detail="TMS account not found")
 
+    login_task = tms_login_tasks.pop(client_id, None)
+    if login_task and not login_task.done():
+        login_task.cancel()
+        await asyncio.gather(login_task, return_exceptions=True)
+
     db.query(LoggedInUsers).filter(LoggedInUsers.client_id == client_id).delete()
     db.delete(user)
     db.commit()
@@ -1980,37 +2070,29 @@ async def login_tms_account(client_id: str, db: Session = Depends(get_db)):
     if not user:
         raise HTTPException(status_code=404, detail="TMS account not found")
 
-    try:
-        await invalidate_cached_tms_user(client_id)
-        tms_instance = await get_cached_tms_user(user, request_per_sec=5, allow_full_login=True)
-        try:
-            await tms_instance.get_client_collateral(force_refresh=True)
-        except Exception:
-            pass
-        login_status = {
-            "status": "success",
-            "message": "token loaded and session cached",
-            "password_expiry": getattr(tms_instance, "login_response", {}).get("password_expiry"),
-            "password_rotated": False,
-        }
-    except LoginFailedException as e:
-        _record_tms_login_failure(db, client_id=client_id, broker_no=user.broker_no, message=e.message)
-        raise HTTPException(status_code=401, detail=e.message)
+    current_task = tms_login_tasks.get(client_id)
+    if current_task and not current_task.done():
+        return JSONResponse(
+            status_code=202,
+            content={
+                "status": "accepted",
+                "message": "TMS login is already in progress",
+                "client_id": client_id,
+            },
+        )
 
-    if login_status.get("status") != "success":
-        raise HTTPException(status_code=401, detail="Login failed")
-
-    session = db.query(LoggedInUsers).filter(LoggedInUsers.client_id == client_id).first()
-    if session:
-        session.status = "logged_in"
-        session.message = summarize_login_message(login_status.get("message") or "Logged in")
-        session.last_login_at = datetime.utcnow()
-        db.commit()
-        db.refresh(session)
-    return {
-        "message": login_status,
-        "account": _serialize_tms_account(user, session),
-    }
+    _record_tms_login_pending(db, client_id=client_id, broker_no=user.broker_no)
+    task = asyncio.create_task(_run_tms_account_login(client_id))
+    tms_login_tasks[client_id] = task
+    task.add_done_callback(lambda finished: _remove_finished_tms_login_task(client_id, finished))
+    return JSONResponse(
+        status_code=202,
+        content={
+            "status": "accepted",
+            "message": "TMS login started",
+            "client_id": client_id,
+        },
+    )
 
 
 @app.post("/login/")
