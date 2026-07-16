@@ -1,7 +1,11 @@
 import unittest
+from datetime import datetime, timezone
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 from utils.log_sender import (
     is_transient_monitor_log_line,
+    store_or_update_logs,
     strip_transient_monitor_log_lines,
 )
 
@@ -19,6 +23,33 @@ class TestTransientMonitorLogs(unittest.TestCase):
 
     def test_strip_transient_monitor_log_lines_all_transient(self):
         self.assertIsNone(strip_transient_monitor_log_lines("Price fetch failed"))
+
+
+class TestPausedMonitorLogTimestamp(unittest.IsolatedAsyncioTestCase):
+    async def test_paused_status_does_not_replace_last_real_scan_time(self):
+        original = datetime(2026, 7, 14, 7, 15, tzinfo=timezone.utc)
+        log = SimpleNamespace(
+            scanning_count=4,
+            current_price=199,
+            order_placed=False,
+            timestamp=original,
+            logs=None,
+        )
+        db = MagicMock()
+        db.query.return_value.filter_by.return_value.first.return_value = log
+
+        await store_or_update_logs(
+            db,
+            "client1",
+            "CZBIL",
+            4,
+            None,
+            False,
+            "Waiting for market",
+            touch_timestamp=False,
+        )
+
+        self.assertEqual(log.timestamp, original)
 
 
 class TestScheduledLiveStatus(unittest.TestCase):

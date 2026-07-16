@@ -14,10 +14,10 @@ export const isApiTimestamp = (value: unknown): value is ApiTimestamp =>
 export const formatNepalDateTime = (value: ApiTimeValue): string => {
   if (!value) return '';
   if (isApiTimestamp(value)) {
-    return value.display;
+    return value.display.replace(/\s+NPT\b/g, '');
   }
   if (typeof value === 'string') {
-    return value;
+    return value.replace(/\s+NPT\b/g, '');
   }
   return '';
 };
@@ -82,7 +82,7 @@ export const formatNepalClockFromUtcMs = (utcMs: number) => {
     minute: '2-digit',
     second: '2-digit',
     hour12: true,
-  }).format(instant)} NPT`;
+  }).format(instant)}`;
   return { time, date, display };
 };
 

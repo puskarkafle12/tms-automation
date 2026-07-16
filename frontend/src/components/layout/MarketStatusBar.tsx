@@ -23,7 +23,7 @@ const buildStatusTitle = (status: MarketStatus | null) => {
   const parts = [
     dnaStatus,
     status.tms_session_message,
-    `DNA market check: Sun–Fri 11:00 AM–3:00 PM NPT`,
+    'DNA market check: Sun–Fri 11:00 AM–3:00 PM',
   ];
 
   if (status.market_phase === 'open') {
@@ -112,13 +112,13 @@ const MarketStatusBar: React.FC = () => {
   const pillTitle = buildStatusTitle(status);
   const clockTime = liveClock?.time || status?.nepal_time_formatted || status?.server_time?.time || '--:--:--';
   const clockDate = liveClock?.date || status?.nepal_date_formatted || status?.server_time?.date || '';
-  const clockTitle = liveClock?.display || status?.nepal_time_display || 'Nepal Time (NPT)';
+  const clockTitle = liveClock?.display || status?.nepal_time_display || 'Nepal Time';
 
   return (
     <div className="market-status-bar">
       <div className="market-status-clock">
         <span className="market-status-time" title={clockTitle}>
-          {clockTime} NPT
+          {clockTime}
         </span>
         <span className="market-status-date">{clockDate}</span>
       </div>

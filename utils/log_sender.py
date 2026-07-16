@@ -128,6 +128,7 @@ async def store_or_update_logs(
     log_message: Optional[str] = None,
     *,
     commit: bool = True,
+    touch_timestamp: bool = True,
 ):
     scanning_count = int(scanning_count or 0)
     if current_price is not None:
@@ -143,7 +144,8 @@ async def store_or_update_logs(
             log_entry.scanning_count = scanning_count
         log_entry.current_price = current_price
         log_entry.order_placed = order_placed
-        log_entry.timestamp = datetime.now(timezone.utc)
+        if touch_timestamp:
+            log_entry.timestamp = datetime.now(timezone.utc)
         if log_message:
             log_entry.logs = f"{log_entry.logs}\n{log_message}" if log_entry.logs else log_message
     else:
@@ -153,7 +155,7 @@ async def store_or_update_logs(
             scanning_count=scanning_count,
             current_price=current_price,
             order_placed=order_placed,
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(timezone.utc) if touch_timestamp else None,
             logs=log_message,
         )
         db.add(log_entry)

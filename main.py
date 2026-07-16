@@ -58,7 +58,7 @@ from sqlalchemy.orm import Session
 from datetime import date, datetime, timedelta
 
 from utils.tms_user_loader import load_tms_users_instances
-from utils.api_time import format_api_timestamp, get_server_time_payload
+from utils.api_time import format_api_timestamp, get_server_time_payload, is_continuous_market_timestamp
 from utils.market_status import (
     MARKET_LIVE_POLL_INTERVAL_SECONDS,
     MARKET_POLL_HOURS_LABEL,
@@ -2939,7 +2939,9 @@ async def get_order_status_logs(
             "cancelled_reason": order.cancelled_reason,
             "scanning_count": scanning_count,
             "current_price": int(round(current_price_val)) if current_price_val is not None else None,
-            "last_scan_at": format_api_timestamp(scan_log.timestamp if scan_log else None),
+            "last_scan_at": format_api_timestamp(scan_log.timestamp)
+            if scan_log and is_continuous_market_timestamp(scan_log.timestamp)
+            else None,
             **live_status_fields,
             "last_monitor_message": last_monitor_message,
             "monitor_logs": scan_log.logs if scan_log and scan_log.logs else None,

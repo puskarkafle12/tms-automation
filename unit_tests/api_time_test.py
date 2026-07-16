@@ -2,7 +2,7 @@ import unittest
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from utils.api_time import format_api_timestamp, seconds_until_market_open
+from utils.api_time import format_api_timestamp, is_continuous_market_timestamp, seconds_until_market_open
 from utils.market_status import MARKET_OPEN, NEPAL_TZ
 
 
@@ -13,11 +13,17 @@ class ApiTimeTest(unittest.TestCase):
         self.assertIsNotNone(payload)
         assert payload is not None
         self.assertEqual(payload["utc"], "2026-06-20T01:44:49Z")
-        self.assertIn("NPT", payload["display"])
-        self.assertTrue(payload["display"].endswith("NPT"))
+        self.assertEqual(payload["display"], "Jun 20, 2026, 07:29:49 AM")
         npt = datetime.fromisoformat(payload["npt"])
         self.assertEqual(npt.hour, 7)
         self.assertEqual(npt.minute, 29)
+
+    def test_last_scan_timestamp_must_be_inside_continuous_market_hours(self):
+        during_market_utc = datetime(2026, 7, 14, 7, 15)  # 1:00 PM Nepal time
+        after_market_utc = datetime(2026, 7, 14, 14, 4, 34)  # 7:49:34 PM Nepal time
+
+        self.assertTrue(is_continuous_market_timestamp(during_market_utc))
+        self.assertFalse(is_continuous_market_timestamp(after_market_utc))
 
     def test_seconds_until_market_open_before_open(self):
         before_open = datetime.combine(

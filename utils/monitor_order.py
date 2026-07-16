@@ -615,6 +615,7 @@ async def monitor_order_task_func():
                                 False,
                                 execution_gate["message"],
                                 commit=False,
+                                touch_timestamp=False,
                             )
                         db.commit()
                     finally:

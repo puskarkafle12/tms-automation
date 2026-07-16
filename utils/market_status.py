@@ -13,9 +13,9 @@ TRADING_WEEKDAYS = {0, 1, 2, 3, 4}
 # Poll Sunday–Friday during market hours. The exchange response, not this
 # calendar, decides whether scanning is allowed.
 MARKET_POLL_WEEKDAYS = {0, 1, 2, 3, 4, 6}
-MARKET_HOURS_LABEL = "Mon–Fri 11:00 AM–3:00 PM NPT"
-MARKET_POLL_HOURS_LABEL = "Sun–Fri 11:00 AM–3:00 PM NPT"
-PRE_OPEN_HOURS_LABEL = "Mon–Fri 10:30 AM–10:45 AM NPT"
+MARKET_HOURS_LABEL = "Mon–Fri 11:00 AM–3:00 PM"
+MARKET_POLL_HOURS_LABEL = "Sun–Fri 11:00 AM–3:00 PM"
+PRE_OPEN_HOURS_LABEL = "Mon–Fri 10:30 AM–10:45 AM"
 
 
 def get_nepal_now() -> datetime:

@@ -8,7 +8,7 @@ const mockServerTimePayload = {
   now: {
     utc: '2026-06-20T01:44:49Z',
     npt: '2026-06-20T07:29:49+05:45',
-    display: 'Jun 20, 2026, 07:29:49 AM NPT',
+    display: 'Jun 20, 2026, 07:29:49 AM',
     date: '2026-06-20',
     time: '07:29:49 AM',
     timezone: 'Asia/Kathmandu',

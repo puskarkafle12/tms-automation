@@ -4,7 +4,7 @@ import re
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Dict, Optional
 
-from utils.market_status import MARKET_OPEN, NEPAL_TZ, TRADING_WEEKDAYS, get_nepal_now
+from utils.market_status import MARKET_OPEN, NEPAL_TZ, TRADING_WEEKDAYS, get_market_hours_status, get_nepal_now
 
 
 def coerce_utc(value: Optional[datetime]) -> Optional[datetime]:
@@ -28,7 +28,7 @@ def format_api_timestamp(value: Optional[datetime]) -> Optional[Dict[str, str]]:
     return {
         "utc": utc_text,
         "npt": npt.isoformat(),
-        "display": npt.strftime("%b %d, %Y, %I:%M:%S %p NPT"),
+        "display": npt.strftime("%b %d, %Y, %I:%M:%S %p"),
         "date": npt.strftime("%Y-%m-%d"),
         "time": npt.strftime("%I:%M:%S %p"),
         "timezone": "Asia/Kathmandu",
@@ -38,6 +38,13 @@ def format_api_timestamp(value: Optional[datetime]) -> Optional[Dict[str, str]]:
 def format_api_timestamp_display(value: Optional[datetime]) -> str:
     payload = format_api_timestamp(value)
     return payload["display"] if payload else ""
+
+
+def is_continuous_market_timestamp(value: Optional[datetime]) -> bool:
+    """Return whether a UTC/DB timestamp occurred during Nepal's continuous session."""
+    if value is None:
+        return False
+    return bool(get_market_hours_status(to_nepal(value))["market_hours_open"])
 
 
 def parse_nepal_datetime_local_to_utc(value: str) -> Optional[datetime]:
@@ -86,7 +93,7 @@ def _next_trading_day(from_date: date) -> date:
 
 
 def seconds_until_market_open(now: Optional[datetime] = None) -> float:
-    """Seconds until the next continuous session open (11:00 NPT on a trading day)."""
+    """Seconds until the next continuous session open (11:00 Nepal time on a trading day)."""
     current = now or get_nepal_now()
     if current.weekday() in TRADING_WEEKDAYS and MARKET_OPEN <= current.time() <= time(15, 0):
         return 0.0
