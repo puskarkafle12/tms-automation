@@ -28,6 +28,7 @@ PROVIDER_ENV_KEYS = {
 
 
 ALL_LLM_PROVIDERS = ["gemini", "cohere", "nvidia", "groq"]
+LLM_REQUEST_TIMEOUT_SECONDS = float(os.getenv("AI_LLM_REQUEST_TIMEOUT_SECONDS", "25"))
 
 
 class LlmChatError(Exception):
@@ -220,7 +221,10 @@ def _call_cohere_chat(
     except ImportError as exc:
         raise LlmChatError("cohere package is not installed on the server.") from exc
 
-    client = cohere.ClientV2(api_key=settings["api_key"])
+    client = cohere.ClientV2(
+        api_key=settings["api_key"],
+        timeout=LLM_REQUEST_TIMEOUT_SECONDS,
+    )
     messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
     if conversation:
         messages.extend(conversation)
@@ -256,7 +260,12 @@ def _call_openai_compatible_chat(
     except ImportError as exc:
         raise LlmChatError("openai package is not installed on the server.") from exc
 
-    client = OpenAI(base_url=settings["base_url"], api_key=settings["api_key"])
+    client = OpenAI(
+        base_url=settings["base_url"],
+        api_key=settings["api_key"],
+        timeout=LLM_REQUEST_TIMEOUT_SECONDS,
+        max_retries=0,
+    )
     messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
     if conversation:
         messages.extend(conversation)

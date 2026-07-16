@@ -18,6 +18,7 @@ import {
 import { buildNepseAlphaChartUrl } from '../../lib/nepseAlpha';
 import ScreenerDropConfirmModal from '../../components/ScreenerDropConfirmModal';
 import { ScreenerDropScheduleInput } from '../../api/screenerDrop.api';
+import { fetchAiScreen } from '../../api/aiScreen.api';
 import { addNepalDays, currentNepalDateTimeLocal, todayNepalDate } from '../../utils/nepalTime';
 
 type FieldType = 'number' | 'text';
@@ -426,16 +427,11 @@ const StockScreener: React.FC = () => {
     try {
       const controller = new AbortController();
       const timeoutId = window.setTimeout(() => controller.abort(), 300000);
-      const response = await fetch(`${getApiUrl()}/stock_screener/ai_screen`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...buildUniversePayload(),
-          message: userMessage,
-          force_refresh: forceRefresh,
-        }),
-        signal: controller.signal,
-      });
+      const response = await fetchAiScreen('/stock_screener/ai_screen', {
+        ...buildUniversePayload(),
+        message: userMessage,
+        force_refresh: forceRefresh,
+      }, controller.signal);
       window.clearTimeout(timeoutId);
 
       const { data, rawText } = await readJsonResponse(response);

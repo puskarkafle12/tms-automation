@@ -102,6 +102,9 @@ market_data_scheduler_task: Optional[asyncio.Task] = None
 running_grabbers: Dict[str, TmsUser] = {}
 stock_grabber_updates: Dict[str, List[Dict]] = {}
 stock_grabber_fetch_tests: Dict[str, Dict] = {}
+ai_screen_jobs: Dict[str, Dict] = {}
+ai_screen_tasks: Dict[str, asyncio.Task] = {}
+AI_SCREEN_JOB_TTL_SECONDS = 600.0
 tms_user_cache: Dict[str, TmsUser] = {}
 tms_user_cache_touched: Dict[str, float] = {}
 tms_user_cache_ttl = 300.0
@@ -2515,7 +2518,7 @@ async def _validate_scheduled_order_payload(order_data: OrderCreateRequest, db: 
         raise HTTPException(status_code=404, detail="User not found")
 
     if order_data.order_type.lower() == "buy":
-        tms_user_instance = await get_cached_tms_user(user)
+        tms_user_instance = await _get_schedule_validation_tms_user(user)
         script_high = await _get_script_high(tms_user_instance, order_data.script_name)
         if script_high is not None:
             order_price = truncate_to_one_decimal_place(order_data.price)
@@ -2529,8 +2532,18 @@ async def _validate_scheduled_order_payload(order_data: OrderCreateRequest, db: 
                     ),
                 )
     elif order_data.order_type.lower() == "sell":
-        tms_user_instance = await get_cached_tms_user(user)
+        tms_user_instance = await _get_schedule_validation_tms_user(user)
         await _validate_sell_lot_against_holdings(order_data, tms_user_instance)
+
+
+async def _get_schedule_validation_tms_user(user: User) -> TmsUser:
+    try:
+        return await get_cached_tms_user(user, allow_full_login=True)
+    except LoginFailedException as exc:
+        raise HTTPException(
+            status_code=401,
+            detail=f"TMS login failed while validating the scheduled order: {exc}",
+        ) from exc
 
 
 @app.post("/scheduled_orders/")
@@ -3562,8 +3575,7 @@ async def market_analysis_llm_health(probe: bool = True):
     return await asyncio.to_thread(test_all_llm_connections, probe=probe)
 
 
-@app.post("/market_analysis/ai_screen")
-async def market_analysis_ai_screen(body: StockScreenerAiRequest, db: Session = Depends(get_db)):
+async def _execute_market_analysis_ai_screen(body: StockScreenerAiRequest, db: Session) -> Dict:
     from utils.market_data.nonblocking_cache import kickoff_cache_bootstrap_if_empty
     from utils.market_data.request_workers import worker_run_market_screen
 
@@ -3640,6 +3652,83 @@ async def market_analysis_ai_screen(body: StockScreenerAiRequest, db: Session = 
         symbol_count=len(symbols),
     )
     return payload
+
+
+async def _run_ai_screen_job(job_id: str, body_data: Dict) -> None:
+    db = SessionLocal()
+    try:
+        body = StockScreenerAiRequest(**body_data)
+        body.background = False
+        ai_screen_jobs[job_id] = {"status": "running"}
+        result = await _execute_market_analysis_ai_screen(body, db)
+        ai_screen_jobs[job_id] = {
+            "status": "complete",
+            "result": result,
+            "finished_at": monotonic_time.monotonic(),
+        }
+    except HTTPException as exc:
+        ai_screen_jobs[job_id] = {
+            "status": "failed",
+            "http_status": exc.status_code,
+            "detail": exc.detail,
+            "finished_at": monotonic_time.monotonic(),
+        }
+    except Exception as exc:
+        logging.exception("Background AI screen failed for job_id=%s", job_id)
+        ai_screen_jobs[job_id] = {
+            "status": "failed",
+            "http_status": 500,
+            "detail": str(exc),
+            "finished_at": monotonic_time.monotonic(),
+        }
+    finally:
+        db.close()
+
+
+def _prune_ai_screen_jobs() -> None:
+    cutoff = monotonic_time.monotonic() - AI_SCREEN_JOB_TTL_SECONDS
+    expired = [
+        job_id
+        for job_id, job in ai_screen_jobs.items()
+        if float(job.get("finished_at", cutoff + 1)) < cutoff
+    ]
+    for job_id in expired:
+        ai_screen_jobs.pop(job_id, None)
+
+
+@app.get("/market_analysis/ai_screen/jobs/{job_id}")
+async def market_analysis_ai_screen_job(job_id: str):
+    _prune_ai_screen_jobs()
+    job = ai_screen_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="AI screen job was not found or the server restarted.")
+    if job["status"] in {"pending", "running"}:
+        return JSONResponse(status_code=202, content={"job_id": job_id, "status": job["status"]})
+    if job["status"] == "failed":
+        return JSONResponse(
+            status_code=int(job.get("http_status", 500)),
+            content={"detail": job.get("detail", "AI screener request failed")},
+        )
+    return job["result"]
+
+
+@app.post("/market_analysis/ai_screen")
+async def market_analysis_ai_screen(body: StockScreenerAiRequest, db: Session = Depends(get_db)):
+    message = (body.message or "").strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="Message is required")
+
+    # Pre-built screens are already fast and do not need job orchestration.
+    if body.background and match_quick_ai_screen(message) is None:
+        _prune_ai_screen_jobs()
+        job_id = uuid.uuid4().hex
+        ai_screen_jobs[job_id] = {"status": "pending"}
+        task = asyncio.create_task(_run_ai_screen_job(job_id, body.model_dump()))
+        ai_screen_tasks[job_id] = task
+        task.add_done_callback(lambda _task, key=job_id: ai_screen_tasks.pop(key, None))
+        return JSONResponse(status_code=202, content={"job_id": job_id, "status": "pending"})
+
+    return await _execute_market_analysis_ai_screen(body, db)
 
 
 @app.post("/stock_screener/parse")

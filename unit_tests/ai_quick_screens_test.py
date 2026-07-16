@@ -36,6 +36,14 @@ class AiQuickScreensTest(unittest.TestCase):
         )
         self.assertEqual(left, right)
 
+    def test_sustained_bullish_question_uses_instant_screen(self):
+        screen = match_quick_ai_screen(
+            "Which stock is rising continuously, bullish for 10 to 15 days, "
+            "and is likely to be bullish for upcoming days also?",
+        )
+        self.assertIsNotNone(screen)
+        self.assertEqual(screen["id"], "sustained_bullish_continuation")
+
     def test_all_quick_screen_sql_prepares(self):
         engine = create_engine("sqlite:///:memory:")
         with engine.begin() as connection:

@@ -95,6 +95,29 @@ LIMIT 25
 """,
     },
     {
+        "id": "sustained_bullish_continuation",
+        "prompt": "Which stock is rising continuously, bullish for 10 to 15 days, and is likely to be bullish for upcoming days also?",
+        "summary": (
+            "Continuation candidates with a bullish MACD, a trending 3-month profile, price above the "
+            "10/20/50-day averages, and RSI below the most overheated zone. Future gains are not "
+            "guaranteed; these indicators approximate a sustained 10–15 day rise because the cache "
+            "does not store an exact consecutive-up-day count."
+        ),
+        "query_sql": """
+SELECT symbol, ltp, percent_change, qty, sector, technical_rsi_14, technical_macd, technical_3m_price_tend, technical_sma_10, technical_sma_20, technical_sma_50, avg_volume_30d
+FROM v_nepse_stock_screen
+WHERE LOWER(technical_macd) = 'bullish'
+  AND LOWER(technical_3m_price_tend) = 'trending'
+  AND LOWER(technical_sma_10) = 'above'
+  AND LOWER(technical_sma_20) = 'above'
+  AND LOWER(technical_sma_50) = 'above'
+  AND technical_rsi_14 BETWEEN 50 AND 72
+  AND avg_volume_30d >= 300
+ORDER BY technical_rsi_14 DESC
+LIMIT 25
+""",
+    },
+    {
         "id": "hydropower_good_day",
         "prompt": "Which hydropower stocks are having a good day on the market?",
         "summary": (

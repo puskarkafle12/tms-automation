@@ -4,6 +4,7 @@ import ErrorMessage from '../../components/ErrorMessage';
 import CommonTable from '../../components/table/Table';
 import Dropdown from '../../components/Dropdown';
 import { fetchJson, getApiUrl } from '../../utils/api';
+import { fetchAiScreen } from '../../api/aiScreen.api';
 import {
   buildPresetCopyText,
   DEFAULT_SIMPLE_QUERY,
@@ -961,15 +962,10 @@ const StockAnalysis: React.FC = () => {
     try {
       const controller = new AbortController();
       const timeoutId = window.setTimeout(() => controller.abort(), 300000);
-      const response = await fetch(`${getApiUrl()}/market_analysis/ai_screen`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...buildUniversePayload(),
-          message: userMessage,
-        }),
-        signal: controller.signal,
-      });
+      const response = await fetchAiScreen('/market_analysis/ai_screen', {
+        ...buildUniversePayload(),
+        message: userMessage,
+      }, controller.signal);
       window.clearTimeout(timeoutId);
 
       const { data, rawText } = await readJsonResponse(response);

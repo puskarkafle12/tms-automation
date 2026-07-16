@@ -121,6 +121,7 @@ class StockScreenerAiRequest(BaseModel):
     symbols: Optional[List[str]] = None
     message: str
     force_refresh: bool = False
+    background: bool = False
 
     @model_validator(mode="after")
     def validate_universe(self):
