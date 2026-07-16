@@ -125,8 +125,8 @@ def simulate_scans(
             memory,
             (details_builder(ltp, scan_idx) if details_builder else (details or default_details())),
         )
-        if decision.mutate and decision.mutate.get("target_state"):
-            extra["target_state"] = decision.mutate["target_state"]
+        if decision.mutate:
+            extra.update(decision.mutate)
         decisions.append(decision)
         previous_ltp = ltp
 

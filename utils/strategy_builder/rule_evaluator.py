@@ -626,11 +626,12 @@ def evaluate_rule(
             )
 
     if rule.use_strategy and not signal_expr and not rule.score_items:
-        matched, status = _apply_confirmation(rule, True, history, trade_timestamp=flat.get("last_traded_at"))
-        if trigger_on_cross and matched and history.rule_was_true:
+        confirmed, status = _apply_confirmation(rule, True, history, trade_timestamp=flat.get("last_traded_at"))
+        matched = confirmed
+        if trigger_on_cross and confirmed and history.rule_was_true:
             matched = False
             status = "ALREADY_TRIGGERED"
-        history.rule_was_true = True
+        history.rule_was_true = confirmed
         return EvaluationResult(
             symbol=symbol,
             rule_name=rule.name,
@@ -651,11 +652,12 @@ def evaluate_rule(
     else:
         conditions.append(result)
     when_matched = result.matched and (not rule.score_items or bool(final_score and final_score >= float(rule.required_score or 0)))
-    matched, status = _apply_confirmation(rule, when_matched, history, trade_timestamp=flat.get("last_traded_at"))
-    if trigger_on_cross and matched and history.rule_was_true:
+    confirmed, status = _apply_confirmation(rule, when_matched, history, trade_timestamp=flat.get("last_traded_at"))
+    matched = confirmed
+    if trigger_on_cross and confirmed and history.rule_was_true:
         matched = False
         status = "ALREADY_TRIGGERED"
-    history.rule_was_true = bool(when_matched)
+    history.rule_was_true = confirmed
     return EvaluationResult(
         symbol=symbol,
         rule_name=rule.name,

@@ -11,6 +11,13 @@
   color: #24292f;
 }
 
+.custom-query-help {
+  margin-top: -0.4rem;
+  color: #57606a;
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
 .custom-query-textarea {
   width: 100%;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;

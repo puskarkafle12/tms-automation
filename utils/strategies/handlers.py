@@ -471,6 +471,8 @@ def _mark_rule_execution(history: "TargetHistory") -> None:
 
 
 def evaluate_rule_based_strategy(ctx: OrderContext, snapshot: MarketSnapshot, memory: ScannerMemory, details: ScriptDetails) -> StrategyDecision:
+    from dataclasses import replace
+
     from utils.strategy_builder.derived_fields import enrich_flat_snapshot
     from utils.strategy_builder.execution_depth import (
         depth_quantity_sufficient,
@@ -523,14 +525,70 @@ def evaluate_rule_based_strategy(ctx: OrderContext, snapshot: MarketSnapshot, me
         return _skip("INVALID_RULE_PLAN", f"Compiled plan is invalid: {exc}")
 
     symbol = (ctx.symbol or snapshot.symbol or "").upper()
-    selected_rule = None
+    matching_rules = []
     for rule_data in plan.rules:
         rule = RuleBlock.model_validate(rule_data) if isinstance(rule_data, dict) else rule_data
         if symbol in {item.upper() for item in rule.symbols}:
-            selected_rule = rule
-            break
-    if not selected_rule:
+            matching_rules.append(rule)
+    if not matching_rules:
         return _skip("SYMBOL_NOT_IN_PLAN", f"No rule targets {symbol} in this plan")
+
+    # Multiple RULE blocks may intentionally target the same symbol. Evaluate
+    # each rule with its own history so confirmations, cooldowns, and execution
+    # limits cannot leak between rules. The first rule that executes wins.
+    if len(matching_rules) > 1 and not config.get("_single_rule_eval"):
+        multi_rule_state = dict(config.get("multi_rule_target_state") or {})
+        decisions = []
+        for index, rule in enumerate(matching_rules):
+            rule_state = dict(multi_rule_state.get(rule.rule_id) or {})
+            if index == 0 and not rule_state and config.get("target_state"):
+                # Preserve history created before multi-rule state was supported.
+                rule_state = dict(config.get("target_state") or {})
+
+            single_plan = plan.model_copy(update={"rules": [rule]}).model_dump()
+            single_extra = dict(config)
+            single_extra.update(
+                {
+                    "compiled_plan": single_plan,
+                    "target_state": rule_state,
+                    "_single_rule_eval": True,
+                }
+            )
+            single_ctx = replace(
+                ctx,
+                config=replace(ctx.config, extra=single_extra),
+            )
+            decision = evaluate_rule_based_strategy(single_ctx, snapshot, memory, details)
+            decision_mutate = dict(decision.mutate or {})
+            multi_rule_state[rule.rule_id] = dict(
+                decision_mutate.pop("target_state", rule_state) or {}
+            )
+            decision.mutate = decision_mutate
+            decisions.append(decision)
+            if decision.action == "EXECUTE":
+                break
+
+        selected = next(
+            (decision for decision in decisions if decision.action == "EXECUTE"),
+            next(
+                (decision for decision in decisions if decision.action != "TRACK"),
+                next(
+                    (
+                        decision
+                        for decision in decisions
+                        if decision.tracking_status not in {None, "NOT_MATCHED", "Monitoring"}
+                    ),
+                    decisions[0],
+                ),
+            ),
+        )
+        selected.mutate = {
+            **dict(selected.mutate or {}),
+            "multi_rule_target_state": multi_rule_state,
+        }
+        return selected
+
+    selected_rule = matching_rules[0]
 
     normalized = build_symbol_snapshot_from_parts(symbol, snapshot, details)
     target_state = dict(config.get("target_state") or {})

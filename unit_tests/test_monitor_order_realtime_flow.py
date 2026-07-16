@@ -17,6 +17,7 @@ from utils.monitor_order import (
     _evaluate_strategy,
     submit_scheduled_order_to_tms,
 )
+from utils.strategies.types import MarketSnapshot
 from utils.strategy_builder.strategy_parser import parse_strategy_query
 
 
@@ -41,6 +42,36 @@ RULE "Sell At 10 Percent Gain" FOR SYMBOL "HDL" {
     TRIGGER LEVEL
     MAX_SLIPPAGE_PCT 1
     EXECUTE ONCE PER SYMBOL
+}
+"""
+
+MULTI_SYMBOL_QUERY = """
+STRATEGY_VERSION 1
+SIDE BUY
+RULE "CZBIL Entry" FOR SYMBOL "CZBIL" {
+    WHEN ltp >= 190
+    ORDER QUANTITY 10
+    EXECUTE ONCE
+}
+RULE "NABIL Entry" FOR SYMBOL "NABIL" {
+    WHEN ltp >= 490
+    ORDER QUANTITY 20
+    EXECUTE ONCE
+}
+"""
+
+SAME_SYMBOL_FALLBACK_QUERY = """
+STRATEGY_VERSION 1
+SIDE BUY
+RULE "Deep Pullback" FOR SYMBOL "CZBIL" {
+    WHEN ltp < 100
+    ORDER QUANTITY 10
+    EXECUTE ONCE
+}
+RULE "Momentum Entry" FOR SYMBOL "CZBIL" {
+    WHEN ltp > 150
+    ORDER QUANTITY 20
+    EXECUTE ONCE
 }
 """
 
@@ -301,6 +332,55 @@ class RuleBasedRealtimeScanParityTest(unittest.TestCase):
     self.assertEqual(decisions[1].qty, 100)
     self.assertEqual(first_execute_index(decisions), 1)
 
+  def test_second_rule_for_same_symbol_executes_when_first_does_not_match(self):
+    decisions = simulate_scans(
+      SAME_SYMBOL_FALLBACK_QUERY,
+      price_series=[200.0],
+      execution_mode="live",
+      strategy_type="Custom Query Buy",
+    )
+
+    self.assertEqual(decisions[0].action, "EXECUTE")
+    self.assertEqual(decisions[0].qty, 20)
+
+  def test_first_matching_rule_wins_when_same_symbol_rules_both_match(self):
+    query = SAME_SYMBOL_FALLBACK_QUERY.replace("ltp < 100", "ltp > 100")
+    decisions = simulate_scans(
+      query,
+      price_series=[200.0],
+      execution_mode="live",
+      strategy_type="Custom Query Buy",
+    )
+
+    self.assertEqual(decisions[0].action, "EXECUTE")
+    self.assertEqual(decisions[0].qty, 10)
+
+  def test_same_symbol_rules_keep_independent_confirmation_history(self):
+    query = SAME_SYMBOL_FALLBACK_QUERY.replace(
+      "ORDER QUANTITY 20\n    EXECUTE ONCE",
+      "ORDER QUANTITY 20\n    CONFIRM TRUE_FOR 2 SCANS\n    EXECUTE ONCE",
+    )
+    decisions = simulate_scans(
+      query,
+      price_series=[200.0, 201.0],
+      execution_mode="live",
+      strategy_type="Custom Query Buy",
+      snapshot_builder=lambda ltp, scan_idx: MarketSnapshot(
+        symbol="CZBIL",
+        ltp=ltp,
+        open=200.0,
+        high=202.0,
+        low=195.0,
+        volume=82902.0,
+        prev_close=200.0,
+        last_traded_time=f"2026-07-15 11:00:0{scan_idx}",
+      ),
+    )
+
+    self.assertEqual(decisions[0].action, "TRACK")
+    self.assertEqual(decisions[1].action, "EXECUTE")
+    self.assertEqual(decisions[1].qty, 20)
+
 
 class MonitorExecutionIntegrationTest(unittest.IsolatedAsyncioTestCase):
   @patch("utils.strategies.normalize.get_script_details_fetch_meta")
@@ -358,6 +438,63 @@ class MonitorExecutionIntegrationTest(unittest.IsolatedAsyncioTestCase):
       security=db_order.security_details,
       order_type="buy",
     )
+
+  async def test_multi_symbol_plan_evaluates_and_submits_each_scheduled_order(self):
+    cases = [
+      ("CZBIL", 200.0, 10),
+      ("NABIL", 500.0, 20),
+    ]
+
+    for order_id, (symbol, ltp, expected_qty) in enumerate(cases, start=1):
+      with self.subTest(symbol=symbol):
+        db_order = _make_rule_order(query=MULTI_SYMBOL_QUERY, qty=expected_qty)
+        db_order.order_id = order_id
+        db_order.script_name = symbol
+        db_order.symbol = symbol
+        db_order.qty = expected_qty
+        db_order.remaining_quantity = expected_qty
+        db_order.security_details = {
+          "id": order_id,
+          "symbol": symbol,
+          "boardLot": 1,
+          "oddLotAllowed": True,
+        }
+        quote = _tms_quote(ltp=ltp, high=ltp + 2)
+
+        decision, strategy_log = _evaluate_strategy(
+          db_order,
+          ltp,
+          quote,
+          scan_count=1,
+          details=_nepse_details(),
+          nepse_network_attempted=False,
+        )
+        self.assertIsNone(strategy_log)
+        self.assertIsNotNone(decision)
+        assert decision is not None
+        self.assertEqual(decision["qty"], expected_qty)
+
+        tms_user = MagicMock()
+        tms_user.order = AsyncMock(return_value={"status": 200, "message": "ok"})
+        submission = await submit_scheduled_order_to_tms(
+          db_order,
+          decision,
+          high_price=ltp + 2,
+          fallback_qty=expected_qty,
+          security_details=db_order.security_details,
+          order_type="buy",
+          tms_user=tms_user,
+          execution_gate={"can_execute": True},
+        )
+
+        self.assertTrue(submission.submitted)
+        self.assertEqual(submission.execution_qty, expected_qty)
+        tms_user.order.assert_awaited_once_with(
+          ltp,
+          expected_qty,
+          security=db_order.security_details,
+          order_type="buy",
+        )
 
   @patch("utils.strategies.normalize.get_script_details_fetch_meta")
   async def test_monitor_flow_skips_tms_when_metrics_not_matched(self, mock_fetch_meta):

@@ -595,6 +595,10 @@ const CustomQueryEditor: React.FC<Props> = ({
       {aiPortalTarget ? createPortal(aiPanel, aiPortalTarget) : aiPanel}
 
       <label htmlFor="strategyQueryText">Strategy Query</label>
+      <div className="custom-query-help">
+        You can add multiple RULE blocks for one or many stocks. If multiple rules for the same stock match on one scan,
+        the first matching rule in query order places the order.
+      </div>
       <textarea
         id="strategyQueryText"
         className="custom-query-textarea"

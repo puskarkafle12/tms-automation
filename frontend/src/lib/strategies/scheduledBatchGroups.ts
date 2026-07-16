@@ -8,7 +8,7 @@ export interface ScheduledBatchGroup<T extends ScheduledBatchOrderLike = Schedul
   batchId: string;
   label: string;
   orders: T[];
-  createdAt?: string;
+  createdAt?: T['created_at'];
   symbolCount: number;
 }
 
@@ -41,16 +41,13 @@ export function groupScheduledOrdersByBatch<T extends ScheduledBatchOrderLike>(
 
   const batches = Array.from(byBatch.entries()).map(([batchId, batchOrders]) => {
     const sortedOrders = [...batchOrders].sort((left, right) => right.order_id - left.order_id);
-    const createdAt = sortedOrders.reduce((latest, order) => {
-      const value = String(order.created_at || '');
-      return value > latest ? value : latest;
-    }, '');
+    const createdAt = sortedOrders.find((order) => order.created_at != null)?.created_at;
     const configuredCount = Number(sortedOrders[0]?.strategy_config?.schedule_batch_symbol_count);
     return {
       batchId,
       label: readScheduleBatchLabel(sortedOrders[0]),
       orders: sortedOrders,
-      createdAt: createdAt || undefined,
+      createdAt,
       symbolCount: Number.isFinite(configuredCount) && configuredCount > 0
         ? configuredCount
         : sortedOrders.length,
