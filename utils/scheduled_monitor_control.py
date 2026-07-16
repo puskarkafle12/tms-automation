@@ -10,13 +10,14 @@ from config.app_environment import is_testing
 from database import SessionLocal
 from models.logged_in_user import LoggedInUsers
 from models.scheduled_order import ScheduledOrder
+from models.user import User
 from utils.log_sender import delete_order_log_scan_count
 from utils.market_status import (
     MARKET_LIVE_POLL_INTERVAL_SECONDS,
     get_nepal_now,
     is_market_polling_window,
 )
-from utils.monitor_order import monitor_order_task_func
+from utils.monitor_order import ACTIVE_STATUSES, monitor_order_task_func
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +37,29 @@ def has_logged_in_tms_users() -> bool:
         db.close()
 
 
+def has_scheduled_order_users() -> bool:
+    """Return whether an active order has a saved account eligible for recovery."""
+    db = SessionLocal()
+    try:
+        return (
+            db.query(ScheduledOrder.order_id)
+            .join(User, User.client_id == ScheduledOrder.client_id)
+            .filter(
+                ScheduledOrder.status.in_(ACTIVE_STATUSES),
+            )
+            .first()
+            is not None
+        )
+    finally:
+        db.close()
+
+
+def has_monitorable_tms_users() -> bool:
+    return has_logged_in_tms_users() or has_scheduled_order_users()
+
+
 def should_auto_run_scheduler() -> bool:
-    if not has_logged_in_tms_users():
+    if not has_monitorable_tms_users():
         return False
     if is_testing():
         return True
@@ -45,7 +67,7 @@ def should_auto_run_scheduler() -> bool:
 
 
 def should_keep_scheduler_running() -> bool:
-    if not has_logged_in_tms_users():
+    if not has_monitorable_tms_users():
         return False
     if is_testing():
         return True

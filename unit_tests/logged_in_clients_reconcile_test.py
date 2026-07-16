@@ -38,7 +38,7 @@ class _Db:
 
 
 class LoggedInClientsReconcileTest(unittest.IsolatedAsyncioTestCase):
-    async def test_reconcile_marks_invalid_sessions_logged_out(self):
+    async def test_reconcile_queues_auto_login_when_cached_session_expires(self):
         from main import _reconcile_logged_in_sessions
 
         session = SimpleNamespace(
@@ -51,12 +51,37 @@ class LoggedInClientsReconcileTest(unittest.IsolatedAsyncioTestCase):
         user = SimpleNamespace(client_id="client1", broker_no="35", auto_login=True)
         db = _Db([session], [user])
 
-        with patch("main.get_cached_tms_user", new_callable=AsyncMock, side_effect=Exception("Token expired")):
+        with patch("main.get_cached_tms_user", new_callable=AsyncMock, side_effect=Exception("Token expired")), patch(
+            "main._queue_tms_account_login", return_value=True
+        ) as queue_login:
             await _reconcile_logged_in_sessions(db)
 
-        self.assertEqual(session.status, "logged_out")
-        self.assertEqual(session.tokens, {})
+        queue_login.assert_called_once_with(user, db, automatic=True, force=True)
+        self.assertEqual(session.status, "logged_in")
+        self.assertEqual(session.tokens, {"XSRF-TOKEN": "stale"})
         self.assertGreaterEqual(db.commits, 1)
+
+    async def test_reconcile_queues_ui_login_even_when_old_toggle_is_disabled(self):
+        from main import _reconcile_logged_in_sessions
+
+        session = SimpleNamespace(
+            client_id="client1",
+            status="logged_in",
+            tokens={"XSRF-TOKEN": "stale"},
+            broker_no="35",
+            message="logged in",
+        )
+        user = SimpleNamespace(client_id="client1", broker_no="35", auto_login=False)
+        db = _Db([session], [user])
+
+        with patch("main.get_cached_tms_user", new_callable=AsyncMock, side_effect=Exception("Token expired")), patch(
+            "main._queue_tms_account_login", return_value=True
+        ) as queue_login:
+            await _reconcile_logged_in_sessions(db)
+
+        queue_login.assert_called_once_with(user, db, automatic=True, force=True)
+        self.assertEqual(session.status, "logged_in")
+        self.assertEqual(session.tokens, {"XSRF-TOKEN": "stale"})
 
     async def test_reconcile_keeps_valid_sessions_logged_in(self):
         from main import _reconcile_logged_in_sessions

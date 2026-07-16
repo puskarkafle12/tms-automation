@@ -57,7 +57,12 @@ from fastapi import FastAPI, Request, HTTPException
 from sqlalchemy.orm import Session
 from datetime import date, datetime, timedelta
 
-from utils.tms_user_loader import load_tms_users_instances
+from utils.tms_user_loader import (
+    auto_login_retry_allowed,
+    load_tms_users_instances,
+    record_auto_login_failure,
+    record_auto_login_success,
+)
 from utils.api_time import format_api_timestamp, get_server_time_payload, is_continuous_market_timestamp
 from utils.market_status import (
     MARKET_LIVE_POLL_INTERVAL_SECONDS,
@@ -1453,7 +1458,7 @@ def _record_tms_login_pending(db: Session, *, client_id: str, broker_no: Optiona
     db.commit()
 
 
-async def _run_tms_account_login(client_id: str) -> None:
+async def _run_tms_account_login(client_id: str, *, automatic: bool = False) -> None:
     db = SessionLocal()
     try:
         user = db.query(User).filter(User.client_id == client_id).first()
@@ -1476,9 +1481,12 @@ async def _run_tms_account_login(client_id: str) -> None:
         session.message = "Logged in"
         session.last_login_at = datetime.utcnow()
         db.commit()
+        record_auto_login_success(client_id)
     except asyncio.CancelledError:
         raise
     except LoginFailedException as exc:
+        if automatic:
+            record_auto_login_failure(client_id)
         _record_tms_login_failure(
             db,
             client_id=client_id,
@@ -1486,6 +1494,8 @@ async def _run_tms_account_login(client_id: str) -> None:
             message=exc.message,
         )
     except Exception as exc:
+        if automatic:
+            record_auto_login_failure(client_id)
         logging.exception("Background TMS login failed for %s", client_id)
         _record_tms_login_failure(
             db,
@@ -1500,6 +1510,45 @@ async def _run_tms_account_login(client_id: str) -> None:
 def _remove_finished_tms_login_task(client_id: str, task: asyncio.Task) -> None:
     if tms_login_tasks.get(client_id) is task:
         tms_login_tasks.pop(client_id, None)
+
+
+def _queue_tms_account_login(
+    user: User,
+    db: Session,
+    *,
+    automatic: bool,
+    force: bool = False,
+) -> bool:
+    """Start one deduplicated background login for a saved TMS account."""
+    if automatic and not auto_login_retry_allowed(user.client_id):
+        return False
+
+    current_task = tms_login_tasks.get(user.client_id)
+    if current_task and not current_task.done():
+        return False
+
+    session = db.query(LoggedInUsers).filter(LoggedInUsers.client_id == user.client_id).first()
+    if not force and session and session.status == "logged_in":
+        return False
+
+    _record_tms_login_pending(db, client_id=user.client_id, broker_no=user.broker_no)
+    login_coro = (
+        _run_tms_account_login(user.client_id, automatic=True)
+        if automatic
+        else _run_tms_account_login(user.client_id)
+    )
+    task = asyncio.create_task(login_coro)
+    tms_login_tasks[user.client_id] = task
+    task.add_done_callback(
+        lambda finished, client_id=user.client_id: _remove_finished_tms_login_task(client_id, finished)
+    )
+    return True
+
+
+def _queue_ui_auto_logins(db: Session, users: List[User]) -> None:
+    """UI activity keeps all explicitly auto-login-enabled accounts warm."""
+    for user in users:
+        _queue_tms_account_login(user, db, automatic=True)
 
 
 async def _reconcile_logged_in_sessions(db: Session) -> None:
@@ -1531,19 +1580,9 @@ async def _reconcile_logged_in_sessions(db: Session) -> None:
         try:
             await get_cached_tms_user(user, allow_full_login=False)
         except LoginFailedException as exc:
-            _record_tms_login_failure(
-                db,
-                client_id=session.client_id,
-                broker_no=user.broker_no,
-                message=exc.message,
-            )
+            _queue_tms_account_login(user, db, automatic=True, force=True)
         except Exception as exc:
-            _record_tms_login_failure(
-                db,
-                client_id=session.client_id,
-                broker_no=user.broker_no,
-                message=str(exc),
-            )
+            _queue_tms_account_login(user, db, automatic=True, force=True)
 
     db.commit()
 
@@ -1558,13 +1597,6 @@ def _compute_scheduled_live_status(
 ) -> dict:
     has_valid_price = current_price is not None and float(current_price) > 0
 
-    if not monitoring_active or monitor_phase == "stopped":
-        return {
-            "live_status": "monitor stopped",
-            "is_scanning": False,
-            "display_error": "Monitor stopped",
-        }
-
     if monitor_phase == "waiting_hours":
         return {
             "live_status": "waiting for market",
@@ -1577,6 +1609,13 @@ def _compute_scheduled_live_status(
             "live_status": "waiting for TMS session",
             "is_scanning": False,
             "display_error": None,
+        }
+
+    if not monitoring_active or monitor_phase == "stopped":
+        return {
+            "live_status": "monitor stopped",
+            "is_scanning": False,
+            "display_error": "Monitor stopped",
         }
 
     is_scanning = monitor_phase in ("active", "armed") and has_valid_price
@@ -1952,6 +1991,7 @@ async def _get_script_high(tms_user: TmsUser, script_name: str) -> Optional[floa
 async def list_tms_accounts(db: Session = Depends(get_db)):
     await _reconcile_logged_in_sessions(db)
     users = db.query(User).order_by(User.client_id).all()
+    _queue_ui_auto_logins(db, users)
     sessions = {
         session.client_id: session
         for session in db.query(LoggedInUsers).all()
@@ -2073,8 +2113,7 @@ async def login_tms_account(client_id: str, db: Session = Depends(get_db)):
     if not user:
         raise HTTPException(status_code=404, detail="TMS account not found")
 
-    current_task = tms_login_tasks.get(client_id)
-    if current_task and not current_task.done():
+    if not _queue_tms_account_login(user, db, automatic=False, force=True):
         return JSONResponse(
             status_code=202,
             content={
@@ -2084,10 +2123,6 @@ async def login_tms_account(client_id: str, db: Session = Depends(get_db)):
             },
         )
 
-    _record_tms_login_pending(db, client_id=client_id, broker_no=user.broker_no)
-    task = asyncio.create_task(_run_tms_account_login(client_id))
-    tms_login_tasks[client_id] = task
-    task.add_done_callback(lambda finished: _remove_finished_tms_login_task(client_id, finished))
     return JSONResponse(
         status_code=202,
         content={
@@ -2403,6 +2438,7 @@ async def add_order(order_data: OrderCreateRequest, db: Session = Depends(get_db
 async def get_logged_in_clients(db: Session = Depends(get_db)):
     try:
         await _reconcile_logged_in_sessions(db)
+        _queue_ui_auto_logins(db, db.query(User).order_by(User.client_id).all())
 
         logged_in_users = db.query(LoggedInUsers).filter(
             LoggedInUsers.status == "logged_in").all()

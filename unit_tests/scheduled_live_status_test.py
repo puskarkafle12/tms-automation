@@ -83,6 +83,26 @@ class TestScheduledLiveStatus(unittest.TestCase):
         self.assertFalse(result["is_scanning"])
         self.assertEqual(result["display_error"], "Price fetch failed")
 
+    def test_inactive_monitor_reports_waiting_market_before_stopped(self):
+        result = self.compute(
+            monitoring_active=False,
+            monitor_phase="waiting_hours",
+            scanning_count=12,
+            current_price=245.0,
+        )
+        self.assertEqual(result["live_status"], "waiting for market")
+        self.assertIsNone(result["display_error"])
+
+    def test_inactive_monitor_reports_waiting_session_before_stopped(self):
+        result = self.compute(
+            monitoring_active=False,
+            monitor_phase="waiting_session",
+            scanning_count=12,
+            current_price=245.0,
+        )
+        self.assertEqual(result["live_status"], "waiting for TMS session")
+        self.assertIsNone(result["display_error"])
+
     def test_last_monitor_log_line_skips_transient_when_price_valid(self):
         class ScanLog:
             logs = "Price fetch failed\nTRACKING: Monitoring: armed"

@@ -6,19 +6,25 @@ from utils import scheduled_monitor_control as control
 
 
 class TestScheduledMonitorControl(unittest.TestCase):
+    def test_auto_login_order_user_is_monitorable_while_logged_out(self):
+        with patch.object(control, "has_logged_in_tms_users", return_value=False), patch.object(
+            control, "has_scheduled_order_users", return_value=True
+        ):
+            self.assertTrue(control.has_monitorable_tms_users())
+
     def test_should_auto_run_requires_market_and_login(self):
         with patch.object(control, "is_market_polling_window", return_value=True), patch.object(
-            control, "has_logged_in_tms_users", return_value=True
+            control, "has_monitorable_tms_users", return_value=True
         ):
             self.assertTrue(control.should_auto_run_scheduler())
 
         with patch.object(control, "is_market_polling_window", return_value=False), patch.object(
-            control, "has_logged_in_tms_users", return_value=True
+            control, "has_monitorable_tms_users", return_value=True
         ), patch.object(control, "is_testing", return_value=False):
             self.assertFalse(control.should_auto_run_scheduler())
 
         with patch.object(control, "is_market_polling_window", return_value=True), patch.object(
-            control, "has_logged_in_tms_users", return_value=False
+            control, "has_monitorable_tms_users", return_value=False
         ):
             self.assertFalse(control.should_auto_run_scheduler())
 
@@ -34,7 +40,7 @@ class TestScheduledMonitorControl(unittest.TestCase):
 
     def test_testing_mode_auto_runs_outside_market_hours(self):
         with patch.object(control, "is_market_polling_window", return_value=False), patch.object(
-            control, "has_logged_in_tms_users", return_value=True
+            control, "has_monitorable_tms_users", return_value=True
         ), patch.object(control, "is_testing", return_value=True):
             self.assertTrue(control.should_auto_run_scheduler())
         tms_config.is_running = False
