@@ -43,7 +43,11 @@ NON_FILTERABLE_FIELDS = frozenset(
 TEXT_FIELD_HINTS = frozenset(
     {
         "sector",
+        "company_name",
         "listing_date",
+        "market_data_date",
+        "market_data_source",
+        "security_type",
         "last_traded_on",
         "technical_macd",
         "technical_sma_10",
@@ -86,7 +90,14 @@ MARKET_FIELD_KEYS = frozenset(
         "qty",
         "sector",
         "shares_outstanding",
+        "promoter_shares",
+        "public_shares",
+        "promoter_share_percent",
+        "public_share_percent",
+        "paid_up_value",
+        "paid_up_capital",
         "listing_date",
+        "listing_age_days",
     }
 )
 
@@ -107,6 +118,9 @@ INVESTOR_DISPLAY_COLUMNS = (
     "sector",
     "ltp",
     "market_cap",
+    "paid_up_capital",
+    "shares_outstanding",
+    "listing_date",
     "pe_ratio",
     "pbv",
     "eps",
@@ -399,7 +413,16 @@ def build_dynamic_query_spec(
 # user phrases -> preferred field (only emitted when field exists in cache)
 SEMANTIC_INTENT_HINTS: List[Tuple[str, str, str]] = [
     ("market_cap", "low cap, small cap, micro cap, market capitalization", "filter/sort on market_cap"),
-    ("shares_outstanding", "shares outstanding, float, share count", "use shares_outstanding"),
+    ("shares_outstanding", "listed shares, listed share count, shares outstanding, share count", "use shares_outstanding"),
+    ("paid_up_capital", "paid up capital, paid-up capital, paidup capital", "use paid_up_capital"),
+    ("paid_up_value", "paid up value, paid-up value, face value", "use paid_up_value"),
+    ("promoter_shares", "promoter shares, promoter holdings", "use promoter_shares"),
+    ("public_shares", "public shares, public holdings, public float", "use public_shares"),
+    ("promoter_share_percent", "promoter share percentage, promoter ownership", "use promoter_share_percent"),
+    ("public_share_percent", "public share percentage, public ownership", "use public_share_percent"),
+    ("listing_date", "listing date, listed date, newly listed", "use listing_date and listing_age_days"),
+    ("listing_age_days", "listing age, newly listed stocks, new stocks", "filter/sort on listing_age_days"),
+    ("security_type", "ordinary shares, ordinary stocks, security type", "use security_type = 'ordinary_share'"),
     ("pe_ratio", "low pe, cheap valuation, value stocks", "use pe_ratio or fundamental_pe_ttm"),
     ("fundamental_pe_ttm", "pe ratio, price to earnings", "use fundamental_pe_ttm or pe_ratio"),
     ("ltp", "share price, last price, cheap stocks by price", "use ltp (not a cap substitute if market_cap exists)"),
@@ -465,10 +488,11 @@ def _format_grouped_column_catalog(
 def _build_column_selection_rules(keys: Set[str]) -> str:
     trader = [col for col in TRADER_DISPLAY_COLUMNS if col in keys]
     investor = [col for col in INVESTOR_DISPLAY_COLUMNS if col in keys]
+    basics = [col for col in ("symbol", "company_name", "sector", "ltp") if col in keys]
     return f"""COLUMN SELECTION (never use SELECT *):
 - Always query FROM market_combined (or v_nepse_stock_screen for presets).
 - Always list explicit columns in SELECT — pick 8 to 14 columns max for a readable table.
-- MANDATORY in every SELECT (in this order): symbol, ltp, percent_change, qty — users must see stock name and basics.
+- MANDATORY in every SELECT: {", ".join(basics) or "symbol"}. Add percent_change and qty only when useful and available.
 - Never return sector-only rows; symbol identifies each stock. Add sector after the mandatory columns if useful.
 - Trader-style requests: start with symbol, ltp, percent_change, qty, then {", ".join(trader) or "technical_macd, technical_rsi_14"} when relevant.
 - Investor-style requests: start with symbol, ltp, percent_change, qty, then {", ".join(investor) or "pe_ratio, market_cap"} when relevant.
@@ -510,6 +534,24 @@ def _build_dynamic_examples(
     rsi = _pick_existing(keys, "technical_rsi_14")
     alpha = _pick_existing(keys, "alpha_annualized")
     rank_default = str(spec.get("default_rank_by") or "ltp")
+
+    paid_up_capital = _pick_existing(keys, "paid_up_capital")
+    shares_outstanding = _pick_existing(keys, "shares_outstanding")
+    listing_age_days = _pick_existing(keys, "listing_age_days")
+    if paid_up_capital and shares_outstanding:
+        examples.append(
+            "Highest paid-up capital (fundamentals):\n"
+            f"SELECT symbol, company_name, sector, ltp, {paid_up_capital}, {shares_outstanding}, listing_date\n"
+            "FROM market_combined\nWHERE security_type = 'ordinary_share'\n"
+            f"ORDER BY {paid_up_capital} DESC\nLIMIT {limit}"
+        )
+    if listing_age_days:
+        examples.append(
+            "Newly listed ordinary shares:\n"
+            "SELECT symbol, company_name, sector, ltp, listing_date, listing_age_days, shares_outstanding\n"
+            "FROM market_combined\nWHERE security_type = 'ordinary_share' AND listing_age_days <= 15\n"
+            f"ORDER BY listing_age_days ASC\nLIMIT {limit}"
+        )
 
     if market_cap:
         examples.append(
@@ -592,6 +634,7 @@ QUERY RULES:
 5. Always include ORDER BY and LIMIT (default {spec['limit_default']}, max {spec['limit_max']}).
 6. Map user concepts via SEMANTIC MAP. Do NOT substitute ltp for market_cap when market_cap exists.
 7. Use practical thresholds for useful first-attempt results.
+8. Unless the user explicitly requests funds, debentures, bonds, promoter shares, or preference shares, filter `security_type = 'ordinary_share'` when that column exists.
 
 SEMANTIC MAP:
 {semantic_hints}

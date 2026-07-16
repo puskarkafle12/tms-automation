@@ -97,13 +97,14 @@ def enrich_merolagani_from_daily_snapshot(db: Session) -> Dict[str, Any]:
     if not daily_by_symbol:
         return {"status": "skipped", "reason": "no_daily_snapshot"}
 
-    symbols = [
+    cached_symbols = [
         str(item).upper()
         for item in db.execute(text("SELECT symbol FROM market_screener_cache ORDER BY symbol")).scalars().all()
         if str(item).strip()
     ]
-    if not symbols:
+    if not cached_symbols:
         return bootstrap_cache_from_daily_snapshot(db)
+    symbols = sorted(set(cached_symbols) | set(daily_by_symbol))
 
     updated = 0
     now = datetime.utcnow()
@@ -336,16 +337,22 @@ async def refresh_nepse_alpha_cache(
         return {"status": "skipped", "reason": "market_closed"}
 
     bootstrap_cache_from_daily_snapshot(db)
-    symbols = [
+    all_symbols = [
         str(item).upper()
         for item in db.execute(text("SELECT symbol FROM market_screener_cache ORDER BY symbol")).scalars().all()
         if str(item).strip()
+    ]
+    merolagani_by_symbol = _load_cached_merolagani_map(db)
+    symbols = [
+        symbol
+        for symbol in all_symbols
+        if str((merolagani_by_symbol.get(symbol) or {}).get("security_type") or "ordinary_share")
+        == "ordinary_share"
     ]
     if not symbols:
         return {"status": "skipped", "reason": "no_symbols_in_cache"}
 
     started_at = datetime.utcnow()
-    merolagani_by_symbol = _load_cached_merolagani_map(db)
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_FETCHES)
     tasks = [_fetch_nepse_alpha_record(symbol, semaphore) for symbol in symbols]
     results = await asyncio.gather(*tasks)

@@ -36,6 +36,7 @@ _EQUITY_SECTOR_HINTS = (
     "development bank",
     "finance",
     "hydro power",
+    "hydropower",
     "hotel",
     "insurance",
     "investment",
@@ -43,6 +44,7 @@ _EQUITY_SECTOR_HINTS = (
     "microfinance",
     "manufacturing",
     "non life insurance",
+    "others",
     "trading",
 )
 
@@ -199,10 +201,8 @@ def load_latest_daily_stock_rows(db: Session) -> List[Dict[str, Any]]:
 
 
 def get_new_symbols(db: Session, *, days: int = 15) -> List[Dict[str, Any]]:
-    cutoff = date.today() - timedelta(days=max(1, days))
-    first_snapshot = db.execute(
-        text("SELECT MIN(snapshot_date) FROM merolagani_daily_snapshots"),
-    ).scalar()
+    max_age_days = max(1, days)
+    cutoff = date.today() - timedelta(days=max_age_days)
     latest_rows = {
         extract_symbol(row): row
         for row in load_latest_daily_stock_rows(db)
@@ -213,22 +213,36 @@ def get_new_symbols(db: Session, *, days: int = 15) -> List[Dict[str, Any]]:
             """
             SELECT symbol, first_seen_date, last_seen_date, is_watchlist
             FROM market_symbol_registry
-            WHERE first_seen_date >= :cutoff
-              AND (:first_snapshot IS NULL OR first_seen_date > :first_snapshot)
-              AND COALESCE(is_watchlist, TRUE) = TRUE
+            WHERE COALESCE(is_watchlist, TRUE) = TRUE
             ORDER BY first_seen_date DESC, symbol ASC
             """
         ),
-        {"cutoff": cutoff, "first_snapshot": first_snapshot},
+        {},
     ).mappings().all()
     output: List[Dict[str, Any]] = []
     for row in rows:
         symbol = str(row["symbol"]).strip().upper()
         snapshot_row = latest_rows.get(symbol, {})
         sector = _extract_text_value(snapshot_row, {"ml_sector", "sector", "Sector"})
+        security_type = _extract_text_value(snapshot_row, {"security_type"})
+        listing_date = _parse_listing_date(
+            _extract_text_value(snapshot_row, {"ml_listing_date", "listing_date", "Listing Date"})
+        )
+        listing_age = _extract_numeric_value(snapshot_row, {"listing_age_days"})
         volume = _extract_numeric_value(snapshot_row, {"ml_quantity", "Qty.", "qty", "volume"})
+        if security_type and security_type != "ordinary_share":
+            continue
+        if listing_date is None:
+            continue
+        if listing_age is not None:
+            if listing_age > max_age_days:
+                continue
+        elif listing_date < cutoff:
+            continue
         if _should_include_new_symbol(symbol=symbol, sector=sector, cutoff=cutoff):
             payload = dict(row)
+            payload["listing_date"] = listing_date.isoformat()
+            payload["listing_age_days"] = int(listing_age) if listing_age is not None else max(0, (date.today() - listing_date).days)
             if sector:
                 payload["sector"] = sector
             if volume is not None:

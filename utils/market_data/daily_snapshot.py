@@ -1,4 +1,4 @@
-"""Daily Merolagani snapshot job."""
+"""Daily all-sector ShareSansar company snapshot job."""
 
 from __future__ import annotations
 
@@ -30,9 +30,9 @@ def _rows_from_dataframe(df) -> List[Dict[str, Any]]:
     return rows
 
 
-def run_daily_merolagani_snapshot(db: Session, *, snapshot_date: date | None = None, force: bool = False) -> Dict[str, Any]:
-    """Scrape full Merolagani details and persist a daily snapshot."""
-    from services.stock_data_scrapper.scrapper import get_stock_details
+def run_daily_market_snapshot(db: Session, *, snapshot_date: date | None = None, force: bool = False) -> Dict[str, Any]:
+    """Fetch all ShareSansar sectors and persist one normalized daily snapshot."""
+    from services.stock_data_scrapper.sharesansar import fetch_all_company_details
 
     target_date = snapshot_date or get_nepal_now().date()
     if not force and has_daily_snapshot(db, target_date):
@@ -40,8 +40,7 @@ def run_daily_merolagani_snapshot(db: Session, *, snapshot_date: date | None = N
 
     started_at = datetime.utcnow()
     try:
-        df = get_stock_details()
-        rows = _rows_from_dataframe(df)
+        rows = fetch_all_company_details()
         symbol_count = save_daily_snapshot(db, target_date, rows)
         db.commit()
         log_refresh(
@@ -53,11 +52,12 @@ def run_daily_merolagani_snapshot(db: Session, *, snapshot_date: date | None = N
             started_at=started_at,
         )
         db.commit()
-        logger.info("Daily Merolagani snapshot saved for %s (%s symbols)", target_date, symbol_count)
+        logger.info("Daily ShareSansar snapshot saved for %s (%s symbols)", target_date, symbol_count)
         return {
             "status": "ok",
             "snapshot_date": target_date.isoformat(),
             "symbol_count": symbol_count,
+            "source": "sharesansar_company_list",
         }
     except Exception as exc:
         db.rollback()
@@ -69,5 +69,10 @@ def run_daily_merolagani_snapshot(db: Session, *, snapshot_date: date | None = N
             started_at=started_at,
         )
         db.commit()
-        logger.exception("Daily Merolagani snapshot failed")
+        logger.exception("Daily ShareSansar snapshot failed")
         return {"status": "error", "snapshot_date": target_date.isoformat(), "message": str(exc)}
+
+
+def run_daily_merolagani_snapshot(db: Session, *, snapshot_date: date | None = None, force: bool = False) -> Dict[str, Any]:
+    """Backward-compatible name for callers of the previous daily snapshot job."""
+    return run_daily_market_snapshot(db, snapshot_date=snapshot_date, force=force)

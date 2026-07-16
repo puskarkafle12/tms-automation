@@ -16,6 +16,7 @@ def _normalize_field_key(key: str) -> str:
 # canonical_key -> (label, type, aliases newest-last for merge)
 CANONICAL_FIELD_SPECS: Dict[str, Dict[str, Any]] = {
     "symbol": {"label": "Symbol", "type": "text", "aliases": ["Symbol", "symbol"]},
+    "company_name": {"label": "Company", "type": "text", "aliases": ["company_name"]},
     "ltp": {"label": "LTP", "type": "number", "aliases": ["ml_ltp", "ltp"]},
     "percent_change": {"label": "% Change", "type": "number", "aliases": ["ml_percent_change", "percent_change"]},
     "qty": {"label": "Qty", "type": "number", "aliases": ["ml_quantity", "qty", "quantity"]},
@@ -41,16 +42,26 @@ CANONICAL_FIELD_SPECS: Dict[str, Dict[str, Any]] = {
         "aliases": ["ml_avg_volume_30d", "avg_volume_30d"],
     },
     "shares_outstanding": {
-        "label": "Shares Out",
+        "label": "Listed Shares",
         "type": "number",
-        "aliases": ["ml_shares_outstanding", "shares_outstanding"],
+        "aliases": ["ml_shares_outstanding", "listed_shares", "listed_share_count", "shares_outstanding"],
     },
+    "promoter_shares": {"label": "Promoter Shares", "type": "number", "aliases": ["promoter_shares"]},
+    "public_shares": {"label": "Public Shares", "type": "number", "aliases": ["public_shares"]},
+    "promoter_share_percent": {"label": "Promoter Share %", "type": "number", "aliases": ["promoter_share_percent"]},
+    "public_share_percent": {"label": "Public Share %", "type": "number", "aliases": ["public_share_percent"]},
+    "paid_up_value": {"label": "Paid-up Value", "type": "number", "aliases": ["paid_up_value"]},
+    "paid_up_capital": {"label": "Paid-up Capital", "type": "number", "aliases": ["paid_up_capital"]},
     "avg_120d": {"label": "120D Avg", "type": "number", "aliases": ["ml_avg_120d", "avg_120d"]},
     "avg_180d": {"label": "180D Avg", "type": "number", "aliases": ["ml_avg_180d", "avg_180d"]},
     "book_value": {"label": "Book Value", "type": "number", "aliases": ["ml_book_value", "book_value"]},
     "market_price": {"label": "Mkt Price", "type": "number", "aliases": ["ml_market_price", "market_price"]},
     "sector": {"label": "Sector", "type": "text", "aliases": ["ml_sector", "sector"]},
     "listing_date": {"label": "Listed", "type": "text", "aliases": ["ml_listing_date", "listing_date"]},
+    "listing_age_days": {"label": "Listing Age (Days)", "type": "number", "aliases": ["listing_age_days"]},
+    "is_ordinary_share": {"label": "Ordinary Share", "type": "text", "aliases": ["is_ordinary_share"]},
+    "security_type": {"label": "Security Type", "type": "text", "aliases": ["security_type"]},
+    "market_data_date": {"label": "As Of", "type": "text", "aliases": ["market_data_date"]},
     "last_traded_on": {
         "label": "Last Trade",
         "type": "text",
@@ -60,6 +71,7 @@ CANONICAL_FIELD_SPECS: Dict[str, Dict[str, Any]] = {
 
 MEROLAGANI_DISPLAY_ORDER: List[str] = [
     "symbol",
+    "company_name",
     "ltp",
     "percent_change",
     "qty",
@@ -73,12 +85,21 @@ MEROLAGANI_DISPLAY_ORDER: List[str] = [
     "one_year_yield",
     "avg_volume_30d",
     "shares_outstanding",
+    "promoter_shares",
+    "public_shares",
+    "promoter_share_percent",
+    "public_share_percent",
+    "paid_up_value",
+    "paid_up_capital",
     "avg_120d",
     "avg_180d",
     "book_value",
     "market_price",
     "sector",
     "listing_date",
+    "listing_age_days",
+    "security_type",
+    "market_data_date",
     "last_traded_on",
 ]
 
@@ -103,6 +124,7 @@ NEPSE_DISPLAY_ORDER: List[str] = [
 
 COMBINED_DISPLAY_ORDER: List[str] = [
     "symbol",
+    "company_name",
     "ltp",
     "percent_change",
     "qty",
@@ -113,6 +135,8 @@ COMBINED_DISPLAY_ORDER: List[str] = [
     "pbv",
     "eps",
     "market_cap",
+    "paid_up_capital",
+    "shares_outstanding",
     "alpha_annualized",
     "beta_3_month",
     "sharpe_ratio_annualized",
@@ -124,6 +148,10 @@ COMBINED_DISPLAY_ORDER: List[str] = [
     "fifty_two_week_low",
     "avg_volume_30d",
     "sector",
+    "listing_date",
+    "listing_age_days",
+    "security_type",
+    "market_data_date",
     "updated_at",
 ]
 

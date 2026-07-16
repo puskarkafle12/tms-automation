@@ -50,6 +50,7 @@ DOCKER_FINGERPRINT_PREFIXES = (
     "models/",
     "schemas/",
     "utils/",
+    "services/",
     "config/",
     "exceptions/",
     "initialize_project/",

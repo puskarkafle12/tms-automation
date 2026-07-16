@@ -31,6 +31,41 @@ MEROLAGANI_FIELD_MAP = {
     "Listing Date": "ml_listing_date",
 }
 
+ANALYSIS_PASSTHROUGH_FIELDS = {
+    "company_name",
+    "company_url",
+    "sector_id",
+    "sector",
+    "shares_outstanding",
+    "promoter_shares",
+    "public_shares",
+    "promoter_share_percent",
+    "public_share_percent",
+    "paid_up_value",
+    "paid_up_capital",
+    "market_cap",
+    "listing_date",
+    "listing_age_days",
+    "is_ordinary_share",
+    "security_type",
+    "ltp",
+    "market_data_date",
+    "market_data_source",
+}
+
+ANALYSIS_NUMERIC_FIELDS = {
+    "shares_outstanding",
+    "promoter_shares",
+    "public_shares",
+    "promoter_share_percent",
+    "public_share_percent",
+    "paid_up_value",
+    "paid_up_capital",
+    "market_cap",
+    "listing_age_days",
+    "ltp",
+}
+
 MEROLAGANI_NUMERIC_KEYS = {
     "ml_ltp",
     "ml_percent_change",
@@ -149,6 +184,15 @@ def extract_symbol(row: Dict[str, Any]) -> str:
 
 def flatten_merolagani_row(row: Dict[str, Any]) -> Dict[str, Any]:
     record: Dict[str, Any] = {"symbol": extract_symbol(row)}
+    for key in ANALYSIS_PASSTHROUGH_FIELDS:
+        if key not in row or row.get(key) is None:
+            continue
+        if key in ANALYSIS_NUMERIC_FIELDS:
+            numeric = _parse_numeric(row.get(key))
+            if numeric is not None:
+                record[key] = numeric
+        else:
+            record[key] = row.get(key)
     for source_key, target_key in MEROLAGANI_FIELD_MAP.items():
         if source_key not in row:
             continue

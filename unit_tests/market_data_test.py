@@ -1,3 +1,4 @@
+import json
 import unittest
 from datetime import date, timedelta
 from unittest.mock import patch
@@ -122,8 +123,9 @@ class MarketDataRepositoryTest(unittest.TestCase):
         )
         db.commit()
 
-        new_symbols = get_new_symbols(db, days=15)
-        self.assertEqual([item["symbol"] for item in new_symbols], ["ABC"])
+        # Discovery time is not listing time; a missing exchange listing date must not
+        # make an old security appear newly listed.
+        self.assertEqual(get_new_symbols(db, days=15), [])
 
     def test_get_new_symbols_filters_to_recent_equity_listings(self):
         db = self.Session()
@@ -152,14 +154,26 @@ class MarketDataRepositoryTest(unittest.TestCase):
                 """
                 INSERT INTO merolagani_daily_stocks (snapshot_date, symbol, data)
                 VALUES
-                    (:today, 'AAA', '{"Symbol":"AAA","Sector":"Commercial Bank","Qty.":"12345"}'),
+                    (:today, 'AAA', :aaa_data),
                     (:today, 'ADBLB', '{"Symbol":"ADBLB","Sector":"Others"}'),
                     (:today, 'GBBLPO', '{"Symbol":"GBBLPO","Sector":"Promotor Share"}'),
                     (:today, 'SRLIP', '{"Symbol":"SRLIP"}'),
                     (:today, 'LBLD86', '{"Symbol":"LBLD86"}')
                 """
             ),
-            {"today": today},
+            {
+                "today": today,
+                "aaa_data": json.dumps(
+                    {
+                        "symbol": "AAA",
+                        "sector": "Commercial Bank",
+                        "qty": 12345,
+                        "listing_date": today.isoformat(),
+                        "listing_age_days": 0,
+                        "security_type": "ordinary_share",
+                    }
+                ),
+            },
         )
         db.execute(
             text(
@@ -393,6 +407,98 @@ class DynamicCatalogTest(unittest.TestCase):
         self.assertIn("custom_beta", spec["allowed_filter_keys"])
         self.assertTrue(spec.get("dynamic"))
         self.assertEqual(spec.get("unsupported_user_terms"), [])
+
+    def test_company_fundamentals_are_queryable_with_natural_aliases(self):
+        records = [
+            {
+                "symbol": "CZBIL",
+                "company_name": "Citizens Bank International Limited",
+                "security_type": "ordinary_share",
+                "paid_up_capital": 15_507_463_800,
+                "shares_outstanding": 155_074_638,
+                "listing_date": "2017-01-10",
+                "listing_age_days": 3473,
+            }
+        ]
+        spec = build_dynamic_query_spec(None, records=records)
+        self.assertIn("paid_up_capital", spec["allowed_filter_keys"])
+        self.assertIn("shares_outstanding", spec["allowed_filter_keys"])
+        self.assertEqual(spec["alias_map"]["listed_shares"], "shares_outstanding")
+
+        prompt = build_dynamic_ai_system_prompt_from_records(records)
+        self.assertIn("paid up capital", prompt.lower())
+        self.assertIn("listed shares", prompt.lower())
+        self.assertIn("security_type = 'ordinary_share'", prompt)
+
+    def test_company_fundamentals_execute_in_market_sql(self):
+        from utils.market_data.sql_screener import run_market_sql_screener
+
+        engine = create_engine("sqlite:///:memory:")
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE market_screener_cache (
+                        symbol VARCHAR PRIMARY KEY,
+                        merolagani_data TEXT,
+                        nepse_alpha_data TEXT,
+                        combined_data TEXT,
+                        merolagani_fetched_at TIMESTAMP,
+                        nepse_alpha_fetched_at TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE merolagani_daily_snapshots (
+                        snapshot_date DATE,
+                        symbol_count INTEGER,
+                        created_at TIMESTAMP
+                    )
+                    """
+                )
+            )
+            connection.execute(
+                text(
+                    """
+                    CREATE TABLE market_data_refresh_log (
+                        refresh_type VARCHAR,
+                        status VARCHAR,
+                        completed_at TIMESTAMP
+                    )
+                    """
+                )
+            )
+            connection.execute(
+                text("INSERT INTO market_screener_cache (symbol, combined_data) VALUES (:symbol, :data)"),
+                {
+                    "symbol": "CZBIL",
+                    "data": json.dumps(
+                        {
+                            "symbol": "CZBIL",
+                            "company_name": "Citizens Bank International Limited",
+                            "security_type": "ordinary_share",
+                            "paid_up_capital": 15_507_463_800,
+                            "shares_outstanding": 155_074_638,
+                            "listing_date": "2017-01-10",
+                        }
+                    ),
+                },
+            )
+        db = sessionmaker(bind=engine)()
+        result = run_market_sql_screener(
+            db,
+            "SELECT symbol, paid_up_capital, shares_outstanding, listing_date "
+            "FROM market_combined WHERE security_type = 'ordinary_share' "
+            "ORDER BY paid_up_capital DESC LIMIT 10",
+        )
+        self.assertEqual(result["results"][0]["symbol"], "CZBIL")
+        self.assertEqual(result["results"][0]["paid_up_capital"], 15_507_463_800)
+        self.assertEqual(result["results"][0]["shares_outstanding"], 155_074_638)
+        db.close()
 
     def test_build_combined_record_merges_new_source_fields(self):
         combined = build_combined_record(
