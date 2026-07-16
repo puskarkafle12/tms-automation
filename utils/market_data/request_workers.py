@@ -89,7 +89,7 @@ def worker_get_market_data(source: str) -> Dict[str, Any]:
     db = SessionLocal()
     try:
         ensure_read_session(db)
-        rows = load_table_rows(db, source)
+        rows = load_latest_daily_stock_rows(db) if source == "sharesansar" else load_table_rows(db, source)
         if not rows and source in {"combined", "merolagani"}:
             fallback_rows = load_latest_daily_stock_rows(db)
             if fallback_rows:

@@ -120,6 +120,40 @@ def has_daily_snapshot(db: Session, snapshot_date: date) -> bool:
     )
 
 
+def daily_snapshot_has_source(
+    db: Session,
+    snapshot_date: date,
+    source: str,
+    *,
+    min_version: int = 1,
+) -> bool:
+    """Return whether a dated snapshot contains normalized rows from `source`."""
+    rows = db.execute(
+        text(
+            """
+            SELECT data
+            FROM merolagani_daily_stocks
+            WHERE snapshot_date = :snapshot_date
+            LIMIT 20
+            """
+        ),
+        {"snapshot_date": snapshot_date},
+    ).scalars().all()
+    for payload in rows:
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+        if (
+            isinstance(payload, dict)
+            and payload.get("market_data_source") == source
+            and int(payload.get("market_snapshot_version") or 1) >= min_version
+        ):
+            return True
+    return False
+
+
 def save_daily_snapshot(db: Session, snapshot_date: date, rows: List[Dict[str, Any]]) -> int:
     symbols = sorted({extract_symbol(row) for row in rows if extract_symbol(row)})
     db.execute(
@@ -208,6 +242,7 @@ def get_new_symbols(db: Session, *, days: int = 15) -> List[Dict[str, Any]]:
         for row in load_latest_daily_stock_rows(db)
         if extract_symbol(row)
     }
+    cached_volume_by_symbol = _load_cached_volume_by_symbol(db)
     rows = db.execute(
         text(
             """
@@ -224,12 +259,15 @@ def get_new_symbols(db: Session, *, days: int = 15) -> List[Dict[str, Any]]:
         symbol = str(row["symbol"]).strip().upper()
         snapshot_row = latest_rows.get(symbol, {})
         sector = _extract_text_value(snapshot_row, {"ml_sector", "sector", "Sector"})
+        company_name = _extract_text_value(snapshot_row, {"company_name", "Company Name"})
         security_type = _extract_text_value(snapshot_row, {"security_type"})
         listing_date = _parse_listing_date(
             _extract_text_value(snapshot_row, {"ml_listing_date", "listing_date", "Listing Date"})
         )
         listing_age = _extract_numeric_value(snapshot_row, {"listing_age_days"})
         volume = _extract_numeric_value(snapshot_row, {"ml_quantity", "Qty.", "qty", "volume"})
+        if volume is None:
+            volume = cached_volume_by_symbol.get(symbol)
         if security_type and security_type != "ordinary_share":
             continue
         if listing_date is None:
@@ -243,11 +281,33 @@ def get_new_symbols(db: Session, *, days: int = 15) -> List[Dict[str, Any]]:
             payload = dict(row)
             payload["listing_date"] = listing_date.isoformat()
             payload["listing_age_days"] = int(listing_age) if listing_age is not None else max(0, (date.today() - listing_date).days)
+            if company_name:
+                payload["company_name"] = company_name
             if sector:
                 payload["sector"] = sector
             if volume is not None:
                 payload["volume"] = volume
             output.append(payload)
+    return output
+
+
+def _load_cached_volume_by_symbol(db: Session) -> Dict[str, float]:
+    rows = db.execute(
+        text("SELECT symbol, combined_data, merolagani_data FROM market_screener_cache")
+    ).mappings().all()
+    output: Dict[str, float] = {}
+    for row in rows:
+        payload = row.get("combined_data") or row.get("merolagani_data") or {}
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+        if not isinstance(payload, dict):
+            continue
+        volume = _extract_numeric_value(payload, {"ml_quantity", "Qty.", "qty", "volume"})
+        if volume is not None:
+            output[str(row.get("symbol") or "").strip().upper()] = volume
     return output
 
 

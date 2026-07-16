@@ -20,7 +20,12 @@ from utils.market_data.dynamic_catalog import (
     discover_combined_field_keys,
 )
 from utils.market_data.merolagani_fields import flatten_merolagani_row, merge_merolagani_records
-from utils.market_data.repository import get_new_symbols, load_latest_daily_stock_rows, set_new_symbol_watchlist_status
+from utils.market_data.repository import (
+    daily_snapshot_has_source,
+    get_new_symbols,
+    load_latest_daily_stock_rows,
+    set_new_symbol_watchlist_status,
+)
 
 
 class MarketDataRepositoryTest(unittest.TestCase):
@@ -166,14 +171,23 @@ class MarketDataRepositoryTest(unittest.TestCase):
                 "aaa_data": json.dumps(
                     {
                         "symbol": "AAA",
+                        "company_name": "AAA Limited",
                         "sector": "Commercial Bank",
-                        "qty": 12345,
                         "listing_date": today.isoformat(),
                         "listing_age_days": 0,
                         "security_type": "ordinary_share",
                     }
                 ),
             },
+        )
+        db.execute(
+            text(
+                """
+                INSERT INTO market_screener_cache (symbol, combined_data)
+                VALUES ('AAA', :combined_data)
+                """
+            ),
+            {"combined_data": json.dumps({"symbol": "AAA", "qty": 12345})},
         )
         db.execute(
             text(
@@ -194,6 +208,7 @@ class MarketDataRepositoryTest(unittest.TestCase):
         new_symbols = get_new_symbols(db, days=15)
         self.assertEqual([item["symbol"] for item in new_symbols], ["AAA"])
         self.assertEqual(new_symbols[0]["sector"], "Commercial Bank")
+        self.assertEqual(new_symbols[0]["company_name"], "AAA Limited")
         self.assertEqual(new_symbols[0]["volume"], 12345.0)
 
     def test_set_new_symbol_watchlist_status_updates_registry(self):
@@ -246,6 +261,36 @@ class MarketDataRepositoryTest(unittest.TestCase):
         rows = load_latest_daily_stock_rows(db)
         self.assertEqual(len(rows), 2)
         self.assertEqual(flatten_merolagani_row(rows[0])["symbol"], "AAA")
+
+    def test_daily_snapshot_source_detection_distinguishes_legacy_rows(self):
+        db = self.Session()
+        today = date.today()
+        db.execute(
+            text(
+                """
+                INSERT INTO merolagani_daily_stocks (snapshot_date, symbol, data)
+                VALUES
+                    (:today, 'OLD', '{"Symbol":"OLD"}'),
+                    (:today, 'NEW', :new_data)
+                """
+            ),
+            {
+                "today": today,
+                "new_data": json.dumps(
+                    {
+                        "symbol": "NEW",
+                        "market_data_source": "sharesansar_company_list",
+                        "market_snapshot_version": 2,
+                    }
+                ),
+            },
+        )
+        db.commit()
+
+        self.assertTrue(daily_snapshot_has_source(db, today, "sharesansar_company_list"))
+        self.assertTrue(daily_snapshot_has_source(db, today, "sharesansar_company_list", min_version=2))
+        self.assertFalse(daily_snapshot_has_source(db, today, "sharesansar_company_list", min_version=3))
+        self.assertFalse(daily_snapshot_has_source(db, today, "another_source"))
 
     def test_combined_screener_filters_merolagani_and_nepse_fields(self):
         db = self.Session()

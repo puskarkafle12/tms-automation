@@ -3449,7 +3449,7 @@ async def market_analysis_restore_new_stocks(symbols: List[str] = Body(default_f
 
 @app.get("/market_analysis/data")
 async def market_analysis_data(
-    source: str = Query("combined", pattern="^(combined|merolagani|nepse_alpha)$"),
+    source: str = Query("combined", pattern="^(combined|sharesansar|merolagani|nepse_alpha)$"),
     db: Session = Depends(get_db),
 ):
     from utils.market_data.nonblocking_cache import kickoff_cache_bootstrap_if_empty

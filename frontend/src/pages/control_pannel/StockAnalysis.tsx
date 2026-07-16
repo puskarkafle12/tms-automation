@@ -313,10 +313,14 @@ const universeRequiresLogin = (universe: ScreenerUniverse) =>
   universe === 'combined_holdings';
 
 type AnalysisTab = 'screener' | 'new_stocks' | 'data';
-type DataSource = 'combined' | 'merolagani' | 'nepse_alpha';
+type DataSource = 'combined' | 'sharesansar' | 'merolagani' | 'nepse_alpha';
 
 interface NewStockRow {
   symbol: string;
+  company_name?: string;
+  sector?: string;
+  listing_date?: string;
+  listing_age_days?: number;
   is_watchlist?: boolean;
   volume?: number;
 }
@@ -1227,7 +1231,7 @@ const StockAnalysis: React.FC = () => {
               <div>
                 <h3>New / IPO watchlist</h3>
                 <p className="stock-screener-subtitle">
-                  Symbols first seen in the daily Merolagani snapshot during the selected window.
+                  Ordinary shares listed within the selected window, using ShareSansar listing dates and your existing watchlist.
                 </p>
               </div>
               <div className="stock-screener-universe-chips">
@@ -1270,8 +1274,14 @@ const StockAnalysis: React.FC = () => {
                       </button>
                     ),
                   }))}
-                  columns={['symbol', 'volume', 'is_watchlist', 'removeAction']}
-                  columnLabels={{ removeAction: 'Action', volume: 'Volume' }}
+                  columns={['symbol', 'company_name', 'sector', 'listing_date', 'listing_age_days', 'volume', 'removeAction']}
+                  columnLabels={{
+                    company_name: 'Company',
+                    listing_date: 'Listing Date',
+                    listing_age_days: 'Age (Days)',
+                    removeAction: 'Action',
+                    volume: 'Volume',
+                  }}
                   columnLinks={{
                     symbol: (row) => buildNepseAlphaChartUrl(String(row.symbol || '')),
                   }}
@@ -1292,18 +1302,24 @@ const StockAnalysis: React.FC = () => {
               <div>
                 <h3>Stored market data</h3>
                 <p className="stock-screener-subtitle">
-                  Browse cached Merolagani, Nepse Alpha, or the combined database used by the screener.
+                  Browse ShareSansar company data, cached Merolagani and Nepse Alpha data, or the combined screener database.
                 </p>
               </div>
               <div className="stock-screener-universe-chips">
-                {(['combined', 'merolagani', 'nepse_alpha'] as DataSource[]).map((source) => (
+                {(['combined', 'sharesansar', 'merolagani', 'nepse_alpha'] as DataSource[]).map((source) => (
                   <button
                     key={source}
                     type="button"
                     className={`stock-screener-universe-chip${dataSource === source ? ' active' : ''}`}
                     onClick={() => setDataSource(source)}
                   >
-                    {source === 'combined' ? 'Combined' : source === 'merolagani' ? 'Merolagani' : 'Nepse Alpha'}
+                    {source === 'combined'
+                      ? 'Combined'
+                      : source === 'sharesansar'
+                        ? 'ShareSansar'
+                        : source === 'merolagani'
+                          ? 'Merolagani'
+                          : 'Nepse Alpha'}
                   </button>
                 ))}
                 <button
@@ -1320,7 +1336,7 @@ const StockAnalysis: React.FC = () => {
               <p className="stock-analysis-panel-message">Loading table…</p>
             ) : dataRows.length === 0 ? (
               <p className="stock-analysis-panel-message">
-                No cached market data yet. Click Refresh to load Merolagani and Nepse Alpha in the background
+                No cached market data yet. Click Refresh to load ShareSansar, Merolagani, and Nepse Alpha in the background
                 (first run can take a few minutes; the rest of the app stays usable).
               </p>
             ) : (

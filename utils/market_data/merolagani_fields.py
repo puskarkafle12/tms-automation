@@ -49,6 +49,11 @@ ANALYSIS_PASSTHROUGH_FIELDS = {
     "is_ordinary_share",
     "security_type",
     "ltp",
+    "percent_change",
+    "qty",
+    "open",
+    "high",
+    "low",
     "market_data_date",
     "market_data_source",
 }
@@ -64,6 +69,11 @@ ANALYSIS_NUMERIC_FIELDS = {
     "market_cap",
     "listing_age_days",
     "ltp",
+    "percent_change",
+    "qty",
+    "open",
+    "high",
+    "low",
 }
 
 MEROLAGANI_NUMERIC_KEYS = {

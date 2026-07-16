@@ -7,6 +7,7 @@ from services.stock_data_scrapper.sharesansar import (
     fetch_all_company_details,
     normalize_company_row,
 )
+from utils.market_data.daily_snapshot import _merge_latest_market_activity
 
 
 class _FakeResponse:
@@ -88,6 +89,18 @@ class ShareSansarCompanyListTest(unittest.TestCase):
         self.assertEqual(row["listing_age_days"], 3473)
         self.assertTrue(row["is_ordinary_share"])
         self.assertEqual(row["market_data_source"], "sharesansar_company_list")
+        self.assertEqual(row["market_snapshot_version"], 2)
+
+    def test_merges_latest_volume_into_company_fundamentals(self):
+        rows = [{"symbol": "KAHL", "company_name": "Kalanga Hydro", "paid_up_capital": 1_000_000}]
+        merged = _merge_latest_market_activity(
+            rows,
+            [{"Symbol": "KAHL", "LTP": "479.90", "% Change": "0.19", "Qty.": "22,727"}],
+        )
+
+        self.assertEqual(merged[0]["qty"], 22727.0)
+        self.assertEqual(merged[0]["ltp"], 479.9)
+        self.assertEqual(merged[0]["paid_up_capital"], 1_000_000)
 
     def test_discovers_all_sectors_and_paginates_at_api_limit(self):
         session = _FakeSession()

@@ -157,6 +157,7 @@ def normalize_company_row(raw: Dict[str, Any], *, sector_id: str, sector: str) -
         "ltp": _numeric(raw.get("ltp")),
         "market_data_date": market_data_date.isoformat() if market_data_date else None,
         "market_data_source": "sharesansar_company_list",
+        "market_snapshot_version": 2,
     }
 
 
