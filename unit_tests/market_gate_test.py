@@ -94,6 +94,30 @@ async def test_dna_logged_off_blocks_scanning_and_execution(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_one_stale_account_does_not_block_another_live_account(monkeypatch):
+    monkeypatch.setattr(market_gate, "is_market_polling_window", lambda: True)
+    stale_user = FakeTmsUser({
+        "status": "failed",
+        "message": "DNA logged off",
+        "data": None,
+    })
+    live_user = FakeTmsUser({
+        "status": "success",
+        "message": "Logged In Successfully",
+        "data": {"dnaStatus": "LOGGED_IN"},
+    })
+
+    gate = await market_gate.resolve_market_gate({
+        "stale-client": stale_user,
+        "live-client": live_user,
+    })
+
+    assert gate["can_scan"] is True
+    assert gate["can_execute"] is True
+    assert gate["phase"] == "active"
+
+
+@pytest.mark.asyncio
 async def test_dna_check_failure_blocks_scanning(monkeypatch):
     monkeypatch.setattr(market_gate, "is_market_polling_window", lambda: True)
     user = FakeTmsUser(

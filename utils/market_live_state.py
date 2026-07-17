@@ -56,8 +56,13 @@ async def get_shared_dna_session(tms_users: Iterable[Any]) -> dict[str, Any]:
         for tms_user in tms_users:
             try:
                 payload = await tms_user.check_exchange_session()
-                next_state = parse_session_check_response(payload)
-                break
+                candidate = parse_session_check_response(payload)
+                next_state = candidate
+                # DNA is exchange-wide, but one stale account may report logged
+                # out. Keep checking the remaining authenticated accounts and
+                # allow monitoring when any one of them confirms SUCCESS.
+                if candidate["session_active"]:
+                    break
             except Exception:
                 continue
 
