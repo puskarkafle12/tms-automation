@@ -16,6 +16,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import IO
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +26,9 @@ DEPS_IMAGE_TAG = "python-deps"
 SOURCE_LABEL = "org.opencontainers.image.source-version"
 DEPS_VERSION_LABEL = "org.opencontainers.image.deps-version"
 PRIMARY_BRANCH = os.environ.get("TMS_PRIMARY_BRANCH", "codex/backtesting")
+RUN_LOCK_FILE = Path(
+    os.environ.get("TMS_RUN_LOCK_FILE", str(ROOT / ".git" / "tms-latest-commit.lock"))
+)
 EXCLUDED_DIRS = {
     ".git",
     ".venv",
@@ -141,6 +145,32 @@ def dirty_status() -> str:
     return capture(["git", "status", "--short"], check=False)
 
 
+def acquire_run_lock() -> IO[str] | None:
+    """Prevent overlapping cron/manual runs from rebuilding the same app."""
+    RUN_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    handle = RUN_LOCK_FILE.open("a+", encoding="utf-8")
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0)
+            if not handle.read(1):
+                handle.seek(0)
+                handle.write("1")
+                handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError):
+        handle.close()
+        print(f"Another latest-commit Docker run already holds {RUN_LOCK_FILE}; skipping.")
+        return None
+    return handle
+
+
 def ensure_primary_branch(branch: str) -> None:
     """Switch to the configured branch, including from a fresh main checkout."""
     current = current_branch()
@@ -169,6 +199,18 @@ def ensure_primary_branch(branch: str) -> None:
             raise SystemExit(f"Primary branch {branch!r} was not found on origin.")
         run(["git", "switch", "--track", "-c", branch, f"origin/{branch}"])
     print(f"Primary branch: {branch}")
+
+
+def fast_forward_from_origin(branch: str) -> None:
+    """Fetch and fast-forward the exact configured branch without relying on upstream config."""
+    remote_ref = f"refs/remotes/origin/{branch}"
+    run(["git", "fetch", "--prune", "origin", f"{branch}:{remote_ref}"])
+    remote_exists = subprocess.run(
+        ["git", "show-ref", "--verify", "--quiet", remote_ref], cwd=ROOT,
+    ).returncode == 0
+    if not remote_exists:
+        raise SystemExit(f"Primary branch {branch!r} was not found on origin.")
+    run(["git", "merge", "--ff-only", remote_ref])
 
 
 def should_include(path: Path) -> bool:
@@ -293,7 +335,7 @@ def main() -> int:
     parser.add_argument(
         "--pull-git",
         action="store_true",
-        help="Run git pull --ff-only before checking the current files.",
+        help="Fetch and fast-forward the selected branch before building.",
     )
     parser.add_argument(
         "--branch",
@@ -320,7 +362,16 @@ def main() -> int:
         action="store_true",
         help="Only build/tag the image when needed; do not restart docker compose.",
     )
+    parser.add_argument(
+        "--require-clean",
+        action="store_true",
+        help="Fail instead of deploying when the selected branch has local changes.",
+    )
     args = parser.parse_args()
+
+    run_lock = acquire_run_lock()
+    if run_lock is None:
+        return 0
 
     ensure_required_tools()
     compose = docker_compose_command()
@@ -330,10 +381,16 @@ def main() -> int:
         branch = current_branch()
         if branch == "HEAD":
             raise SystemExit("--pull-git cannot run from detached HEAD.")
-        if dirty_status():
-            print("Working tree has local changes; skipping git pull to avoid overwriting them.")
+        changes = dirty_status()
+        if changes and args.require_clean:
+            raise SystemExit(
+                "Scheduled latest-commit run requires a clean working tree; refusing to deploy "
+                "uncommitted server files.\n" + changes
+            )
+        if changes:
+            print("Working tree has local changes; skipping remote update to avoid overwriting them.")
         else:
-            run(["git", "pull", "--ff-only"])
+            fast_forward_from_origin(args.branch)
 
     commit = current_commit()
     fingerprint = source_fingerprint()

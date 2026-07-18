@@ -10,4 +10,10 @@ if [ "$DAY" -ge 1 ] && [ "$DAY" -le 5 ] && [ "$TIME" -ge 1000 ] && [ "$TIME" -lt
     exit 0
 fi
 
-exec "$(dirname "$0")/run_latest_commit_docker.sh" --pull-git
+# The scheduled runner must never deploy uncommitted server files. The Docker
+# runner defaults to codex/backtesting and fetches/fast-forwards that exact
+# branch before building and starting the container.
+PRIMARY_BRANCH=${TMS_PRIMARY_BRANCH:-codex/backtesting}
+exec "$(dirname "$0")/run_latest_commit_docker.sh" \
+    --branch "$PRIMARY_BRANCH" \
+    --require-clean
