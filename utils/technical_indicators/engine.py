@@ -11,11 +11,12 @@ from typing import Any, Dict, List, Sequence
 
 import numpy as np
 import pandas as pd
-from ta.momentum import PercentagePriceOscillator
-from ta.trend import AroonIndicator, PSARIndicator, VortexIndicator
-from ta.volatility import KeltnerChannel
+from ta.momentum import KAMAIndicator, PercentagePriceOscillator, UltimateOscillator
+from ta.trend import AroonIndicator, MassIndex, PSARIndicator, TRIXIndicator, VortexIndicator
+from ta.volatility import KeltnerChannel, UlcerIndex
+from ta.volume import ForceIndexIndicator, VolumePriceTrendIndicator, VolumeWeightedAveragePrice
 
-ENGINE_VERSION = "ohlcv-ta-v2-ta-0.11.0"
+ENGINE_VERSION = "ohlcv-ta-v3-ta-0.11.0"
 
 NUMERIC_FIELDS = (
     "technical_sma_10_value", "technical_sma_20_value", "technical_sma_50_value",
@@ -40,6 +41,20 @@ NUMERIC_FIELDS = (
     "technical_keltner_middle_20", "technical_keltner_upper_20",
     "technical_psar_value", "technical_squeeze_momentum",
     "technical_squeeze_on", "technical_squeeze_off",
+    "technical_kama_10", "technical_ultimate_oscillator_7_14_28",
+    "technical_trix_15", "technical_kst", "technical_kst_signal", "technical_kst_diff",
+    "technical_mass_index_9_25", "technical_ulcer_index_14", "technical_force_index_13",
+    "technical_volume_price_trend", "technical_vwap_20",
+    "technical_ichimoku_conversion_9", "technical_ichimoku_base_26",
+    "technical_ichimoku_span_a_26", "technical_ichimoku_span_b_52",
+    "technical_price_zscore_20", "technical_efficiency_ratio_20",
+    "technical_candle_body_percent", "technical_upper_wick_percent",
+    "technical_lower_wick_percent", "technical_close_location_value",
+    "technical_gap_percent", "technical_prior_high_20", "technical_prior_low_20",
+    "technical_breakout_20", "technical_breakdown_20",
+    "technical_bullish_engulfing", "technical_hammer", "technical_inside_bar",
+    "technical_outside_bar", "technical_bullish_marubozu",
+    "technical_higher_high_3", "technical_higher_low_3",
     "technical_buy_score", "technical_sell_score", "technical_signal_score",
 )
 TEXT_FIELDS = (
@@ -267,6 +282,86 @@ def calculate_indicator_rows(bars: Sequence[Any]) -> List[Dict[str, Any]]:
         frame["technical_squeeze_on"] == 1, "On",
         np.where(frame["technical_squeeze_off"] == 1, "Released", "Neutral"),
     )
+
+    # Adaptive/multi-horizon studies from the same open-source `ta` package.
+    # Each output at index N is calculated only from rows <= N.
+    frame["technical_kama_10"] = KAMAIndicator(close=close, window=10, pow1=2, pow2=30, fillna=False).kama()
+    frame["technical_ultimate_oscillator_7_14_28"] = UltimateOscillator(
+        high=high, low=low, close=close, window1=7, window2=14, window3=28, fillna=False,
+    ).ultimate_oscillator()
+    frame["technical_trix_15"] = TRIXIndicator(close=close, window=15, fillna=False).trix()
+    # `ta` 0.11.0's KST uses the full-series mean as a shift fill value,
+    # which leaks future observations into early rows. Use the published
+    # past-only ROC/SMA construction instead.
+    rocma1 = close.pct_change(10, fill_method=None).rolling(10, min_periods=10).mean()
+    rocma2 = close.pct_change(15, fill_method=None).rolling(10, min_periods=10).mean()
+    rocma3 = close.pct_change(20, fill_method=None).rolling(10, min_periods=10).mean()
+    rocma4 = close.pct_change(30, fill_method=None).rolling(15, min_periods=15).mean()
+    kst_value = 100 * (rocma1 + 2 * rocma2 + 3 * rocma3 + 4 * rocma4)
+    kst_signal = kst_value.rolling(9, min_periods=9).mean()
+    frame["technical_kst"] = kst_value
+    frame["technical_kst_signal"] = kst_signal
+    frame["technical_kst_diff"] = kst_value - kst_signal
+    frame["technical_mass_index_9_25"] = MassIndex(high=high, low=low, window_fast=9, window_slow=25, fillna=False).mass_index()
+    frame["technical_ulcer_index_14"] = UlcerIndex(close=close, window=14, fillna=False).ulcer_index()
+    frame["technical_force_index_13"] = ForceIndexIndicator(close=close, volume=volume, window=13, fillna=False).force_index()
+    frame["technical_volume_price_trend"] = VolumePriceTrendIndicator(close=close, volume=volume, fillna=False).volume_price_trend()
+    frame["technical_vwap_20"] = VolumeWeightedAveragePrice(
+        high=high, low=low, close=close, volume=volume, window=20, fillna=False,
+    ).volume_weighted_average_price()
+
+    # Ichimoku values are intentionally plotted without future displacement.
+    # The decision row therefore never reads a future cloud value.
+    conversion = (high.rolling(9).max() + low.rolling(9).min()) / 2
+    base = (high.rolling(26).max() + low.rolling(26).min()) / 2
+    frame["technical_ichimoku_conversion_9"] = conversion
+    frame["technical_ichimoku_base_26"] = base
+    frame["technical_ichimoku_span_a_26"] = (conversion + base) / 2
+    frame["technical_ichimoku_span_b_52"] = (high.rolling(52).max() + low.rolling(52).min()) / 2
+
+    # Price-action geometry and breakout state. Previous levels are shifted by
+    # one session so today's high/low cannot define its own breakout threshold.
+    open_price = frame["open"]
+    candle_range = (high - low).replace(0, np.nan)
+    body = close - open_price
+    absolute_body = body.abs()
+    upper_wick = high - pd.concat((open_price, close), axis=1).max(axis=1)
+    lower_wick = pd.concat((open_price, close), axis=1).min(axis=1) - low
+    frame["technical_candle_body_percent"] = body / open_price.replace(0, np.nan) * 100
+    frame["technical_upper_wick_percent"] = upper_wick / candle_range * 100
+    frame["technical_lower_wick_percent"] = lower_wick / candle_range * 100
+    frame["technical_close_location_value"] = (close - low) / candle_range
+    frame["technical_gap_percent"] = (open_price - previous_close) / previous_close.replace(0, np.nan) * 100
+    frame["technical_price_zscore_20"] = (close - middle) / deviation.replace(0, np.nan)
+    frame["technical_efficiency_ratio_20"] = close.diff(20).abs() / close.diff().abs().rolling(20).sum().replace(0, np.nan)
+
+    prior_high_20 = high.shift(1).rolling(20).max()
+    prior_low_20 = low.shift(1).rolling(20).min()
+    frame["technical_prior_high_20"] = prior_high_20
+    frame["technical_prior_low_20"] = prior_low_20
+    frame["technical_breakout_20"] = (close > prior_high_20).astype(float)
+    frame["technical_breakdown_20"] = (close < prior_low_20).astype(float)
+    bullish = close > open_price
+    prior_bearish = previous_close < open_price.shift(1)
+    frame["technical_bullish_engulfing"] = (
+        bullish & prior_bearish & (open_price <= previous_close) & (close >= open_price.shift(1))
+    ).astype(float)
+    frame["technical_hammer"] = (
+        bullish & (lower_wick >= absolute_body * 2) & (upper_wick <= absolute_body) &
+        (absolute_body / candle_range <= 0.5)
+    ).astype(float)
+    frame["technical_inside_bar"] = ((high < high.shift(1)) & (low > low.shift(1))).astype(float)
+    frame["technical_outside_bar"] = ((high > high.shift(1)) & (low < low.shift(1)) & bullish).astype(float)
+    frame["technical_bullish_marubozu"] = (
+        bullish & (absolute_body / candle_range >= 0.8) &
+        (upper_wick / candle_range <= 0.1) & (lower_wick / candle_range <= 0.1)
+    ).astype(float)
+    frame["technical_higher_high_3"] = (high > high.shift(1).rolling(2).max()).astype(float)
+    frame["technical_higher_low_3"] = (low > low.shift(1).rolling(2).max()).astype(float)
+
+    # Consolidate blocks after the extended field insertions. This keeps the
+    # final label/score calculations fast when a whole market is prepared.
+    frame = frame.copy()
 
     frame["technical_macd"] = np.where(frame["technical_macd_histogram"].isna(), None, np.where(frame["technical_macd_histogram"] >= 0, "Bullish", "Bearish"))
     for period in (10, 20, 50, 200):

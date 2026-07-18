@@ -65,6 +65,19 @@ STRONG_BUY_SORT_FIELDS = {
     "condition_progress_pct": "condition_progress_pct", "latest_volume": "latest_volume",
 }
 
+STRONG_BUY_FILTER_TYPES = {
+    "symbol": "text", "current_signal_status": "text", "preset_name": "text", "category": "text",
+    "sector": "text", "recommendation_score": "number", "ltp": "number", "win_rate_pct": "number",
+    "wins": "number", "losses": "number", "total_trades": "number", "average_holding_days": "number",
+    "loss_rate_pct": "number", "confidence_score": "number", "net_return_pct": "number",
+    "net_profit": "number", "profit_factor": "number", "max_drawdown_pct": "number",
+    "sharpe_ratio": "number", "reliability_score": "number", "condition_progress_pct": "number",
+    "latest_volume": "number", "median_volume_20": "number",
+}
+STRONG_BUY_FILTER_OPERATORS = {
+    "eq": "=", "neq": "<>", "gt": ">", "gte": ">=", "lt": "<", "lte": "<=", "contains": "ILIKE",
+}
+
 
 def compile_strong_buy_sorts(body: Dict[str, Any]) -> Tuple[str, List[Dict[str, str]]]:
     """Compile validated multi-column ordering for the recommendation table."""
@@ -90,6 +103,58 @@ def compile_strong_buy_sorts(body: Dict[str, Any]) -> Tuple[str, List[Dict[str, 
         clauses.append(f"{STRONG_BUY_SORT_FIELDS[field]} {direction.upper()} NULLS LAST")
         normalized.append({"field": field, "direction": direction})
     return ",".join(clauses), normalized
+
+
+def compile_strong_buy_filters(
+    requested: Any, params: Dict[str, Any], recommendation_score_sql: str,
+) -> Tuple[str, List[Dict[str, Any]]]:
+    """Compile the recommendation filter builder into parameterized SQL."""
+    filters = requested or []
+    if not isinstance(filters, list) or len(filters) > 12:
+        raise ResultQueryError("Recommendation filtering supports up to twelve conditions.")
+    expressions = {
+        "symbol": "r.symbol", "current_signal_status": "r.current_signal_status",
+        "preset_name": "r.preset_name", "category": "r.category", "sector": "s.sector",
+        "recommendation_score": f"({recommendation_score_sql})", "ltp": "s.ltp",
+        "win_rate_pct": "r.win_rate_pct", "wins": "r.wins", "losses": "r.losses",
+        "total_trades": "r.total_trades", "average_holding_days": "r.average_holding_days",
+        "loss_rate_pct": "(100-COALESCE(r.win_rate_pct,0))", "confidence_score": "r.confidence_score",
+        "net_return_pct": "r.net_return_pct",
+        "net_profit": "NULLIF(r.assumptions->'summary'->>'net_profit','')::double precision",
+        "profit_factor": "r.profit_factor", "max_drawdown_pct": "r.max_drawdown_pct",
+        "sharpe_ratio": "r.sharpe_ratio", "reliability_score": "r.reliability_score",
+        "condition_progress_pct": "COALESCE(NULLIF(r.current_evidence->>'condition_progress_pct','')::double precision,0)",
+        "latest_volume": "s.latest_volume", "median_volume_20": "s.median_volume_20",
+    }
+    clauses: List[str] = []
+    normalized: List[Dict[str, Any]] = []
+    for index, item in enumerate(filters):
+        if not isinstance(item, dict):
+            raise ResultQueryError("Each recommendation filter must contain a field, operator, and value.")
+        field = str(item.get("field") or "")
+        operator = str(item.get("operator") or "").lower()
+        field_type = STRONG_BUY_FILTER_TYPES.get(field)
+        if not field_type or operator not in STRONG_BUY_FILTER_OPERATORS:
+            raise ResultQueryError("Unsupported recommendation filter field or operator.")
+        if operator == "contains" and field_type != "text":
+            raise ResultQueryError(f"contains is only valid for text fields ({field}).")
+        if field_type == "text" and operator not in {"eq", "neq", "contains"}:
+            raise ResultQueryError(f"{operator} is not valid for text field {field}.")
+        value = item.get("value")
+        if field_type == "number":
+            try:
+                value = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ResultQueryError(f"{field} requires a numeric value.") from exc
+        else:
+            value = str(value or "").strip()
+            if not value:
+                raise ResultQueryError(f"{field} requires a value.")
+        param_name = f"advanced_filter_{index}"
+        params[param_name] = f"%{value}%" if operator == "contains" else value
+        clauses.append(f"{expressions[field]} {STRONG_BUY_FILTER_OPERATORS[operator]} :{param_name}")
+        normalized.append({"field": field, "operator": operator, "value": value})
+    return " AND ".join(clauses) or "TRUE", normalized
 
 
 def field_catalog() -> List[Dict[str, Any]]:
@@ -211,19 +276,21 @@ def query_strong_buys(session, run_id: str, body: Dict[str, Any], *, owner_id: s
     }
     if signal_mode not in signal_requirements:
         raise ResultQueryError("Unsupported current-signal filter.")
-    requirements = f"""{signal_requirements[signal_mode]}
-        AND r.total_trades>=:min_trades AND r.win_rate_pct>=:min_win AND r.confidence_score>=:min_confidence
-        AND r.net_return_pct>=:min_return AND (r.profit_factor IS NULL OR r.profit_factor>=:min_pf)
-        AND COALESCE(r.sharpe_ratio,-999)>=:min_sharpe AND r.max_drawdown_pct<=:max_dd
-        AND COALESCE(s.latest_volume,0)>=:min_volume
-        AND (:category='' OR r.category=:category)
-        AND (:latest_date IS NULL OR r.current_signal_date>=CAST(:latest_date AS DATE))"""
     recommendation_score = """ROUND((
         COALESCE(r.win_rate_pct,0)*0.45
         + GREATEST(0,LEAST(100,COALESCE(r.net_return_pct,0)))*0.30
         + GREATEST(0,LEAST(100,COALESCE(r.total_trades,0)*2))*0.15
         + GREATEST(0,LEAST(100,COALESCE(r.reliability_score,0)))*0.10
     )::numeric,2)::double precision"""
+    advanced_where, normalized_filters = compile_strong_buy_filters(body.get("filters"), params, recommendation_score)
+    requirements = f"""{signal_requirements[signal_mode]}
+        AND r.total_trades>=:min_trades AND r.win_rate_pct>=:min_win AND r.confidence_score>=:min_confidence
+        AND r.net_return_pct>=:min_return AND (r.profit_factor IS NULL OR r.profit_factor>=:min_pf)
+        AND COALESCE(r.sharpe_ratio,-999)>=:min_sharpe AND r.max_drawdown_pct<=:max_dd
+        AND COALESCE(s.latest_volume,0)>=:min_volume
+        AND (:category='' OR r.category=:category)
+        AND (:latest_date IS NULL OR r.current_signal_date>=CAST(:latest_date AS DATE))
+        AND {advanced_where}"""
     columns = """r.result_id,r.symbol,r.preset_id,r.preset_name,r.category,r.current_signal_status,
         r.current_signal_date,r.reliability_score,r.current_technical_score,r.win_rate_pct,r.wins,r.losses,
         r.total_trades,r.average_holding_days,r.confidence_score,r.net_return_pct,r.profit_factor,r.max_drawdown_pct,r.sharpe_ratio,
@@ -255,4 +322,5 @@ def query_strong_buys(session, run_id: str, body: Dict[str, Any], *, owner_id: s
     return {"items": items, "page": page, "page_size": page_size, "total": total,
             "pages": ceil(total / page_size) if total else 0,
             "sorts": normalized_sorts,
+            "filters": normalized_filters,
             "disclaimer": "Backtested historical performance does not guarantee future results."}

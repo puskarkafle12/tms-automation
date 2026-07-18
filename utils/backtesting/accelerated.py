@@ -45,10 +45,19 @@ def _text_is(rows: Sequence[Dict[str, Any]], field: str, expected: str) -> np.nd
     return np.asarray([str(row.get(field) or "").strip().lower() == expected.lower() for row in rows], dtype=bool)
 
 
+def _positive_slope(values: np.ndarray, window: int) -> np.ndarray:
+    result = np.zeros(len(values), dtype=bool)
+    for index in range(window - 1, len(values)):
+        scoped = values[index - window + 1:index + 1]
+        result[index] = bool(np.isfinite(scoped).all() and np.polyfit(np.arange(window), scoped, 1)[0] > 0)
+    return result
+
+
 def compile_preset_signals(preset_id: str, rows: Sequence[Dict[str, Any]]) -> List[bool]:
     """Compile one catalog preset without reading any future row."""
     count = len(rows)
     close = _numbers(rows, "ltp")
+    low = _numbers(rows, "low")
     change = _numbers(rows, "change_percent")
     volume = _numbers(rows, "volume")
     rsi = _numbers(rows, "technical_rsi_14")
@@ -77,6 +86,33 @@ def compile_preset_signals(preset_id: str, rows: Sequence[Dict[str, Any]]) -> Li
     ema_200 = _numbers(rows, "technical_ema_200_value")
     donchian_upper = _numbers(rows, "technical_donchian_upper_20")
     obv = _numbers(rows, "technical_obv")
+    kama = _numbers(rows, "technical_kama_10")
+    ultimate = _numbers(rows, "technical_ultimate_oscillator_7_14_28")
+    trix = _numbers(rows, "technical_trix_15")
+    kst = _numbers(rows, "technical_kst")
+    kst_diff = _numbers(rows, "technical_kst_diff")
+    ulcer = _numbers(rows, "technical_ulcer_index_14")
+    force_index = _numbers(rows, "technical_force_index_13")
+    vpt = _numbers(rows, "technical_volume_price_trend")
+    vwap = _numbers(rows, "technical_vwap_20")
+    ichimoku_conversion = _numbers(rows, "technical_ichimoku_conversion_9")
+    ichimoku_base = _numbers(rows, "technical_ichimoku_base_26")
+    ichimoku_span_a = _numbers(rows, "technical_ichimoku_span_a_26")
+    ichimoku_span_b = _numbers(rows, "technical_ichimoku_span_b_52")
+    price_zscore = _numbers(rows, "technical_price_zscore_20")
+    efficiency = _numbers(rows, "technical_efficiency_ratio_20")
+    candle_body = _numbers(rows, "technical_candle_body_percent")
+    close_location = _numbers(rows, "technical_close_location_value")
+    gap = _numbers(rows, "technical_gap_percent")
+    prior_low = _numbers(rows, "technical_prior_low_20")
+    breakout = _numbers(rows, "technical_breakout_20")
+    bullish_engulfing = _numbers(rows, "technical_bullish_engulfing")
+    hammer = _numbers(rows, "technical_hammer")
+    inside_bar = _numbers(rows, "technical_inside_bar")
+    outside_bar = _numbers(rows, "technical_outside_bar")
+    bullish_marubozu = _numbers(rows, "technical_bullish_marubozu")
+    higher_high = _numbers(rows, "technical_higher_high_3")
+    higher_low = _numbers(rows, "technical_higher_low_3")
     positive = change > 0
     signal = np.zeros(count, dtype=bool)
 
@@ -184,6 +220,47 @@ def compile_preset_signals(preset_id: str, rows: Sequence[Dict[str, Any]]) -> Li
         signal = (aroon_up >= 70) & (vortex_positive > vortex_negative) & (ppo > 0) & (obv > _rolling_mean(obv, 20))
     elif preset_id == "squeeze_trend_regime":
         signal = _text_is(rows, "technical_squeeze", "released") & (choppiness < 45) & _text_is(rows, "technical_supertrend", "bullish") & (cmf > 0) & (volume_ratio >= 1.1)
+    elif preset_id == "pa_engulfing_trend_volume":
+        signal = (bullish_engulfing == 1) & _text_is(rows, "technical_sma_200", "above") & (volume_ratio >= 1.1) & (rsi >= 35) & (rsi <= 65)
+    elif preset_id == "pa_hammer_trend_reclaim":
+        signal = (hammer == 1) & (close > ema_50) & _text_is(rows, "technical_sma_200", "above") & (close_location >= .65) & (cmf > 0)
+    elif preset_id == "pa_inside_bar_trend":
+        signal = (inside_bar == 1) & (ema_20 > ema_50) & (adx >= 20) & (volume_ratio <= 1.2)
+    elif preset_id == "pa_outside_bar_momentum":
+        signal = (outside_bar == 1) & (close_location >= .75) & (candle_body >= 1) & (volume_ratio >= 1.2)
+    elif preset_id == "pa_marubozu_participation":
+        signal = (bullish_marubozu == 1) & (volume_ratio >= 1.3) & (adx >= 20) & (atr_percent <= 7)
+    elif preset_id == "pa_20d_breakout_volume":
+        signal = (breakout == 1) & (volume_ratio >= 1.5) & (adx >= 20) & (atr_percent <= 7)
+    elif preset_id == "pa_false_breakdown_reclaim":
+        signal = (low < prior_low) & (close > prior_low) & (close_location >= .7) & (volume_ratio >= 1.1)
+    elif preset_id == "pa_higher_high_low_continuation":
+        signal = (higher_high == 1) & (higher_low == 1) & (ema_20 > ema_50) & (cmf > 0)
+    elif preset_id == "pa_gap_momentum":
+        signal = (gap >= 1) & (close_location >= .7) & (volume_ratio >= 1.3) & _text_is(rows, "technical_sma_50", "above")
+    elif preset_id == "pa_vwap_reclaim":
+        signal = (close > vwap) & (price_zscore <= 1.5) & (cmf > 0) & positive
+    elif preset_id == "ichimoku_cloud_adx":
+        signal = (close > ichimoku_span_a) & (close > ichimoku_span_b) & (ichimoku_conversion > ichimoku_base) & (adx >= 20)
+    elif preset_id == "kama_adaptive_momentum":
+        signal = (close > kama) & _positive_slope(kama, 5) & (ppo_histogram > 0) & (efficiency >= .3)
+    elif preset_id == "kst_multi_cycle_trend":
+        signal = (kst_diff > 0) & (kst > 0) & _text_is(rows, "technical_sma_200", "above") & (cmf > 0)
+    elif preset_id == "trix_volume_trend":
+        signal = (trix > 0) & (ppo_histogram > 0) & (volume_ratio >= 1.1) & _text_is(rows, "technical_sma_50", "above")
+    elif preset_id == "ultimate_pullback_trend":
+        signal = (ultimate >= 40) & (ultimate <= 60) & _text_is(rows, "technical_sma_200", "above") & (close > ema_50) & positive
+    elif preset_id == "force_index_breakout":
+        signal = (force_index > 0) & (breakout == 1) & (volume_ratio >= 1.2) & (adx >= 20)
+    elif preset_id == "efficiency_trend_defense":
+        signal = (efficiency >= .35) & (choppiness < 45) & (ema_20 > ema_50) & (ema_50 > ema_200) & (ppo_histogram > 0)
+    elif preset_id == "low_ulcer_momentum":
+        signal = (ulcer <= 8) & (_change_percent(close, 63) >= 5) & _text_is(rows, "technical_sma_200", "above") & (atr_percent <= 5)
+    elif preset_id == "vpt_vwap_confirmation":
+        signal = (vpt > _rolling_mean(vpt, 20)) & (close > vwap) & (cmf > 0) & _text_is(rows, "technical_sma_50", "above")
+    elif preset_id == "nonlinear_momentum_regime":
+        momentum_63 = _change_percent(close, 63)
+        signal = (momentum_63 >= 5) & (momentum_63 <= 25) & (_change_percent(close, 126) >= 10) & (historical_volatility <= 45) & (adx >= 20) & _text_is(rows, "technical_sma_200", "above")
     else:
         raise ValueError(f"Preset {preset_id} is not supported by the accelerated compiler.")
     raw = np.nan_to_num(signal, nan=False).astype(bool)

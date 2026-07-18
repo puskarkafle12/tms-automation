@@ -30,7 +30,7 @@ def test_complete_indicator_contract_and_scores_are_bounded():
     closes = [100 + index * .4 + ((index % 7) - 3) for index in range(260)]
     row = calculate_indicator_rows(_bars(closes))[-1]
     assert set(row) == set(INDICATOR_FIELDS)
-    assert ENGINE_VERSION == "ohlcv-ta-v2-ta-0.11.0"
+    assert ENGINE_VERSION == "ohlcv-ta-v3-ta-0.11.0"
     assert 0 <= row["technical_buy_score"] <= 100
     assert 0 <= row["technical_sell_score"] <= 100
     assert -100 <= row["technical_signal_score"] <= 100
@@ -45,3 +45,12 @@ def test_complete_indicator_contract_and_scores_are_bounded():
     assert row["technical_keltner_upper_20"] is not None
     assert row["technical_psar"] in {"Bullish", "Bearish"}
     assert row["technical_squeeze"] in {"On", "Released", "Neutral"}
+    assert row["technical_kama_10"] is not None
+    assert row["technical_ultimate_oscillator_7_14_28"] is not None
+    assert row["technical_kst_diff"] is not None
+    assert row["technical_ulcer_index_14"] is not None
+    assert row["technical_vwap_20"] is not None
+    assert row["technical_ichimoku_span_b_52"] is not None
+    assert row["technical_efficiency_ratio_20"] is not None
+    assert row["technical_close_location_value"] is not None
+    assert row["technical_prior_high_20"] is not None

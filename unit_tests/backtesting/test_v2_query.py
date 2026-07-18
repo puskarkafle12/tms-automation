@@ -1,6 +1,11 @@
 import pytest
 
-from utils.backtesting.v2_query import ResultQueryError, compile_filters, compile_strong_buy_sorts
+from utils.backtesting.v2_query import (
+    ResultQueryError,
+    compile_filters,
+    compile_strong_buy_filters,
+    compile_strong_buy_sorts,
+)
 
 
 def test_result_filters_are_parameterized_and_force_ordinary_shares():
@@ -50,3 +55,32 @@ def test_recommendation_sorting_rejects_unknown_or_duplicate_fields():
             {"field": "win_rate_pct", "direction": "desc"},
             {"field": "win_rate_pct", "direction": "asc"},
         ]})
+
+
+def test_recommendations_compile_multiple_parameterized_filters():
+    params = {}
+    sql, filters = compile_strong_buy_filters([
+        {"field": "recommendation_score", "operator": "gte", "value": "70"},
+        {"field": "max_drawdown_pct", "operator": "lte", "value": 25},
+        {"field": "sector", "operator": "contains", "value": "Bank"},
+    ], params, "score_expression")
+    assert "(score_expression) >= :advanced_filter_0" in sql
+    assert "r.max_drawdown_pct <= :advanced_filter_1" in sql
+    assert "s.sector ILIKE :advanced_filter_2" in sql
+    assert params == {"advanced_filter_0": 70.0, "advanced_filter_1": 25.0, "advanced_filter_2": "%Bank%"}
+    assert filters[0] == {"field": "recommendation_score", "operator": "gte", "value": 70.0}
+
+
+def test_recommendation_filters_reject_unsafe_or_invalid_conditions():
+    with pytest.raises(ResultQueryError):
+        compile_strong_buy_filters([
+            {"field": "drop table backtest_results", "operator": "eq", "value": 1},
+        ], {}, "score_expression")
+    with pytest.raises(ResultQueryError):
+        compile_strong_buy_filters([
+            {"field": "win_rate_pct", "operator": "contains", "value": 70},
+        ], {}, "score_expression")
+    with pytest.raises(ResultQueryError):
+        compile_strong_buy_filters([
+            {"field": "sector", "operator": "gte", "value": "Bank"},
+        ], {}, "score_expression")

@@ -102,7 +102,17 @@ def _run_symbol_task(task: Dict[str, Any]) -> Dict[str, Any]:
         custom_query_template = preset.get("custom_query_text")
         executable_query = (
             retarget_strategy_query(custom_query_template, [symbol])
-            if custom_query_template else build_preset_query(preset, symbol)
+            if custom_query_template else build_preset_query(
+                preset, symbol,
+                backtest_config={
+                    **settings,
+                    "stop_loss_pct": defaults["stop_loss_pct"],
+                    "take_profit_pct": defaults["take_profit_pct"],
+                    "min_holding_days": effective_min_holding_days,
+                    "max_holding_days": effective_max_holding_days,
+                    "data_source": source,
+                },
+            )
         )
         try:
             entry_signals = None

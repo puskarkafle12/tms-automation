@@ -78,11 +78,29 @@ def test_backtest_rejects_symbol_not_present_in_query():
 
 def test_all_presets_compile_for_nepse_symbol():
     presets = get_backtest_presets()
-    assert len(presets) == 84
-    assert len({preset["id"] for preset in presets}) == 84
+    assert len(presets) == 104
+    assert len({preset["id"] for preset in presets}) == 104
     for preset in presets:
-        plan = parse_strategy_query(build_preset_query(preset, "NABIL"))
+        query = build_preset_query(preset, "NABIL")
+        plan = parse_strategy_query(query)
         assert plan.rules[0].symbols == ["NABIL"]
+        assert 'CHARGE_MODEL "nepse_equity"' in query
+        assert f'STOP_LOSS_PCT {preset["defaults"]["stop_loss_pct"]:g}' in query
+        assert f'TAKE_PROFIT_PCT {preset["defaults"]["take_profit_pct"]:g}' in query
+        assert f'MAX_HOLDING_DAYS {preset["defaults"]["max_holding_days"]}' in query
+
+
+def test_preset_query_embeds_run_holding_and_cost_overrides_for_replay_and_promotion():
+    query = build_preset_query(
+        get_backtest_presets()[-1], "NABIL",
+        backtest_config={"min_holding_days": 7, "max_holding_days": 42, "slippage_pct": .25},
+    )
+    plan = parse_strategy_query(query)
+    assert plan.backtest is not None
+    assert plan.backtest.charge_model == "nepse_equity"
+    assert plan.backtest.min_holding_days == 7
+    assert plan.backtest.max_holding_days == 42
+    assert plan.backtest.slippage_pct == .25
 
 
 def test_minimum_holding_days_delays_target_but_not_run_reproducibility():

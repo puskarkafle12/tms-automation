@@ -147,14 +147,91 @@ def get_backtest_presets() -> List[Dict[str, Any]]:
             "Evidence-informed daily setup adapted to point-in-time NEPSE OHLCV data; validate out of sample.",
             stop=stop, target=target, holding=holding, research_basis=research_basis,
         ))
-    if len(presets) != 84:
-        raise RuntimeError(f"Expected 84 backtest presets, built {len(presets)}")
+
+    price_action = (
+        ("pa_engulfing_trend_volume", "Engulfing Trend + Volume", 'technical_bullish_engulfing = 1 AND technical_sma_200 = "above" AND technical_volume_ratio_20 >= 1.1 AND technical_rsi_14 BETWEEN 35 AND 65', 5, 14, 25),
+        ("pa_hammer_trend_reclaim", "Hammer Trend Reclaim", 'technical_hammer = 1 AND ltp > technical_ema_50_value AND technical_sma_200 = "above" AND technical_close_location_value >= 0.65 AND technical_cmf_20 > 0', 5, 13, 25),
+        ("pa_inside_bar_trend", "Inside-Bar Trend Compression", 'technical_inside_bar = 1 AND technical_ema_20_value > technical_ema_50_value AND technical_adx_14 >= 20 AND technical_volume_ratio_20 <= 1.2', 5, 15, 30),
+        ("pa_outside_bar_momentum", "Outside-Bar Momentum", 'technical_outside_bar = 1 AND technical_close_location_value >= 0.75 AND technical_candle_body_percent >= 1 AND technical_volume_ratio_20 >= 1.2', 6, 16, 30),
+        ("pa_marubozu_participation", "Marubozu Participation", 'technical_bullish_marubozu = 1 AND technical_volume_ratio_20 >= 1.3 AND technical_adx_14 >= 20 AND technical_atr_percent <= 7', 6, 17, 30),
+        ("pa_20d_breakout_volume", "20-Day Price + Volume Breakout", 'technical_breakout_20 = 1 AND technical_volume_ratio_20 >= 1.5 AND technical_adx_14 >= 20 AND technical_atr_percent <= 7', 7, 20, 40),
+        ("pa_false_breakdown_reclaim", "False-Breakdown Reclaim", 'low < technical_prior_low_20 AND ltp > technical_prior_low_20 AND technical_close_location_value >= 0.7 AND technical_volume_ratio_20 >= 1.1', 5, 14, 25),
+        ("pa_higher_high_low_continuation", "Higher-High / Higher-Low Continuation", 'technical_higher_high_3 = 1 AND technical_higher_low_3 = 1 AND technical_ema_20_value > technical_ema_50_value AND technical_cmf_20 > 0', 6, 17, 35),
+        ("pa_gap_momentum", "Gap Momentum Confirmation", 'technical_gap_percent >= 1 AND technical_close_location_value >= 0.7 AND technical_volume_ratio_20 >= 1.3 AND technical_sma_50 = "above"', 6, 16, 25),
+        ("pa_vwap_reclaim", "20-Day VWAP Reclaim", 'ltp > technical_vwap_20 AND technical_price_zscore_20 <= 1.5 AND technical_cmf_20 > 0 AND change_percent > 0', 5, 14, 25),
+    )
+    for preset_id, name, condition, stop, target, holding in price_action:
+        presets.append(_preset(
+            preset_id, name, "Price action + regime", condition,
+            "Daily candle or structure signal confirmed by trend, participation, or liquidity context.",
+            stop=stop, target=target, holding=holding,
+            research_basis="Candlestick and price-action hypotheses require regime confirmation and out-of-sample validation.",
+        ))
+
+    adaptive_regime = (
+        ("ichimoku_cloud_adx", "Ichimoku Cloud + ADX", 'ltp > technical_ichimoku_span_a_26 AND ltp > technical_ichimoku_span_b_52 AND technical_ichimoku_conversion_9 > technical_ichimoku_base_26 AND technical_adx_14 >= 20', 7, 20, 45, "Multi-horizon trend state with independent trend-strength confirmation."),
+        ("kama_adaptive_momentum", "KAMA Adaptive Momentum", 'ltp > technical_kama_10 AND SLOPE(field=technical_kama_10, window=5, operator="gt", threshold=0) AND technical_ppo_histogram > 0 AND technical_efficiency_ratio_20 >= 0.3', 6, 17, 35, "Adaptive trend filter with path-efficiency and momentum confirmation."),
+        ("kst_multi_cycle_trend", "KST Multi-Cycle Trend", 'technical_kst_diff > 0 AND technical_kst > 0 AND technical_sma_200 = "above" AND technical_cmf_20 > 0', 7, 20, 45, "Multiple rate-of-change horizons combined with accumulation and long-trend filters."),
+        ("trix_volume_trend", "TRIX Volume Trend", 'technical_trix_15 > 0 AND technical_ppo_histogram > 0 AND technical_volume_ratio_20 >= 1.1 AND technical_sma_50 = "above"', 6, 18, 35, "Triple-smoothed trend momentum with price and volume confirmation."),
+        ("ultimate_pullback_trend", "Ultimate-Oscillator Trend Pullback", 'technical_ultimate_oscillator_7_14_28 BETWEEN 40 AND 60 AND technical_sma_200 = "above" AND ltp > technical_ema_50_value AND change_percent > 0', 5, 15, 30, "Multi-window momentum pullback restricted to a positive long-term regime."),
+        ("force_index_breakout", "Force-Index Breakout", 'technical_force_index_13 > 0 AND technical_breakout_20 = 1 AND technical_volume_ratio_20 >= 1.2 AND technical_adx_14 >= 20', 7, 20, 40, "Price-volume impulse confirms a prior-range breakout."),
+        ("efficiency_trend_defense", "Efficient Trend Defense", 'technical_efficiency_ratio_20 >= 0.35 AND technical_choppiness_14 < 45 AND technical_ema_20_value > technical_ema_50_value AND technical_ema_50_value > technical_ema_200_value AND technical_ppo_histogram > 0', 6, 19, 45, "Trend-quality defenses reduce exposure to noisy or broken trends."),
+        ("low_ulcer_momentum", "Low-Ulcer Momentum", 'technical_ulcer_index_14 <= 8 AND CHANGE_PERCENT(field=ltp, scans_back=63) >= 5 AND technical_sma_200 = "above" AND technical_atr_percent <= 5', 6, 18, 45, "Medium-horizon momentum filtered by downside-risk and daily volatility."),
+        ("vpt_vwap_confirmation", "VPT + VWAP Confirmation", 'technical_volume_price_trend > AVERAGE(field=technical_volume_price_trend, window=20) AND ltp > technical_vwap_20 AND technical_cmf_20 > 0 AND technical_sma_50 = "above"', 6, 18, 40, "Independent volume-price flow, fair-value, and trend confirmations."),
+        ("nonlinear_momentum_regime", "Nonlinear Momentum Regime", 'CHANGE_PERCENT(field=ltp, scans_back=63) BETWEEN 5 AND 25 AND CHANGE_PERCENT(field=ltp, scans_back=126) >= 10 AND technical_historical_volatility_20 <= 45 AND technical_adx_14 >= 20 AND technical_sma_200 = "above"', 8, 24, 60, "Bounded multi-horizon momentum avoids extrapolating the strongest moves without risk controls."),
+    )
+    for preset_id, name, condition, stop, target, holding, research_basis in adaptive_regime:
+        presets.append(_preset(
+            preset_id, name, "2026 adaptive multi-factor", condition,
+            "Evidence-informed daily multi-factor hypothesis using point-in-time OHLCV indicators; validate on locked data.",
+            stop=stop, target=target, holding=holding, research_basis=research_basis,
+        ))
+
+    if len(presets) != 104:
+        raise RuntimeError(f"Expected 104 backtest presets, built {len(presets)}")
     return presets
 
 
-def build_preset_query(preset: Dict[str, Any], symbol: str) -> str:
+def build_preset_query(
+    preset: Dict[str, Any], symbol: str, *, backtest_config: Dict[str, Any] | None = None,
+) -> str:
+    defaults = preset.get("defaults") or {}
+    config = {
+        "initial_capital": 100000, "charge_model": "nepse_equity",
+        "investor_type": "individual", "apply_cgt": True, "dp_charge": 25,
+        "fee_pct": .4, "fixed_fee": 0, "slippage_pct": .1,
+        "stop_loss_pct": defaults.get("stop_loss_pct", 5),
+        "take_profit_pct": defaults.get("take_profit_pct", 10),
+        "min_holding_days": defaults.get("min_holding_days", 0),
+        "max_holding_days": defaults.get("max_holding_days", 20),
+        "position_size_pct": 100, "max_volume_participation_pct": 10,
+        "risk_free_rate_pct": 4, "data_source": "auto", "trailing_stop_pct": None,
+    }
+    config.update(backtest_config or {})
+    trailing_stop = (
+        f'  TRAILING_STOP_PCT {float(config["trailing_stop_pct"]):g}\n'
+        if config.get("trailing_stop_pct") is not None else ""
+    )
     return f'''STRATEGY_VERSION 1
 SIDE BUY
+BACKTEST {{
+  INITIAL_CAPITAL {float(config["initial_capital"]):g}
+  CHARGE_MODEL "{config["charge_model"]}"
+  INVESTOR_TYPE "{config["investor_type"]}"
+  APPLY_CGT {"TRUE" if config["apply_cgt"] else "FALSE"}
+  DP_CHARGE {float(config["dp_charge"]):g}
+  FEE_PCT {float(config["fee_pct"]):g}
+  FIXED_FEE {float(config["fixed_fee"]):g}
+  SLIPPAGE_PCT {float(config["slippage_pct"]):g}
+  STOP_LOSS_PCT {float(config["stop_loss_pct"]):g}
+  TAKE_PROFIT_PCT {float(config["take_profit_pct"]):g}
+{trailing_stop}  MIN_HOLDING_DAYS {int(config["min_holding_days"])}
+  MAX_HOLDING_DAYS {int(config["max_holding_days"])}
+  POSITION_SIZE_PCT {float(config["position_size_pct"]):g}
+  MAX_VOLUME_PARTICIPATION_PCT {float(config["max_volume_participation_pct"]):g}
+  RISK_FREE_RATE_PCT {float(config["risk_free_rate_pct"]):g}
+  DATA_SOURCE "{config["data_source"]}"
+}}
 RULE "{preset["name"]}" FOR SYMBOL "{symbol}" {{
   WHEN {preset["condition"]}
   ORDER PERCENT_OF_AVAILABLE_CASH 100
@@ -213,6 +290,19 @@ technical_ppo_12_26_9, technical_ppo_signal_9, technical_ppo_histogram,
 technical_choppiness_14, technical_keltner_lower_20,
 technical_keltner_middle_20, technical_keltner_upper_20, technical_psar,
 technical_psar_value, technical_squeeze, and technical_squeeze_momentum.
+Adaptive and price-action fields include technical_kama_10,
+technical_ultimate_oscillator_7_14_28, technical_trix_15, technical_kst,
+technical_kst_signal, technical_kst_diff, technical_mass_index_9_25,
+technical_ulcer_index_14, technical_force_index_13, technical_volume_price_trend,
+technical_vwap_20, technical_ichimoku_conversion_9, technical_ichimoku_base_26,
+technical_ichimoku_span_a_26, technical_ichimoku_span_b_52,
+technical_price_zscore_20, technical_efficiency_ratio_20,
+technical_candle_body_percent, technical_upper_wick_percent,
+technical_lower_wick_percent, technical_close_location_value,
+technical_gap_percent, technical_prior_high_20, technical_prior_low_20,
+technical_breakout_20, technical_breakdown_20, technical_bullish_engulfing,
+technical_hammer, technical_inside_bar, technical_outside_bar,
+technical_bullish_marubozu, technical_higher_high_3, and technical_higher_low_3.
 
 Historical functions: PREVIOUS, CHANGE, CHANGE_PERCENT, CONSECUTIVE_DROPS,
 CONSECUTIVE_RISES, CROSSES_ABOVE, CROSSES_BELOW, REMAINS_ABOVE, REMAINS_BELOW,

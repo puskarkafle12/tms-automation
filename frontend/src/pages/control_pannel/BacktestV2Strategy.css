@@ -55,8 +55,55 @@
 .recommendation-sort-guide button { border: 1px solid #b9c8d8; border-radius: 7px; background: #fff; color: #245b82; padding: 7px 10px; font-weight: 750; cursor: pointer; }
 .recommendation-sort-button { display: inline-flex; align-items: center; gap: 6px; border: 0; background: transparent; color: inherit; padding: 0; font: inherit; font-weight: 800; white-space: nowrap; cursor: pointer; }
 .recommendation-sort-button span { display: inline-grid; min-width: 23px; place-items: center; border-radius: 9px; background: #e5edf5; color: #315d7d; padding: 2px 4px; font-size: 9px; }
+.recommendation-sort-button.active { color: #0d669f; }
+.recommendation-sort-button.active span { background: #176da6; color: #fff; }
+.recommendation-filter-builder { margin-top: 14px; padding: 14px; border: 1px solid #cbd9e7; border-radius: 11px; background: #f8fbfe; }
+.recommendation-filter-heading, .recommendation-filter-actions { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.recommendation-filter-heading h4 { margin: 0; font-size: 14px; color: #233a54; }
+.recommendation-filter-heading p { margin: 4px 0 0; color: #68788c; font-size: 11px; }
+.recommendation-filter-heading > button, .recommendation-filter-actions button { border: 0; border-radius: 8px; background: #176da6; color: #fff; padding: 8px 11px; font-weight: 750; cursor: pointer; }
+.recommendation-filter-actions button:disabled { cursor: not-allowed; opacity: .45; }
+.recommendation-filter-actions button.secondary { border: 1px solid #b9c8d8; background: #fff; color: #315d7d; }
+.recommendation-filter-rows { display: flex; flex-direction: column; gap: 7px; margin-top: 12px; }
+.recommendation-filter-row { display: grid; grid-template-columns: minmax(190px,1.25fr) minmax(145px,.8fr) minmax(140px,1fr) 34px; gap: 7px; }
+.recommendation-filter-row select, .recommendation-filter-row input { width: 100%; box-sizing: border-box; border: 1px solid #c3d1df; border-radius: 7px; background: #fff; padding: 8px; color: #27394d; }
+.recommendation-filter-row .remove-filter { border: 1px solid #e5bbbb; border-radius: 7px; background: #fff; color: #af3030; font-size: 18px; cursor: pointer; }
+.recommendation-filter-actions { margin-top: 12px; border-top: 1px solid #dde7f0; padding-top: 10px; color: #5d6e82; font-size: 11px; }
+.recommendation-filter-actions > div { display: flex; gap: 7px; }
+.applied-filter-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.applied-filter-chips span { border: 1px solid #b9d7c8; border-radius: 14px; background: #eef9f3; color: #286146; padding: 5px 9px; font-size: 10px; }
+
+.research-run-library { margin-top: 18px; padding: 16px 18px; background: #fff; border: 1px solid #dfe6ef; border-radius: 14px; box-shadow: 0 8px 24px rgba(27,55,87,.06); }
+.research-run-library-head { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-bottom: 12px; }
+.research-run-library-head > span > small { display: block; color: #29739f; font-size: 10px; font-weight: 850; letter-spacing: .12em; text-transform: uppercase; }
+.research-run-library-head h2 { margin: 3px 0 2px; font-size: 18px; }
+.research-run-library-head p { margin: 0; color: #66758b; font-size: 12px; }
+.research-run-library-head > div { display: flex; align-items: center; gap: 8px; color: #66758b; font-size: 11px; }
+.research-run-library-head > div > strong { font-size: 20px; color: #153f67; }
+.research-run-library-head button { margin-left: 8px; border: 0; border-radius: 8px; background: #eaf3fb; color: #176da6; padding: 8px 11px; font-weight: 800; cursor: pointer; }
+.research-run-strip { display: flex; gap: 10px; overflow-x: auto; padding: 1px 1px 7px; scrollbar-width: thin; }
+.research-run-strip > p { margin: 8px 0; color: #66758b; }
+.research-run-strip > button { position: relative; display: flex; flex: 0 0 270px; flex-direction: column; gap: 9px; min-height: 92px; padding: 12px; text-align: left; color: inherit; border: 1px solid #dfe6ef; border-radius: 11px; background: linear-gradient(145deg,#fff,#f7fafd); cursor: pointer; transition: border-color .15s,box-shadow .15s,transform .15s; }
+.research-run-strip > button:hover { border-color: #86b8da; box-shadow: 0 7px 17px rgba(24,91,137,.1); transform: translateY(-1px); }
+.research-run-strip > button.active { border-color: #2679b7; background: linear-gradient(145deg,#f4faff,#eaf5fd); box-shadow: inset 0 0 0 1px #76add3; }
+.research-run-card-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 9px; }
+.research-run-card-top b { display: -webkit-box; overflow: hidden; font-size: 12px; line-height: 1.35; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.research-run-card-top em { flex: none; font-style: normal; font-size: 9px; text-transform: uppercase; font-weight: 850; padding: 4px 6px; border-radius: 9px; background: #e8eef5; }
+.research-run-card-metrics { display: flex; gap: 14px; color: #65758a; font-size: 10px; }
+.research-run-card-metrics small { display: flex; align-items: baseline; gap: 3px; }
+.research-run-card-metrics strong { color: #253b53; font-size: 12px; }
+.research-run-card-progress { height: 3px; overflow: hidden; border-radius: 4px; background: #e4ebf2; }
+.research-run-card-progress i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg,#198fb0,#2a72b0); }
+.research-layout { display: block; }
+.research-main { margin-top: 14px; }
 
 @media (max-width: 650px) {
   .research-custom-query > div, .execution-promotion > div { align-items: stretch; flex-direction: column; }
-  .recommendation-sort-guide { align-items: stretch; flex-direction: column; }
+  .recommendation-sort-guide, .recommendation-filter-heading, .recommendation-filter-actions { align-items: stretch; flex-direction: column; }
+  .recommendation-filter-row { grid-template-columns: 1fr; }
+  .recommendation-filter-actions > div { flex-direction: column; }
+  .research-run-library { padding: 13px; }
+  .research-run-library-head { align-items: flex-start; }
+  .research-run-library-head p, .research-run-library-head > div > span { display: none; }
+  .research-run-strip > button { flex-basis: 235px; }
 }

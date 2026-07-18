@@ -16,7 +16,7 @@ type Preset = { id: string; name: string; category: string; family: string; desc
 type Run = {
   run_id: string; name: string; status: string; progress_pct: number; symbols_completed: number;
   symbols_total: number; combinations_completed: number; current_symbol?: string; created_at?: string;
-  configuration: { start_date: string; end_date: string; preset_ids: string[]; ordinary_shares_only: boolean; strategy_mode?: 'presets' | 'custom'; custom_query_text?: string };
+  configuration: { start_date: string; end_date: string; preset_ids: string[]; ordinary_shares_only: boolean; history_mode?: 'all_available' | 'custom'; strategy_mode?: 'presets' | 'custom'; custom_query_text?: string };
   error_summary?: string;
 };
 type ResultRow = Record<string, any> & { result_id: number; symbol: string; preset_name: string };
@@ -24,11 +24,18 @@ type ResultPage = { items: ResultRow[]; page: number; page_size: number; total: 
 type Portfolio = { preset_id: string; preset_name: string; summary: Record<string, number>; allocation_config: Record<string, number> };
 type Opportunity = ResultRow & { rank: number; recommendation_score: number; current_signal_status: string; signal_date: string; reliability_score: number; current_technical_score: number; wins: number; losses: number; loss_rate_pct: number; net_profit: number; ltp: number; latest_volume: number; legacy_cost_model: boolean; current_evidence: Record<string, any>; assumptions: Record<string, any> };
 type OpportunitySort = { field: string; direction: 'asc' | 'desc' };
-type OpportunityPage = { items: Opportunity[]; page: number; page_size: number; total: number; pages: number; sorts?: OpportunitySort[]; disclaimer: string };
+type OpportunityAdvancedFilter = { id: number; field: string; operator: string; value: string };
+type OpportunityPage = { items: Opportunity[]; page: number; page_size: number; total: number; pages: number; sorts?: OpportunitySort[]; filters?: Array<Omit<OpportunityAdvancedFilter, 'id'>>; disclaimer: string };
 type TradePage = { items: Array<Record<string, any>>; page: number; page_size: number; total: number; pages: number };
 
 const today = new Date().toISOString().slice(0, 10);
 const defaultStart = '2018-01-01';
+const allHistoryStart = (() => {
+  const value = new Date(`${today}T00:00:00Z`);
+  value.setUTCFullYear(value.getUTCFullYear() - 20);
+  value.setUTCDate(value.getUTCDate() + 1);
+  return value.toISOString().slice(0, 10);
+})();
 const defaultCustomQuery = `STRATEGY_VERSION 1
 SIDE BUY
 BACKTEST {
@@ -75,6 +82,42 @@ const opportunityColumns: Array<{ key: string; label: string; sortKey?: string }
   { key: 'conditions', label: 'Conditions ready', sortKey: 'condition_progress_pct' },
   { key: 'volume', label: 'Latest volume', sortKey: 'latest_volume' }, { key: 'actions', label: '' },
 ];
+const opportunityFilterFields: Array<{ field: string; label: string; type: 'number' | 'text'; placeholder?: string; defaultOperator?: string; options?: Array<{ value: string; label: string }> }> = [
+  { field: 'recommendation_score', label: 'Combined score', type: 'number', placeholder: '70' },
+  { field: 'symbol', label: 'Stock', type: 'text', placeholder: 'NABIL' },
+  { field: 'sector', label: 'Sector', type: 'text', placeholder: 'Commercial Bank' },
+  { field: 'preset_name', label: 'Strategy', type: 'text', defaultOperator: 'eq' },
+  { field: 'category', label: 'Strategy category', type: 'text', defaultOperator: 'eq' },
+  { field: 'current_signal_status', label: 'Signal state', type: 'text', defaultOperator: 'eq', options: [
+    { value: 'strong_buy', label: 'Strong buy today' }, { value: 'buy', label: 'Buy today' },
+    { value: 'watch', label: 'Triggered · review' }, { value: 'near_trigger', label: 'Near trigger' },
+    { value: 'no_signal', label: 'Historical leader' }, { value: 'stale', label: 'Historical · stale' },
+  ] },
+  { field: 'win_rate_pct', label: 'Win rate', type: 'number', placeholder: '60' },
+  { field: 'total_trades', label: 'Trades', type: 'number', placeholder: '20' },
+  { field: 'average_holding_days', label: 'Avg hold', type: 'number', placeholder: '15', defaultOperator: 'lte' },
+  { field: 'loss_rate_pct', label: 'Loss rate', type: 'number', placeholder: '40', defaultOperator: 'lte' },
+  { field: 'confidence_score', label: 'Confidence', type: 'number', placeholder: '60' },
+  { field: 'net_return_pct', label: 'Net return %', type: 'number', placeholder: '25' },
+  { field: 'net_profit', label: 'Net profit', type: 'number', placeholder: '100000' },
+  { field: 'profit_factor', label: 'Profit factor', type: 'number', placeholder: '1.5' },
+  { field: 'max_drawdown_pct', label: 'Max drawdown', type: 'number', placeholder: '25', defaultOperator: 'lte' },
+  { field: 'sharpe_ratio', label: 'Sharpe', type: 'number', placeholder: '1' },
+  { field: 'reliability_score', label: 'Reliability', type: 'number', placeholder: '60' },
+  { field: 'condition_progress_pct', label: 'Conditions ready', type: 'number', placeholder: '75' },
+  { field: 'ltp', label: 'LTP', type: 'number', placeholder: '500' },
+  { field: 'latest_volume', label: 'Latest volume', type: 'number', placeholder: '10000' },
+  { field: 'median_volume_20', label: '20-session median volume', type: 'number', placeholder: '10000' },
+];
+const numericFilterOperators = [
+  { value: 'gte', label: 'at least (≥)' }, { value: 'lte', label: 'at most (≤)' },
+  { value: 'gt', label: 'greater than (>)' }, { value: 'lt', label: 'less than (<)' }, { value: 'eq', label: 'equals (=)' },
+];
+const textFilterOperators = [
+  { value: 'contains', label: 'contains' }, { value: 'eq', label: 'equals' }, { value: 'neq', label: 'does not equal' },
+];
+const defaultOpportunityFilterOperator = (field: typeof opportunityFilterFields[number]) => field.defaultOperator || (field.type === 'number' ? 'gte' : 'contains');
+const defaultOpportunityFilters = { minimum_trades: 5, minimum_win_rate: 0, minimum_confidence: 0, minimum_sharpe: -999, minimum_profit_factor: 0, maximum_drawdown: 100, minimum_return: 0, minimum_volume: '', category: '', current_signal: 'all' };
 const fmt = (value: unknown, key: string) => {
   if (value == null || value === '') return '—';
   if (typeof value === 'number') {
@@ -111,6 +154,7 @@ const BacktestV2: React.FC = () => {
   const [runs, setRuns] = useState<Run[]>([]);
   const [activeRun, setActiveRun] = useState<Run | null>(null);
   const [name, setName] = useState('Full NEPSE robustness scan');
+  const [historyMode, setHistoryMode] = useState<'all_available' | 'custom'>('all_available');
   const [startDate, setStartDate] = useState(defaultStart);
   const [endDate, setEndDate] = useState(today);
   const [ordinaryOnly, setOrdinaryOnly] = useState(true);
@@ -140,8 +184,11 @@ const BacktestV2: React.FC = () => {
   const [aiAnswer, setAiAnswer] = useState<any>(null);
   const [aiBusy, setAiBusy] = useState(false);
   const [opportunities, setOpportunities] = useState<OpportunityPage>({ items: [], page: 1, page_size: 25, total: 0, pages: 0, disclaimer: '' });
-  const [opportunityFilters, setOpportunityFilters] = useState({ minimum_trades: 5, minimum_win_rate: 0, minimum_confidence: 0, minimum_sharpe: -999, minimum_profit_factor: 0, maximum_drawdown: 100, minimum_return: 0, minimum_volume: '', category: '', current_signal: 'all' });
+  const [opportunityFilters, setOpportunityFilters] = useState(defaultOpportunityFilters);
   const [opportunitySorts, setOpportunitySorts] = useState<OpportunitySort[]>([{ field: 'recommendation_score', direction: 'desc' }]);
+  const [opportunityFilterRows, setOpportunityFilterRows] = useState<OpportunityAdvancedFilter[]>([]);
+  const [appliedOpportunityFilters, setAppliedOpportunityFilters] = useState<OpportunityAdvancedFilter[]>([]);
+  const nextOpportunityFilterId = useRef(1);
   const [selectedOpportunity, setSelectedOpportunity] = useState<any>(null);
   const [detailTrades, setDetailTrades] = useState<TradePage>({ items: [], page: 1, page_size: 50, total: 0, pages: 0 });
   const [tradeFilter, setTradeFilter] = useState('all');
@@ -215,12 +262,12 @@ const BacktestV2: React.FC = () => {
     if (!activeRun) return;
     const response = await fetchJson<OpportunityPage>(`/api/backtests/v2/runs/${activeRun.run_id}/strong-buys/query`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...opportunityFilters, sorts: opportunitySorts, minimum_volume: opportunityFilters.minimum_volume ? Number(opportunityFilters.minimum_volume) : null, category: opportunityFilters.category || null, include_non_equities: includeNonEquities, page, page_size: opportunities.page_size }),
+      body: JSON.stringify({ ...opportunityFilters, sorts: opportunitySorts, filters: appliedOpportunityFilters.map(({ field, operator, value }) => ({ field, operator, value })), minimum_volume: opportunityFilters.minimum_volume ? Number(opportunityFilters.minimum_volume) : null, category: opportunityFilters.category || null, include_non_equities: includeNonEquities, page, page_size: opportunities.page_size }),
     });
     if (response.ok) setOpportunities(response.data); else setError(response.error || 'Could not load current opportunities.');
   };
 
-  useEffect(() => { if (tab === 'opportunities') void loadOpportunities(1); }, [activeRun?.run_id, activeRun?.combinations_completed, tab, opportunityFilters, opportunitySorts, includeNonEquities, opportunities.page_size]);
+  useEffect(() => { if (tab === 'opportunities') void loadOpportunities(1); }, [activeRun?.run_id, activeRun?.combinations_completed, tab, opportunityFilters, opportunitySorts, appliedOpportunityFilters, includeNonEquities, opportunities.page_size]);
 
   const openOpportunity = async (row: Opportunity) => {
     setDetailBusy(true); setTradeFilter('all');
@@ -248,7 +295,7 @@ const BacktestV2: React.FC = () => {
     if (maxHoldingDays && minHoldingDays > Number(maxHoldingDays)) { setCreating(false); setError('Minimum holding days cannot exceed maximum holding days.'); return; }
     const response = await fetchJson<Run>('/api/backtests/v2/runs', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, start_date: startDate, end_date: endDate, strategy_mode: strategyMode, custom_query_text: strategyMode === 'custom' ? customQuery : null, preset_ids: strategyMode === 'presets' ? Array.from(selected) : [], symbols: runScope === 'single' && selectedStock ? [selectedStock.symbol] : null, ordinary_shares_only: ordinaryOnly, min_holding_days: minHoldingDays, max_holding_days: maxHoldingDays ? Number(maxHoldingDays) : null, data_source: 'merolagani', max_workers: runScope === 'single' ? 1 : 8, run_type: runScope === 'single' ? 'single_stock' : 'market_scan' }),
+      body: JSON.stringify({ name, history_mode: historyMode, start_date: historyMode === 'all_available' ? allHistoryStart : startDate, end_date: historyMode === 'all_available' ? today : endDate, strategy_mode: strategyMode, custom_query_text: strategyMode === 'custom' ? customQuery : null, preset_ids: strategyMode === 'presets' ? Array.from(selected) : [], symbols: runScope === 'single' && selectedStock ? [selectedStock.symbol] : null, ordinary_shares_only: ordinaryOnly, min_holding_days: minHoldingDays, max_holding_days: maxHoldingDays ? Number(maxHoldingDays) : null, data_source: 'merolagani', max_workers: runScope === 'single' ? 1 : 8, run_type: runScope === 'single' ? 'single_stock' : 'market_scan' }),
     }, 120000);
     setCreating(false);
     if (!response.ok) { setError(response.error || 'Could not queue the research run.'); return; }
@@ -307,16 +354,41 @@ const BacktestV2: React.FC = () => {
   }, {})), [presets]);
 
   const toggleSort = (key: string) => setSort((current) => ({ key, direction: current.key === key && current.direction === 'desc' ? 'asc' : 'desc' }));
-  const toggleOpportunitySort = (field: string) => setOpportunitySorts((current): OpportunitySort[] => {
+  const toggleOpportunitySort = (field: string, additive: boolean) => setOpportunitySorts((current): OpportunitySort[] => {
     const index = current.findIndex((item) => item.field === field);
+    if (!additive) {
+      if (index === 0 && current.length === 1) return [{ field, direction: current[0].direction === 'desc' ? 'asc' : 'desc' }];
+      return [{ field, direction: 'desc' }];
+    }
     if (index < 0) return [...current, { field, direction: 'desc' as const }].slice(0, 8);
     if (current[index].direction === 'desc') return current.map((item, itemIndex) => itemIndex === index ? { ...item, direction: 'asc' as const } : item);
-    return current.filter((_, itemIndex) => itemIndex !== index);
+    const remaining = current.filter((_, itemIndex) => itemIndex !== index);
+    return remaining.length ? remaining : [{ field: 'recommendation_score', direction: 'desc' }];
   });
   const opportunitySortMarker = (field?: string) => {
     if (!field) return '';
     const index = opportunitySorts.findIndex((item) => item.field === field);
     return index < 0 ? '↕' : `${opportunitySorts[index].direction === 'desc' ? '↓' : '↑'} ${index + 1}`;
+  };
+  const addOpportunityFilter = () => {
+    const field = opportunityFilterFields[0];
+    setOpportunityFilterRows((current) => [...current, { id: nextOpportunityFilterId.current++, field: field.field, operator: defaultOpportunityFilterOperator(field), value: '' }]);
+  };
+  const updateOpportunityFilter = (id: number, update: Partial<OpportunityAdvancedFilter>) => {
+    setOpportunityFilterRows((current) => current.map((item) => item.id === id ? { ...item, ...update } : item));
+  };
+  const applyOpportunityFilters = () => {
+    if (opportunityFilterRows.some((item) => !item.value.trim())) {
+      setError('Enter a value for every advanced recommendation filter before applying.'); return;
+    }
+    setError('');
+    setAppliedOpportunityFilters(opportunityFilterRows.map((item) => ({ ...item })));
+  };
+  const resetOpportunityWorkspace = () => {
+    setOpportunityFilters(defaultOpportunityFilters);
+    setOpportunityFilterRows([]);
+    setAppliedOpportunityFilters([]);
+    setOpportunitySorts([{ field: 'recommendation_score', direction: 'desc' }]);
   };
 
   return <div className="research-page">
@@ -327,17 +399,17 @@ const BacktestV2: React.FC = () => {
 
     {error && <div className="research-alert" role="alert">{error}<button onClick={() => setError('')}>Dismiss</button></div>}
 
-    <section className="research-layout">
-      <aside className="research-sidebar">
-        <div className="research-side-heading"><h2>Saved runs</h2><button onClick={() => void loadRuns()}>Refresh</button></div>
-        <div className="research-runs">{runs.length === 0 ? <p>No v2 research runs yet.</p> : runs.map((run) => <button key={run.run_id} className={activeRun?.run_id === run.run_id ? 'active' : ''} onClick={() => setActiveRun(run)}><span><b>{run.name}</b><small>{run.symbols_completed}/{run.symbols_total} stocks · {run.combinations_completed.toLocaleString()} results</small></span><em className={`run-${run.status}`}>{run.status}</em></button>)}</div>
-      </aside>
+    <section className="research-run-library" aria-label="Saved backtest runs">
+      <div className="research-run-library-head"><span><small>Research archive</small><h2>Saved runs</h2><p>Select a scan to reopen its progress, recommendations, and results.</p></span><div><strong>{runs.length}</strong><span>saved</span><button onClick={() => void loadRuns()}>Refresh</button></div></div>
+      <div className="research-run-strip">{runs.length === 0 ? <p>No v2 research runs yet.</p> : runs.map((run) => <button key={run.run_id} className={activeRun?.run_id === run.run_id ? 'active' : ''} onClick={() => setActiveRun(run)}><span className="research-run-card-top"><b>{run.name}</b><em className={`run-${run.status}`}>{run.status}</em></span><span className="research-run-card-metrics"><small><strong>{run.symbols_completed}/{run.symbols_total}</strong> stocks</small><small><strong>{run.combinations_completed.toLocaleString()}</strong> results</small></span><span className="research-run-card-progress"><i style={{ width: `${Math.max(0, Math.min(100, run.progress_pct || 0))}%` }} /></span></button>)}</div>
+    </section>
 
+    <section className="research-layout">
       <main className="research-main">
         <details className="research-new-run" open={!activeRun}>
           <summary><span><b>New research run</b><small>Name it, select the universe and strategies, then leave it running safely in the background.</small></span><strong>Configure</strong></summary>
           <form onSubmit={startRun}>
-            <div className="research-form-grid"><label>Run name<input value={name} onChange={(e) => setName(e.target.value)} required /></label><label>Start<input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} required /></label><label>End<input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} required /></label><label>Universe<select value={ordinaryOnly ? 'ordinary' : 'all'} onChange={(e) => setOrdinaryOnly(e.target.value === 'ordinary')}><option value="ordinary">Ordinary shares only</option><option value="all">All instrument classes</option></select></label><label>Stocks to test<select value={runScope} onChange={(e) => { setRunScope(e.target.value as 'all' | 'single'); setSelectedStock(null); setStockSearch(''); }}><option value="all">All stocks in universe</option><option value="single">One particular stock</option></select></label><label>Strategy source<select value={strategyMode} onChange={(e) => setStrategyMode(e.target.value as 'presets' | 'custom')}><option value="presets">Professional presets</option><option value="custom">One custom query</option></select></label><label>Minimum hold (days)<input type="number" min="0" max="365" value={minHoldingDays} onChange={(e) => setMinHoldingDays(Math.max(0, Number(e.target.value) || 0))} /><small>Stop-loss protection remains active.</small></label><label>Maximum hold (days)<input type="number" min="1" max="365" value={maxHoldingDays} onChange={(e) => setMaxHoldingDays(e.target.value)} placeholder="Use preset/query default" /><small>Blank preserves each strategy default.</small></label></div>
+            <div className="research-form-grid"><label>Run name<input value={name} onChange={(e) => setName(e.target.value)} required /></label><label>History<select value={historyMode} onChange={(e) => setHistoryMode(e.target.value as 'all_available' | 'custom')}><option value="all_available">All available history (default)</option><option value="custom">Custom date range</option></select><small>{historyMode === 'all_available' ? 'Uses up to 20 years and each stock’s earliest available session.' : 'Use only when comparing an exact market period.'}</small></label>{historyMode === 'custom' && <><label>Start<input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} required /></label><label>End<input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} required /></label></>}<label>Universe<select value={ordinaryOnly ? 'ordinary' : 'all'} onChange={(e) => setOrdinaryOnly(e.target.value === 'ordinary')}><option value="ordinary">Ordinary shares only</option><option value="all">All instrument classes</option></select></label><label>Stocks to test<select value={runScope} onChange={(e) => { setRunScope(e.target.value as 'all' | 'single'); setSelectedStock(null); setStockSearch(''); }}><option value="all">All stocks in universe</option><option value="single">One particular stock</option></select></label><label>Strategy source<select value={strategyMode} onChange={(e) => setStrategyMode(e.target.value as 'presets' | 'custom')}><option value="presets">Professional presets</option><option value="custom">One custom query</option></select></label><label>Minimum hold (days)<input type="number" min="0" max="365" value={minHoldingDays} onChange={(e) => setMinHoldingDays(Math.max(0, Number(e.target.value) || 0))} /><small>Stop-loss protection remains active.</small></label><label>Maximum hold (days)<input type="number" min="1" max="365" value={maxHoldingDays} onChange={(e) => setMaxHoldingDays(e.target.value)} placeholder="Use preset/query default" /><small>Blank preserves each strategy default.</small></label></div>
             {runScope === 'single' && <div className="stock-picker"><label>Find stock by symbol or company name<input value={stockSearch} onChange={(e) => { setStockSearch(e.target.value.toUpperCase()); setSelectedStock(null); }} placeholder="Type NABIL or Nabil Bank…" autoComplete="off" required /></label>{selectedStock && <div className="selected-stock"><b>{selectedStock.symbol}</b><span>{selectedStock.company_name}</span><em>{selectedStock.sector || 'Sector unavailable'}</em></div>}{stockSuggestions.length > 0 && <div className="stock-suggestions" role="listbox">{stockSuggestions.map((item) => <button type="button" role="option" aria-selected={selectedStock?.symbol === item.symbol} key={item.symbol} onClick={() => { setSelectedStock(item); setStockSearch(item.symbol); setStockSuggestions([]); setName(`${item.symbol} strategy research`); }}><b>{item.symbol}</b><span>{item.company_name}</span><em>{item.sector || ''}</em></button>)}</div>}<small>All selected presets will run only on the chosen stock. This does not affect saved all-market runs.</small></div>}
             {strategyMode === 'presets' ? <><div className="research-preset-head"><span><b>Preset catalog</b><small>{selected.size}/{presets.length} selected · grouped by family</small></span><div><button type="button" onClick={() => setSelected(new Set(presets.map((item) => item.id)))}>All {presets.length}</button><button type="button" onClick={() => setSelected(new Set())}>Clear</button></div></div><div className="research-preset-groups">{grouped.map(([category, items]) => <details key={category}><summary>{category}<span>{items.filter((item) => selected.has(item.id)).length}/{items.length}</span></summary><div>{items.map((preset) => <label key={preset.id} title={preset.description}><input type="checkbox" checked={selected.has(preset.id)} onChange={() => setSelected((current) => { const next = new Set(current); next.has(preset.id) ? next.delete(preset.id) : next.add(preset.id); return next; })} /><span>{preset.name}</span></label>)}</div></details>)}</div></> : <div className="research-custom-query"><div><span><b>Custom Strategy Language</b><small>The symbol in this query is a template. For an all-stock run, the server safely retargets only the symbol and keeps every condition, risk setting, charge, and order-sizing rule unchanged.</small></span><button type="button" onClick={() => void copyGptPrompt()}>Copy prompt for GPT</button>{copyStatus && <em>{copyStatus}</em>}</div><textarea value={customQuery} onChange={(e) => setCustomQuery(e.target.value)} rows={20} spellCheck={false} /></div>}
             <div className="research-submit"><p>History is cached per stock. The exact versioned query is stored with every result and can be promoted to paper, then separately confirmed for live scheduling.</p><button disabled={creating || (strategyMode === 'presets' ? selected.size === 0 : customQuery.trim().length < 20)}>{creating ? 'Queuing…' : strategyMode === 'custom' ? `Queue query on ${runScope === 'all' ? 'all stocks' : selectedStock?.symbol || 'one stock'}` : `Queue ${selected.size} strategies`}</button></div>
@@ -362,10 +434,32 @@ const BacktestV2: React.FC = () => {
               <label>Min volume<input type="number" min="0" value={opportunityFilters.minimum_volume} onChange={(e) => setOpportunityFilters((v) => ({ ...v, minimum_volume: e.target.value }))} /></label>
               <label>Strategy category<select value={opportunityFilters.category} onChange={(e) => setOpportunityFilters((v) => ({ ...v, category: e.target.value }))}><option value="">All categories</option>{Array.from(new Set(presets.map((item) => item.category))).map((category) => <option key={category}>{category}</option>)}</select></label>
               <label>Signal state<select value={opportunityFilters.current_signal} onChange={(e) => setOpportunityFilters((v) => ({ ...v, current_signal: e.target.value }))}><option value="all">Best available</option><option value="triggered_today">Triggered latest session</option><option value="near_trigger">Near trigger</option><option value="strong_buy">Strong Buy only</option><option value="buy">Buy or Strong Buy</option><option value="watch">Triggered · review</option><option value="no_signal">Historical only</option></select></label>
+              <label>Instrument class<select value={includeNonEquities ? 'all' : 'ordinary'} onChange={(e) => setIncludeNonEquities(e.target.value === 'all')}><option value="ordinary">Ordinary shares only</option><option value="all">Explicitly include all</option></select></label>
+              <label>Rows per page<select value={opportunities.page_size} onChange={(e) => setOpportunities((current) => ({ ...current, page_size: Number(e.target.value) }))}><option>25</option><option>50</option><option>100</option></select></label>
             </div>
-            <div className="recommendation-sort-guide"><span>Click several column names to build sort priority. Each click cycles descending, ascending, then off.</span><button type="button" onClick={() => setOpportunitySorts([{ field: 'recommendation_score', direction: 'desc' }])}>Reset to combined score</button></div>
-            <div className="research-table-summary"><b>{opportunities.total} ranked stocks</b><span>One best strategy per stock by combined metrics · sorted by {opportunitySorts.length ? opportunitySorts.map((item, index) => `${index + 1}. ${item.field.replaceAll('_', ' ')} ${item.direction}`).join(' · ') : 'combined score desc'}</span></div>
-            <div className="research-table-wrap strong-buy-table"><table><thead><tr>{opportunityColumns.map((column) => <th key={column.key}>{column.sortKey ? <button type="button" className="recommendation-sort-button" onClick={() => toggleOpportunitySort(column.sortKey!)}>{column.label}<span>{opportunitySortMarker(column.sortKey)}</span></button> : column.label}</th>)}</tr></thead><tbody>{opportunities.items.map((row) => <tr key={row.result_id}><td>{row.rank}</td><td><div className="stock-chart-links"><button className="symbol-link" onClick={() => void openOpportunity(row)}>{row.symbol}</button><NepseAlphaSymbolLink symbol={row.symbol}>NEPSE Alpha chart ↗</NepseAlphaSymbolLink></div></td><td><span className={`signal-pill ${row.current_signal_status}`}>{signalLabel(row.current_signal_status)}</span>{row.legacy_cost_model && <small>Legacy costs · rerun advised</small>}</td><td>{row.preset_name}</td><td><b>{fmt(row.recommendation_score, 'score')}</b></td><td>{fmt(row.ltp, 'ltp')}</td><td>{row.signal_date}</td><td><b>{fmt(row.win_rate_pct, 'percent')}%</b><small>Historical result</small></td><td>{row.wins}</td><td>{row.losses}</td><td>{row.total_trades}</td><td>{fmt(row.average_holding_days, 'days')} days</td><td>{fmt(row.loss_rate_pct, 'percent')}%</td><td>{fmt(row.confidence_score, 'score')}</td><td>{fmt(row.net_return_pct, 'percent')}%</td><td>NPR {fmt(row.net_profit, 'money')}</td><td>{fmt(row.profit_factor, 'ratio')}</td><td>{fmt(row.max_drawdown_pct, 'percent')}%</td><td>{fmt(row.sharpe_ratio, 'ratio')}</td><td><span className="reliability-ring">{fmt(row.reliability_score, 'score')}</span></td><td>{row.current_evidence?.conditions_total ? `${row.current_evidence.conditions_passed}/${row.current_evidence.conditions_total} · ${fmt(row.current_evidence.condition_progress_pct, 'percent')}%` : 'Available after rerun'}</td><td>{fmt(row.latest_volume, 'latest_volume')}</td><td><button className="view-evidence" onClick={() => void openOpportunity(row)}>View details</button></td></tr>)}</tbody></table>{opportunities.items.length === 0 && <div className="research-empty">No stocks match these exact filters. Select “Best available” or relax a numeric filter to view the saved run leaders.</div>}</div>
+            <section className="recommendation-filter-builder" aria-label="Advanced recommendation filters">
+              <div className="recommendation-filter-heading"><div><h4>Advanced stock filters</h4><p>Combine up to 12 exact conditions. Every condition must match; filters are never silently weakened.</p></div><button type="button" onClick={addOpportunityFilter}>+ Add condition</button></div>
+              {opportunityFilterRows.length > 0 && <div className="recommendation-filter-rows">{opportunityFilterRows.map((item) => {
+                const definition = opportunityFilterFields.find((field) => field.field === item.field) || opportunityFilterFields[0];
+                const valueOptions = definition.options || (definition.field === 'preset_name'
+                  ? Array.from(new Map(presets.map((preset) => [preset.name, { value: preset.name, label: preset.name }])).values())
+                  : definition.field === 'category'
+                    ? Array.from(new Set(presets.map((preset) => preset.category))).sort().map((category) => ({ value: category, label: category }))
+                    : undefined);
+                const operators = definition.type === 'number' ? numericFilterOperators : valueOptions ? textFilterOperators.filter((operator) => operator.value !== 'contains') : textFilterOperators;
+                return <div className="recommendation-filter-row" key={item.id}>
+                  <select aria-label="Filter field" value={item.field} onChange={(e) => { const next = opportunityFilterFields.find((field) => field.field === e.target.value) || opportunityFilterFields[0]; updateOpportunityFilter(item.id, { field: next.field, operator: defaultOpportunityFilterOperator(next), value: '' }); }}>{opportunityFilterFields.map((field) => <option value={field.field} key={field.field}>{field.label}</option>)}</select>
+                  <select aria-label="Filter operator" value={item.operator} onChange={(e) => updateOpportunityFilter(item.id, { operator: e.target.value })}>{operators.map((operator) => <option value={operator.value} key={operator.value}>{operator.label}</option>)}</select>
+                  {valueOptions ? <select aria-label={`${definition.label} filter value`} value={item.value} onChange={(e) => updateOpportunityFilter(item.id, { value: e.target.value })}><option value="">Choose {definition.label.toLowerCase()}…</option>{valueOptions.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}</select> : <input aria-label={`${definition.label} filter value`} type={definition.type === 'number' ? 'number' : 'text'} step={definition.type === 'number' ? 'any' : undefined} value={item.value} placeholder={definition.placeholder} onChange={(e) => updateOpportunityFilter(item.id, { value: e.target.value })} />}
+                  <button type="button" className="remove-filter" aria-label={`Remove ${definition.label} filter`} onClick={() => setOpportunityFilterRows((current) => current.filter((row) => row.id !== item.id))}>×</button>
+                </div>;
+              })}</div>}
+              <div className="recommendation-filter-actions"><span>{appliedOpportunityFilters.length ? `${appliedOpportunityFilters.length} advanced condition${appliedOpportunityFilters.length === 1 ? '' : 's'} applied` : 'No advanced conditions applied'}</span><div><button type="button" className="secondary" onClick={resetOpportunityWorkspace}>Reset filters + sorting</button><button type="button" disabled={opportunityFilterRows.length === 0} onClick={applyOpportunityFilters}>Apply exact filters</button></div></div>
+              {appliedOpportunityFilters.length > 0 && <div className="applied-filter-chips">{appliedOpportunityFilters.map((item) => { const label = opportunityFilterFields.find((field) => field.field === item.field)?.label || item.field; const operator = [...numericFilterOperators, ...textFilterOperators].find((option) => option.value === item.operator)?.label || item.operator; return <span key={item.id}>{label} {operator} <b>{item.value}</b></span>; })}</div>}
+            </section>
+            <div className="recommendation-sort-guide"><span><b>Dynamic sorting:</b> click a column to make it primary and toggle ↓/↑. Hold Shift while clicking to add or change secondary rules.</span><button type="button" onClick={() => setOpportunitySorts([{ field: 'recommendation_score', direction: 'desc' }])}>Reset to combined score</button></div>
+            <div className="research-table-summary"><b>{opportunities.total} ranked stocks</b><span>One best matching strategy per stock · {opportunitySorts.map((item, index) => { const label = opportunityColumns.find((column) => column.sortKey === item.field)?.label || item.field; return `${index + 1}. ${label} ${item.direction === 'desc' ? '↓' : '↑'}`; }).join(' · ')}</span></div>
+            <div className="research-table-wrap strong-buy-table"><table><thead><tr>{opportunityColumns.map((column) => { const sortIndex = opportunitySorts.findIndex((item) => item.field === column.sortKey); const ariaSort = sortIndex === 0 ? (opportunitySorts[0].direction === 'desc' ? 'descending' : 'ascending') : undefined; return <th key={column.key} aria-sort={ariaSort}>{column.sortKey ? <button type="button" className={`recommendation-sort-button ${sortIndex >= 0 ? 'active' : ''}`} title="Click for primary sort; Shift-click to add a sorting rule" onClick={(event) => toggleOpportunitySort(column.sortKey!, event.shiftKey)}>{column.label}<span>{opportunitySortMarker(column.sortKey)}</span></button> : column.label}</th>; })}</tr></thead><tbody>{opportunities.items.map((row) => <tr key={row.result_id}><td>{row.rank}</td><td><div className="stock-chart-links"><button className="symbol-link" onClick={() => void openOpportunity(row)}>{row.symbol}</button><NepseAlphaSymbolLink symbol={row.symbol}>NEPSE Alpha chart ↗</NepseAlphaSymbolLink></div></td><td><span className={`signal-pill ${row.current_signal_status}`}>{signalLabel(row.current_signal_status)}</span>{row.legacy_cost_model && <small>Legacy costs · rerun advised</small>}</td><td>{row.preset_name}</td><td><b>{fmt(row.recommendation_score, 'score')}</b></td><td>{fmt(row.ltp, 'ltp')}</td><td>{row.signal_date}</td><td><b>{fmt(row.win_rate_pct, 'percent')}%</b><small>Historical result</small></td><td>{row.wins}</td><td>{row.losses}</td><td>{row.total_trades}</td><td>{fmt(row.average_holding_days, 'days')} days</td><td>{fmt(row.loss_rate_pct, 'percent')}%</td><td>{fmt(row.confidence_score, 'score')}</td><td>{fmt(row.net_return_pct, 'percent')}%</td><td>NPR {fmt(row.net_profit, 'money')}</td><td>{fmt(row.profit_factor, 'ratio')}</td><td>{fmt(row.max_drawdown_pct, 'percent')}%</td><td>{fmt(row.sharpe_ratio, 'ratio')}</td><td><span className="reliability-ring">{fmt(row.reliability_score, 'score')}</span></td><td>{row.current_evidence?.conditions_total ? `${row.current_evidence.conditions_passed}/${row.current_evidence.conditions_total} · ${fmt(row.current_evidence.condition_progress_pct, 'percent')}%` : 'Available after rerun'}</td><td>{fmt(row.latest_volume, 'latest_volume')}</td><td><button className="view-evidence" onClick={() => void openOpportunity(row)}>View details</button></td></tr>)}</tbody></table>{opportunities.items.length === 0 && <div className="research-empty">No stocks match these exact filters. Remove a condition or relax a value; the application will not broaden filters automatically.</div>}</div>
             <div className="research-pagination"><button disabled={opportunities.page <= 1} onClick={() => void loadOpportunities(opportunities.page - 1)}>Previous</button><span>Page {opportunities.page} of {opportunities.pages || 1}</span><button disabled={opportunities.page >= opportunities.pages} onClick={() => void loadOpportunities(opportunities.page + 1)}>Next</button></div>
             <p className="strong-buy-disclaimer">Backtested historical performance does not guarantee future results. This is research, not financial advice, and never places a broker order.</p>
           </section>}
