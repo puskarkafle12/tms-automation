@@ -51,7 +51,12 @@
 .strong-buy-table table { min-width: 2450px; }
 .signal-pill.near_trigger { background: #f1e8ff; color: #7041a3; }
 .signal-pill.no_signal, .signal-pill.stale { background: #edf1f5; color: #5b6878; }
+.recommendation-sort-guide { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 10px 0; color: #627186; font-size: 12px; }
+.recommendation-sort-guide button { border: 1px solid #b9c8d8; border-radius: 7px; background: #fff; color: #245b82; padding: 7px 10px; font-weight: 750; cursor: pointer; }
+.recommendation-sort-button { display: inline-flex; align-items: center; gap: 6px; border: 0; background: transparent; color: inherit; padding: 0; font: inherit; font-weight: 800; white-space: nowrap; cursor: pointer; }
+.recommendation-sort-button span { display: inline-grid; min-width: 23px; place-items: center; border-radius: 9px; background: #e5edf5; color: #315d7d; padding: 2px 4px; font-size: 9px; }
 
 @media (max-width: 650px) {
   .research-custom-query > div, .execution-promotion > div { align-items: stretch; flex-direction: column; }
+  .recommendation-sort-guide { align-items: stretch; flex-direction: column; }
 }

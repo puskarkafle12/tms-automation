@@ -185,6 +185,11 @@ class BacktestV2PromoteRequest(BaseModel):
     name: Optional[str] = Field(default=None, min_length=2, max_length=200)
 
 
+class BacktestV2SortItem(BaseModel):
+    field: str = Field(min_length=1, max_length=80)
+    direction: str = Field(default="desc", pattern="^(asc|desc)$")
+
+
 class BacktestV2StrongBuyQuery(BaseModel):
     minimum_trades: int = Field(default=5, ge=0)
     minimum_win_rate: float = Field(default=0, ge=0, le=100)
@@ -200,6 +205,7 @@ class BacktestV2StrongBuyQuery(BaseModel):
     include_non_equities: bool = False
     sort_by: str = "recommendation_score"
     sort_direction: str = Field(default="desc", pattern="^(asc|desc)$")
+    sorts: List[BacktestV2SortItem] = Field(default_factory=list, max_length=8)
     page: int = Field(default=1, ge=1)
     page_size: int = Field(default=25, ge=1, le=100)
 

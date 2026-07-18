@@ -1,6 +1,6 @@
 import pytest
 
-from utils.backtesting.v2_query import ResultQueryError, compile_filters
+from utils.backtesting.v2_query import ResultQueryError, compile_filters, compile_strong_buy_sorts
 
 
 def test_result_filters_are_parameterized_and_force_ordinary_shares():
@@ -30,3 +30,23 @@ def test_nested_or_filters_are_supported():
     ]})
     assert " OR " in sql
     assert params["filter_0"] == "Bank"
+
+
+def test_recommendations_support_validated_multi_column_sorting():
+    sql, sorts = compile_strong_buy_sorts({"sorts": [
+        {"field": "win_rate_pct", "direction": "desc"},
+        {"field": "net_profit", "direction": "asc"},
+        {"field": "average_holding_days", "direction": "desc"},
+    ]})
+    assert sql == "win_rate_pct DESC NULLS LAST,net_profit ASC NULLS LAST,average_holding_days DESC NULLS LAST"
+    assert sorts[1] == {"field": "net_profit", "direction": "asc"}
+
+
+def test_recommendation_sorting_rejects_unknown_or_duplicate_fields():
+    with pytest.raises(ResultQueryError):
+        compile_strong_buy_sorts({"sorts": [{"field": "drop table runs", "direction": "desc"}]})
+    with pytest.raises(ResultQueryError):
+        compile_strong_buy_sorts({"sorts": [
+            {"field": "win_rate_pct", "direction": "desc"},
+            {"field": "win_rate_pct", "direction": "asc"},
+        ]})

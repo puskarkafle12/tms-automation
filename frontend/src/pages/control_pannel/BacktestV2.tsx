@@ -23,7 +23,8 @@ type ResultRow = Record<string, any> & { result_id: number; symbol: string; pres
 type ResultPage = { items: ResultRow[]; page: number; page_size: number; total: number; pages: number };
 type Portfolio = { preset_id: string; preset_name: string; summary: Record<string, number>; allocation_config: Record<string, number> };
 type Opportunity = ResultRow & { rank: number; recommendation_score: number; current_signal_status: string; signal_date: string; reliability_score: number; current_technical_score: number; wins: number; losses: number; loss_rate_pct: number; net_profit: number; ltp: number; latest_volume: number; legacy_cost_model: boolean; current_evidence: Record<string, any>; assumptions: Record<string, any> };
-type OpportunityPage = { items: Opportunity[]; page: number; page_size: number; total: number; pages: number; disclaimer: string };
+type OpportunitySort = { field: string; direction: 'asc' | 'desc' };
+type OpportunityPage = { items: Opportunity[]; page: number; page_size: number; total: number; pages: number; sorts?: OpportunitySort[]; disclaimer: string };
 type TradePage = { items: Array<Record<string, any>>; page: number; page_size: number; total: number; pages: number };
 
 const today = new Date().toISOString().slice(0, 10);
@@ -58,6 +59,22 @@ const columns = [
   ['walk_forward_profitable_pct', 'Stable folds %'], ['data_completeness_pct', 'Data %'],
   ['latest_volume', 'Latest volume'], ['recommendation_status', 'Status'],
 ] as const;
+const opportunityColumns: Array<{ key: string; label: string; sortKey?: string }> = [
+  { key: 'rank', label: 'Rank' }, { key: 'symbol', label: 'Stock', sortKey: 'symbol' },
+  { key: 'signal', label: 'Signal state', sortKey: 'current_signal_status' },
+  { key: 'strategy', label: 'Strategy', sortKey: 'preset_name' },
+  { key: 'score', label: 'Combined score', sortKey: 'recommendation_score' },
+  { key: 'ltp', label: 'LTP', sortKey: 'ltp' }, { key: 'date', label: 'Data session', sortKey: 'current_signal_date' },
+  { key: 'win_rate', label: 'Win rate', sortKey: 'win_rate_pct' }, { key: 'wins', label: 'Wins', sortKey: 'wins' },
+  { key: 'losses', label: 'Losses', sortKey: 'losses' }, { key: 'trades', label: 'Trades', sortKey: 'total_trades' },
+  { key: 'hold', label: 'Avg hold', sortKey: 'average_holding_days' }, { key: 'loss_rate', label: 'Loss rate', sortKey: 'loss_rate_pct' },
+  { key: 'confidence', label: 'Confidence', sortKey: 'confidence_score' }, { key: 'return', label: 'Net return %', sortKey: 'net_return_pct' },
+  { key: 'profit', label: 'Net profit', sortKey: 'net_profit' }, { key: 'factor', label: 'Profit factor', sortKey: 'profit_factor' },
+  { key: 'drawdown', label: 'Max drawdown', sortKey: 'max_drawdown_pct' }, { key: 'sharpe', label: 'Sharpe', sortKey: 'sharpe_ratio' },
+  { key: 'reliability', label: 'Reliability', sortKey: 'reliability_score' },
+  { key: 'conditions', label: 'Conditions ready', sortKey: 'condition_progress_pct' },
+  { key: 'volume', label: 'Latest volume', sortKey: 'latest_volume' }, { key: 'actions', label: '' },
+];
 const fmt = (value: unknown, key: string) => {
   if (value == null || value === '') return '—';
   if (typeof value === 'number') {
@@ -123,7 +140,8 @@ const BacktestV2: React.FC = () => {
   const [aiAnswer, setAiAnswer] = useState<any>(null);
   const [aiBusy, setAiBusy] = useState(false);
   const [opportunities, setOpportunities] = useState<OpportunityPage>({ items: [], page: 1, page_size: 25, total: 0, pages: 0, disclaimer: '' });
-  const [opportunityFilters, setOpportunityFilters] = useState({ minimum_trades: 5, minimum_win_rate: 0, minimum_confidence: 0, minimum_sharpe: -999, minimum_profit_factor: 0, maximum_drawdown: 100, minimum_return: 0, minimum_volume: '', category: '', current_signal: 'all', sort_by: 'recommendation_score' });
+  const [opportunityFilters, setOpportunityFilters] = useState({ minimum_trades: 5, minimum_win_rate: 0, minimum_confidence: 0, minimum_sharpe: -999, minimum_profit_factor: 0, maximum_drawdown: 100, minimum_return: 0, minimum_volume: '', category: '', current_signal: 'all' });
+  const [opportunitySorts, setOpportunitySorts] = useState<OpportunitySort[]>([{ field: 'recommendation_score', direction: 'desc' }]);
   const [selectedOpportunity, setSelectedOpportunity] = useState<any>(null);
   const [detailTrades, setDetailTrades] = useState<TradePage>({ items: [], page: 1, page_size: 50, total: 0, pages: 0 });
   const [tradeFilter, setTradeFilter] = useState('all');
@@ -197,12 +215,12 @@ const BacktestV2: React.FC = () => {
     if (!activeRun) return;
     const response = await fetchJson<OpportunityPage>(`/api/backtests/v2/runs/${activeRun.run_id}/strong-buys/query`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...opportunityFilters, minimum_volume: opportunityFilters.minimum_volume ? Number(opportunityFilters.minimum_volume) : null, category: opportunityFilters.category || null, include_non_equities: includeNonEquities, page, page_size: opportunities.page_size }),
+      body: JSON.stringify({ ...opportunityFilters, sorts: opportunitySorts, minimum_volume: opportunityFilters.minimum_volume ? Number(opportunityFilters.minimum_volume) : null, category: opportunityFilters.category || null, include_non_equities: includeNonEquities, page, page_size: opportunities.page_size }),
     });
     if (response.ok) setOpportunities(response.data); else setError(response.error || 'Could not load current opportunities.');
   };
 
-  useEffect(() => { if (tab === 'opportunities') void loadOpportunities(1); }, [activeRun?.run_id, activeRun?.combinations_completed, tab, opportunityFilters, includeNonEquities, opportunities.page_size]);
+  useEffect(() => { if (tab === 'opportunities') void loadOpportunities(1); }, [activeRun?.run_id, activeRun?.combinations_completed, tab, opportunityFilters, opportunitySorts, includeNonEquities, opportunities.page_size]);
 
   const openOpportunity = async (row: Opportunity) => {
     setDetailBusy(true); setTradeFilter('all');
@@ -289,6 +307,17 @@ const BacktestV2: React.FC = () => {
   }, {})), [presets]);
 
   const toggleSort = (key: string) => setSort((current) => ({ key, direction: current.key === key && current.direction === 'desc' ? 'asc' : 'desc' }));
+  const toggleOpportunitySort = (field: string) => setOpportunitySorts((current): OpportunitySort[] => {
+    const index = current.findIndex((item) => item.field === field);
+    if (index < 0) return [...current, { field, direction: 'desc' as const }].slice(0, 8);
+    if (current[index].direction === 'desc') return current.map((item, itemIndex) => itemIndex === index ? { ...item, direction: 'asc' as const } : item);
+    return current.filter((_, itemIndex) => itemIndex !== index);
+  });
+  const opportunitySortMarker = (field?: string) => {
+    if (!field) return '';
+    const index = opportunitySorts.findIndex((item) => item.field === field);
+    return index < 0 ? '↕' : `${opportunitySorts[index].direction === 'desc' ? '↓' : '↑'} ${index + 1}`;
+  };
 
   return <div className="research-page">
     <header className="research-hero">
@@ -333,10 +362,10 @@ const BacktestV2: React.FC = () => {
               <label>Min volume<input type="number" min="0" value={opportunityFilters.minimum_volume} onChange={(e) => setOpportunityFilters((v) => ({ ...v, minimum_volume: e.target.value }))} /></label>
               <label>Strategy category<select value={opportunityFilters.category} onChange={(e) => setOpportunityFilters((v) => ({ ...v, category: e.target.value }))}><option value="">All categories</option>{Array.from(new Set(presets.map((item) => item.category))).map((category) => <option key={category}>{category}</option>)}</select></label>
               <label>Signal state<select value={opportunityFilters.current_signal} onChange={(e) => setOpportunityFilters((v) => ({ ...v, current_signal: e.target.value }))}><option value="all">Best available</option><option value="triggered_today">Triggered latest session</option><option value="near_trigger">Near trigger</option><option value="strong_buy">Strong Buy only</option><option value="buy">Buy or Strong Buy</option><option value="watch">Triggered · review</option><option value="no_signal">Historical only</option></select></label>
-              <label>Sort by<select value={opportunityFilters.sort_by} onChange={(e) => setOpportunityFilters((v) => ({ ...v, sort_by: e.target.value }))}><option value="recommendation_score">Best win + profit score</option><option value="win_rate_pct">Win rate</option><option value="net_return_pct">Net return</option><option value="reliability_score">Reliability score</option><option value="total_trades">Total trades</option><option value="profit_factor">Profit factor</option><option value="sharpe_ratio">Sharpe ratio</option><option value="max_drawdown_pct">Drawdown</option><option value="current_signal_date">Signal date</option></select></label>
             </div>
-            <div className="research-table-summary"><b>{opportunities.total} ranked stocks</b><span>One best saved strategy per stock · ordinary shares by default</span></div>
-            <div className="research-table-wrap strong-buy-table"><table><thead><tr>{['Rank','Stock','Signal state','Strategy','Best score','LTP','Data session','Win rate','Wins','Losses','Trades','Avg hold','Loss rate','Confidence','Net return %','Net profit','Profit factor','Max drawdown','Sharpe','Reliability','Conditions ready','Latest volume',''].map((label) => <th key={label}>{label}</th>)}</tr></thead><tbody>{opportunities.items.map((row) => <tr key={row.result_id}><td>{row.rank}</td><td><div className="stock-chart-links"><button className="symbol-link" onClick={() => void openOpportunity(row)}>{row.symbol}</button><NepseAlphaSymbolLink symbol={row.symbol}>NEPSE Alpha chart ↗</NepseAlphaSymbolLink></div></td><td><span className={`signal-pill ${row.current_signal_status}`}>{signalLabel(row.current_signal_status)}</span>{row.legacy_cost_model && <small>Legacy costs · rerun advised</small>}</td><td>{row.preset_name}</td><td><b>{fmt(row.recommendation_score, 'score')}</b></td><td>{fmt(row.ltp, 'ltp')}</td><td>{row.signal_date}</td><td><b>{fmt(row.win_rate_pct, 'percent')}%</b><small>Historical result</small></td><td>{row.wins}</td><td>{row.losses}</td><td>{row.total_trades}</td><td>{fmt(row.average_holding_days, 'days')} days</td><td>{fmt(row.loss_rate_pct, 'percent')}%</td><td>{fmt(row.confidence_score, 'score')}</td><td>{fmt(row.net_return_pct, 'percent')}%</td><td>NPR {fmt(row.net_profit, 'money')}</td><td>{fmt(row.profit_factor, 'ratio')}</td><td>{fmt(row.max_drawdown_pct, 'percent')}%</td><td>{fmt(row.sharpe_ratio, 'ratio')}</td><td><span className="reliability-ring">{fmt(row.reliability_score, 'score')}</span></td><td>{row.current_evidence?.conditions_total ? `${row.current_evidence.conditions_passed}/${row.current_evidence.conditions_total} · ${fmt(row.current_evidence.condition_progress_pct, 'percent')}%` : 'Available after rerun'}</td><td>{fmt(row.latest_volume, 'latest_volume')}</td><td><button className="view-evidence" onClick={() => void openOpportunity(row)}>View details</button></td></tr>)}</tbody></table>{opportunities.items.length === 0 && <div className="research-empty">No stocks match these exact filters. Select “Best available” or relax a numeric filter to view the saved run leaders.</div>}</div>
+            <div className="recommendation-sort-guide"><span>Click several column names to build sort priority. Each click cycles descending, ascending, then off.</span><button type="button" onClick={() => setOpportunitySorts([{ field: 'recommendation_score', direction: 'desc' }])}>Reset to combined score</button></div>
+            <div className="research-table-summary"><b>{opportunities.total} ranked stocks</b><span>One best strategy per stock by combined metrics · sorted by {opportunitySorts.length ? opportunitySorts.map((item, index) => `${index + 1}. ${item.field.replaceAll('_', ' ')} ${item.direction}`).join(' · ') : 'combined score desc'}</span></div>
+            <div className="research-table-wrap strong-buy-table"><table><thead><tr>{opportunityColumns.map((column) => <th key={column.key}>{column.sortKey ? <button type="button" className="recommendation-sort-button" onClick={() => toggleOpportunitySort(column.sortKey!)}>{column.label}<span>{opportunitySortMarker(column.sortKey)}</span></button> : column.label}</th>)}</tr></thead><tbody>{opportunities.items.map((row) => <tr key={row.result_id}><td>{row.rank}</td><td><div className="stock-chart-links"><button className="symbol-link" onClick={() => void openOpportunity(row)}>{row.symbol}</button><NepseAlphaSymbolLink symbol={row.symbol}>NEPSE Alpha chart ↗</NepseAlphaSymbolLink></div></td><td><span className={`signal-pill ${row.current_signal_status}`}>{signalLabel(row.current_signal_status)}</span>{row.legacy_cost_model && <small>Legacy costs · rerun advised</small>}</td><td>{row.preset_name}</td><td><b>{fmt(row.recommendation_score, 'score')}</b></td><td>{fmt(row.ltp, 'ltp')}</td><td>{row.signal_date}</td><td><b>{fmt(row.win_rate_pct, 'percent')}%</b><small>Historical result</small></td><td>{row.wins}</td><td>{row.losses}</td><td>{row.total_trades}</td><td>{fmt(row.average_holding_days, 'days')} days</td><td>{fmt(row.loss_rate_pct, 'percent')}%</td><td>{fmt(row.confidence_score, 'score')}</td><td>{fmt(row.net_return_pct, 'percent')}%</td><td>NPR {fmt(row.net_profit, 'money')}</td><td>{fmt(row.profit_factor, 'ratio')}</td><td>{fmt(row.max_drawdown_pct, 'percent')}%</td><td>{fmt(row.sharpe_ratio, 'ratio')}</td><td><span className="reliability-ring">{fmt(row.reliability_score, 'score')}</span></td><td>{row.current_evidence?.conditions_total ? `${row.current_evidence.conditions_passed}/${row.current_evidence.conditions_total} · ${fmt(row.current_evidence.condition_progress_pct, 'percent')}%` : 'Available after rerun'}</td><td>{fmt(row.latest_volume, 'latest_volume')}</td><td><button className="view-evidence" onClick={() => void openOpportunity(row)}>View details</button></td></tr>)}</tbody></table>{opportunities.items.length === 0 && <div className="research-empty">No stocks match these exact filters. Select “Best available” or relax a numeric filter to view the saved run leaders.</div>}</div>
             <div className="research-pagination"><button disabled={opportunities.page <= 1} onClick={() => void loadOpportunities(opportunities.page - 1)}>Previous</button><span>Page {opportunities.page} of {opportunities.pages || 1}</span><button disabled={opportunities.page >= opportunities.pages} onClick={() => void loadOpportunities(opportunities.page + 1)}>Next</button></div>
             <p className="strong-buy-disclaimer">Backtested historical performance does not guarantee future results. This is research, not financial advice, and never places a broker order.</p>
           </section>}

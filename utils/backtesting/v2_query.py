@@ -52,6 +52,46 @@ class ResultQueryError(ValueError):
     pass
 
 
+STRONG_BUY_SORT_FIELDS = {
+    "symbol": "symbol", "current_signal_status": "current_signal_status",
+    "preset_name": "preset_name", "recommendation_score": "recommendation_score",
+    "ltp": "ltp", "current_signal_date": "current_signal_date",
+    "win_rate_pct": "win_rate_pct", "wins": "wins", "losses": "losses",
+    "total_trades": "total_trades", "average_holding_days": "average_holding_days",
+    "loss_rate_pct": "loss_rate_pct", "confidence_score": "confidence_score",
+    "net_return_pct": "net_return_pct", "net_profit": "net_profit",
+    "profit_factor": "profit_factor", "max_drawdown_pct": "max_drawdown_pct",
+    "sharpe_ratio": "sharpe_ratio", "reliability_score": "reliability_score",
+    "condition_progress_pct": "condition_progress_pct", "latest_volume": "latest_volume",
+}
+
+
+def compile_strong_buy_sorts(body: Dict[str, Any]) -> Tuple[str, List[Dict[str, str]]]:
+    """Compile validated multi-column ordering for the recommendation table."""
+    requested = body.get("sorts") or [{
+        "field": str(body.get("sort_by") or "recommendation_score"),
+        "direction": str(body.get("sort_direction") or "desc"),
+    }]
+    if not isinstance(requested, list) or len(requested) > 8:
+        raise ResultQueryError("Recommendation sorting supports up to eight columns.")
+    clauses: List[str] = []
+    normalized: List[Dict[str, str]] = []
+    seen = set()
+    for item in requested:
+        if not isinstance(item, dict):
+            raise ResultQueryError("Each recommendation sort must contain a field and direction.")
+        field = str(item.get("field") or "")
+        direction = str(item.get("direction") or "desc").lower()
+        if field not in STRONG_BUY_SORT_FIELDS or direction not in {"asc", "desc"}:
+            raise ResultQueryError("Unsupported recommendation sort field or direction.")
+        if field in seen:
+            raise ResultQueryError(f"Recommendation sort field {field!r} was selected more than once.")
+        seen.add(field)
+        clauses.append(f"{STRONG_BUY_SORT_FIELDS[field]} {direction.upper()} NULLS LAST")
+        normalized.append({"field": field, "direction": direction})
+    return ",".join(clauses), normalized
+
+
 def field_catalog() -> List[Dict[str, Any]]:
     return [{"field": key, "type": "number" if key in NUMERIC_FIELDS else "text", "filterable": key != "warning_codes", "sortable": key != "warning_codes"} for key in RESULT_FIELDS]
 
@@ -148,17 +188,7 @@ def result_trades(session, result_id: int, *, owner_id: str = "local") -> List[D
 def query_strong_buys(session, run_id: str, body: Dict[str, Any], *, owner_id: str = "local") -> Dict[str, Any]:
     page = max(1, int(body.get("page") or 1))
     page_size = min(100, max(1, int(body.get("page_size") or 25)))
-    sort_fields = {
-        "recommendation_score": "recommendation_score",
-        "reliability_score": "reliability_score", "win_rate_pct": "win_rate_pct",
-        "net_return_pct": "net_return_pct", "total_trades": "total_trades",
-        "profit_factor": "profit_factor", "sharpe_ratio": "sharpe_ratio",
-        "max_drawdown_pct": "max_drawdown_pct", "current_signal_date": "current_signal_date",
-    }
-    sort_by = str(body.get("sort_by") or "recommendation_score")
-    if sort_by not in sort_fields:
-        raise ResultQueryError("Unsupported Strong Buy sort field.")
-    direction = "ASC" if str(body.get("sort_direction") or "desc").lower() == "asc" else "DESC"
+    order_sql, normalized_sorts = compile_strong_buy_sorts(body)
     params = {
         "run_id": run_id, "owner_id": owner_id, "min_trades": int(body.get("minimum_trades", 5)),
         "min_win": float(body.get("minimum_win_rate", 0)), "min_confidence": float(body.get("minimum_confidence", 0)),
@@ -199,6 +229,8 @@ def query_strong_buys(session, run_id: str, body: Dict[str, Any], *, owner_id: s
         r.total_trades,r.average_holding_days,r.confidence_score,r.net_return_pct,r.profit_factor,r.max_drawdown_pct,r.sharpe_ratio,
         r.current_evidence,r.assumptions,s.security_type,s.sector,s.ltp,s.latest_volume,s.median_volume_20,
         NULLIF(r.assumptions->'summary'->>'net_profit','')::double precision AS net_profit,
+        100-COALESCE(r.win_rate_pct,0) AS loss_rate_pct,
+        COALESCE(NULLIF(r.current_evidence->>'condition_progress_pct','')::double precision,0) AS condition_progress_pct,
         CASE WHEN COALESCE(r.assumptions->>'charge_model','') LIKE 'nepse_equity%' THEN FALSE ELSE TRUE END AS legacy_cost_model,
         COALESCE(c.combined_data->>'company_name',c.combined_data->>'name',c.combined_data->>'companyName',r.symbol) AS company_name"""
     base = f"""FROM backtest_results r JOIN backtest_runs br ON br.run_id=r.run_id
@@ -211,7 +243,7 @@ def query_strong_buys(session, run_id: str, body: Dict[str, Any], *, owner_id: s
             r.win_rate_pct DESC,r.total_trades DESC,r.result_id) row_no {base})"""
     total = int(session.execute(text(f"{cte} SELECT COUNT(*) FROM candidates WHERE row_no=1"), params).scalar() or 0)
     rows = session.execute(text(
-        f"{cte} SELECT * FROM candidates WHERE row_no=1 ORDER BY {sort_fields[sort_by]} {direction} NULLS LAST,symbol LIMIT :limit OFFSET :offset"
+        f"{cte} SELECT * FROM candidates WHERE row_no=1 ORDER BY {order_sql},symbol ASC,result_id ASC LIMIT :limit OFFSET :offset"
     ), params).mappings().all()
     items = []
     for rank, row in enumerate(rows, start=(page - 1) * page_size + 1):
@@ -222,4 +254,5 @@ def query_strong_buys(session, run_id: str, body: Dict[str, Any], *, owner_id: s
         items.append(item)
     return {"items": items, "page": page, "page_size": page_size, "total": total,
             "pages": ceil(total / page_size) if total else 0,
+            "sorts": normalized_sorts,
             "disclaimer": "Backtested historical performance does not guarantee future results."}
