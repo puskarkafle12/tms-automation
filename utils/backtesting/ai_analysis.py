@@ -14,11 +14,13 @@ NUMERIC_FIELDS = {
     "robust_score", "oos_trades", "oos_win_rate_pct", "oos_return_pct",
     "oos_expectancy_pct", "oos_sharpe_ratio", "oos_max_drawdown_pct",
     "walk_forward_profitable_pct", "data_completeness_pct", "liquidity_score",
-    "median_volume_20", "average_turnover_20",
+    "median_volume_20", "average_turnover_20", "min_holding_days", "max_holding_days",
+    "stop_loss_pct", "take_profit_pct", "trailing_stop_pct", "slippage_pct_each_side",
 }
 TEXT_FIELDS = {
     "symbol", "preset_id", "preset_name", "category", "sample_quality",
     "technical_signal", "security_type", "sector", "preset_family", "recommendation_status",
+    "current_signal_status",
 }
 ALLOWED_FIELDS = NUMERIC_FIELDS | TEXT_FIELDS
 ALLOWED_OPERATORS = {"eq", "neq", "gt", "gte", "lt", "lte", "contains"}

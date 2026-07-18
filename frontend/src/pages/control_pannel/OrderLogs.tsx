@@ -35,7 +35,7 @@ import {
   resolveScheduledOrderIdsForBulkDelete,
   type ScheduledBulkDeleteMode,
 } from './scheduleOrderHelpers';
-import { formatOrderQuantityDisplay, getDisplayQtyForOrder } from '../../lib/strategies/rulePlanHelpers';
+import { getDisplayQtyForOrder } from '../../lib/strategies/rulePlanHelpers';
 import { buildStrategyDetailLayout } from '../../lib/strategies/orderStrategyDetails';
 import {
   formatScheduledQuantitySummary,
@@ -2224,37 +2224,139 @@ const GetOrderStatus: React.FC = () => {
           <div className="strategy-details-modal strategy-details-modal-rich" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
             <div className="strategy-details-header">
               <div>
-                <h3>Strategy Details</h3>
-                <p>
-                  <NepseAlphaSymbolLink symbol={strategyDetailsOrder.script_name} />
-                </p>
+                <span className="strategy-details-eyebrow">Live strategy monitor</span>
+                <h3>{strategyDetailsOrder.script_name} · {strategyDetailLayout.headline.find((item) => item.label === 'Strategy')?.value}</h3>
+                <p><NepseAlphaSymbolLink symbol={strategyDetailsOrder.script_name} /> · Created {strategyDetailsOrder.created_at ? formatDateTime(strategyDetailsOrder.created_at) : 'time unavailable'}</p>
               </div>
               <button type="button" className="strategy-details-close" onClick={closeStrategyDetails} aria-label="Close strategy details">
                 ×
               </button>
             </div>
 
-            <div className="strategy-details-headline">
-              {strategyDetailLayout.headline.map((item) => (
-                <div key={item.label} className="strategy-details-headline-item">
-                  <span>{item.label}</span>
-                  <strong>{item.value}</strong>
-                </div>
-              ))}
+            <div className="strategy-details-statusbar">
+              <span className={`strategy-details-side ${getOrderSide(strategyDetailsOrder).toLowerCase()}`}>{getOrderSide(strategyDetailsOrder)}</span>
+              <span className="strategy-details-live-dot" aria-hidden="true" />
+              <strong>{formatLiveScanStatus(strategyDetailsOrder)}</strong>
+              <span>{strategyDetailsOrder.monitoring_active ? 'Monitor running' : 'Monitor paused'}</span>
             </div>
 
-            {strategyDetailLayout.primary.length > 0 ? (
-              <div className="strategy-details-metrics">
-                {strategyDetailLayout.primary.map((item) => (
-                  <div key={item.label} className={`strategy-details-metric ${item.kind === 'muted' ? 'muted' : ''}`}>
-                    <span className="strategy-details-metric-label">{item.label}</span>
-                    <span className="strategy-details-metric-value">{item.value}</span>
+            <div className="strategy-details-body">
+              <section className="strategy-details-section strategy-details-signal-section">
+                <div className="strategy-details-section-heading">
+                  <div>
+                    <span className="strategy-details-section-kicker">Entry signal</span>
+                    <h4>What must happen before this order executes?</h4>
                   </div>
-                ))}
-              </div>
-            ) : null}
+                  <span className="strategy-details-logic">{strategyDetailLayout.conditionLogic || 'AND'} logic</span>
+                </div>
+                <p className="strategy-details-summary">{strategyDetailLayout.conditionSummary}</p>
+                <div className="strategy-details-condition-list">
+                  {(strategyDetailLayout.conditions || []).map((condition, index) => (
+                    <article key={`${condition.label}-${index}`} className={`strategy-details-condition ${condition.status}`}>
+                      <span className="strategy-details-condition-icon" aria-hidden="true">
+                        {condition.status === 'satisfied' ? '✓' : condition.status === 'waiting' ? '!' : '·'}
+                      </span>
+                      <div className="strategy-details-condition-copy">
+                        <strong>{condition.label}</strong>
+                        <span>{condition.explanation}</span>
+                      </div>
+                      <dl className="strategy-details-condition-values">
+                        <div><dt>Current</dt><dd>{condition.current}</dd></div>
+                        <div><dt>Required</dt><dd>{condition.required}</dd></div>
+                      </dl>
+                    </article>
+                  ))}
+                </div>
+                <div className="strategy-details-trigger-note">
+                  <strong>Trigger behavior</strong>
+                  <span>On cross: the signal fires only when the complete rule changes from false to true. This scheduled recommendation can BUY once per symbol.</span>
+                </div>
+              </section>
 
-            {strategyDetailLayout.secondary.length > 0 ? (
+              {(strategyDetailLayout.workflow || []).length > 0 ? (
+                <section className="strategy-details-section">
+                  <div className="strategy-details-section-heading">
+                    <div>
+                      <span className="strategy-details-section-kicker">Position lifecycle</span>
+                      <h4>What happens after the entry signal?</h4>
+                    </div>
+                  </div>
+                  <ol className="strategy-details-workflow">
+                    {(strategyDetailLayout.workflow || []).map((step, index) => (
+                      <li key={step.label} className={step.state}>
+                        <span className="strategy-details-workflow-index">{step.state === 'complete' ? '✓' : index + 1}</span>
+                        <div><strong>{step.label}</strong><span>{step.detail}</span></div>
+                      </li>
+                    ))}
+                  </ol>
+                </section>
+              ) : null}
+
+              {(strategyDetailLayout.exitRules || []).length > 0 ? (
+                <section className="strategy-details-section">
+                  <div className="strategy-details-section-heading">
+                    <div>
+                      <span className="strategy-details-section-kicker">Exit plan</span>
+                      <h4>When will the position be sold?</h4>
+                    </div>
+                  </div>
+                  <div className="strategy-details-exit-grid">
+                    {(strategyDetailLayout.exitRules || []).map((rule) => (
+                      <article key={`${rule.label}-${rule.detail}`}><strong>{rule.label}</strong><span>{rule.detail}</span></article>
+                    ))}
+                  </div>
+                </section>
+              ) : null}
+
+              {(strategyDetailLayout.positionMetrics || []).length > 0 ? (
+                <section className="strategy-details-section">
+                  <div className="strategy-details-section-heading">
+                    <div>
+                      <span className="strategy-details-section-kicker">Net return estimate</span>
+                      <h4>How is profit_percent calculated?</h4>
+                    </div>
+                  </div>
+                  <p className="strategy-details-summary">Estimated net proceeds minus total entry cost, divided by total entry cost. It uses the current LTP and changes with the market; broker commission, SEBON fee, DP charge, and estimated CGT are included.</p>
+                  <div className="strategy-details-calculation-grid">
+                    {(strategyDetailLayout.positionMetrics || []).map((item) => (
+                      <div key={item.label}><span>{item.label}</span><strong>{item.value}</strong></div>
+                    ))}
+                  </div>
+                  <p className="strategy-details-estimate-note">This remains an estimate until TMS confirms the final SELL fill price and official ledger charges.</p>
+                </section>
+              ) : null}
+
+              {(strategyDetailLayout.fixedReferences || []).length > 0 ? (
+                <section className="strategy-details-section">
+                  <div className="strategy-details-section-heading">
+                    <div><span className="strategy-details-section-kicker">Stored references</span><h4>Values intentionally frozen at scheduling</h4></div>
+                    <span className="strategy-details-fixed-badge">Never recalculated</span>
+                  </div>
+                  <p className="strategy-details-summary">Only explicit REFERENCE values are fixed. Live fields such as LTP and indicators continue updating so the strategy can detect a trigger.</p>
+                  <div className="strategy-details-calculation-grid">
+                    {(strategyDetailLayout.fixedReferences || []).map((item) => (
+                      <div key={item.label}><span>{item.label}</span><strong>{item.value}</strong></div>
+                    ))}
+                  </div>
+                </section>
+              ) : null}
+
+              {strategyDetailLayout.primary.length > 0 ? (
+                <section className="strategy-details-section">
+                  <div className="strategy-details-section-heading"><div><span className="strategy-details-section-kicker">Order setup</span><h4>Execution settings</h4></div></div>
+                  <div className="strategy-details-metrics">
+                    {strategyDetailLayout.primary
+                      .filter((item) => !['Strategy Condition', 'Current / Required', 'Why Waiting'].includes(item.label))
+                      .map((item) => (
+                        <div key={item.label} className={`strategy-details-metric ${item.kind === 'muted' ? 'muted' : ''}`}>
+                          <span className="strategy-details-metric-label">{item.label}</span>
+                          <span className="strategy-details-metric-value">{item.value}</span>
+                        </div>
+                      ))}
+                  </div>
+                </section>
+              ) : null}
+
               <div className="strategy-details-expand-wrap">
                 <button
                   type="button"
@@ -2262,28 +2364,21 @@ const GetOrderStatus: React.FC = () => {
                   onClick={() => setStrategyDetailsExpanded((current) => !current)}
                   aria-expanded={strategyDetailsExpanded}
                 >
-                  {strategyDetailsExpanded ? 'See less' : 'See more details'}
+                  {strategyDetailsExpanded ? 'Hide advanced details' : 'Advanced details, query and diagnostics'}
                 </button>
                 {strategyDetailsExpanded ? (
-                  <dl className="strategy-details-list strategy-details-list-secondary">
-                    {strategyDetailLayout.secondary.map((item) => (
-                      <div key={item.label} className="strategy-details-row">
-                        <dt>{item.label}</dt>
-                        <dd className={item.kind === 'muted' ? 'strategy-details-muted' : undefined}>
-                          {item.kind === 'query' ? (
-                            <pre className="strategy-details-query">{item.value}</pre>
-                          ) : item.kind === 'logs' ? (
-                            <pre className="strategy-details-logs">{item.value}</pre>
-                          ) : (
-                            item.value
-                          )}
-                        </dd>
-                      </div>
-                    ))}
-                  </dl>
+                  <div className="strategy-details-advanced">
+                    <dl className="strategy-details-list strategy-details-list-secondary">
+                      {strategyDetailLayout.secondary.map((item) => (
+                        <div key={item.label} className="strategy-details-row"><dt>{item.label}</dt><dd>{item.value}</dd></div>
+                      ))}
+                    </dl>
+                    {strategyDetailLayout.rawQuery ? <div className="strategy-details-code-block"><h5>Effective strategy query</h5><pre className="strategy-details-query">{strategyDetailLayout.rawQuery}</pre></div> : null}
+                    {strategyDetailLayout.recentLogs ? <div className="strategy-details-code-block"><h5>Recent monitor events</h5><pre className="strategy-details-logs">{strategyDetailLayout.recentLogs}</pre></div> : null}
+                  </div>
                 ) : null}
               </div>
-            ) : null}
+            </div>
 
             <div className="strategy-details-footer">
               <button

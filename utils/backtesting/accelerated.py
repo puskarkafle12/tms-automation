@@ -53,8 +53,19 @@ def _positive_slope(values: np.ndarray, window: int) -> np.ndarray:
     return result
 
 
-def compile_preset_signals(preset_id: str, rows: Sequence[Dict[str, Any]]) -> List[bool]:
-    """Compile one catalog preset without reading any future row."""
+def compile_preset_signals(
+    preset_id: str,
+    rows: Sequence[Dict[str, Any]],
+    *,
+    trigger_on_cross: bool = True,
+) -> List[bool]:
+    """Compile one catalog preset without reading any future row.
+
+    ``trigger_on_cross=False`` returns the rule's completed-session state. This
+    is important for discovery: component states are combined first and the
+    conjunction is crossed once, instead of requiring every component to have
+    independently crossed on exactly the same session.
+    """
     count = len(rows)
     close = _numbers(rows, "ltp")
     low = _numbers(rows, "low")
@@ -286,12 +297,25 @@ def compile_preset_signals(preset_id: str, rows: Sequence[Dict[str, Any]]) -> Li
     elif preset_id == "nonlinear_momentum_regime":
         momentum_63 = _change_percent(close, 63)
         signal = (momentum_63 >= 5) & (momentum_63 <= 25) & (_change_percent(close, 126) >= 10) & (historical_volatility <= 45) & (adx >= 20) & _text_is(rows, "technical_sma_200", "above")
+    elif preset_id.startswith("nepse15_"):
+        number = int(preset_id.rsplit("_", 1)[1])
+        signal = _numbers(rows, f"technical_nepse15_entry_{number}") == 1
     else:
         raise ValueError(f"Preset {preset_id} is not supported by the accelerated compiler.")
     raw = np.nan_to_num(signal, nan=False).astype(bool)
+    if not trigger_on_cross:
+        return [bool(value) for value in raw]
     # Preset rules use ON_CROSS semantics by default: a sustained true level
     # produces one signal, not a fresh order on every subsequent session.
     triggered = raw.copy()
     if count > 1:
         triggered[1:] = raw[1:] & ~raw[:-1]
     return [bool(value) for value in triggered]
+
+
+def compile_preset_exit_signals(preset_id: str, rows: Sequence[Dict[str, Any]]) -> List[bool]:
+    """Return the preset's completed-session condition exit without look-ahead."""
+    if preset_id.startswith("nepse15_"):
+        number = int(preset_id.rsplit("_", 1)[1])
+        return [bool(value) for value in (_numbers(rows, f"technical_nepse15_exit_{number}") == 1)]
+    return [False] * len(rows)

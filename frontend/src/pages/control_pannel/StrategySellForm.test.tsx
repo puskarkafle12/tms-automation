@@ -2,7 +2,43 @@ import { act, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import StrategySellForm from './StrategySellForm';
 
+jest.mock('../../components/CustomQueryEditor', () => ({
+  __esModule: true,
+  default: ({ initialQuery }: { initialQuery?: string }) => (
+    <div data-testid="custom-query-initial-value">{initialQuery}</div>
+  ),
+}));
+
 describe('StrategySellForm', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  test('restores the exact recommendation strategy query before the custom editor mounts', () => {
+    const exactQuery = 'BUY WHEN symbol = "NABIL" AND rsi_14 < 45 SELL WHEN rsi_14 > 70';
+    localStorage.setItem('tms-strategy-form-draft-v1:schedule-order', JSON.stringify({
+      strategy: 'Custom Query Buy',
+      ruleQueryText: exactQuery,
+      qty: '10',
+    }));
+
+    render(
+      <StrategySellForm
+        side="buy"
+        clientId="client-1"
+        scriptName="NABIL"
+        currentLtp={100}
+        initialQty="10"
+        initialPrice="100"
+        initialStrategy="Custom Query Buy"
+        draftKey="schedule-order"
+        onSubmit={jest.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId('custom-query-initial-value')).toHaveTextContent(exactQuery);
+  });
+
   test('Schedule Strategy Order click shows missing-field error for Profit Ladder Sell', async () => {
     const onSubmit = jest.fn();
     render(

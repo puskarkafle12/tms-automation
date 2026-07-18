@@ -9,9 +9,12 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from database import get_db
+from models.frontend_user import FrontendUser
+from utils.auth import get_current_user, require_owned_client, require_permission
 from schemas.schemas import OrderCreateRequest
 from utils.strategy_builder.strategy_fields import get_field_catalog, get_supported_functions
 from utils.strategy_builder.strategy_parser import StrategyQueryError, extract_symbols_from_query, format_strategy_query, parse_strategy_query
@@ -19,7 +22,7 @@ from utils.strategy_builder.strategy_validator import validate_strategy_plan
 from utils.strategy_builder.strategy_llm_prompt import build_strategy_query_copy_prompt
 from utils.strategy_builder.ai_query import StrategyQueryAiError, execute_strategy_query_ai_with_retries
 
-router = APIRouter(prefix="/api", tags=["strategy-builder"])
+router = APIRouter(prefix="/api", tags=["strategy-builder"], dependencies=[Depends(get_current_user)])
 
 
 class StrategyQueryRequest(BaseModel):
@@ -101,8 +104,8 @@ class BacktestRequest(BaseModel):
     dp_charge: float = Field(default=25, ge=0)
     stop_loss_pct: float = Field(default=5, gt=0, le=100)
     take_profit_pct: float = Field(default=10, gt=0, le=500)
-    min_holding_days: int = Field(default=0, ge=0, le=365)
-    max_holding_days: int = Field(default=20, ge=1, le=365)
+    min_holding_days: int = Field(default=5, ge=0, le=365)
+    max_holding_days: int = Field(default=90, ge=1, le=365)
     fee_pct: float = Field(default=0.4, ge=0, le=10)
     fixed_fee: float = Field(default=0, ge=0)
     slippage_pct: float = Field(default=0.1, ge=0, le=10)
@@ -129,8 +132,8 @@ class BacktestBatchRequest(BaseModel):
     fixed_fee: float = Field(default=0, ge=0)
     slippage_pct: float = Field(default=0.1, ge=0, le=10)
     position_size_pct: float = Field(default=100, gt=0, le=100)
-    min_holding_days: int = Field(default=0, ge=0, le=365)
-    max_holding_days: Optional[int] = Field(default=None, ge=1, le=365)
+    min_holding_days: int = Field(default=5, ge=0, le=365)
+    max_holding_days: Optional[int] = Field(default=90, ge=1, le=365)
     trailing_stop_pct: Optional[float] = Field(default=None, gt=0, le=100)
     max_volume_participation_pct: float = Field(default=10, gt=0, le=100)
     risk_free_rate_pct: float = Field(default=4, ge=0, le=100)
@@ -154,8 +157,16 @@ class BacktestV2RunRequest(BacktestBatchRequest):
     run_type: str = Field(default="market_scan", pattern="^(single_stock|market_scan|portfolio)$")
     history_mode: str = Field(default="all_available", pattern="^(all_available|custom)$")
     portfolio: Dict[str, Any] = Field(default_factory=dict)
-    strategy_mode: str = Field(default="presets", pattern="^(presets|custom)$")
+    strategy_mode: str = Field(default="presets", pattern="^(presets|custom|discovery)$")
     custom_query_text: Optional[str] = Field(default=None, min_length=20, max_length=50000)
+    discovery_budget: int = Field(default=1000, ge=10, le=10000)
+    discovery_seed: int = Field(default=20260718, ge=0, le=2147483647)
+    discovery_base_ids: List[str] = Field(default_factory=list, max_length=116)
+
+
+class BacktestV2SortItem(BaseModel):
+    field: str = Field(min_length=1, max_length=80)
+    direction: str = Field(default="desc", pattern="^(asc|desc)$")
 
 
 class BacktestV2ResultQuery(BaseModel):
@@ -163,6 +174,9 @@ class BacktestV2ResultQuery(BaseModel):
     include_non_equities: bool = False
     sort_by: str = "robust_score"
     sort_direction: str = Field(default="desc", pattern="^(asc|desc)$")
+    sorts: List[BacktestV2SortItem] = Field(default_factory=list, max_length=8)
+    unique_by_symbol: bool = False
+    unique_by_strategy: bool = False
     page: int = Field(default=1, ge=1)
     page_size: int = Field(default=100, ge=1, le=100)
 
@@ -184,11 +198,6 @@ class BacktestV2CloneRequest(BaseModel):
 class BacktestV2PromoteRequest(BaseModel):
     client_id: str = Field(min_length=1, max_length=100)
     name: Optional[str] = Field(default=None, min_length=2, max_length=200)
-
-
-class BacktestV2SortItem(BaseModel):
-    field: str = Field(min_length=1, max_length=80)
-    direction: str = Field(default="desc", pattern="^(asc|desc)$")
 
 
 class BacktestV2StrongBuyFilter(BaseModel):
@@ -268,31 +277,31 @@ async def strategy_builder_fields():
 
 
 @router.post("/backtests/v2/runs", status_code=202)
-async def create_backtest_v2_run(body: BacktestV2RunRequest):
+async def create_backtest_v2_run(body: BacktestV2RunRequest, current_user: FrontendUser = Depends(require_permission("backtest"))):
     from utils.backtesting.v2_jobs import create_run
     try:
-        return await run_in_threadpool(create_run, body.model_dump(), owner_id="local")
+        return await run_in_threadpool(create_run, body.model_dump(), owner_id=str(current_user.id))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/backtests/v2/runs")
-async def list_backtest_v2_runs(page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100)):
+async def list_backtest_v2_runs(page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100), current_user: FrontendUser = Depends(require_permission("backtest"))):
     from utils.backtesting.v2_jobs import list_runs
-    return await run_in_threadpool(list_runs, owner_id="local", page=page, page_size=page_size)
+    return await run_in_threadpool(list_runs, owner_id=str(current_user.id), page=page, page_size=page_size)
 
 
 @router.get("/backtests/v2/runs/{run_id}")
-async def read_backtest_v2_run(run_id: str):
+async def read_backtest_v2_run(run_id: str, current_user: FrontendUser = Depends(require_permission("backtest"))):
     from utils.backtesting.v2_jobs import get_run
     try:
-        return await run_in_threadpool(get_run, run_id, owner_id="local")
+        return await run_in_threadpool(get_run, run_id, owner_id=str(current_user.id))
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/backtests/v2/runs/{run_id}/events")
-async def stream_backtest_v2_events(run_id: str):
+async def stream_backtest_v2_events(run_id: str, current_user: FrontendUser = Depends(require_permission("backtest"))):
     from utils.backtesting.v2_jobs import get_run
     from database import SessionLocal
     from utils.backtesting.v2_query import query_results
@@ -301,7 +310,7 @@ async def stream_backtest_v2_events(run_id: str):
         last_payload = ""
         while True:
             try:
-                run = await run_in_threadpool(get_run, run_id, owner_id="local")
+                run = await run_in_threadpool(get_run, run_id, owner_id=str(current_user.id))
                 session = SessionLocal()
                 try:
                     leaders = query_results(session, run_id, {"page_size": 10, "sort_by": "robust_score"})["items"]
@@ -320,41 +329,41 @@ async def stream_backtest_v2_events(run_id: str):
     return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-async def _control_backtest_v2_run(run_id: str, action: str):
+async def _control_backtest_v2_run(run_id: str, action: str, owner_id: str):
     from utils.backtesting.v2_jobs import retry_failed_symbols, set_run_control
     try:
         if action == "retry":
-            return await run_in_threadpool(retry_failed_symbols, run_id, owner_id="local")
-        return await run_in_threadpool(set_run_control, run_id, action, owner_id="local")
+            return await run_in_threadpool(retry_failed_symbols, run_id, owner_id=owner_id)
+        return await run_in_threadpool(set_run_control, run_id, action, owner_id=owner_id)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/backtests/v2/runs/{run_id}/cancel")
-async def cancel_backtest_v2_run(run_id: str):
-    return await _control_backtest_v2_run(run_id, "cancel")
+async def cancel_backtest_v2_run(run_id: str, current_user: FrontendUser = Depends(require_permission("backtest"))):
+    return await _control_backtest_v2_run(run_id, "cancel", str(current_user.id))
 
 
 @router.post("/backtests/v2/runs/{run_id}/pause")
-async def pause_backtest_v2_run(run_id: str):
-    return await _control_backtest_v2_run(run_id, "pause")
+async def pause_backtest_v2_run(run_id: str, current_user: FrontendUser = Depends(require_permission("backtest"))):
+    return await _control_backtest_v2_run(run_id, "pause", str(current_user.id))
 
 
 @router.post("/backtests/v2/runs/{run_id}/resume")
-async def resume_backtest_v2_run(run_id: str):
-    return await _control_backtest_v2_run(run_id, "resume")
+async def resume_backtest_v2_run(run_id: str, current_user: FrontendUser = Depends(require_permission("backtest"))):
+    return await _control_backtest_v2_run(run_id, "resume", str(current_user.id))
 
 
 @router.post("/backtests/v2/runs/{run_id}/retry")
-async def retry_backtest_v2_run(run_id: str):
-    return await _control_backtest_v2_run(run_id, "retry")
+async def retry_backtest_v2_run(run_id: str, current_user: FrontendUser = Depends(require_permission("backtest"))):
+    return await _control_backtest_v2_run(run_id, "retry", str(current_user.id))
 
 
 @router.post("/backtests/v2/runs/{run_id}/clone-with-name", status_code=202)
-async def clone_backtest_v2_run(run_id: str, body: BacktestV2CloneRequest):
+async def clone_backtest_v2_run(run_id: str, body: BacktestV2CloneRequest, current_user: FrontendUser = Depends(require_permission("backtest"))):
     from utils.backtesting.v2_jobs import clone_run
     try:
-        return await run_in_threadpool(clone_run, run_id, owner_id="local", name=body.name)
+        return await run_in_threadpool(clone_run, run_id, owner_id=str(current_user.id), name=body.name)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -383,38 +392,92 @@ async def search_backtest_v2_symbols(search: str = "", include_non_equities: boo
     return {"items": [dict(row) for row in rows], "ordinary_shares_default": not include_non_equities}
 
 
+@router.get("/backtests/v2/filter-options")
+async def backtest_v2_filter_options(
+    db: Session = Depends(get_db),
+    current_user: FrontendUser = Depends(require_permission("backtest")),
+):
+    rows = db.execute(text("""
+        SELECT DISTINCT COALESCE(combined_data->>'sector',combined_data->>'ml_sector') AS sector
+        FROM market_screener_cache
+        WHERE combined_data->>'security_type'='ordinary_share'
+          AND COALESCE(combined_data->>'sector',combined_data->>'ml_sector','')<>''
+        ORDER BY sector
+    """)).scalars().all()
+    return {
+        "sectors": [str(item) for item in rows if item],
+        "instrument_types": ["ordinary_share", "promoter_share", "mutual_fund", "debenture", "other"],
+        "ordinary_shares_default": True,
+    }
+
+
 @router.post("/backtests/v2/runs/{run_id}/results/query")
-async def query_backtest_v2_results(run_id: str, body: BacktestV2ResultQuery, db: Session = Depends(get_db)):
+def query_backtest_v2_results(run_id: str, body: BacktestV2ResultQuery, db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("backtest"))):
     from utils.backtesting.v2_query import ResultQueryError, query_results
     try:
-        return query_results(db, run_id, body.model_dump(), owner_id="local")
+        return query_results(db, run_id, body.model_dump(), owner_id=str(current_user.id))
     except ResultQueryError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.post("/backtests/v2/runs/{run_id}/results/export.csv")
+async def export_backtest_v2_results_csv(
+    run_id: str, body: BacktestV2ResultQuery, db: Session = Depends(get_db),
+    current_user: FrontendUser = Depends(require_permission("backtest")),
+):
+    from database import SessionLocal
+    from utils.backtesting.v2_query import ResultQueryError, query_results, stream_results_csv
+    if run_id != "all":
+        owned = db.execute(text(
+            "SELECT 1 FROM backtest_runs WHERE run_id=:run_id AND owner_id=:owner_id AND deleted_at IS NULL"
+        ), {"run_id": run_id, "owner_id": str(current_user.id)}).scalar()
+        if not owned:
+            raise HTTPException(status_code=404, detail="Backtest run was not found.")
+    try:
+        # Validate the complete filter/sort plan before response headers are sent;
+        # generator errors after streaming begins cannot be returned as a clean 400.
+        query_results(db, run_id, {**body.model_dump(), "page": 1, "page_size": 1}, owner_id=str(current_user.id))
+        stream = stream_results_csv(SessionLocal, run_id, body.model_dump(), owner_id=str(current_user.id))
+    except ResultQueryError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    filename = f"backtest-{run_id[:12]}-results.csv" if run_id != "all" else "all-backtest-results.csv"
+    return StreamingResponse(stream, media_type="text/csv; charset=utf-8", headers={
+        "Content-Disposition": f'attachment; filename="{filename}"', "Cache-Control": "no-store",
+    })
+
+
 @router.post("/backtests/v2/runs/{run_id}/strong-buys/query")
-async def query_backtest_v2_strong_buys(run_id: str, body: BacktestV2StrongBuyQuery, db: Session = Depends(get_db)):
+def query_backtest_v2_strong_buys(run_id: str, body: BacktestV2StrongBuyQuery, db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("backtest"))):
     from utils.backtesting.v2_query import ResultQueryError, query_strong_buys
     try:
         payload = body.model_dump(mode="json")
-        return query_strong_buys(db, run_id, payload, owner_id="local")
+        return query_strong_buys(db, run_id, payload, owner_id=str(current_user.id))
     except ResultQueryError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/market-recommendations/query")
-async def query_market_recommendations(body: MarketRecommendationQuery, db: Session = Depends(get_db)):
+async def query_market_recommendations(body: MarketRecommendationQuery, db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("recommendations"))):
     from utils.backtesting.recommendations import query_recommendations
     try:
-        return query_recommendations(db, body.model_dump(mode="json"), owner_id="local")
+        return query_recommendations(db, body.model_dump(mode="json"), owner_id=str(current_user.id))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/market-recommendations/sells/query")
+async def query_market_sell_recommendations(body: MarketRecommendationQuery, db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("recommendations"))):
+    from utils.backtesting.recommendations import query_sell_recommendations
+    try:
+        return await query_sell_recommendations(db, body.model_dump(mode="json"), owner_id=str(current_user.id))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/market-recommendations/refresh")
-async def refresh_market_recommendations(db: Session = Depends(get_db)):
+async def refresh_market_recommendations(db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("recommendations"))):
     from utils.backtesting.recommendations import materialize_recommendations
-    payload = materialize_recommendations(db, owner_id="local")
+    payload = materialize_recommendations(db, owner_id=str(current_user.id))
     db.commit()
     return payload
 
@@ -422,6 +485,7 @@ async def refresh_market_recommendations(db: Session = Depends(get_db)):
 @router.get("/backtests/v2/runs/{run_id}/strong-buys/{symbol}")
 async def read_backtest_v2_strong_buy_stock(
     run_id: str, symbol: str, result_id: Optional[int] = Query(None, ge=1), db: Session = Depends(get_db),
+    current_user: FrontendUser = Depends(require_permission("backtest")),
 ):
     from sqlalchemy import text
     from utils.backtesting.v2_query import _LIVE_LTP_SQL, _LIVE_VOLUME_SQL
@@ -435,13 +499,14 @@ async def read_backtest_v2_strong_buy_stock(
            FROM backtest_results r JOIN backtest_runs br ON br.run_id=r.run_id
            JOIN backtest_run_symbols s ON s.run_id=r.run_id AND s.symbol=r.symbol
            LEFT JOIN market_screener_cache c ON c.symbol=r.symbol
-           WHERE (:run_id='all' OR r.run_id=:run_id) AND br.owner_id='local'
+           WHERE (:run_id='all' OR r.run_id=:run_id) AND br.owner_id=:owner_id
              AND br.deleted_at IS NULL AND r.symbol=:symbol
            ORDER BY CASE WHEN r.result_id=:result_id THEN 0 ELSE 1 END,
                     r.current_signal_active DESC,r.reliability_score DESC,r.robust_score DESC""".format(
                         live_ltp=_LIVE_LTP_SQL, live_volume=_LIVE_VOLUME_SQL,
                     )
-    ), {"run_id": run_id, "symbol": symbol.strip().upper(), "result_id": result_id or -1}).mappings().all()
+    ), {"run_id": run_id, "symbol": symbol.strip().upper(), "result_id": result_id or -1,
+        "owner_id": str(current_user.id)}).mappings().all()
     if not rows:
         raise HTTPException(status_code=404, detail="No saved backtest strategy was found for this stock.")
     from utils.backtesting.v2_query import _strategy_planning_range
@@ -460,12 +525,167 @@ async def read_backtest_v2_strong_buy_stock(
 
 
 @router.get("/backtests/v2/results/{result_id}")
-async def read_backtest_v2_result(result_id: int, db: Session = Depends(get_db)):
+async def read_backtest_v2_result(result_id: int, db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("backtest"))):
     from utils.backtesting.v2_query import ResultQueryError, result_detail
     try:
-        return result_detail(db, result_id, owner_id="local")
+        return result_detail(db, result_id, owner_id=str(current_user.id))
     except ResultQueryError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/backtests/v2/results/{result_id}/strategy-query")
+async def read_backtest_v2_result_strategy_query(
+    result_id: int, side: str = Query("buy", pattern="^(buy|sell)$"),
+    db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("backtest")),
+):
+    """Resolve and validate the exact persisted strategy before scheduling it."""
+    from utils.backtesting.presets import build_preset_query, get_backtest_presets
+    from utils.backtesting.v2_query import ResultQueryError, result_detail
+    from utils.strategy_builder.strategy_parser import retarget_strategy_query
+    try:
+        detail = result_detail(db, result_id, owner_id=str(current_user.id))
+    except ResultQueryError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    assumptions = detail.get("assumptions") or {}
+    paired_sell_query = None
+    if side == "sell":
+        persisted_query = assumptions.get("sell_strategy_query")
+        if not persisted_query:
+            raise HTTPException(status_code=409, detail="This backtest result does not contain a tested sell strategy query.")
+    else:
+        persisted_query = assumptions.get("strategy_query") or assumptions.get("strategy_query_template")
+        if not persisted_query:
+            preset = next((item for item in get_backtest_presets() if item["id"] == detail["preset_id"]), None)
+            if not preset:
+                raise HTTPException(status_code=409, detail="The saved strategy version is no longer available.")
+            persisted_query = build_preset_query(preset, detail["symbol"])
+    try:
+        targeted_query = retarget_strategy_query(str(persisted_query), [detail["symbol"]])
+        plan = parse_strategy_query(targeted_query)
+        if side == "buy":
+            from utils.strategy_builder.strategy_models import (
+                BacktestConfig,
+                ExecutionConfig,
+                OrderSizing,
+                PositionExitAction,
+                PositionLifecycleConfig,
+            )
+
+            def comparison(field: str, operator: str, value: float) -> Dict[str, Any]:
+                return {
+                    "type": "comparison", "operator": operator,
+                    "left": {"type": "field", "name": field},
+                    "right": {"type": "literal", "value": value},
+                }
+
+            backtest = plan.backtest
+            if backtest is None:
+                backtest = BacktestConfig(
+                    initial_capital=float(assumptions.get("initial_capital") or 100000),
+                    charge_model=str(assumptions.get("charge_model") or "nepse_equity"),
+                    investor_type=str(assumptions.get("investor_type") or "individual"),
+                    apply_cgt=bool(assumptions.get("apply_cgt", True)),
+                    dp_charge=float(assumptions.get("dp_charge") or 25),
+                    fee_pct=float(assumptions.get("fee_pct") or 0.4),
+                    slippage_pct=float(assumptions.get("slippage_pct") or 0.1),
+                    stop_loss_pct=float(assumptions.get("stop_loss_pct") or 6),
+                    take_profit_pct=float(assumptions.get("take_profit_pct") or 15),
+                    trailing_stop_pct=assumptions.get("trailing_stop_pct"),
+                    min_holding_days=int(assumptions.get("min_holding_days") or 5),
+                    max_holding_days=int(assumptions.get("max_holding_days") or 90),
+                )
+            stop_pct = float(assumptions.get("stop_loss_pct") or (backtest.stop_loss_pct if backtest else 6) or 6)
+            target_pct = float(assumptions.get("take_profit_pct") or (backtest.take_profit_pct if backtest else 15) or 15)
+            trailing_pct = assumptions.get("trailing_stop_pct")
+            if trailing_pct is None and backtest:
+                trailing_pct = backtest.trailing_stop_pct
+            risk_exits = [
+                PositionExitAction(action="sell", order_mode="all_available", when=comparison("profit_percent", "lte", -abs(stop_pct))),
+                PositionExitAction(action="sell", order_mode="all_available", when=comparison("profit_percent", "gte", abs(target_pct))),
+            ]
+            if trailing_pct is not None and float(trailing_pct) > 0:
+                risk_exits.append(PositionExitAction(
+                    action="sell", order_mode="all_available",
+                    when=comparison("drawdown_from_peak_percent", "lte", -abs(float(trailing_pct))),
+                ))
+
+            min_holding_days = max(0, int(
+                assumptions.get("min_holding_days")
+                or (backtest.min_holding_days if backtest else 5)
+                or 5
+            ))
+            max_holding_days = max(min_holding_days, int(
+                assumptions.get("max_holding_days")
+                or (backtest.max_holding_days if backtest else 90)
+                or 90
+            ), 1)
+            runtime_lifecycle = PositionLifecycleConfig(
+                min_holding_days=min_holding_days,
+                max_holding_days=max_holding_days,
+            )
+
+            def single_execution_rule(rule):
+                execution = rule.execution.model_copy(update={
+                    "frequency": "once_per_symbol",
+                    "max_times": None,
+                }) if rule.execution else ExecutionConfig(frequency="once_per_symbol")
+                return rule.model_copy(deep=True, update={"execution": execution})
+
+            plan.rules = [single_execution_rule(rule) for rule in plan.rules]
+
+            stored_sell_query = str(assumptions.get("sell_strategy_query") or "").strip()
+            if stored_sell_query:
+                sell_targeted = retarget_strategy_query(stored_sell_query, [detail["symbol"]])
+                sell_plan = parse_strategy_query(sell_targeted)
+                strategy_exits = [
+                    PositionExitAction(action="sell", order_mode="all_available", when=rule.when or rule.signal)
+                    for rule in sell_plan.rules if rule.when or rule.signal
+                ]
+                sell_plan.position_exit = [*risk_exits, *sell_plan.position_exit, *strategy_exits]
+                sell_plan.rules = [single_execution_rule(rule) for rule in sell_plan.rules]
+            else:
+                impossible = comparison("ltp", "lt", 0)
+                fallback_rules = [rule.model_copy(update={
+                    "name": f"{detail['preset_name']} lifecycle exit",
+                    "when": impossible,
+                    "signal": impossible,
+                    "use_strategy": None,
+                    "strategy_params": {},
+                    "order": OrderSizing(mode="all_available", explicit=True),
+                }) for rule in plan.rules[:1]]
+                sell_plan = plan.model_copy(deep=True, update={
+                    "side": "SELL", "lifecycle": False, "rules": fallback_rules,
+                    "position_exit": risk_exits,
+                })
+            sell_plan.side = "SELL"
+            sell_plan.lifecycle = False
+            sell_plan.backtest = None
+            sell_plan.position_lifecycle = runtime_lifecycle
+            paired_sell_query = format_strategy_query(sell_plan)
+            lifecycle_plan = plan.model_copy(deep=True, update={
+                "side": "BUY", "lifecycle": True,
+                "backtest": None,
+                "position_lifecycle": runtime_lifecycle,
+                "position_exit": list(sell_plan.position_exit),
+            })
+            plan = lifecycle_plan
+        formatted_query = format_strategy_query(plan)
+    except StrategyQueryError as exc:
+        raise HTTPException(status_code=409, detail=f"The saved strategy query is no longer valid: {exc}") from exc
+    return {
+        "valid": True, "side": side, "symbol": detail["symbol"],
+        "preset_id": detail["preset_id"], "preset_name": detail["preset_name"],
+        "query_text": formatted_query, "compiled_plan": plan.model_dump(),
+        "paired_sell_query_text": paired_sell_query,
+        "paired_sell_compiled_plan": parse_strategy_query(paired_sell_query).model_dump() if paired_sell_query else None,
+        "live_charge_policy": {
+            "charge_model": str(assumptions.get("charge_model") or "nepse_equity_v2024_05_14"),
+            "investor_type": str(assumptions.get("investor_type") or "individual"),
+            "apply_cgt": bool(assumptions.get("apply_cgt", True)),
+            "dp_charge": float(assumptions.get("dp_charge") if assumptions.get("dp_charge") is not None else 25),
+        },
+        "source_backtest_result_id": result_id, "source_backtest_run_id": detail["run_id"],
+    }
 
 
 @router.get("/backtests/v2/results/{result_id}/trades")
@@ -473,13 +693,14 @@ async def read_backtest_v2_result_trades(
     result_id: int, page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=100),
     result_filter: str = Query("all", pattern="^(all|wins|losses|stop_loss|take_profit)$"),
     start_date: Optional[date] = None, end_date: Optional[date] = None, db: Session = Depends(get_db),
+    current_user: FrontendUser = Depends(require_permission("backtest")),
 ):
     from utils.backtesting.v2_query import ResultQueryError, result_detail, result_trades
     try:
-        detail = result_detail(db, result_id, owner_id="local")
+        detail = result_detail(db, result_id, owner_id=str(current_user.id))
     except ResultQueryError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    trades = result_trades(db, result_id, owner_id="local")
+    trades = result_trades(db, result_id, owner_id=str(current_user.id))
     equity = float((detail.get("assumptions") or {}).get("initial_capital") or 100000)
     peak = equity
     for trade in trades:
@@ -503,14 +724,14 @@ async def read_backtest_v2_result_trades(
 
 
 @router.get("/backtests/v2/results/{result_id}/chart")
-async def read_backtest_v2_result_chart(result_id: int, db: Session = Depends(get_db)):
+async def read_backtest_v2_result_chart(result_id: int, db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("backtest"))):
     from sqlalchemy import text
     from utils.backtesting.v2_query import ResultQueryError, result_detail, result_trades
     try:
-        detail = result_detail(db, result_id, owner_id="local")
+        detail = result_detail(db, result_id, owner_id=str(current_user.id))
     except ResultQueryError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    trades = result_trades(db, result_id, owner_id="local")
+    trades = result_trades(db, result_id, owner_id=str(current_user.id))
     capital = float((detail.get("assumptions") or {}).get("initial_capital") or 100000)
     equity = capital
     curve = []
@@ -551,24 +772,25 @@ async def read_backtest_v2_result_chart(result_id: int, db: Session = Depends(ge
 
 
 @router.get("/backtests/v2/results/{result_id}/robustness")
-async def read_backtest_v2_result_robustness(result_id: int, db: Session = Depends(get_db)):
+async def read_backtest_v2_result_robustness(result_id: int, db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("backtest"))):
     from utils.backtesting.monte_carlo import block_bootstrap
     from utils.backtesting.v2_query import result_trades
-    trades = result_trades(db, result_id, owner_id="local")
+    trades = result_trades(db, result_id, owner_id=str(current_user.id))
     return block_bootstrap([float(trade["return_pct"]) for trade in trades], samples=1000, block_size=5, seed=result_id)
 
 
 @router.post("/backtests/v2/results/{result_id}/promote-to-paper", status_code=201)
-async def promote_backtest_v2_result_to_paper(result_id: int, body: BacktestV2PromoteRequest, db: Session = Depends(get_db)):
+async def promote_backtest_v2_result_to_paper(result_id: int, body: BacktestV2PromoteRequest, db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("backtest"))):
     from models.strategy_plan import StrategyPlan
     from utils.backtesting.presets import build_preset_query, get_backtest_presets
     from utils.backtesting.v2_query import ResultQueryError, result_detail
     from utils.strategy_builder.strategy_parser import retarget_strategy_query
     try:
-        detail = result_detail(db, result_id, owner_id="local")
+        detail = result_detail(db, result_id, owner_id=str(current_user.id))
     except ResultQueryError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     assumptions = detail.get("assumptions") or {}
+    require_owned_client(db, current_user, body.client_id)
     persisted_query = assumptions.get("strategy_query") or assumptions.get("strategy_query_template")
     if persisted_query:
         try:
@@ -582,9 +804,9 @@ async def promote_backtest_v2_result_to_paper(result_id: int, body: BacktestV2Pr
         query_text = build_preset_query(preset, detail["symbol"])
     created = await create_plan(StrategyPlanCreateRequest(
         name=body.name or f"Paper · {detail['symbol']} · {detail['preset_name']}", client_id=body.client_id,
-        user_id=body.client_id, execution_mode="paper", strategy_type="Custom Query Backtest Paper Candidate",
+        user_id=body.client_id, execution_mode="paper", strategy_type="Custom Query Buy",
         query_text=query_text, form_symbol=detail["symbol"], skip_live_checks=True,
-    ), db)
+    ), db, current_user)
     plan = db.query(StrategyPlan).filter(StrategyPlan.id == created["id"]).one()
     plan.portfolio_limits = {
         **(plan.portfolio_limits or {}), "source_backtest_run_id": detail["run_id"],
@@ -593,25 +815,45 @@ async def promote_backtest_v2_result_to_paper(result_id: int, body: BacktestV2Pr
         "strategy_source_hash": assumptions.get("preset_source_hash"),
     }
     db.commit()
+    sell_created = None
+    sell_query = str(assumptions.get("sell_strategy_query") or "").strip()
+    if sell_query:
+        paired_plan_name = body.name or f"Paper · {detail['symbol']} · {detail['preset_name']}"
+        sell_created = await create_plan(StrategyPlanCreateRequest(
+            name=f"{paired_plan_name} · Exit",
+            client_id=body.client_id, user_id=body.client_id, execution_mode="paper",
+            strategy_type="Custom Query Sell", query_text=sell_query,
+            form_symbol=detail["symbol"], skip_live_checks=True,
+        ), db, current_user)
+        sell_plan = db.query(StrategyPlan).filter(StrategyPlan.id == sell_created["id"]).one()
+        sell_plan.portfolio_limits = {
+            **(sell_plan.portfolio_limits or {}), "source_backtest_run_id": detail["run_id"],
+            "source_backtest_result_id": result_id, "paired_buy_plan_id": created["id"],
+            "engine_version": "nepse-daily-v2", "selected_symbols": [detail["symbol"]],
+            "strategy_source_hash": assumptions.get("preset_source_hash"),
+        }
+        plan.portfolio_limits = {**(plan.portfolio_limits or {}), "paired_sell_plan_id": sell_created["id"]}
+        db.commit()
     return {**created, "execution_mode": "paper", "activation_required": True,
             "query_text": query_text, "same_query_for_execution": True,
+            "paired_sell_plan": sell_created, "sell_query_text": sell_query or None,
             "live_requires_separate_confirmation": True,
-            "message": "The exact backtested query was created as a paper draft. Live execution requires separate account, holdings, balance, and risk confirmation."}
+            "message": "The exact backtested BUY query and, when present, its independently tested SELL query were created as paired paper drafts. Live execution requires separate account, holdings, balance, and risk confirmation."}
 
 
 @router.get("/backtests/v2/runs/{run_id}/portfolios")
-async def read_backtest_v2_portfolios(run_id: str, db: Session = Depends(get_db)):
+async def read_backtest_v2_portfolios(run_id: str, db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("backtest"))):
     from sqlalchemy import text
     rows = db.execute(text(
         """SELECT p.preset_id,p.preset_name,p.summary,p.equity_curve,p.allocation_config
            FROM backtest_portfolio_results p JOIN backtest_runs r ON r.run_id=p.run_id
-           WHERE p.run_id=:run_id AND r.owner_id='local' ORDER BY (p.summary->>'net_return_pct')::double precision DESC"""
-    ), {"run_id": run_id}).mappings().all()
+           WHERE p.run_id=:run_id AND r.owner_id=:owner_id ORDER BY (p.summary->>'net_return_pct')::double precision DESC"""
+    ), {"run_id": run_id, "owner_id": str(current_user.id)}).mappings().all()
     return {"items": [dict(row) for row in rows]}
 
 
 @router.post("/backtests/v2/runs/{run_id}/ai-query")
-async def ask_backtest_v2_ai(run_id: str, body: BacktestV2AiQueryRequest, db: Session = Depends(get_db)):
+async def ask_backtest_v2_ai(run_id: str, body: BacktestV2AiQueryRequest, db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("backtest"))):
     from sqlalchemy import text
     from utils.backtesting.ai_analysis import build_plan_prompt, compile_display_query, parse_plan
     from utils.backtesting.v2_query import ResultQueryError, query_results
@@ -624,16 +866,28 @@ async def ask_backtest_v2_ai(run_id: str, body: BacktestV2AiQueryRequest, db: Se
                           extra_filters=body.manual_filters)
         query = {"filters": {"join": "and", "conditions": plan["filters"]}, "include_non_equities": body.include_non_equities,
                  "sort_by": plan["sort_by"], "sort_direction": plan["sort_direction"], "page": 1, "page_size": 10}
-        results = query_results(db, run_id, query, owner_id="local")
+        if run_id == "all":
+            query["unique_by_symbol"] = True
+        results = query_results(db, run_id, query, owner_id=str(current_user.id))
         audit = {"filters": plan["filters"], "sort_by": plan["sort_by"], "sort_direction": plan["sort_direction"]}
+        audit_run_id = None if run_id == "all" else run_id
         db.execute(text(
             """INSERT INTO backtest_ai_audits(run_id,owner_id,action,provider,prompt_version,user_message,generated_plan,validation_result)
-               VALUES (:run_id,'local','result_query',:provider,'backtest-result-query-v2',:message,CAST(:plan AS JSONB),CAST(:validation AS JSONB))"""
-        ), {"run_id": run_id, "provider": provider, "message": body.message, "plan": json.dumps(audit),
+               VALUES (:run_id,:owner_id,'result_query',:provider,'backtest-result-query-v2',:message,CAST(:plan AS JSONB),CAST(:validation AS JSONB))"""
+        ), {"run_id": audit_run_id, "owner_id": str(current_user.id), "provider": provider, "message": body.message, "plan": json.dumps(audit),
             "validation": json.dumps({"valid": True, "matches": results["total"]})})
         db.commit()
+        items = results["items"]
+        for item in items:
+            reasons = []
+            if float(item.get("robust_score") or 0) >= 60: reasons.append("strong robust score")
+            if float(item.get("oos_return_pct") or 0) > 0: reasons.append("positive locked out-of-sample return")
+            if int(item.get("oos_trades") or 0) >= 10: reasons.append("usable out-of-sample trade count")
+            if float(item.get("max_drawdown_pct") or 100) <= 25: reasons.append("controlled historical drawdown")
+            item["match_reasons"] = reasons or ["matched every validated query condition"]
         return {"generated_query": compile_display_query(plan), "validated_plan": audit, "explanation": plan["explanation"],
-                "items": results["items"], "matches_returned": len(results["items"]), "total_matches": results["total"],
+                "recommendation_summary": f"Found {results['total']:,} exact matching simulations and ranked the best ten by {plan['sort_by'].replace('_', ' ')}. Review sample warnings and current signal state before scheduling.",
+                "items": items, "matches_returned": len(items), "total_matches": results["total"],
                 "suggested_relaxations": [] if results["total"] else ["Reduce the minimum trade count or robust-score threshold.", "Broaden the selected sector or listing-age range."],
                 "note": "Explicit filters were preserved. No generated SQL was executed."}
     except LlmChatError as exc:
@@ -1146,11 +1400,12 @@ async def preview_plan(body: StrategyQueryRequest, db: Session = Depends(get_db)
 
 
 @router.post("/strategy-plans/screener-drop/preview")
-async def preview_screener_drop_batch(body: ScreenerDropBatchRequest, db: Session = Depends(get_db)):
+async def preview_screener_drop_batch(body: ScreenerDropBatchRequest, db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("schedule_orders"))):
     from utils.strategy_builder.schedule_baseline import ScheduleBaselineError
     from utils.strategy_builder.screener_drop_schedule import preview_screener_drop_batch as preview_batch
 
     try:
+        require_owned_client(db, current_user, body.client_id)
         return await preview_batch(
             db,
             client_id=body.client_id,
@@ -1171,11 +1426,12 @@ async def preview_screener_drop_batch(body: ScreenerDropBatchRequest, db: Sessio
 
 
 @router.post("/strategy-plans/screener-drop/commit")
-async def commit_screener_drop_batch(body: ScreenerDropCommitRequest, db: Session = Depends(get_db)):
+async def commit_screener_drop_batch(body: ScreenerDropCommitRequest, db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("schedule_orders"))):
     from utils.strategy_builder.schedule_baseline import ScheduleBaselineError
     from utils.strategy_builder.screener_drop_schedule import commit_screener_drop_batch as commit_batch
 
     try:
+        require_owned_client(db, current_user, body.client_id)
         return await commit_batch(
             db,
             client_id=body.client_id,
@@ -1191,6 +1447,7 @@ async def commit_screener_drop_batch(body: ScreenerDropCommitRequest, db: Sessio
             max_slippage_percent=body.max_allowed_slippage_percent,
             odd_lot_allowed=body.odd_lot_allowed,
             security_details_by_symbol=body.security_details_by_symbol,
+            owner_user_id=current_user.id,
         )
     except ScheduleBaselineError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1200,6 +1457,8 @@ async def commit_screener_drop_batch(body: ScreenerDropCommitRequest, db: Sessio
 async def schedule_custom_query_batch(
     body: CustomQueryBatchScheduleRequest,
     background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: FrontendUser = Depends(require_permission("schedule_orders")),
 ):
     from utils.strategy_builder.custom_query_batch_schedule import (
         CustomQueryBatchError,
@@ -1207,10 +1466,12 @@ async def schedule_custom_query_batch(
     )
 
     try:
+        require_owned_client(db, current_user, body.client_id)
         symbols = [str(item).strip().upper() for item in body.symbols if str(item).strip()]
         if not symbols:
             raise CustomQueryBatchError("At least one symbol is required.")
         payload = body.model_dump()
+        payload["owner_user_id"] = current_user.id
         background_tasks.add_task(run_custom_query_batch_safe, payload)
         return {
             "status": "accepted",
@@ -1225,7 +1486,7 @@ async def schedule_custom_query_batch(
 
 
 @router.post("/strategy-plans/schedule-batch/wait")
-async def schedule_custom_query_batch_wait(body: CustomQueryBatchScheduleRequest):
+async def schedule_custom_query_batch_wait(body: CustomQueryBatchScheduleRequest, db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("schedule_orders"))):
     """Synchronous batch schedule — used by tests and optional blocking clients."""
     from utils.strategy_builder.custom_query_batch_schedule import (
         CustomQueryBatchError,
@@ -1233,21 +1494,23 @@ async def schedule_custom_query_batch_wait(body: CustomQueryBatchScheduleRequest
     )
 
     try:
-        return await run_custom_query_batch(body.model_dump())
+        require_owned_client(db, current_user, body.client_id)
+        return await run_custom_query_batch({**body.model_dump(), "owner_user_id": current_user.id})
     except CustomQueryBatchError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/strategy-plans")
-async def create_plan(body: StrategyPlanCreateRequest, db: Session = Depends(get_db)):
+async def create_plan(body: StrategyPlanCreateRequest, db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("schedule_orders"))):
     from models.strategy_plan import StrategyPlan, StrategyRule, StrategyTarget
 
+    require_owned_client(db, current_user, body.client_id)
     validation_response = await validate_plan(body, db)
     if not validation_response.get("valid"):
         raise HTTPException(status_code=400, detail=validation_response)
     plan_ast = validation_response["compiled_plan"]
     row = StrategyPlan(
-        user_id=body.user_id or body.client_id,
+        user_id=str(current_user.id),
         client_id=body.client_id,
         name=body.name,
         side=plan_ast["side"],

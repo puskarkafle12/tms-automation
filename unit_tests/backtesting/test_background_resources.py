@@ -11,3 +11,10 @@ def test_background_worker_limit_honors_server_cap(monkeypatch):
     monkeypatch.setenv("BACKTEST_MAX_WORKERS", "2")
     monkeypatch.setenv("BACKTEST_RESERVED_CPUS", "1")
     assert 1 <= background_worker_limit(12) <= 2
+
+
+def test_background_scans_use_two_workers_when_capacity_is_available(monkeypatch):
+    monkeypatch.setenv("BACKTEST_MAX_WORKERS", "2")
+    monkeypatch.setenv("BACKTEST_RESERVED_CPUS", "1")
+    monkeypatch.setattr("utils.backtesting.batch.os.cpu_count", lambda: 4)
+    assert background_worker_limit(8) == 2

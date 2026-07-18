@@ -1,6 +1,12 @@
 ?start: document
 
-document: strategy_version side backtest_block? defaults_block? portfolio_limits_block? position_protection_block? position_exit_block? rank_block? rule+
+document: strategy_version side backtest_block? position_lifecycle_block? defaults_block? portfolio_limits_block? position_protection_block? position_exit_block? rank_block? rule+
+
+position_lifecycle_block: "POSITION_LIFECYCLE" "{" position_lifecycle_stmt* "}"
+position_lifecycle_stmt: "MIN_HOLDING_DAYS" NUMBER -> lifecycle_min_holding_days
+    | "MAX_HOLDING_DAYS" NUMBER -> lifecycle_max_holding_days
+    | "SELL_ACTIVATION" "BUY_FILLED_AND_SETTLED" -> lifecycle_sell_activation
+    | "REENTRY" "AFTER_POSITION_CLOSED" -> lifecycle_reentry
 
 backtest_block: "BACKTEST" "{" backtest_stmt* "}"
 backtest_stmt: "INITIAL_CAPITAL" NUMBER -> bt_initial_capital
@@ -46,7 +52,7 @@ trailing_stop_clause: "TRAILING_STOP_PCT" NUMBER
 strategy_version: "STRATEGY_VERSION" NUMBER
 side: "SIDE" SIDE_KW
 
-SIDE_KW: "BUY" | "SELL"
+SIDE_KW: "BUY" | "SELL" | "LIFECYCLE"
 
 defaults_block: "DEFAULTS" block_body
 portfolio_limits_block: "PORTFOLIO_LIMITS" block_body
@@ -114,6 +120,7 @@ exec_clause: "EXECUTE" exec_body
 exec_body: "ONCE" -> exec_once
     | "ONCE" "PER" "SYMBOL" -> exec_once_per_symbol
     | "ONCE" "PER" "MARKET" "DAY" -> exec_once_per_market_day
+    | "ON" "EVERY" "MATCH" -> exec_every_match
     | "MAX" NUMBER "TIMES" per_symbol? -> exec_max_times
 
 per_symbol: "PER" "SYMBOL"
@@ -169,6 +176,7 @@ SLASH: "/"
 ?arith_expr: term ((PLUS | MINUS) term)*
 ?term: factor ((STAR | SLASH) factor)*
 ?factor: NUMBER -> number
+    | MINUS NUMBER -> negative_number
     | STRING -> string
     | "TRUE" -> true_lit
     | "FALSE" -> false_lit

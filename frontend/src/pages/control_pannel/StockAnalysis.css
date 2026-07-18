@@ -193,6 +193,37 @@
   display: flex;
   flex-wrap: wrap;
   gap: 0.55rem;
+  align-items: center;
+}
+
+.stock-analysis-custom-age {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.28rem 0.35rem 0.28rem 0.65rem;
+  border: 1px solid var(--color-border, #d8dee9);
+  border-radius: 0.7rem;
+  background: #fff;
+  color: #475569;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.stock-analysis-custom-age input {
+  width: 5.25rem;
+  padding: 0.38rem 0.45rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 0.45rem;
+}
+
+.stock-analysis-custom-age button {
+  border: 0;
+  border-radius: 0.45rem;
+  background: #0f766e;
+  color: #fff;
+  padding: 0.42rem 0.65rem;
+  font-weight: 750;
+  cursor: pointer;
 }
 
 .stock-screener-universe-chips-compact {
@@ -1417,6 +1448,29 @@
   font-size: 1.2rem;
   line-height: 1;
   cursor: pointer;
+}
+
+.stock-analysis-backtest-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 9.5rem;
+  padding: 0.42rem 0.68rem;
+  border: 1px solid #b9cce0;
+  border-radius: 8px;
+  background: #f5f9fd;
+  color: #145f92;
+  font-weight: 700;
+  line-height: 1.15;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.stock-analysis-backtest-link:hover,
+.stock-analysis-backtest-link:focus-visible {
+  border-color: #247eb6;
+  background: #e9f4fb;
+  color: #0c4d77;
 }
 
 @media (max-width: 900px) {

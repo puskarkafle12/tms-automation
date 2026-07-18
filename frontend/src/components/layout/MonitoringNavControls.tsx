@@ -2,7 +2,7 @@ import React from 'react';
 import './MonitoringNavControls.css';
 import { useMonitoring } from '../../hooks/useMonitoring';
 
-const MonitoringNavControls: React.FC = () => {
+const MonitoringNavControls: React.FC<{ canSchedule?: boolean; canUseGrabber?: boolean }> = ({ canSchedule = true, canUseGrabber = true }) => {
   const {
     state,
     schedule,
@@ -19,7 +19,7 @@ const MonitoringNavControls: React.FC = () => {
         </span>
       )}
 
-      <div className={`monitoring-nav-chip scheduled ${schedule.badgeClass !== 'idle' ? schedule.badgeClass : ''}`}>
+      {canSchedule && <div className={`monitoring-nav-chip scheduled ${schedule.badgeClass !== 'idle' ? schedule.badgeClass : ''}`}>
         <span className="monitoring-nav-chip-icon" aria-hidden="true">📅</span>
         <div className="monitoring-nav-chip-body">
           <span className="monitoring-nav-chip-label">Schedule</span>
@@ -28,11 +28,11 @@ const MonitoringNavControls: React.FC = () => {
             {schedule.navLabel}
           </span>
         </div>
-      </div>
+      </div>}
 
-      <div className="monitoring-nav-divider" aria-hidden="true" />
+      {canSchedule && canUseGrabber && <div className="monitoring-nav-divider" aria-hidden="true" />}
 
-      <div className={`monitoring-nav-chip grabber ${state.grabberActiveCount > 0 ? (grabber.badgeClass === 'active' ? 'active' : 'waiting') : state.grabberTotal > 0 ? 'ready' : ''}`}>
+      {canUseGrabber && <div className={`monitoring-nav-chip grabber ${state.grabberActiveCount > 0 ? (grabber.badgeClass === 'active' ? 'active' : 'waiting') : state.grabberTotal > 0 ? 'ready' : ''}`}>
         <span className="monitoring-nav-chip-icon" aria-hidden="true">⚡</span>
         <div className="monitoring-nav-chip-body">
           <span className="monitoring-nav-chip-label">Grabber</span>
@@ -64,7 +64,7 @@ const MonitoringNavControls: React.FC = () => {
             {state.grabberLoading === 'stop' ? '…' : '⏹'}
           </button>
         </div>
-      </div>
+      </div>}
     </div>
   );
 };

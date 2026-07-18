@@ -8,9 +8,12 @@ import os
 engine = create_engine(
     DATABASE_URL,
     echo=os.getenv("SQL_ECHO", "false").lower() == "true",
-    pool_size=50,
-    max_overflow=20,
-    pool_timeout=60,
+    # Keep the bundled PostgreSQL responsive under browser polling and scans.
+    # A huge pool turns a request burst into dozens of competing PostgreSQL
+    # processes; bounded queues give normal traffic fair access instead.
+    pool_size=max(2, int(os.getenv("DB_POOL_SIZE", "10"))),
+    max_overflow=max(0, int(os.getenv("DB_MAX_OVERFLOW", "10"))),
+    pool_timeout=max(1, int(os.getenv("DB_POOL_TIMEOUT", "10"))),
     pool_pre_ping=True,
 )
 # Set up session factory with tracking setting
@@ -41,6 +44,73 @@ def get_db():
 
 def ensure_performance_indexes():
     statements = [
+        "ALTER TABLE frontend_users ADD COLUMN IF NOT EXISTS role VARCHAR NOT NULL DEFAULT 'user'",
+        "ALTER TABLE frontend_users ADD COLUMN IF NOT EXISTS permissions JSON NOT NULL DEFAULT '[]'::json",
+        "ALTER TABLE frontend_users ADD COLUMN IF NOT EXISTS managed_by_user_id INTEGER",
+        "ALTER TABLE frontend_users ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE",
+        "ALTER TABLE frontend_users ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 1",
+        "ALTER TABLE frontend_users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW()",
+        "ALTER TABLE frontend_users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW()",
+        "ALTER TABLE frontend_users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMP",
+        "CREATE INDEX IF NOT EXISTS ix_frontend_users_manager ON frontend_users (managed_by_user_id, role, is_active)",
+        """CREATE TABLE IF NOT EXISTS signup_captcha_challenges (
+            challenge_id VARCHAR(100) PRIMARY KEY, answer_digest VARCHAR(64) NOT NULL,
+            nonce VARCHAR(100) NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+            max_attempts INTEGER NOT NULL DEFAULT 3, expires_at TIMESTAMPTZ NOT NULL,
+            consumed_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )""",
+        "CREATE INDEX IF NOT EXISTS ix_signup_captcha_expiry ON signup_captcha_challenges (expires_at)",
+        "ALTER TABLE signup_captcha_challenges ADD COLUMN IF NOT EXISTS request_ip VARCHAR(100)",
+        "CREATE INDEX IF NOT EXISTS ix_signup_captcha_ip_created ON signup_captcha_challenges (request_ip, created_at DESC)",
+        """CREATE TABLE IF NOT EXISTS frontend_user_audit_log (
+            id BIGSERIAL PRIMARY KEY,
+            actor_user_id INTEGER REFERENCES frontend_users(id) ON DELETE SET NULL,
+            target_user_id INTEGER REFERENCES frontend_users(id) ON DELETE SET NULL,
+            action VARCHAR(80) NOT NULL, before_data JSONB, after_data JSONB,
+            ip_address VARCHAR(100), user_agent VARCHAR(500),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )""",
+        "CREATE INDEX IF NOT EXISTS ix_frontend_user_audit_target ON frontend_user_audit_log (target_user_id, created_at DESC)",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS owner_user_id INTEGER",
+        "ALTER TABLE scheduled_orders ADD COLUMN IF NOT EXISTS owner_user_id INTEGER",
+        "ALTER TABLE order_logs ADD COLUMN IF NOT EXISTS owner_user_id INTEGER",
+        "ALTER TABLE order_status_logs ADD COLUMN IF NOT EXISTS owner_user_id INTEGER",
+        "CREATE INDEX IF NOT EXISTS ix_users_owner ON users (owner_user_id, client_id)",
+        "CREATE INDEX IF NOT EXISTS ix_scheduled_orders_owner ON scheduled_orders (owner_user_id, created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS ix_order_logs_owner ON order_logs (owner_user_id, timestamp DESC)",
+        "CREATE INDEX IF NOT EXISTS ix_order_status_logs_owner ON order_status_logs (owner_user_id, timestamp DESC)",
+        """CREATE OR REPLACE FUNCTION assign_trading_owner_from_client() RETURNS TRIGGER AS $$
+           BEGIN
+             IF NEW.owner_user_id IS NULL THEN
+               SELECT owner_user_id INTO NEW.owner_user_id FROM users WHERE client_id=NEW.client_id;
+             END IF;
+             RETURN NEW;
+           END; $$ LANGUAGE plpgsql""",
+        "DROP TRIGGER IF EXISTS trg_scheduled_orders_owner ON scheduled_orders",
+        """CREATE TRIGGER trg_scheduled_orders_owner BEFORE INSERT OR UPDATE OF client_id
+           ON scheduled_orders FOR EACH ROW EXECUTE FUNCTION assign_trading_owner_from_client()""",
+        "DROP TRIGGER IF EXISTS trg_order_logs_owner ON order_logs",
+        """CREATE TRIGGER trg_order_logs_owner BEFORE INSERT OR UPDATE OF client_id
+           ON order_logs FOR EACH ROW EXECUTE FUNCTION assign_trading_owner_from_client()""",
+        "DROP TRIGGER IF EXISTS trg_order_status_logs_owner ON order_status_logs",
+        """CREATE TRIGGER trg_order_status_logs_owner BEFORE INSERT OR UPDATE OF client_id
+           ON order_status_logs FOR EACH ROW EXECUTE FUNCTION assign_trading_owner_from_client()""",
+        """UPDATE frontend_users SET role='superuser',permissions=CAST(:all_permissions AS JSON),is_active=TRUE
+           WHERE username=:seed_username""",
+        """UPDATE frontend_users SET permissions=CAST(:default_permissions AS JSON)
+           WHERE role='user' AND (permissions IS NULL OR permissions::jsonb='[]'::jsonb)""",
+        """UPDATE frontend_users SET managed_by_user_id=(
+               SELECT id FROM frontend_users WHERE username=:admin_username AND role='admin'
+           ) WHERE role='user' AND managed_by_user_id IS NULL AND username<>:seed_username
+             AND EXISTS (SELECT 1 FROM frontend_users WHERE username=:admin_username AND role='admin')""",
+        """UPDATE users SET owner_user_id=(SELECT id FROM frontend_users WHERE username=:seed_username)
+           WHERE owner_user_id IS NULL""",
+        """UPDATE scheduled_orders o SET owner_user_id=u.owner_user_id FROM users u
+           WHERE o.owner_user_id IS NULL AND u.client_id=o.client_id""",
+        """UPDATE order_logs o SET owner_user_id=u.owner_user_id FROM users u
+           WHERE o.owner_user_id IS NULL AND u.client_id=o.client_id""",
+        """UPDATE order_status_logs o SET owner_user_id=u.owner_user_id FROM users u
+           WHERE o.owner_user_id IS NULL AND u.client_id=o.client_id""",
         "CREATE INDEX IF NOT EXISTS ix_logged_in_users_status_last_updated ON logged_in_users (status, last_updated)",
         "ALTER TABLE logged_in_users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMP",
         "ALTER TABLE logged_in_users ADD COLUMN IF NOT EXISTS collateral JSON",
@@ -411,6 +481,8 @@ def ensure_performance_indexes():
         "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS last_refresh_at TIMESTAMPTZ",
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_backtest_runs_owner_scan_key ON backtest_runs (owner_id, scan_key) WHERE deleted_at IS NULL AND scan_key IS NOT NULL",
         "CREATE INDEX IF NOT EXISTS ix_backtest_runs_queue ON backtest_runs (status, created_at) WHERE deleted_at IS NULL",
+        """UPDATE backtest_runs SET owner_id=(SELECT id::text FROM frontend_users WHERE username=:seed_username)
+           WHERE owner_id='local' AND EXISTS (SELECT 1 FROM frontend_users WHERE username=:seed_username)""",
         """CREATE TABLE IF NOT EXISTS backtest_run_symbols (
             run_id VARCHAR(64) NOT NULL REFERENCES backtest_runs(run_id) ON DELETE CASCADE,
             symbol VARCHAR(30) NOT NULL,
@@ -503,10 +575,123 @@ def ensure_performance_indexes():
         "ALTER TABLE backtest_results ADD COLUMN IF NOT EXISTS reliability_score DOUBLE PRECISION NOT NULL DEFAULT 0",
         "ALTER TABLE backtest_results ADD COLUMN IF NOT EXISTS strong_buy_qualified BOOLEAN NOT NULL DEFAULT FALSE",
         "ALTER TABLE backtest_results ADD COLUMN IF NOT EXISTS current_evidence JSONB",
+        "ALTER TABLE backtest_results ADD COLUMN IF NOT EXISTS configuration_hash VARCHAR(32)",
+        "ALTER TABLE backtest_results ADD COLUMN IF NOT EXISTS configuration_identity_version INTEGER NOT NULL DEFAULT 1",
+        """UPDATE backtest_results AS result SET configuration_hash=md5(concat_ws('|','simulation-identity-v2',result.symbol,result.preset_id,result.evaluation_split,
+             COALESCE(run.engine_version,''),COALESCE(run.indicator_engine_version,''),
+             COALESCE(assumptions->>'preset_source_hash',''),COALESCE(assumptions->>'preset_version',''),
+             COALESCE(assumptions->>'strategy_query',''),COALESCE(assumptions->>'sell_strategy_query',''),
+             COALESCE(assumptions->>'strategy_query_template',''),COALESCE(assumptions->>'strategy_mode',''),
+             COALESCE(assumptions->>'entry',''),COALESCE(assumptions->>'intraday_priority',''),
+             COALESCE(assumptions->>'exit_rule_id',''),COALESCE(assumptions->>'exit_condition',''),
+             COALESCE(assumptions->>'min_holding_days',''),COALESCE(assumptions->>'max_holding_days',''),
+             COALESCE(assumptions->>'stop_loss_pct',''),COALESCE(assumptions->>'take_profit_pct',''),
+             COALESCE(assumptions->>'trailing_stop_pct',''),COALESCE(assumptions->>'charge_model',''),
+             COALESCE(assumptions->>'investor_type',''),COALESCE(assumptions->>'capital_gains_tax_enabled',''),
+             COALESCE(assumptions->>'fee_pct_each_side',''),COALESCE(assumptions->>'fixed_fee_each_order',''),
+             COALESCE(assumptions->>'dp_charge_each_sell',''),COALESCE(assumptions->>'slippage_pct_each_side',''),
+             COALESCE(assumptions->>'position_size_pct',''),COALESCE(assumptions->>'max_volume_participation_pct',''),
+             COALESCE(assumptions->>'initial_capital',''),COALESCE(assumptions->>'brokerage_schedule',''),
+             COALESCE(assumptions->>'risk_free_rate_pct',''),
+             COALESCE(assumptions->'period'->>'start',''),COALESCE(assumptions->>'data_source','')))
+             ,configuration_identity_version=2
+           FROM backtest_runs AS run
+           WHERE result.run_id=run.run_id AND result.configuration_identity_version<2""",
+        "ALTER TABLE backtest_results ALTER COLUMN configuration_identity_version SET DEFAULT 2",
         "CREATE INDEX IF NOT EXISTS ix_backtest_results_rank ON backtest_results (run_id, evaluation_split, robust_score DESC, total_trades DESC)",
         "CREATE INDEX IF NOT EXISTS ix_backtest_results_current_buy ON backtest_results (run_id, strong_buy_qualified, reliability_score DESC) WHERE current_signal_active = TRUE",
         "CREATE INDEX IF NOT EXISTS ix_backtest_results_symbol ON backtest_results (run_id, symbol, robust_score DESC)",
         "CREATE INDEX IF NOT EXISTS ix_backtest_results_preset ON backtest_results (run_id, preset_id, robust_score DESC)",
+        "CREATE INDEX IF NOT EXISTS ix_backtest_results_configuration ON backtest_results (configuration_hash)",
+        "CREATE INDEX IF NOT EXISTS ix_backtest_runs_owner_active ON backtest_runs (owner_id, run_id) WHERE deleted_at IS NULL",
+        """CREATE TABLE IF NOT EXISTS backtest_canonical_results (
+            owner_id VARCHAR(100) NOT NULL,
+            configuration_hash VARCHAR(32) NOT NULL,
+            result_id BIGINT NOT NULL UNIQUE REFERENCES backtest_results(result_id) ON DELETE CASCADE,
+            run_id VARCHAR(64),
+            symbol VARCHAR(32),
+            security_type VARCHAR(40),
+            data_session DATE,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (owner_id, configuration_hash)
+        )""",
+        "ALTER TABLE backtest_canonical_results ADD COLUMN IF NOT EXISTS run_id VARCHAR(64)",
+        "ALTER TABLE backtest_canonical_results ADD COLUMN IF NOT EXISTS symbol VARCHAR(32)",
+        "ALTER TABLE backtest_canonical_results ADD COLUMN IF NOT EXISTS security_type VARCHAR(40)",
+        """UPDATE backtest_canonical_results canonical
+           SET run_id=r.run_id,symbol=r.symbol,security_type=s.security_type
+           FROM backtest_results r
+           JOIN backtest_run_symbols s ON s.run_id=r.run_id AND s.symbol=r.symbol
+           WHERE canonical.result_id=r.result_id
+             AND (canonical.run_id IS NULL OR canonical.symbol IS NULL OR canonical.security_type IS NULL)""",
+        "CREATE INDEX IF NOT EXISTS ix_backtest_canonical_owner_result ON backtest_canonical_results (owner_id, result_id)",
+        "CREATE INDEX IF NOT EXISTS ix_backtest_canonical_owner_security ON backtest_canonical_results (owner_id, security_type)",
+        "CREATE INDEX IF NOT EXISTS ix_backtest_canonical_owner_run_security ON backtest_canonical_results (owner_id, run_id, security_type)",
+        """DELETE FROM backtest_canonical_results canonical
+           USING backtest_results r
+           WHERE canonical.result_id=r.result_id
+             AND canonical.configuration_hash<>r.configuration_hash""",
+        """DELETE FROM backtest_canonical_results canonical
+           WHERE NOT EXISTS (
+               SELECT 1
+               FROM backtest_results r
+               JOIN backtest_runs br ON br.run_id=r.run_id
+               WHERE r.result_id=canonical.result_id AND br.deleted_at IS NULL
+           )""",
+        """INSERT INTO backtest_canonical_results
+               (owner_id,configuration_hash,result_id,run_id,symbol,security_type,data_session,updated_at)
+           SELECT DISTINCT ON (br.owner_id,r.configuration_hash)
+                  br.owner_id,r.configuration_hash,r.result_id,r.run_id,r.symbol,s.security_type,
+                  r.current_signal_date,NOW()
+           FROM backtest_results r
+           JOIN backtest_runs br ON br.run_id=r.run_id
+           JOIN backtest_run_symbols s ON s.run_id=r.run_id AND s.symbol=r.symbol
+           WHERE br.deleted_at IS NULL AND r.configuration_hash IS NOT NULL
+           ORDER BY br.owner_id,r.configuration_hash,r.current_signal_date DESC NULLS LAST,r.result_id DESC
+           ON CONFLICT (owner_id,configuration_hash) DO UPDATE SET
+             result_id=EXCLUDED.result_id,run_id=EXCLUDED.run_id,symbol=EXCLUDED.symbol,
+             security_type=EXCLUDED.security_type,data_session=EXCLUDED.data_session,updated_at=NOW()
+           WHERE EXCLUDED.data_session IS NOT NULL
+             AND (backtest_canonical_results.data_session IS NULL
+                  OR EXCLUDED.data_session>backtest_canonical_results.data_session
+                  OR (EXCLUDED.data_session=backtest_canonical_results.data_session
+                      AND EXCLUDED.result_id>backtest_canonical_results.result_id))""",
+        "CREATE INDEX IF NOT EXISTS ix_backtest_results_win_rate_sort ON backtest_results (win_rate_pct DESC NULLS LAST,total_trades DESC,result_id)",
+        "CREATE INDEX IF NOT EXISTS ix_backtest_results_win_rate_asc_sort ON backtest_results (win_rate_pct ASC NULLS LAST,total_trades DESC,result_id)",
+        "CREATE INDEX IF NOT EXISTS ix_backtest_results_win_rate_desc_v2 ON backtest_results (win_rate_pct DESC NULLS LAST,total_trades DESC NULLS LAST,result_id ASC)",
+        "CREATE INDEX IF NOT EXISTS ix_backtest_results_win_rate_asc_v2 ON backtest_results (win_rate_pct ASC NULLS LAST,total_trades DESC NULLS LAST,result_id ASC)",
+        "CREATE INDEX IF NOT EXISTS ix_backtest_results_robust_sort ON backtest_results (robust_score DESC NULLS LAST,total_trades DESC,result_id)",
+        "CREATE INDEX IF NOT EXISTS ix_backtest_results_robust_desc_v2 ON backtest_results (robust_score DESC NULLS LAST,total_trades DESC NULLS LAST,result_id ASC)",
+        "CREATE INDEX IF NOT EXISTS ix_backtest_results_robust_asc_v2 ON backtest_results (robust_score ASC NULLS LAST,total_trades DESC NULLS LAST,result_id ASC)",
+        "CREATE INDEX IF NOT EXISTS ix_backtest_results_return_sort ON backtest_results (net_return_pct DESC NULLS LAST,total_trades DESC,result_id)",
+        "CREATE INDEX IF NOT EXISTS ix_backtest_results_return_desc_v2 ON backtest_results (net_return_pct DESC NULLS LAST,total_trades DESC NULLS LAST,result_id ASC)",
+        "CREATE INDEX IF NOT EXISTS ix_backtest_results_return_asc_v2 ON backtest_results (net_return_pct ASC NULLS LAST,total_trades DESC NULLS LAST,result_id ASC)",
+        "CREATE INDEX IF NOT EXISTS ix_backtest_results_drawdown_sort ON backtest_results (max_drawdown_pct ASC NULLS LAST,total_trades DESC,result_id)",
+        "CREATE INDEX IF NOT EXISTS ix_backtest_results_drawdown_asc_v2 ON backtest_results (max_drawdown_pct ASC NULLS LAST,total_trades DESC NULLS LAST,result_id ASC)",
+        "CREATE INDEX IF NOT EXISTS ix_backtest_results_drawdown_desc_v2 ON backtest_results (max_drawdown_pct DESC NULLS LAST,total_trades DESC NULLS LAST,result_id ASC)",
+        """CREATE TABLE IF NOT EXISTS backtest_result_artifacts (
+            artifact_key VARCHAR(64) PRIMARY KEY,
+            symbol VARCHAR(30) NOT NULL,
+            strategy_id VARCHAR(120) NOT NULL,
+            strategy_hash VARCHAR(64) NOT NULL,
+            settings_hash VARCHAR(64) NOT NULL,
+            data_source VARCHAR(40) NOT NULL,
+            start_date DATE NOT NULL,
+            data_session DATE NOT NULL,
+            data_hash VARCHAR(64) NOT NULL,
+            engine_version VARCHAR(40) NOT NULL,
+            indicator_engine_version VARCHAR(40) NOT NULL,
+            result_payload JSONB NOT NULL,
+            market_profile JSONB NOT NULL DEFAULT '{}'::jsonb,
+            technical_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
+            use_count BIGINT NOT NULL DEFAULT 0,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            last_used_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )""",
+        "CREATE INDEX IF NOT EXISTS ix_backtest_artifacts_symbol_strategy ON backtest_result_artifacts (symbol, strategy_hash, settings_hash, data_session DESC)",
+        "CREATE INDEX IF NOT EXISTS ix_backtest_artifacts_strategy_session ON backtest_result_artifacts (strategy_id, data_session DESC)",
+        "CREATE INDEX IF NOT EXISTS ix_backtest_artifacts_last_used ON backtest_result_artifacts (last_used_at DESC)",
         """UPDATE backtest_run_symbols s SET last_tested_session=(
                SELECT MAX(r.current_signal_date) FROM backtest_results r
                WHERE r.run_id=s.run_id AND r.symbol=s.symbol
@@ -595,6 +780,8 @@ def ensure_performance_indexes():
             PRIMARY KEY (owner_id, symbol)
         )""",
         "CREATE INDEX IF NOT EXISTS ix_market_backtest_recommendations_rank ON market_backtest_recommendations (owner_id, signal_date DESC, recommendation_score DESC)",
+        """UPDATE market_backtest_recommendations SET owner_id=(SELECT id::text FROM frontend_users WHERE username=:seed_username)
+           WHERE owner_id='local' AND EXISTS (SELECT 1 FROM frontend_users WHERE username=:seed_username)""",
         """CREATE TABLE IF NOT EXISTS backtest_ai_audits (
             audit_id BIGSERIAL PRIMARY KEY,
             run_id VARCHAR(64) REFERENCES backtest_runs(run_id) ON DELETE SET NULL,
@@ -608,6 +795,8 @@ def ensure_performance_indexes():
             validation_result JSONB,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )""",
+        """UPDATE backtest_ai_audits SET owner_id=(SELECT id::text FROM frontend_users WHERE username=:seed_username)
+           WHERE owner_id='local' AND EXISTS (SELECT 1 FROM frontend_users WHERE username=:seed_username)""",
         """CREATE TABLE IF NOT EXISTS market_screen_presets (
             id SERIAL PRIMARY KEY,
             preset_code VARCHAR(100) NOT NULL UNIQUE,
@@ -624,6 +813,12 @@ def ensure_performance_indexes():
         )""",
         "CREATE INDEX IF NOT EXISTS ix_market_screen_presets_category ON market_screen_presets (category, display_order)",
     ]
+    parameters = {
+        "seed_username": os.getenv("FRONTEND_SEED_USER", "admin"),
+        "admin_username": os.getenv("FRONTEND_ADMIN_USER", "manager"),
+        "all_permissions": '["order_logs","schedule_orders","portfolio","market_analysis","stock_grabber","strategy_details","backtest","recommendations","stock_table","edis","settings","tms_login","admin_users"]',
+        "default_permissions": '["order_logs","schedule_orders","portfolio","market_analysis","strategy_details","backtest","recommendations","stock_table","edis","settings","tms_login"]',
+    }
     with engine.begin() as connection:
         for statement in statements:
-            connection.execute(text(statement))
+            connection.execute(text(statement), parameters)

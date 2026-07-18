@@ -256,7 +256,10 @@ async def _schedule_one_symbol(
             await _enforce_rule_based_schedule_preflight(order_data, db)
         await _apply_schedule_baseline_if_requested(order_data, db)
 
-        user = db.query(User).filter(User.client_id == order_data.client_id).first()
+        user_query = db.query(User).filter(User.client_id == order_data.client_id)
+        if payload.get("owner_user_id") is not None:
+            user_query = user_query.filter(User.owner_user_id == payload.get("owner_user_id"))
+        user = user_query.first()
         if not user:
             return {"symbol": symbol, "error": "User not found"}
 
@@ -270,6 +273,7 @@ async def _schedule_one_symbol(
                 await _validate_sell_lot_against_holdings(order_data, tms_user_instance)
 
         order = ScheduledOrder(order_data)
+        order.owner_user_id = payload.get("owner_user_id")
         db.add(order)
         db.flush()
         await _persist_order_field_references(db, order, order_data)

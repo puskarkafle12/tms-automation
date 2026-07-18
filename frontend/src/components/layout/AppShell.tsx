@@ -16,6 +16,8 @@ interface AppShellProps {
   navItems: NavItem[];
   activeId: string;
   onNavigate: (id: string) => void;
+  canSchedule?: boolean;
+  canUseGrabber?: boolean;
   children: React.ReactNode;
 }
 
@@ -35,9 +37,11 @@ const AppShell: React.FC<AppShellProps> = ({
   navItems,
   activeId,
   onNavigate,
+  canSchedule = true,
+  canUseGrabber = true,
   children,
 }) => {
-  useMonitoringSync();
+  useMonitoringSync(canSchedule || canUseGrabber);
   const [sidebarOpen, setSidebarOpen] = useState(readSidebarOpen);
 
   useEffect(() => {
@@ -130,7 +134,7 @@ const AppShell: React.FC<AppShellProps> = ({
             </div>
           </div>
           <div className="app-topbar-right">
-            <MonitoringNavControls />
+            <MonitoringNavControls canSchedule={canSchedule} canUseGrabber={canUseGrabber} />
             <MarketStatusBar />
           </div>
         </header>

@@ -117,7 +117,7 @@ BACKTEST {
 RULE "RSI Recovery" FOR SYMBOL "NABIL" {
   WHEN technical_rsi_14 BETWEEN 30 AND 45 AND change_percent > 0
   ORDER PERCENT_OF_AVAILABLE_CASH 100
-  EXECUTE MAX 100 TIMES PER SYMBOL
+  EXECUTE ON EVERY MATCH
 }`;
 
 const money = (value: number) => `NPR ${value.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;

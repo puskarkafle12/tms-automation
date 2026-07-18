@@ -13,6 +13,7 @@ export const DASHBOARD_PATHS = {
   stockAnalysis: `${DASHBOARD_BASE}/stock-analysis`,
   stockScreener: `${DASHBOARD_BASE}/stock-analysis`,
   settings: `${DASHBOARD_BASE}/settings`,
+  adminUsers: `${DASHBOARD_BASE}/admin-users`,
 } as const;
 
 export const TAB_TO_PATH: Record<string, string> = {
@@ -28,6 +29,7 @@ export const TAB_TO_PATH: Record<string, string> = {
   StockAnalysis: DASHBOARD_PATHS.stockAnalysis,
   StockScreener: DASHBOARD_PATHS.stockAnalysis,
   Settings: DASHBOARD_PATHS.settings,
+  AdminUsers: DASHBOARD_PATHS.adminUsers,
 };
 
 const normalizePath = (pathname: string) => pathname.replace(/\/$/, '').toLowerCase();
@@ -51,6 +53,7 @@ export const pathToTab = (pathname: string): string => {
     [DASHBOARD_PATHS.stockScreener]: 'StockAnalysis',
     [`${DASHBOARD_BASE}/stock-screener`]: 'StockAnalysis',
     [DASHBOARD_PATHS.settings]: 'Settings',
+    [DASHBOARD_PATHS.adminUsers]: 'AdminUsers',
     [`${DASHBOARD_BASE}/order-status-logs`]: 'OrderStatus',
     [`${DASHBOARD_BASE}/add-order`]: 'ScheduleOrder',
     [`${DASHBOARD_BASE}/chase-stock`]: 'OrderStatus',

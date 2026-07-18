@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Column, Float, Integer, String, JSON, DateTime, func, Index
+from sqlalchemy import Boolean, Column, Float, Integer, String, JSON, DateTime, func, Index, ForeignKey
 from database import Base
 from schemas.schemas import OrderCreateRequest
 
@@ -6,6 +6,7 @@ class ScheduledOrder(Base):
     __tablename__ = 'scheduled_orders'
 
     order_id = Column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id = Column(Integer, ForeignKey("frontend_users.id"), nullable=True, index=True)
     client_id = Column(String)
     security_details = Column(JSON)
     script_name = Column(String)

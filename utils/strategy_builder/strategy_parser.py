@@ -27,6 +27,7 @@ from utils.strategy_builder.strategy_models import (
     ExecutionConfig,
     OrderSizing,
     PortfolioLimits,
+    PositionLifecycleConfig,
     PositionProtectionConfig,
     PositionExitAction,
     RankConfig,
@@ -94,6 +95,9 @@ class StrategyTransformer(Transformer):
     def number(self, value):
         return {"type": "literal", "value": value}
 
+    def negative_number(self, _minus, value):
+        return {"type": "literal", "value": -float(value) if isinstance(value, float) else -int(value)}
+
     def string(self, value):
         return {"type": "literal", "value": value}
 
@@ -124,6 +128,10 @@ class StrategyTransformer(Transformer):
         return result
 
     def factor(self, value):
+        return value
+
+    def paren_expr(self, value):
+        """Parentheses group an expression without leaking a Lark Tree node."""
         return value
 
     def not_expr(self, *args):
@@ -398,6 +406,9 @@ class StrategyTransformer(Transformer):
     def exec_once_per_market_day(self):
         return ExecutionConfig(frequency="once_per_market_day")
 
+    def exec_every_match(self):
+        return ExecutionConfig(frequency="every_match", max_times=None)
+
     def exec_max_times(self, count, per_symbol=None):
         frequency = "max_times_per_symbol" if per_symbol is not None else "max_times"
         return ExecutionConfig(frequency=frequency, max_times=int(count))
@@ -462,6 +473,31 @@ class StrategyTransformer(Transformer):
             if isinstance(stmt, dict):
                 payload.update(stmt)
         return BacktestConfig(**payload)
+
+    def lifecycle_min_holding_days(self, value):
+        return {"min_holding_days": int(value)}
+
+    def lifecycle_max_holding_days(self, value):
+        return {"max_holding_days": int(value)}
+
+    def lifecycle_sell_activation(self):
+        return {"sell_activation": "buy_filled_and_settled"}
+
+    def lifecycle_reentry(self):
+        return {"reentry": "after_position_closed"}
+
+    def position_lifecycle_stmt(self, stmt):
+        return stmt
+
+    def position_lifecycle_block(self, *stmts):
+        payload: Dict[str, Any] = {}
+        for stmt in stmts:
+            if isinstance(stmt, dict):
+                payload.update(stmt)
+        config = PositionLifecycleConfig(**payload)
+        if config.max_holding_days < config.min_holding_days:
+            raise StrategyQueryError("POSITION_LIFECYCLE MAX_HOLDING_DAYS must be >= MIN_HOLDING_DAYS.")
+        return config
 
     def portfolio_limits_block(self, body):
         limits: Dict[str, Any] = {}
@@ -565,9 +601,11 @@ class StrategyTransformer(Transformer):
         )
 
     def document(self, version, side, *rest):
+        lifecycle = str(side).upper() == "LIFECYCLE"
         defaults = ExecutionConfig()
         portfolio_limits = None
         backtest = None
+        position_lifecycle = None
         position_protection = None
         position_exit: List[PositionExitAction] = []
         rank = None
@@ -579,6 +617,8 @@ class StrategyTransformer(Transformer):
                 defaults = item
             elif isinstance(item, BacktestConfig):
                 backtest = item
+            elif isinstance(item, PositionLifecycleConfig):
+                position_lifecycle = item
             elif isinstance(item, PortfolioLimits):
                 portfolio_limits = item
             elif isinstance(item, PositionProtectionConfig):
@@ -591,9 +631,11 @@ class StrategyTransformer(Transformer):
                 rules.append(item)
         return StrategyPlanAST(
             version=int(version),
-            side=str(side),
+            side="BUY" if lifecycle else str(side),
+            lifecycle=lifecycle,
             defaults=defaults,
             backtest=backtest,
+            position_lifecycle=position_lifecycle,
             portfolio_limits=portfolio_limits,
             position_protection=position_protection,
             position_exit=position_exit,
@@ -782,7 +824,7 @@ def _format_strategy_param_line(name: str, value: Any) -> str:
 
 
 def format_strategy_query(plan: StrategyPlanAST) -> str:
-    lines = [f"STRATEGY_VERSION {plan.version}", f"SIDE {plan.side}", ""]
+    lines = [f"STRATEGY_VERSION {plan.version}", f"SIDE {'LIFECYCLE' if plan.lifecycle else plan.side}", ""]
     if plan.backtest:
         config = plan.backtest
         lines.extend([
@@ -807,6 +849,17 @@ def format_strategy_query(plan: StrategyPlanAST) -> str:
             "}",
             "",
         ])
+    if plan.position_lifecycle:
+        lifecycle = plan.position_lifecycle
+        lines.extend([
+            "POSITION_LIFECYCLE {",
+            f"    MIN_HOLDING_DAYS {lifecycle.min_holding_days}",
+            f"    MAX_HOLDING_DAYS {lifecycle.max_holding_days}",
+            "    SELL_ACTIVATION BUY_FILLED_AND_SETTLED",
+            "    REENTRY AFTER_POSITION_CLOSED",
+            "}",
+            "",
+        ])
     if plan.rank and plan.rank.fields:
         rank_parts = []
         for item in plan.rank.fields:
@@ -825,6 +878,22 @@ def format_strategy_query(plan: StrategyPlanAST) -> str:
             lines.append(f"    FIXED_STOP_LOSS_PRICE {plan.position_protection.fixed_stop_loss_price}")
         if plan.position_protection.trailing_stop_pct is not None:
             lines.append(f"    TRAILING_STOP_PCT {plan.position_protection.trailing_stop_pct}")
+        lines.append("}")
+        lines.append("")
+    if plan.position_exit:
+        lines.append("POSITION_EXIT {")
+        for action in plan.position_exit:
+            when = _expr_to_text(action.when) if action.when else "FALSE"
+            if action.action == "sell":
+                mode = str(action.order_mode or "all_available").upper()
+                value = f" {action.order_value:g}" if action.order_value is not None else ""
+                lines.append(f"    SELL {mode}{value} WHEN {when}")
+            elif action.action == "move_stop_to_entry":
+                lines.append(f"    MOVE_STOP_TO_ENTRY WHEN {when}")
+            elif action.action == "lock_profit_pct" and action.lock_profit_pct is not None:
+                lines.append(f"    LOCK_PROFIT_PCT {action.lock_profit_pct:g} WHEN {when}")
+            elif action.action == "trail_remaining":
+                lines.append(f"    TRAIL_REMAINING WHEN {when}")
         lines.append("}")
         lines.append("")
     for rule in plan.rules:
@@ -861,6 +930,8 @@ def format_strategy_query(plan: StrategyPlanAST) -> str:
         if rule.execution.frequency in {"max_times", "max_times_per_symbol"}:
             suffix = " PER SYMBOL" if rule.execution.frequency == "max_times_per_symbol" else ""
             lines.append(f"    EXECUTE MAX {int(rule.execution.max_times or 1)} TIMES{suffix}")
+        elif rule.execution.frequency == "every_match":
+            lines.append("    EXECUTE ON EVERY MATCH")
         elif rule.execution.frequency == "once_per_market_day":
             lines.append("    EXECUTE ONCE PER MARKET DAY")
         else:

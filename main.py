@@ -1,6 +1,7 @@
 import logging
 import json
 import os
+import re
 import uuid
 import aiohttp
 import time as monotonic_time
@@ -87,6 +88,8 @@ from utils.market_data.ai_quick_screens import (
     match_quick_ai_screen,
 )
 from utils.market_data.repository import get_cache_status
+from utils.auth_api import router as auth_router
+from utils.auth import authenticate_request, authenticate_token, create_access_token, owned_client_ids, require_owned_client, require_permission, resolved_permissions
 from utils.market_data.symbols import resolve_analysis_symbols, screener_universe_label
 from utils.strategy_builder.api import router as strategy_builder_router
 from utils.strategy_builder.reference_display import (
@@ -97,8 +100,49 @@ from utils.live_quote_socket import is_live_socket_snapshot, live_quote_manager
 
 app = FastAPI(debug=True)
 app.include_router(strategy_builder_router)
+app.include_router(auth_router)
 SECRET_KEY = "your_secret_key_here"
 FRONTEND_BUILD_DIR = Path(__file__).resolve().parent / "frontend" / "build"
+
+API_PERMISSION_PREFIXES = (
+    (("/stock_grabber", "/stop_stock_grabber", "/get_stock_grabber", "/active_stock_grabbers", "/stop_all_stock_grabbers"), "stock_grabber"),
+    (("/tms-accounts", "/logged_in_clients", "/login/", "/get_order_book", "/get_daily_order_book", "/get_script_details"), "tms_login"),
+    (("/scheduled_orders", "/add_order", "/cancel_order", "/check_orders", "/stop_check_orders", "/monitoring-status"), "schedule_orders"),
+    (("/order_status_logs", "/order_history", "/logs/"), "order_logs"),
+    (("/dp_holdings", "/tradebook_history"), "portfolio"),
+    (("/market_analysis", "/stock_screener"), "market_analysis"),
+    (("/api/backtest", "/api/backtests", "/api/technical-indicators"), "backtest"),
+    (("/api/market-recommendations",), "recommendations"),
+    (("/api/strategy-plans",), "schedule_orders"),
+    (("/api/strategy-builder",), "strategy_details"),
+    (("/api/portal-settings", "/update_monitor_interval", "/get_monitor_interval"), "settings"),
+)
+
+
+@app.middleware("http")
+async def enforce_feature_access(request: Request, call_next):
+    path = request.url.path
+    required = next((permission for prefixes, permission in API_PERMISSION_PREFIXES if path.startswith(prefixes)), None)
+    if not required:
+        return await call_next(request)
+    try:
+        def authorize() -> int:
+            db = SessionLocal()
+            try:
+                user = authenticate_request(request, db)
+                if required not in resolved_permissions(user):
+                    raise HTTPException(status_code=403, detail=f"Access to {required.replace('_', ' ')} is not allowed.")
+                return int(user.id)
+            finally:
+                db.close()
+
+        # Authentication performs a database lookup. Never run it on the
+        # asyncio event loop: a busy backtest/database pool must not freeze
+        # health checks, navigation, monitoring or other lightweight APIs.
+        request.state.frontend_user_id = await asyncio.to_thread(authorize)
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    return await call_next(request)
 
 # Store running tasks and updates
 running_tasks: Dict[str, asyncio.Task] = {}
@@ -107,6 +151,7 @@ scheduled_supervisor_task: Optional[asyncio.Task] = None
 market_data_scheduler_task: Optional[asyncio.Task] = None
 running_grabbers: Dict[str, TmsUser] = {}
 stock_grabber_updates: Dict[str, List[Dict]] = {}
+stock_grabber_owners: Dict[str, int] = {}
 stock_grabber_fetch_tests: Dict[str, Dict] = {}
 ai_screen_jobs: Dict[str, Dict] = {}
 ai_screen_tasks: Dict[str, asyncio.Task] = {}
@@ -872,12 +917,11 @@ async def _run_stock_grabber_task(
 
 
 @app.post("/stock_grabber/")
-async def stock_grabber(request: StockGrabberRequest, db: Session = Depends(get_db)):
+async def stock_grabber(request: StockGrabberRequest, db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("stock_grabber"))):
     session_id = str(uuid.uuid4())
     stock_grabber_updates[session_id] = []
-    user = db.query(User).filter(User.client_id == request.client_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+    user = require_owned_client(db, current_user, request.client_id)
+    stock_grabber_owners[session_id] = current_user.id
 
     symbol = (request.stock_symbol or "").strip().upper()
     for tms_user in running_grabbers.values():
@@ -923,6 +967,7 @@ async def stock_grabber(request: StockGrabberRequest, db: Session = Depends(get_
     def _on_grabber_done(done_task: asyncio.Task) -> None:
         running_tasks.pop(session_id, None)
         running_grabbers.pop(session_id, None)
+        stock_grabber_owners.pop(session_id, None)
         tms_config.grabber_started_at.pop(session_id, None)
         tms_config.grabber_phase.pop(session_id, None)
         tms_config.grabber_status_message.pop(session_id, None)
@@ -991,10 +1036,9 @@ async def _run_stock_grabber_fetch_speed_test(
 async def test_stock_grabber_fetch_speed(
     request: StockGrabberFetchTestRequest,
     db: Session = Depends(get_db),
+    current_user: FrontendUser = Depends(require_permission("stock_grabber")),
 ):
-    user = db.query(User).filter(User.client_id == request.client_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+    user = require_owned_client(db, current_user, request.client_id)
 
     symbol = (request.stock_symbol or "").strip().upper()
     if not symbol:
@@ -1030,6 +1074,7 @@ async def test_stock_grabber_fetch_speed(
         "last_error": None,
         "running": True,
         "done": False,
+        "owner_user_id": current_user.id,
     }
     asyncio.create_task(_run_stock_grabber_fetch_speed_test(
         test_id,
@@ -1044,19 +1089,22 @@ async def test_stock_grabber_fetch_speed(
 
 
 @app.get("/stock_grabber/test_fetch_speed/{test_id}")
-async def get_stock_grabber_fetch_speed_status(test_id: str):
+async def get_stock_grabber_fetch_speed_status(test_id: str, current_user: FrontendUser = Depends(require_permission("stock_grabber"))):
     state = stock_grabber_fetch_tests.get(test_id)
-    if not state:
+    if not state or state.get("owner_user_id") != current_user.id:
         raise HTTPException(status_code=404, detail="Fetch speed test not found")
     return state
 
 @app.post("/stop_stock_grabber/{session_id}")
-async def stop_stock_grabber(session_id: str):
+async def stop_stock_grabber(session_id: str, current_user: FrontendUser = Depends(require_permission("stock_grabber"))):
+    if stock_grabber_owners.get(session_id) != current_user.id:
+        raise HTTPException(status_code=404, detail="Stock grabber not found")
     task = running_tasks.get(session_id)
     if task:
         task.cancel()
         del running_tasks[session_id]
         running_grabbers.pop(session_id, None)
+        stock_grabber_owners.pop(session_id, None)
         tms_config.grabber_started_at.pop(session_id, None)
         tms_config.grabber_phase.pop(session_id, None)
         tms_config.grabber_status_message.pop(session_id, None)
@@ -1066,7 +1114,9 @@ async def stop_stock_grabber(session_id: str):
 
 
 @app.get("/get_stock_grabber_updates/{session_id}")
-async def get_stock_grabber_updates(session_id: str):
+async def get_stock_grabber_updates(session_id: str, current_user: FrontendUser = Depends(require_permission("stock_grabber"))):
+    if stock_grabber_owners.get(session_id) != current_user.id:
+        raise HTTPException(status_code=404, detail="Stock grabber not found")
     updates = list(stock_grabber_updates.get(session_id, []))
     stock_grabber_updates[session_id] = []
 
@@ -1101,9 +1151,11 @@ async def get_stock_grabber_updates(session_id: str):
 
 @app.get("/active_stock_grabbers/")
 @app.get("/active_stock_grabbers")
-async def active_stock_grabbers():
+async def active_stock_grabbers(current_user: FrontendUser = Depends(require_permission("stock_grabber"))):
     grabbers = []
     for session_id, tms_user in running_grabbers.items():
+        if stock_grabber_owners.get(session_id) != current_user.id:
+            continue
         task = running_tasks.get(session_id)
         started_at = tms_config.grabber_started_at.get(session_id)
         live_snapshot = live_quote_manager.get_snapshot(tms_user.stock_symbol or "")
@@ -1559,10 +1611,15 @@ def _queue_ui_auto_logins(db: Session, users: List[User]) -> None:
         _queue_tms_account_login(user, db, automatic=True)
 
 
-async def _reconcile_logged_in_sessions(db: Session) -> None:
+async def _reconcile_logged_in_sessions(db: Session, client_ids: Optional[List[str]] = None) -> None:
+    if client_ids is not None and not client_ids:
+        return
+    session_query = db.query(LoggedInUsers)
+    if client_ids is not None:
+        session_query = session_query.filter(LoggedInUsers.client_id.in_(client_ids))
     interrupted_sessions = [
         session
-        for session in db.query(LoggedInUsers).all()
+        for session in session_query.all()
         if session.status == "logging_in"
     ]
     for session in interrupted_sessions:
@@ -1573,7 +1630,10 @@ async def _reconcile_logged_in_sessions(db: Session) -> None:
     if interrupted_sessions:
         db.commit()
 
-    sessions = db.query(LoggedInUsers).filter(LoggedInUsers.status == "logged_in").all()
+    sessions_query = db.query(LoggedInUsers).filter(LoggedInUsers.status == "logged_in")
+    if client_ids is not None:
+        sessions_query = sessions_query.filter(LoggedInUsers.client_id.in_(client_ids))
+    sessions = sessions_query.all()
     if not sessions:
         return
 
@@ -1996,13 +2056,13 @@ async def _get_script_high(tms_user: TmsUser, script_name: str) -> Optional[floa
 
 
 @app.get("/tms-accounts/")
-async def list_tms_accounts(db: Session = Depends(get_db)):
-    await _reconcile_logged_in_sessions(db)
-    users = db.query(User).order_by(User.client_id).all()
+async def list_tms_accounts(db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("tms_login"))):
+    users = db.query(User).filter(User.owner_user_id == current_user.id).order_by(User.client_id).all()
+    await _reconcile_logged_in_sessions(db, [user.client_id for user in users])
     _queue_ui_auto_logins(db, users)
     sessions = {
         session.client_id: session
-        for session in db.query(LoggedInUsers).all()
+        for session in db.query(LoggedInUsers).filter(LoggedInUsers.client_id.in_([user.client_id for user in users])).all()
     }
     account_ids = {user.client_id for user in users}
     user_by_client_id = {user.client_id: user for user in users}
@@ -2038,8 +2098,8 @@ async def list_tms_accounts(db: Session = Depends(get_db)):
 
 
 @app.post("/tms-accounts/refresh-collateral")
-async def refresh_tms_account_collateral(db: Session = Depends(get_db)):
-    users = db.query(User).order_by(User.client_id).all()
+async def refresh_tms_account_collateral(db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("tms_login"))):
+    users = db.query(User).filter(User.owner_user_id == current_user.id).order_by(User.client_id).all()
     results = await asyncio.gather(*[
         _refresh_tms_account_collateral(user)
         for user in users
@@ -2053,7 +2113,7 @@ async def refresh_tms_account_collateral(db: Session = Depends(get_db)):
 
 
 @app.post("/tms-accounts/")
-async def create_tms_account(payload: TmsAccountCreate, db: Session = Depends(get_db)):
+async def create_tms_account(payload: TmsAccountCreate, db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("tms_login"))):
     client_id = payload.client_id.strip()
     if not client_id:
         raise HTTPException(status_code=400, detail="client_id is required")
@@ -2062,6 +2122,7 @@ async def create_tms_account(payload: TmsAccountCreate, db: Session = Depends(ge
 
     encoded_password = TmsUser.to_tms_password_payload(payload.password)
     user = User(
+        owner_user_id=current_user.id,
         client_id=client_id,
         broker_no=payload.broker_no.strip(),
         password=encoded_password,
@@ -2078,10 +2139,9 @@ async def update_tms_account(
     client_id: str,
     payload: TmsAccountUpdate,
     db: Session = Depends(get_db),
+    current_user: FrontendUser = Depends(require_permission("tms_login")),
 ):
-    user = db.query(User).filter(User.client_id == client_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="TMS account not found")
+    user = require_owned_client(db, current_user, client_id)
 
     if payload.broker_no is not None:
         user.broker_no = payload.broker_no.strip()
@@ -2098,10 +2158,8 @@ async def update_tms_account(
 
 
 @app.delete("/tms-accounts/{client_id}")
-async def delete_tms_account(client_id: str, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.client_id == client_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="TMS account not found")
+async def delete_tms_account(client_id: str, db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("tms_login"))):
+    user = require_owned_client(db, current_user, client_id)
 
     login_task = tms_login_tasks.pop(client_id, None)
     if login_task and not login_task.done():
@@ -2116,10 +2174,8 @@ async def delete_tms_account(client_id: str, db: Session = Depends(get_db)):
 
 
 @app.post("/tms-accounts/{client_id}/login")
-async def login_tms_account(client_id: str, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.client_id == client_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="TMS account not found")
+async def login_tms_account(client_id: str, db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("tms_login"))):
+    user = require_owned_client(db, current_user, client_id)
 
     if not _queue_tms_account_login(user, db, automatic=False, force=True):
         return JSONResponse(
@@ -2142,7 +2198,8 @@ async def login_tms_account(client_id: str, db: Session = Depends(get_db)):
 
 
 @app.post("/login/")
-async def login(login_request: LoginRequest, db: Session = Depends(get_db)):
+async def login(login_request: LoginRequest, db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("tms_login"))):
+    require_owned_client(db, current_user, login_request.username)
     enc_password = TmsUser.to_tms_password_payload(login_request.password)
     tms_instance = TmsUser(
         username=login_request.username,
@@ -2178,12 +2235,10 @@ async def login(login_request: LoginRequest, db: Session = Depends(get_db)):
 
 
 @app.delete("/cancel_order/")
-async def cancel_order(client_id: str, exchange_order_id: str, db: Session = Depends(get_db)):
+async def cancel_order(client_id: str, exchange_order_id: str, db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("schedule_orders"))):
     try:
         # Retrieve user from the database based on client_id
-        user = db.query(User).filter(User.client_id == client_id).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
+        user = require_owned_client(db, current_user, client_id)
 
         tms_user_instance = await get_cached_tms_user(user)
 
@@ -2380,8 +2435,225 @@ async def _enforce_rule_based_schedule_preflight(order_data: OrderCreateRequest,
         )
 
 
+def _materialize_lifecycle_schedule(order_data: OrderCreateRequest) -> None:
+    """Make a SIDE LIFECYCLE query self-contained for live scheduling.
+
+    A lifecycle schedules its BUY and dormant SELL monitor together.  Existing
+    holdings are intentionally not required here: the SELL monitor verifies the
+    linked BUY fill, minimum holding sessions, and sellable DP balance later.
+    """
+    from utils.strategy_builder.strategy_models import (
+        ComparisonNode,
+        ExecutionConfig,
+        FieldNode,
+        LiteralNode,
+        OrderSizing,
+        PositionLifecycleConfig,
+        StrategyPlanAST,
+    )
+    from utils.strategy_builder.strategy_parser import format_strategy_query
+
+    config = dict(order_data.strategy_config or {})
+    compiled = config.get("compiled_plan")
+    if not compiled:
+        return
+    try:
+        plan = StrategyPlanAST.model_validate(compiled)
+    except Exception:
+        return
+    if not plan.lifecycle:
+        return
+    if str(order_data.order_type or "").lower() != "buy":
+        raise HTTPException(status_code=400, detail="SIDE LIFECYCLE must be scheduled as a BUY entry.")
+    if not plan.position_exit:
+        raise HTTPException(
+            status_code=400,
+            detail="SIDE LIFECYCLE requires POSITION_EXIT rules for the linked SELL monitor.",
+        )
+
+    # A lifecycle recommendation represents one linear position cycle.  Even
+    # legacy/user-authored MAX-N entry clauses are canonicalized to one entry;
+    # re-entry is only possible after the linked SELL has closed the position.
+    plan.rules = [rule.model_copy(deep=True, update={
+        "execution": rule.execution.model_copy(update={
+            "frequency": "once_per_symbol",
+            "max_times": None,
+        }),
+    }) for rule in plan.rules]
+    lifecycle_config = plan.position_lifecycle
+    backtest = plan.backtest
+    min_days = max(0, int(
+        lifecycle_config.min_holding_days if lifecycle_config is not None
+        else backtest.min_holding_days if backtest is not None
+        else config.get("min_holding_days", 5)
+    ))
+    max_days = max(min_days, int(
+        lifecycle_config.max_holding_days if lifecycle_config is not None
+        else backtest.max_holding_days if backtest is not None
+        else config.get("max_holding_days", 90)
+    ), 1)
+
+    # BACKTEST assumptions do not participate in broker execution. Convert
+    # legacy lifecycle queries to the small runtime-only contract before they
+    # are persisted or displayed in Order Logs.
+    runtime_lifecycle = lifecycle_config or PositionLifecycleConfig(
+        min_holding_days=min_days,
+        max_holding_days=max_days,
+    )
+    plan.backtest = None
+    plan.position_lifecycle = runtime_lifecycle
+    config["compiled_plan"] = plan.model_dump()
+    config["query_text"] = format_strategy_query(plan)
+
+    paired_compiled = config.get("paired_sell_compiled_plan")
+    paired_query = str(config.get("paired_sell_query_text") or "").strip()
+    if paired_compiled:
+        paired_plan = StrategyPlanAST.model_validate(paired_compiled)
+        paired_plan.backtest = None
+        paired_plan.position_lifecycle = runtime_lifecycle
+        paired_plan.rules = [rule.model_copy(deep=True, update={
+            "execution": rule.execution.model_copy(update={
+                "frequency": "once_per_symbol",
+                "max_times": None,
+            }),
+        }) for rule in paired_plan.rules]
+        paired_compiled = paired_plan.model_dump()
+        paired_query = format_strategy_query(paired_plan)
+    if not paired_compiled:
+        symbol = str(order_data.script_name or order_data.symbol or "").strip().upper()
+        source_rule = next(
+            (rule for rule in plan.rules if symbol in {item.upper() for item in rule.symbols}),
+            plan.rules[0] if plan.rules else None,
+        )
+        if source_rule is None:
+            raise HTTPException(status_code=400, detail="SIDE LIFECYCLE requires at least one BUY rule.")
+        never_match = ComparisonNode(
+            left=FieldNode(name="ltp"),
+            operator="lt",
+            right=LiteralNode(value=0),
+        )
+        dormant_rule = source_rule.model_copy(deep=True, update={
+            "name": f"{source_rule.name} linked exit",
+            "symbols": [symbol],
+            "target_type": "single",
+            "when": never_match,
+            "signal": never_match,
+            "eligibility": None,
+            "require": None,
+            "use_strategy": None,
+            "strategy_params": {},
+            "order": OrderSizing(mode="all_available", explicit=True),
+            "execution": ExecutionConfig(frequency="once_per_symbol"),
+        })
+        sell_plan = plan.model_copy(deep=True, update={
+            "side": "SELL",
+            "lifecycle": False,
+            "rules": [dormant_rule],
+        })
+        paired_compiled = sell_plan.model_dump()
+        paired_query = format_strategy_query(sell_plan)
+
+    config.update({
+        "linear_position_cycle": True,
+        "lifecycle_role": "buy",
+        "min_holding_days": min_days,
+        "max_holding_days": max_days,
+        "paired_sell_query_text": paired_query,
+        "paired_sell_compiled_plan": paired_compiled,
+        "activation_requires_filled_buy": True,
+        "activation_requires_holding": True,
+        "reentry_requires_closed_position": True,
+        "live_charge_policy": dict(config.get("live_charge_policy") or {
+            "charge_model": "nepse_equity_v2024_05_14",
+            "investor_type": "individual",
+            "apply_cgt": True,
+            "dp_charge": 25,
+        }),
+    })
+    order_data.strategy_config = config
+
+
+async def _create_paired_lifecycle_sell(
+    db: Session, buy_order: ScheduledOrder, order_data: OrderCreateRequest, *, owner_user_id: int,
+) -> Optional[ScheduledOrder]:
+    """Create the dormant SELL monitor carried by a validated lifecycle BUY query."""
+    config = dict(order_data.strategy_config or {})
+    sell_query = str(config.get("paired_sell_query_text") or "").strip()
+    sell_compiled = config.get("paired_sell_compiled_plan")
+    if order_data.order_type.lower() != "buy" or not config.get("linear_position_cycle") or not sell_query or not sell_compiled:
+        return None
+    from utils.strategy_builder.strategy_models import StrategyPlanAST
+
+    sell_plan = StrategyPlanAST.model_validate(sell_compiled)
+    if sell_plan.side != "SELL":
+        raise HTTPException(status_code=400, detail="Lifecycle exit plan must compile as SIDE SELL.")
+    min_days = max(0, int(config.get("min_holding_days", 5) or 0))
+    max_days = max(min_days, int(config.get("max_holding_days", 90) or 90))
+    sell_config = {
+        "query_text": sell_query,
+        "compiled_plan": sell_plan.model_dump(),
+        "execution_mode": "live",
+        "linear_position_cycle": True,
+        "lifecycle_role": "sell",
+        "paired_buy_order_id": buy_order.order_id,
+        "activation_requires_filled_buy": True,
+        "activation_requires_holding": True,
+        "lifecycle_active": False,
+        "min_holding_days": min_days,
+        "max_holding_days": max_days,
+        "source_backtest_result_id": config.get("source_backtest_result_id"),
+        "source_backtest_run_id": config.get("source_backtest_run_id"),
+        "live_charge_policy": dict(config.get("live_charge_policy") or {
+            "charge_model": "nepse_equity_v2024_05_14",
+            "investor_type": "individual",
+            "apply_cgt": True,
+            "dp_charge": 25,
+        }),
+    }
+    sell_request = OrderCreateRequest(
+        client_id=order_data.client_id,
+        security_details=order_data.security_details or {},
+        script_name=order_data.script_name,
+        symbol=order_data.symbol or order_data.script_name,
+        company_name=order_data.company_name,
+        price=0,
+        qty=max(1, int(order_data.qty or 1)),
+        remaining_quantity=max(1, int(order_data.qty or 1)),
+        order_type="sell",
+        side="sell",
+        status="Waiting activation",
+        strategy_type="Custom Query Sell",
+        max_allowed_slippage_percent=order_data.max_allowed_slippage_percent,
+        odd_lot_allowed=order_data.odd_lot_allowed,
+        strategy_config=sell_config,
+    )
+    duplicate = _find_duplicate_scheduled_order(db, sell_request)
+    if duplicate:
+        paired_sell = duplicate
+    else:
+        paired_sell = ScheduledOrder(sell_request)
+        paired_sell.owner_user_id = owner_user_id
+        db.add(paired_sell)
+        db.flush()
+        await _persist_order_field_references(db, paired_sell, sell_request)
+        paired_sell.strategy_config = dict(paired_sell.strategy_config or {})
+        paired_sell.strategy_config["schedule_dedup_key"] = _scheduled_order_dedup_key(sell_request)
+    buy_config = dict(buy_order.strategy_config or {})
+    buy_config.update({
+        "linear_position_cycle": True,
+        "lifecycle_role": "buy",
+        "paired_sell_order_id": paired_sell.order_id,
+        "min_holding_days": min_days,
+        "max_holding_days": max_days,
+    })
+    buy_order.strategy_config = buy_config
+    return paired_sell
+
+
 @app.post("/add_order/")
-async def add_order(order_data: OrderCreateRequest, db: Session = Depends(get_db)):
+async def add_order(order_data: OrderCreateRequest, db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("schedule_orders"))):
+    require_owned_client(db, current_user, order_data.client_id)
+    _materialize_lifecycle_schedule(order_data)
     incoming_security_details = order_data.security_details or {}
     order_data.security_details = {
         **incoming_security_details,
@@ -2430,6 +2702,7 @@ async def add_order(order_data: OrderCreateRequest, db: Session = Depends(get_db
             await _validate_sell_lot_against_holdings(order_data, tms_user_instance)
 
     order = ScheduledOrder(order_data)
+    order.owner_user_id = current_user.id
     db.add(order)
     db.flush()
     await _persist_order_field_references(db, order, order_data)
@@ -2438,18 +2711,27 @@ async def add_order(order_data: OrderCreateRequest, db: Session = Depends(get_db
     from utils.strategy_builder.schedule_preview_capture import apply_schedule_preview_snapshot
 
     await apply_schedule_preview_snapshot(order, order_data, db)
+    paired_sell = await _create_paired_lifecycle_sell(
+        db, order, order_data, owner_user_id=current_user.id,
+    )
     db.commit()
-    return {"message": "Order added successfully"}
+    return {
+        "message": "Lifecycle BUY and linked SELL monitor scheduled" if paired_sell else "Order added successfully",
+        "order_id": order.order_id,
+        "paired_sell_order_id": paired_sell.order_id if paired_sell else None,
+    }
 
 
 @app.get("/logged_in_clients/")
-async def get_logged_in_clients(db: Session = Depends(get_db)):
+async def get_logged_in_clients(db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("tms_login"))):
     try:
-        await _reconcile_logged_in_sessions(db)
-        _queue_ui_auto_logins(db, db.query(User).order_by(User.client_id).all())
+        owned_accounts = db.query(User).filter(User.owner_user_id == current_user.id).order_by(User.client_id).all()
+        await _reconcile_logged_in_sessions(db, [account.client_id for account in owned_accounts])
+        _queue_ui_auto_logins(db, owned_accounts)
 
+        owned_ids = [account.client_id for account in owned_accounts]
         logged_in_users = db.query(LoggedInUsers).filter(
-            LoggedInUsers.status == "logged_in").all()
+            LoggedInUsers.status == "logged_in", LoggedInUsers.client_id.in_(owned_ids)).all()
         client_ids = [user.client_id for user in logged_in_users]
         sessions = [
             {
@@ -2472,14 +2754,16 @@ async def delete_scheduled_order(
     order_id: int = Query(None),
     client_id: str = Query(None),
     script_name: str = Query(None),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: FrontendUser = Depends(require_permission("schedule_orders")),
 ):
     if order_id:
         orders_to_delete = db.query(ScheduledOrder).filter(
-            ScheduledOrder.order_id == order_id).all()
+            ScheduledOrder.order_id == order_id, ScheduledOrder.owner_user_id == current_user.id).all()
     elif client_id and script_name:
         orders_to_delete = db.query(ScheduledOrder).filter(
             ScheduledOrder.client_id == client_id,
+            ScheduledOrder.owner_user_id == current_user.id,
             ScheduledOrder.script_name == script_name
         ).all()
     else:
@@ -2500,14 +2784,14 @@ async def delete_scheduled_order(
 
 
 @app.delete("/scheduled_orders/batch/{batch_id}")
-async def delete_scheduled_order_batch(batch_id: str, db: Session = Depends(get_db)):
+async def delete_scheduled_order_batch(batch_id: str, db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("schedule_orders"))):
     normalized_batch_id = str(batch_id or "").strip()
     if not normalized_batch_id:
         raise HTTPException(status_code=400, detail="batch_id is required.")
 
     orders_to_delete = [
         order
-        for order in db.query(ScheduledOrder).all()
+        for order in db.query(ScheduledOrder).filter(ScheduledOrder.owner_user_id == current_user.id).all()
         if str((order.strategy_config or {}).get("schedule_batch_id") or "").strip() == normalized_batch_id
     ]
     if not orders_to_delete:
@@ -2531,14 +2815,14 @@ async def delete_scheduled_order_batch(batch_id: str, db: Session = Depends(get_
 
 
 @app.get("/scheduled_orders/")
-async def list_scheduled_orders(db: Session = Depends(get_db)):
-    orders = db.query(ScheduledOrder).order_by(ScheduledOrder.order_id).all()
+async def list_scheduled_orders(db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("schedule_orders"))):
+    orders = db.query(ScheduledOrder).filter(ScheduledOrder.owner_user_id == current_user.id).order_by(ScheduledOrder.order_id).all()
     return {"scheduled_orders": [_serialize_scheduled_order(order) for order in orders]}
 
 
 @app.get("/scheduled_orders/{order_id}")
-async def get_scheduled_order(order_id: int, db: Session = Depends(get_db)):
-    order = db.query(ScheduledOrder).filter(ScheduledOrder.order_id == order_id).first()
+async def get_scheduled_order(order_id: int, db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("schedule_orders"))):
+    order = db.query(ScheduledOrder).filter(ScheduledOrder.order_id == order_id, ScheduledOrder.owner_user_id == current_user.id).first()
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
     return {"order": _serialize_scheduled_order(order)}
@@ -2591,12 +2875,15 @@ async def _get_schedule_validation_tms_user(user: User) -> TmsUser:
 
 
 @app.post("/scheduled_orders/")
-async def create_scheduled_order(order_data: OrderCreateRequest, db: Session = Depends(get_db)):
+async def create_scheduled_order(order_data: OrderCreateRequest, db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("schedule_orders"))):
+    require_owned_client(db, current_user, order_data.client_id)
+    _materialize_lifecycle_schedule(order_data)
     await _validate_scheduled_order_payload(order_data, db)
     duplicate_result = await _reject_duplicate_scheduled_order(db, order_data)
     if duplicate_result:
         return duplicate_result
     order = ScheduledOrder(order_data)
+    order.owner_user_id = current_user.id
     db.add(order)
     db.flush()
     await _persist_order_field_references(db, order, order_data)
@@ -2605,9 +2892,14 @@ async def create_scheduled_order(order_data: OrderCreateRequest, db: Session = D
     from utils.strategy_builder.schedule_preview_capture import apply_schedule_preview_snapshot
 
     await apply_schedule_preview_snapshot(order, order_data, db)
+    paired_sell = await _create_paired_lifecycle_sell(
+        db, order, order_data, owner_user_id=current_user.id,
+    )
     db.commit()
     db.refresh(order)
-    return {"message": "Scheduled order created", "order": _serialize_scheduled_order(order)}
+    return {"message": "Scheduled lifecycle created" if paired_sell else "Scheduled order created",
+            "order": _serialize_scheduled_order(order),
+            "paired_sell_order": _serialize_scheduled_order(paired_sell) if paired_sell else None}
 
 
 @app.post("/scheduled_orders/{order_id}/references/refresh")
@@ -2615,8 +2907,9 @@ async def refresh_scheduled_order_references(
     order_id: int,
     request: Request,
     db: Session = Depends(get_db),
+    current_user: FrontendUser = Depends(require_permission("schedule_orders")),
 ):
-    order = db.query(ScheduledOrder).filter(ScheduledOrder.order_id == order_id).first()
+    order = db.query(ScheduledOrder).filter(ScheduledOrder.order_id == order_id, ScheduledOrder.owner_user_id == current_user.id).first()
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
     payload = await request.json()
@@ -2642,8 +2935,8 @@ async def refresh_scheduled_order_references(
 
 
 @app.put("/scheduled_orders/{order_id}")
-async def update_scheduled_order(order_id: int, order_data: OrderCreateRequest, db: Session = Depends(get_db)):
-    order = db.query(ScheduledOrder).filter(ScheduledOrder.order_id == order_id).first()
+async def update_scheduled_order(order_id: int, order_data: OrderCreateRequest, db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("schedule_orders"))):
+    order = db.query(ScheduledOrder).filter(ScheduledOrder.order_id == order_id, ScheduledOrder.owner_user_id == current_user.id).first()
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
     if not _is_scheduled_order_editable(order):
@@ -2674,9 +2967,9 @@ async def update_scheduled_order(order_id: int, order_data: OrderCreateRequest, 
 
 
 @app.delete("/scheduled_orders/")
-async def clear_scheduled_orders(db: Session = Depends(get_db)):
-    orders_to_delete = db.query(ScheduledOrder).all()
-    deleted_count = db.query(ScheduledOrder).delete(synchronize_session=False)
+async def clear_scheduled_orders(db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("schedule_orders"))):
+    orders_to_delete = db.query(ScheduledOrder).filter(ScheduledOrder.owner_user_id == current_user.id).all()
+    deleted_count = db.query(ScheduledOrder).filter(ScheduledOrder.owner_user_id == current_user.id).delete(synchronize_session=False)
     for client_id, script_name in {(order.client_id, order.script_name) for order in orders_to_delete}:
         delete_order_log_scan_count(db, client_id, script_name)
     db.commit()
@@ -2816,9 +3109,10 @@ async def get_order_status_logs(
     client_id: str = Query(None),
     script_name: str = Query(None),
     ordered_date: str = Query(None),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: FrontendUser = Depends(require_permission("order_logs")),
 ):
-    query = db.query(OrderStatusLog)
+    query = db.query(OrderStatusLog).filter(OrderStatusLog.owner_user_id == current_user.id)
 
     # Apply filters based on provided parameters
     if client_id:
@@ -2847,7 +3141,7 @@ async def get_order_status_logs(
 
     order_logs = query.all()
 
-    scheduled_query = db.query(ScheduledOrder)
+    scheduled_query = db.query(ScheduledOrder).filter(ScheduledOrder.owner_user_id == current_user.id)
     if client_id:
         scheduled_query = scheduled_query.filter(ScheduledOrder.client_id == client_id)
     if script_name:
@@ -2861,7 +3155,7 @@ async def get_order_status_logs(
             for order in scheduled_orders
         ]
         if pair_filters:
-            for scan_log in db.query(OrderLog).filter(or_(*pair_filters)).all():
+            for scan_log in db.query(OrderLog).filter(OrderLog.owner_user_id == current_user.id, or_(*pair_filters)).all():
                 scan_logs[(scan_log.client_id, scan_log.script_name)] = scan_log
 
     scheduled_payload = []
@@ -3006,7 +3300,7 @@ async def get_order_status_logs(
 
 
 @app.delete("/order_status_logs/clear")
-async def clear_order_status_logs(client_ids: str = Query(...), db: Session = Depends(get_db)):
+async def clear_order_status_logs(client_ids: str = Query(...), db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("order_logs"))):
     if not client_ids or not client_ids.strip():
         raise HTTPException(status_code=400, detail="Client IDs cannot be empty.")
 
@@ -3017,6 +3311,7 @@ async def clear_order_status_logs(client_ids: str = Query(...), db: Session = De
     try:
         updated_count = (
             db.query(OrderStatusLog)
+            .filter(OrderStatusLog.owner_user_id == current_user.id)
             .filter(OrderStatusLog.client_id.in_(parsed_client_ids))
             .filter(OrderStatusLog.deleted_at.is_(None))
             .update({OrderStatusLog.deleted_at: datetime.utcnow()}, synchronize_session=False)
@@ -3048,10 +3343,8 @@ async def clear_order_status_logs(client_ids: str = Query(...), db: Session = De
 
 
 @app.get("/order_history")
-async def get_order_history(client_id: str, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.client_id == client_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+async def get_order_history(client_id: str, db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("order_logs"))):
+    user = require_owned_client(db, current_user, client_id)
 
     try:
         tms_user = await get_cached_tms_user(user)
@@ -3071,10 +3364,9 @@ async def get_tradebook_history(
     to_date: str,
     force_refresh: bool = False,
     db: Session = Depends(get_db),
+    current_user: FrontendUser = Depends(require_permission("portfolio")),
 ):
-    user = db.query(User).filter(User.client_id == client_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+    user = require_owned_client(db, current_user, client_id)
 
     try:
         start = date.fromisoformat(from_date)
@@ -3104,10 +3396,8 @@ async def get_tradebook_history(
 
 
 @app.get("/dp_holdings")
-async def get_dp_holdings(client_id: str, force_refresh: bool = Query(False), db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.client_id == client_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+async def get_dp_holdings(client_id: str, force_refresh: bool = Query(False), db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("portfolio"))):
+    user = require_owned_client(db, current_user, client_id)
 
     hours = get_market_hours_status()
     cached_holdings = _load_dp_holdings_cache(db, client_id)
@@ -3145,11 +3435,10 @@ async def get_stock_quote(
     fresh: bool = False,
     transport: str = "auto",
     db: Session = Depends(get_db),
+    current_user: FrontendUser = Depends(require_permission("stock_table")),
 ):
     try:
-        user = db.query(User).filter(User.client_id == client_id).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
+        user = require_owned_client(db, current_user, client_id)
 
         tms_user_instance = await get_cached_tms_user(user)
 
@@ -3203,15 +3492,18 @@ async def websocket_stock_quote(
     websocket: WebSocket,
     client_id: str,
     symbol: str,
+    token: str = Query(...),
     allow_market_closed: bool = Query(False),
 ):
     db = SessionLocal()
     normalized_symbol = str(symbol or "").strip().upper()
     try:
         await websocket.accept()
-        user = db.query(User).filter(User.client_id == client_id).first()
-        if not user:
-            await websocket.send_json({"type": "error", "message": "User not found"})
+        try:
+            frontend_user = authenticate_token(token, db)
+            user = require_owned_client(db, frontend_user, client_id)
+        except HTTPException as exc:
+            await websocket.send_json({"type": "error", "message": str(exc.detail)})
             await websocket.close(code=1008)
             return
 
@@ -3342,7 +3634,8 @@ async def websocket_stock_quote(
 
 
 @app.get("/get_order_book")
-async def get_order_book(client_id: str, db: Session = Depends(get_db)):
+async def get_order_book(client_id: str, db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("tms_login"))):
+    require_owned_client(db, current_user, client_id)
     try:
         user = db.query(User).filter(User.client_id == client_id).first()
         if not user:
@@ -3361,7 +3654,8 @@ async def get_order_book(client_id: str, db: Session = Depends(get_db)):
 
 
 @app.get("/get_daily_order_book")
-async def get_daily_order_book(client_id: str, db: Session = Depends(get_db)):
+async def get_daily_order_book(client_id: str, db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("tms_login"))):
+    require_owned_client(db, current_user, client_id)
     try:
         user = db.query(User).filter(User.client_id == client_id).first()
         if not user:
@@ -3378,7 +3672,8 @@ async def get_daily_order_book(client_id: str, db: Session = Depends(get_db)):
 
 
 @app.get("/get_script_details")
-async def get_script_details(client_id: str, force_refresh: bool = Query(False), db: Session = Depends(get_db)):
+async def get_script_details(client_id: str, force_refresh: bool = Query(False), db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("tms_login"))):
+    require_owned_client(db, current_user, client_id)
     try:
         user = db.query(User).filter(User.client_id == client_id).first()
         if not user:
@@ -3400,8 +3695,8 @@ async def get_script_details(client_id: str, force_refresh: bool = Query(False),
 
 
 @app.post("/tms-accounts/login-all")
-async def login_all_tms_accounts(db: Session = Depends(get_db)):
-    users = db.query(User).order_by(User.client_id).all()
+async def login_all_tms_accounts(db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("tms_login"))):
+    users = db.query(User).filter(User.owner_user_id == current_user.id).order_by(User.client_id).all()
     results = []
 
     for user in users:
@@ -3493,14 +3788,15 @@ async def market_analysis_restore_new_stocks(symbols: List[str] = Body(default_f
 
 @app.get("/market_analysis/data")
 async def market_analysis_data(
-    source: str = Query("combined", pattern="^(combined|sharesansar|merolagani|nepse_alpha)$"),
+    source: str = Query("combined", pattern="^(combined|sharesansar|merolagani|nepse_alpha|technical|recommendations)$"),
     db: Session = Depends(get_db),
+    current_user: FrontendUser = Depends(require_permission("market_analysis")),
 ):
     from utils.market_data.nonblocking_cache import kickoff_cache_bootstrap_if_empty
     from utils.market_data.request_workers import worker_get_market_data
 
     cache_meta = await kickoff_cache_bootstrap_if_empty()
-    payload = await asyncio.to_thread(worker_get_market_data, source)
+    payload = await asyncio.to_thread(worker_get_market_data, source, str(current_user.id))
     payload["cache_meta"] = cache_meta
     return payload
 
@@ -3621,7 +3917,7 @@ async def market_analysis_llm_health(probe: bool = True):
     return await asyncio.to_thread(test_all_llm_connections, probe=probe)
 
 
-async def _execute_market_analysis_ai_screen(body: StockScreenerAiRequest, db: Session) -> Dict:
+async def _execute_market_analysis_ai_screen(body: StockScreenerAiRequest, db: Session, *, owner_id: Optional[str] = None) -> Dict:
     from utils.market_data.nonblocking_cache import kickoff_cache_bootstrap_if_empty
     from utils.market_data.request_workers import worker_run_market_screen
 
@@ -3631,6 +3927,30 @@ async def _execute_market_analysis_ai_screen(body: StockScreenerAiRequest, db: S
 
     cache_meta = await kickoff_cache_bootstrap_if_empty()
     symbols = await _resolve_screener_symbols_for_request(body, db)
+
+    recommendation_terms = ("recommendation", "backtest", "win rate", "robust score", "buy signal", "best strategy")
+    if owner_id and any(term in message.lower() for term in recommendation_terms):
+        from utils.backtesting.recommendations import query_recommendations
+        min_trades_match = re.search(r"(?:at least|minimum|min)\s+(\d+)\s+(?:oos\s+)?trades?", message, re.IGNORECASE)
+        min_win_match = re.search(r"(?:win rate|winning rate)\s+(?:at least|above|over)?\s*(\d+(?:\.\d+)?)", message, re.IGNORECASE)
+        min_score_match = re.search(r"(?:robust|combined|recommendation)\s+score\s+(?:at least|above|over)?\s*(\d+(?:\.\d+)?)", message, re.IGNORECASE)
+        recommendation_payload = query_recommendations(db, {
+            "signal": "all", "minimum_trades": int(min_trades_match.group(1)) if min_trades_match else 5,
+            "minimum_win_rate": float(min_win_match.group(1)) if min_win_match else 0,
+            "minimum_score": float(min_score_match.group(1)) if min_score_match else 0,
+            "search": "", "sort_by": "recommendation_score", "sort_direction": "desc",
+            "page": 1, "page_size": 25,
+        }, owner_id=owner_id)
+        recommendation_payload.update({
+            "results": recommendation_payload.pop("items"),
+            "result_columns": ["rank", "symbol", "company_name", "sector", "current_signal_status", "signal_date", "preset_name", "recommendation_score", "win_rate_pct", "total_trades", "net_return_pct", "average_holding_days", "buy_zone_low", "buy_zone_high", "protective_stop", "sell_zone_low", "sell_zone_high", "latest_volume"],
+            "column_labels": {},
+            "generated_query": "Fresh recommendation table · latest completed trading session · ordinary shares · validated numeric thresholds",
+            "explanation": "Used the persisted recommendation projection and rejected older trading-session rows before ranking by recommendation score.",
+            "cache_meta": cache_meta, "universe": body.universe,
+            "universe_label": "Fresh backtest recommendations",
+        })
+        return recommendation_payload
 
     quick_screen = match_quick_ai_screen(message)
     if quick_screen is not None:
@@ -3700,21 +4020,23 @@ async def _execute_market_analysis_ai_screen(body: StockScreenerAiRequest, db: S
     return payload
 
 
-async def _run_ai_screen_job(job_id: str, body_data: Dict) -> None:
+async def _run_ai_screen_job(job_id: str, body_data: Dict, owner_id: str) -> None:
     db = SessionLocal()
     try:
         body = StockScreenerAiRequest(**body_data)
         body.background = False
-        ai_screen_jobs[job_id] = {"status": "running"}
-        result = await _execute_market_analysis_ai_screen(body, db)
+        ai_screen_jobs[job_id] = {"status": "running", "owner_id": owner_id}
+        result = await _execute_market_analysis_ai_screen(body, db, owner_id=owner_id)
         ai_screen_jobs[job_id] = {
             "status": "complete",
+            "owner_id": owner_id,
             "result": result,
             "finished_at": monotonic_time.monotonic(),
         }
     except HTTPException as exc:
         ai_screen_jobs[job_id] = {
             "status": "failed",
+            "owner_id": owner_id,
             "http_status": exc.status_code,
             "detail": exc.detail,
             "finished_at": monotonic_time.monotonic(),
@@ -3723,6 +4045,7 @@ async def _run_ai_screen_job(job_id: str, body_data: Dict) -> None:
         logging.exception("Background AI screen failed for job_id=%s", job_id)
         ai_screen_jobs[job_id] = {
             "status": "failed",
+            "owner_id": owner_id,
             "http_status": 500,
             "detail": str(exc),
             "finished_at": monotonic_time.monotonic(),
@@ -3743,11 +4066,13 @@ def _prune_ai_screen_jobs() -> None:
 
 
 @app.get("/market_analysis/ai_screen/jobs/{job_id}")
-async def market_analysis_ai_screen_job(job_id: str):
+async def market_analysis_ai_screen_job(job_id: str, current_user: FrontendUser = Depends(require_permission("market_analysis"))):
     _prune_ai_screen_jobs()
     job = ai_screen_jobs.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="AI screen job was not found or the server restarted.")
+    if str(job.get("owner_id") or "") != str(current_user.id):
+        raise HTTPException(status_code=404, detail="AI screen job was not found.")
     if job["status"] in {"pending", "running"}:
         return JSONResponse(status_code=202, content={"job_id": job_id, "status": job["status"]})
     if job["status"] == "failed":
@@ -3759,7 +4084,7 @@ async def market_analysis_ai_screen_job(job_id: str):
 
 
 @app.post("/market_analysis/ai_screen")
-async def market_analysis_ai_screen(body: StockScreenerAiRequest, db: Session = Depends(get_db)):
+async def market_analysis_ai_screen(body: StockScreenerAiRequest, db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("market_analysis"))):
     message = (body.message or "").strip()
     if not message:
         raise HTTPException(status_code=400, detail="Message is required")
@@ -3768,13 +4093,13 @@ async def market_analysis_ai_screen(body: StockScreenerAiRequest, db: Session = 
     if body.background and match_quick_ai_screen(message) is None:
         _prune_ai_screen_jobs()
         job_id = uuid.uuid4().hex
-        ai_screen_jobs[job_id] = {"status": "pending"}
-        task = asyncio.create_task(_run_ai_screen_job(job_id, body.model_dump()))
+        ai_screen_jobs[job_id] = {"status": "pending", "owner_id": str(current_user.id)}
+        task = asyncio.create_task(_run_ai_screen_job(job_id, body.model_dump(), str(current_user.id)))
         ai_screen_tasks[job_id] = task
         task.add_done_callback(lambda _task, key=job_id: ai_screen_tasks.pop(key, None))
         return JSONResponse(status_code=202, content={"job_id": job_id, "status": "pending"})
 
-    return await _execute_market_analysis_ai_screen(body, db)
+    return await _execute_market_analysis_ai_screen(body, db, owner_id=str(current_user.id))
 
 
 @app.post("/stock_screener/parse")
@@ -3788,8 +4113,8 @@ async def stock_screener_screen(body: StockScreenerRequest, db: Session = Depend
 
 
 @app.post("/stock_screener/ai_screen")
-async def stock_screener_ai_screen(body: StockScreenerAiRequest, db: Session = Depends(get_db)):
-    return await market_analysis_ai_screen(body, db)
+async def stock_screener_ai_screen(body: StockScreenerAiRequest, db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("market_analysis"))):
+    return await market_analysis_ai_screen(body, db, current_user)
 
 
 @app.get("/check_orders/")
@@ -3812,12 +4137,14 @@ async def stop_check_orders_endpoint():
 
 
 @app.get("/monitoring-status/")
-async def monitoring_status():
+async def monitoring_status(current_user: FrontendUser = Depends(require_permission("schedule_orders"))):
     hours = get_market_hours_status(get_nepal_now())
     scheduler = get_scheduler_display_status()
     grabbers = []
     scanning_count = 0
     for session_id, tms_user in running_grabbers.items():
+        if stock_grabber_owners.get(session_id) != current_user.id:
+            continue
         phase = tms_config.grabber_phase.get(session_id, "armed")
         if phase == "active":
             scanning_count += 1
@@ -3850,15 +4177,18 @@ async def monitoring_status():
 
 
 @app.post("/stop_all_stock_grabbers/")
-async def stop_all_stock_grabbers():
+async def stop_all_stock_grabbers(current_user: FrontendUser = Depends(require_permission("stock_grabber"))):
     stopped = []
     for session_id in list(running_tasks.keys()):
+        if stock_grabber_owners.get(session_id) != current_user.id:
+            continue
         task = running_tasks.get(session_id)
         if task:
             task.cancel()
             stopped.append(session_id)
             del running_tasks[session_id]
             running_grabbers.pop(session_id, None)
+            stock_grabber_owners.pop(session_id, None)
             tms_config.grabber_started_at.pop(session_id, None)
             tms_config.grabber_phase.pop(session_id, None)
             tms_config.grabber_status_message.pop(session_id, None)
@@ -3870,10 +4200,13 @@ async def stop_all_stock_grabbers():
 
 
 @app.delete("/logs/")
-async def clear_logs(client_ids:str = Query(...), db: Session = Depends(get_db)):
+async def clear_logs(client_ids:str = Query(...), db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("order_logs"))):
     if not client_ids:
         raise HTTPException(status_code=400, detail="Client IDs cannot be empty.")
     client_ids=client_ids.split(',')
+    owned = set(owned_client_ids(db, current_user))
+    if any(client_id.strip() not in owned for client_id in client_ids):
+        raise HTTPException(status_code=404, detail="One or more TMS accounts were not found.")
     try:
         # Check if logs exist before deleting
         existing_logs = db.query(OrderLog).filter(OrderLog.client_id.in_(client_ids)).count()
@@ -3888,16 +4221,21 @@ async def clear_logs(client_ids:str = Query(...), db: Session = Depends(get_db))
     
     except Exception as e:
         db.rollback()  # Rollback in case of error
+        if isinstance(e, HTTPException):
+            raise
         raise HTTPException(status_code=500, detail=f"Failed to clear logs: {str(e)}")
     
     finally:
         db.close()
 
 @app.get("/logs/")
-async def get_order_logs(client_ids: List[str] = Query(...), db: Session = Depends(get_db)):
+async def get_order_logs(client_ids: List[str] = Query(...), db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("order_logs"))):
     try:
         # Querying the OrderLog table for the list of client_ids
         client_ids = list(map(str.strip, client_ids))
+        owned = set(owned_client_ids(db, current_user))
+        if any(client_id not in owned for client_id in client_ids):
+            raise HTTPException(status_code=404, detail="One or more TMS accounts were not found.")
         order_logs = db.query(OrderLog).filter(
             OrderLog.client_id.in_(client_ids)).all()
 
@@ -3921,6 +4259,8 @@ async def get_order_logs(client_ids: List[str] = Query(...), db: Session = Depen
         return {"order_logs": logs_list}
 
     except Exception as e:
+        if isinstance(e, HTTPException):
+            raise
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -3934,16 +4274,9 @@ async def frontend_login(user_login: UserLogin, db: Session = Depends(get_db)):
         raise HTTPException(
             status_code=401, detail="Invalid username or password")
 
-    # Generate JWT token
-    timestamp = datetime.utcnow().timestamp()
-    payload = {
-        "username": username,
-        "password": password,
-        "timestamp": timestamp
-    }
-    access_token = jwt.encode(payload, SECRET_KEY, algorithm="HS256")
-
-    return {"message": "Login successful", "user_id": user.id, "access_token": access_token}
+    user.last_login_at = datetime.utcnow()
+    db.commit()
+    return {"message": "Login successful", "user_id": user.id, "access_token": create_access_token(user)}
 
 # @app.post("/start_order_loop/")
 # async def start_order_loop(background_tasks: BackgroundTasks):

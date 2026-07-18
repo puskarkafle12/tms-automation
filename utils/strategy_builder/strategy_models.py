@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -58,7 +58,7 @@ class AvailabilityCheckNode(BaseModel):
     check: str
 
 
-RuleExpression = Union[
+RuleExpression = Annotated[Union[
     LiteralNode,
     FieldNode,
     ArithmeticNode,
@@ -68,7 +68,7 @@ RuleExpression = Union[
     FunctionNode,
     ListNode,
     AvailabilityCheckNode,
-]
+], Field(discriminator="type")]
 
 ArithmeticNode.model_rebuild()
 ComparisonNode.model_rebuild()
@@ -115,12 +115,19 @@ class BacktestConfig(BaseModel):
     stop_loss_pct: float = 5
     take_profit_pct: float = 10
     trailing_stop_pct: Optional[float] = None
-    min_holding_days: int = 0
-    max_holding_days: int = 20
+    min_holding_days: int = 5
+    max_holding_days: int = 90
     position_size_pct: float = 100
     max_volume_participation_pct: float = 10
     risk_free_rate_pct: float = 4
     data_source: str = "auto"
+
+
+class PositionLifecycleConfig(BaseModel):
+    min_holding_days: int = 5
+    max_holding_days: int = 90
+    sell_activation: Literal["buy_filled_and_settled"] = "buy_filled_and_settled"
+    reentry: Literal["after_position_closed"] = "after_position_closed"
 
 
 class RuleBlock(BaseModel):
@@ -175,8 +182,10 @@ class RankConfig(BaseModel):
 class StrategyPlanAST(BaseModel):
     version: int = 1
     side: Literal["BUY", "SELL"]
+    lifecycle: bool = False
     defaults: ExecutionConfig = Field(default_factory=ExecutionConfig)
     backtest: Optional[BacktestConfig] = None
+    position_lifecycle: Optional[PositionLifecycleConfig] = None
     portfolio_limits: Optional[PortfolioLimits] = None
     position_protection: Optional["PositionProtectionConfig"] = None
     position_exit: List[PositionExitAction] = Field(default_factory=list)

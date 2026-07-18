@@ -9,7 +9,7 @@ def status_log_from_scheduled_order(order: ScheduledOrder, status: str | None = 
     execution_price = float(order.execution_price) if order.execution_price is not None else None
     requested_price = float(order.price) if order.price is not None else None
     display_price = execution_price if execution_price is not None else requested_price
-    return OrderStatusLog(
+    log = OrderStatusLog(
         order_id=order.order_id,
         client_id=order.client_id,
         security_details=order.security_details,
@@ -29,6 +29,8 @@ def status_log_from_scheduled_order(order: ScheduledOrder, status: str | None = 
         if order.max_allowed_slippage_percent is not None
         else None,
     )
+    log.owner_user_id = order.owner_user_id
+    return log
 
 
 def serialize_order_status_log(log: OrderStatusLog) -> dict:

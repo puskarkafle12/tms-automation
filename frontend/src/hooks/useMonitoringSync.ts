@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { syncMonitoringStatus } from './monitoringSync';
 import { readUiPortalSettings, subscribeUiPortalSettings } from '../lib/uiPortalSettings';
 
-export const useMonitoringSync = () => {
+export const useMonitoringSync = (enabled = true) => {
   const [pollSeconds, setPollSeconds] = useState(() => readUiPortalSettings().marketStatusPollSeconds);
 
   useEffect(() => subscribeUiPortalSettings((settings) => {
@@ -10,6 +10,7 @@ export const useMonitoringSync = () => {
   }), []);
 
   useEffect(() => {
+    if (!enabled) return undefined;
     let active = true;
 
     const safeSync = (): void => {
@@ -25,5 +26,5 @@ export const useMonitoringSync = () => {
       active = false;
       window.clearInterval(interval);
     };
-  }, [pollSeconds]);
+  }, [enabled, pollSeconds]);
 };

@@ -29,7 +29,7 @@ def test_custom_descriptor_is_versioned_and_keeps_risk_configuration():
     assert descriptor["source_hash"]
     assert descriptor["defaults"] == {
         "stop_loss_pct": 6.0, "take_profit_pct": 15.0,
-        "min_holding_days": 0, "max_holding_days": 30,
+        "min_holding_days": 5, "max_holding_days": 30,
     }
     plan = parse_strategy_query(descriptor["custom_query_text"])
     assert plan.backtest.charge_model == "nepse_equity"

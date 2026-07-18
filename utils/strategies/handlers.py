@@ -472,6 +472,7 @@ def _mark_rule_execution(history: "TargetHistory") -> None:
 
 def evaluate_rule_based_strategy(ctx: OrderContext, snapshot: MarketSnapshot, memory: ScannerMemory, details: ScriptDetails) -> StrategyDecision:
     from dataclasses import replace
+    from datetime import datetime, timezone
 
     from utils.strategy_builder.derived_fields import enrich_flat_snapshot
     from utils.strategy_builder.execution_depth import (
@@ -601,6 +602,7 @@ def evaluate_rule_based_strategy(ctx: OrderContext, snapshot: MarketSnapshot, me
             )
     if history.position.get("entry_price"):
         history.position["holding_scan_count"] = int(history.position.get("holding_scan_count") or 0) + 1
+        history.position["holding_days"] = int(config.get("linear_holding_sessions") or history.position.get("holding_days") or 0)
     protective = compute_protective_fields(history.position, snapshot.ltp, plan.position_protection)
     history.position.update(protective)
     flat = enrich_flat_snapshot(
@@ -664,7 +666,22 @@ def evaluate_rule_based_strategy(ctx: OrderContext, snapshot: MarketSnapshot, me
         form_qty=int(ctx.remaining_qty or ctx.qty or 0),
     )
     target_state[symbol] = serialize_target_history(history)
-    mutate = {"target_state": target_state}
+    mutate = {
+        "target_state": target_state,
+        "live_position_metrics": {
+            key: flat.get(key)
+            for key in (
+                "entry_price", "ltp", "gross_profit_percent", "profit_percent",
+                "entry_gross_amount", "estimated_buy_charges", "entry_total_cost",
+                "estimated_exit_gross_amount", "estimated_sell_broker_commission",
+                "estimated_sell_sebon_fee", "estimated_dp_charge",
+                "estimated_capital_gains_tax", "estimated_total_sell_charges",
+                "estimated_net_proceeds", "estimated_net_profit",
+                "capital_gains_tax_rate_percent", "charge_holding_days", "charge_model",
+            )
+            if flat.get(key) is not None
+        },
+    }
     if exit_intent and plan.side == "SELL":
         exit_mode = str(exit_intent.get("order_mode") or "").lower()
         if is_holding_dependent_mode(exit_mode):
@@ -718,7 +735,20 @@ def evaluate_rule_based_strategy(ctx: OrderContext, snapshot: MarketSnapshot, me
             mutate=mutate,
         )
     target_state[symbol] = serialize_target_history(history)
-    mutate = {"target_state": target_state}
+    mutate = {
+        **mutate,
+        "target_state": target_state,
+        "live_condition_status": {
+            "captured_at": datetime.now(timezone.utc).isoformat(),
+            "rule_name": selected_rule.name,
+            "logic": str(
+                getattr(selected_rule.signal or selected_rule.when, "logic", "AND") or "AND"
+            ).upper(),
+            "matched": bool(evaluation.matched),
+            "status": evaluation.status,
+            "conditions": [condition.model_dump(mode="json") for condition in evaluation.conditions],
+        },
+    }
 
     if not evaluation.matched:
         return StrategyDecision(

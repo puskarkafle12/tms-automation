@@ -4,8 +4,10 @@ import {
   describeSchedulePreviewBlockReason,
   extractPlannedQtyFromCompiledPlan,
   getDisplayQtyForOrder,
+  isBuySymbolAllowedForSchedule,
   isSchedulePreviewReady,
   planUsesReference,
+  validatePlanSymbolsForSchedule,
 } from './rulePlanHelpers';
 
 describe('rulePlanHelpers', () => {
@@ -175,5 +177,30 @@ describe('rulePlanHelpers', () => {
     });
     expect(sellKey).toBe(sellKeyNoSymbols);
     expect(sellKey).toContain('holdingsCount');
+  });
+
+  test('server-approved custom query is not rejected by a stale buy-scrip cache', () => {
+    expect(isBuySymbolAllowedForSchedule('MLBBL', new Set(['NABIL']), true)).toBe(true);
+    expect(
+      validatePlanSymbolsForSchedule(
+        { rules: [{ symbols: ['MLBBL'] }] },
+        'buy',
+        {
+          knownBuySymbols: new Set(['NABIL']),
+          schedulePreflightReady: true,
+        },
+      ),
+    ).toBeNull();
+  });
+
+  test('unverified buy query still rejects a symbol missing from the client scrip list', () => {
+    expect(isBuySymbolAllowedForSchedule('MLBBL', new Set(['NABIL']))).toBe(false);
+    expect(
+      validatePlanSymbolsForSchedule(
+        { rules: [{ symbols: ['MLBBL'] }] },
+        'buy',
+        { knownBuySymbols: new Set(['NABIL']) },
+      ),
+    ).toBe('MLBBL is not a valid listed scrip for this client.');
   });
 });

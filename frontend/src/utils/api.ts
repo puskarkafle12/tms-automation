@@ -47,6 +47,8 @@ export const buildWebSocketUrl = (path: string, params?: Record<string, string |
       baseUrl.searchParams.set(key, String(value));
     });
   }
+  const token = localStorage.getItem('accessToken');
+  if (token) baseUrl.searchParams.set('token', token);
   return baseUrl.toString();
 };
 

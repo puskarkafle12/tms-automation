@@ -279,6 +279,7 @@ async def commit_screener_drop_batch(
     max_slippage_percent: float = 1.0,
     odd_lot_allowed: bool = False,
     security_details_by_symbol: Optional[Dict[str, dict]] = None,
+    owner_user_id: Optional[int] = None,
 ) -> dict:
     from models.user import User
     from utils.tms_client_resolver import get_tms_user_for_client
@@ -362,6 +363,7 @@ async def commit_screener_drop_batch(
                 security_details=(security_details_by_symbol or {}).get(symbol),
             )
             order = ScheduledOrder(order_data)
+            order.owner_user_id = owner_user_id
             db.add(order)
             db.flush()
             strategy_config = dict(order_data.strategy_config or {})

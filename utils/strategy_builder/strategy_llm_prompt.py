@@ -631,8 +631,10 @@ STRATEGY_VERSION 1
 SIDE {side_upper}
 
 Optional global blocks (0 or 1 each):
+- BACKTEST {{ ... }} — research/backtesting assumptions only; omit from live execution queries
+- POSITION_LIFECYCLE {{ MIN_HOLDING_DAYS <n> MAX_HOLDING_DAYS <n> SELL_ACTIVATION BUY_FILLED_AND_SETTLED REENTRY AFTER_POSITION_CLOSED }}
 - POSITION_PROTECTION {{ FIXED_STOP_LOSS_PRICE <n> | TRAILING_STOP_PCT <n> }}
-- POSITION_EXIT {{ sell / stop-management actions — SELL side only }}
+- POSITION_EXIT {{ sell / stop-management actions — SIDE SELL or SIDE LIFECYCLE }}
 - RANK MATCHES BY <field> [ASC|DESC] [, <field> ...] [LIMIT <n> ORDERS]
 
 Then one or more RULE blocks. Each RULE is independent and evaluated per symbol per scan.
@@ -654,7 +656,7 @@ RULE "Descriptive name" FOR SYMBOL "CZBIL" {{
     [MAX_DATA_AGE <n> SECONDS]
     [MISSING_HOLDING WARN_AND_SKIP|WAITING_FOR_HOLDING|REJECT]   # SELL only
     [COOLDOWN <n> MINUTES]
-    [EXECUTE ONCE | ONCE PER SYMBOL | ONCE PER MARKET DAY | MAX <n> TIMES [PER SYMBOL]]
+    [EXECUTE ONCE | ONCE PER SYMBOL | ONCE PER MARKET DAY | ON EVERY MATCH | MAX <n> TIMES [PER SYMBOL]]
 }}
 
 Multi-symbol same rule:
@@ -763,6 +765,40 @@ Position fields available after entry: profit_percent, drawdown_from_peak_percen
 entry_price, effective_stop_price, holding_scan_count, time_since_entry_minutes.
 
 ================================================================================
+LINEAR BUY -> SELL LIFECYCLE
+================================================================================
+Use SIDE LIFECYCLE when one query must schedule a BUY entry and its linked SELL monitor together.
+The SELL is created immediately as dormant; an existing portfolio holding is NOT required to schedule it.
+The runtime activates SELL monitoring only after the linked BUY is fully traded, the purchased quantity is
+visible as sellable DP holding, and MIN_HOLDING_DAYS trading sessions have elapsed. MAX_HOLDING_DAYS forces
+the exit if no earlier POSITION_EXIT matches. A new BUY for that symbol/position cycle is blocked until the
+linked SELL closes the position.
+
+Example:
+STRATEGY_VERSION 1
+SIDE LIFECYCLE
+POSITION_LIFECYCLE {{
+    MIN_HOLDING_DAYS 5
+    MAX_HOLDING_DAYS 90
+    SELL_ACTIVATION BUY_FILLED_AND_SETTLED
+    REENTRY AFTER_POSITION_CLOSED
+}}
+POSITION_EXIT {{
+    SELL ALL_AVAILABLE WHEN profit_percent <= -6
+    SELL ALL_AVAILABLE WHEN profit_percent >= 15
+}}
+RULE "SMA 20 lifecycle" FOR SYMBOL "MLBBL" {{
+    WHEN technical_sma_20 = "above" AND technical_macd = "Bullish"
+    ORDER PERCENT_OF_AVAILABLE_CASH 100
+    TRIGGER ON_CROSS
+    EXECUTE ONCE PER SYMBOL
+}}
+
+BACKTEST is a research-only block. Omit it from live scheduling queries. Live orders use actual TMS cash,
+quotes, fills, holdings, and broker/exchange charges. POSITION_LIFECYCLE carries only runtime holding and
+activation controls.
+
+================================================================================
 CONFIRMATION, TRIGGER, EXECUTION
 ================================================================================
 CONFIRM TRUE_FOR 2 SCANS — WHEN/SIGNAL must stay true across consecutive valid observations.
@@ -780,6 +816,7 @@ trigger price to schedule; preflight treats them as schedule-ready once data che
 EXECUTE ONCE — one execution per rule then stop.
 EXECUTE ONCE PER SYMBOL — one per symbol in the rule.
 EXECUTE ONCE PER MARKET DAY — one per symbol per trading day.
+EXECUTE ON EVERY MATCH — no lifetime trade-count cap; every new matching signal may execute after position/risk rules allow it.
 EXECUTE MAX 3 TIMES PER SYMBOL — partial re-entries allowed.
 
 Important scan semantics:

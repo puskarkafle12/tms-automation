@@ -30,7 +30,7 @@ def test_complete_indicator_contract_and_scores_are_bounded():
     closes = [100 + index * .4 + ((index % 7) - 3) for index in range(260)]
     row = calculate_indicator_rows(_bars(closes))[-1]
     assert set(row) == set(INDICATOR_FIELDS)
-    assert ENGINE_VERSION == "ohlcv-ta-v3-ta-0.11.0"
+    assert ENGINE_VERSION == "ohlcv-ta-v4-ta-0.11.0"
     assert 0 <= row["technical_buy_score"] <= 100
     assert 0 <= row["technical_sell_score"] <= 100
     assert -100 <= row["technical_signal_score"] <= 100

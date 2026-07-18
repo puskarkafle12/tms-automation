@@ -3,7 +3,7 @@
 import asyncio
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Dict, Optional, Type
 
 from database import SessionLocal
@@ -15,7 +15,8 @@ from utils.strategies.execution_price import sell_price_exceeds_slippage
 from models.scheduled_order import ScheduledOrder
 from utils.base_functions import truncate_to_one_decimal_place
 from utils.lot_size import get_board_lot_size, is_regular_lot_qty, normalize_sell_qty, round_down_to_board_lot
-from sqlalchemy import or_, update
+from sqlalchemy import or_, text, update
+from sqlalchemy.orm import object_session
 
 from utils.strategy_builder.constants import RULE_BASED_STRATEGIES
 from utils.log_sender import consume_monitor_scan_count_resets, store_or_update_logs
@@ -64,6 +65,7 @@ ACTIVE_STATUSES = {
     "Profit target reached",
     "Waiting minimum time",
     "Waiting activation",
+    "Waiting fill",
     "Tracking highest price",
     "Drop detected",
     "Stop-loss triggered",
@@ -82,6 +84,308 @@ async def _latest_holding_qty(tms_user: TmsUser, script_name: str) -> int:
         if scrip == normalized_symbol or name == normalized_symbol:
             return int(float(holding.get("currentBalance") or 0))
     return 0
+
+
+def _linear_cycle_limits(db_order: ScheduledOrder) -> Optional[tuple[int, int]]:
+    strategy_config = dict(getattr(db_order, "strategy_config", None) or {})
+    if not strategy_config.get("linear_position_cycle"):
+        return None
+    compiled = dict(strategy_config.get("compiled_plan") or {})
+    lifecycle = dict(compiled.get("position_lifecycle") or {})
+    backtest = dict(compiled.get("backtest") or {})
+    minimum = int(strategy_config.get(
+        "min_holding_days", lifecycle.get("min_holding_days", backtest.get("min_holding_days", 5)),
+    ) or 0)
+    maximum = int(strategy_config.get(
+        "max_holding_days", lifecycle.get("max_holding_days", backtest.get("max_holding_days", 90)),
+    ) or 90)
+    return max(0, minimum), max(maximum, minimum, 1)
+
+
+def _open_lot_start_date(db_order: ScheduledOrder) -> Optional[date]:
+    """Resolve the earliest unsold FIFO lot from the normalized tradebook cache."""
+    strategy_config = dict(getattr(db_order, "strategy_config", None) or {})
+    linked_execution = strategy_config.get("linked_buy_executed_at")
+    if linked_execution:
+        try:
+            return datetime.fromisoformat(str(linked_execution).replace("Z", "+00:00")).date()
+        except ValueError:
+            pass
+    session = object_session(db_order)
+    if session is None:
+        return None
+    rows = session.execute(text("""
+        SELECT side,trade_date,quantity FROM tradebook_history_cache
+        WHERE client_id=:client_id AND UPPER(symbol)=:symbol AND trade_date IS NOT NULL
+        ORDER BY trade_date,id
+    """), {"client_id": db_order.client_id, "symbol": db_order.script_name.strip().upper()}).mappings().all()
+    lots: list[list[object]] = []
+    for row in rows:
+        side = str(row.get("side") or "").strip().lower()
+        quantity = max(0.0, float(row.get("quantity") or 0))
+        if quantity <= 0:
+            continue
+        if side in {"buy", "b", "purchase"}:
+            lots.append([row["trade_date"], quantity])
+            continue
+        if side not in {"sell", "s", "sale"}:
+            continue
+        remaining = quantity
+        while remaining > 0 and lots:
+            consumed = min(remaining, float(lots[0][1]))
+            remaining -= consumed
+            lots[0][1] = float(lots[0][1]) - consumed
+            if float(lots[0][1]) <= 0:
+                lots.pop(0)
+    if lots:
+        return lots[0][0] if isinstance(lots[0][0], date) else date.fromisoformat(str(lots[0][0]))
+    source_result = strategy_config.get("source_backtest_result_id")
+    candidates = session.query(ScheduledOrder).filter(
+        ScheduledOrder.client_id == db_order.client_id,
+        ScheduledOrder.script_name == db_order.script_name,
+        ScheduledOrder.order_type == "buy",
+        ScheduledOrder.executed_at.is_not(None),
+    ).order_by(ScheduledOrder.executed_at.desc()).all()
+    for candidate in candidates:
+        candidate_source = dict(candidate.strategy_config or {}).get("source_backtest_result_id")
+        if source_result is None or str(candidate_source) == str(source_result):
+            return candidate.executed_at.date()
+    return None
+
+
+def _linear_holding_sessions(db_order: ScheduledOrder, as_of: Optional[date] = None) -> Optional[int]:
+    start = _open_lot_start_date(db_order)
+    if start is None:
+        return None
+    end = as_of or date.today()
+    session = object_session(db_order)
+    if session is not None:
+        count = session.execute(text("""
+            SELECT COUNT(DISTINCT CASE WHEN source_timestamp IS NOT NULL
+                THEN (to_timestamp(source_timestamp) AT TIME ZONE 'UTC')::date ELSE session_date END)
+            FROM market_ohlcv_daily WHERE symbol=:symbol AND adjusted=TRUE
+              AND (CASE WHEN source_timestamp IS NOT NULL
+                THEN (to_timestamp(source_timestamp) AT TIME ZONE 'UTC')::date ELSE session_date END)>:start
+              AND (CASE WHEN source_timestamp IS NOT NULL
+                THEN (to_timestamp(source_timestamp) AT TIME ZONE 'UTC')::date ELSE session_date END)<=:end
+        """), {"symbol": db_order.script_name.strip().upper(), "start": start, "end": end}).scalar()
+        if count:
+            return int(count)
+    sessions = 0
+    cursor = start + timedelta(days=1)
+    while cursor <= end:
+        if cursor.weekday() != 5:  # NEPSE trades Sunday-Friday; Saturday is closed.
+            sessions += 1
+        cursor += timedelta(days=1)
+    return sessions
+
+
+async def _prepare_lifecycle_sell_monitor(db_order: ScheduledOrder, tms_user: TmsUser) -> tuple[bool, str]:
+    """Activate a paired SELL only after its BUY, holding, and minimum-session gates pass."""
+    config_payload = dict(getattr(db_order, "strategy_config", None) or {})
+    if (db_order.order_type or "").lower() != "sell" or config_payload.get("lifecycle_role") != "sell":
+        return True, ""
+    session = object_session(db_order)
+    paired_id = config_payload.get("paired_buy_order_id")
+    paired_buy = session.get(ScheduledOrder, int(paired_id)) if session is not None and paired_id else None
+    paired_config = dict(getattr(paired_buy, "strategy_config", None) or {}) if paired_buy is not None else {}
+    fill_confirmed = bool(config_payload.get("linked_buy_fill_confirmed") or paired_config.get("fill_confirmed"))
+    linked_executed_at = config_payload.get("linked_buy_executed_at") or paired_config.get("filled_at")
+    if not fill_confirmed or not linked_executed_at:
+        _mark_tracking(db_order, "Waiting activation", float(db_order.last_checked_ltp or 0))
+        return False, "LIFECYCLE_WAIT: The linked BUY is not confirmed fully traded yet."
+    config_payload["linked_buy_executed_at"] = linked_executed_at
+    limits = _linear_cycle_limits(db_order) or (5, 90)
+    minimum_days, _ = limits
+    holding_sessions = _linear_holding_sessions(db_order)
+    config_payload["linear_holding_sessions"] = holding_sessions
+    if holding_sessions is None or holding_sessions < minimum_days:
+        db_order.strategy_config = config_payload
+        db_order.status = "Waiting minimum time"
+        held = 0 if holding_sessions is None else holding_sessions
+        return False, f"LIFECYCLE_WAIT: Held {held}/{minimum_days} required trading sessions."
+    if not config_payload.get("lifecycle_holding_verified"):
+        holding_qty = await _latest_holding_qty(tms_user, db_order.script_name)
+        baseline_qty = max(0, int(config_payload.get("linked_buy_baseline_holding_qty") or 0))
+        filled_qty = max(1, int(config_payload.get("linked_buy_filled_quantity") or db_order.qty or 1))
+        required_qty = baseline_qty + filled_qty
+        if holding_qty < required_qty:
+            db_order.status = "Waiting activation"
+            return False, (
+                f"LIFECYCLE_WAIT: {db_order.script_name} sellable holding is {holding_qty}; "
+                f"at least {required_qty} is required to prove the linked BUY arrived."
+            )
+        config_payload["lifecycle_holding_verified"] = True
+        config_payload["verified_holding_qty"] = holding_qty
+    entry_price = float(
+        config_payload.get("linked_buy_execution_price")
+        or (paired_buy.execution_price if paired_buy is not None else 0)
+        or (paired_buy.last_checked_ltp if paired_buy is not None else 0)
+        or (paired_buy.price if paired_buy is not None else 0)
+        or 0
+    )
+    if entry_price <= 0:
+        db_order.status = "Waiting activation"
+        return False, "LIFECYCLE_WAIT: The linked BUY execution price is not available."
+    if not config_payload.get("lifecycle_active"):
+        from utils.strategy_builder.history_service import TargetHistory, serialize_target_history
+        from utils.strategy_builder.position_protection import seed_position_after_buy
+        from utils.strategy_builder.strategy_models import StrategyPlanAST
+
+        compiled = dict(config_payload.get("compiled_plan") or {})
+        target_state = dict(config_payload.get("target_state") or {})
+        history = TargetHistory()
+        history.position = seed_position_after_buy(
+            {}, entry_price=entry_price,
+            protection=StrategyPlanAST.model_validate(compiled).position_protection,
+        )
+        history.position["entry_at"] = str(linked_executed_at)
+        charge_policy = dict(config_payload.get("live_charge_policy") or {})
+        history.position.update({
+            "quantity": int(config_payload.get("linked_buy_filled_quantity") or db_order.qty or 1),
+            "holding_days": int(holding_sessions or 0),
+            "apply_nepse_charges": True,
+            "charge_model": charge_policy.get("charge_model") or "nepse_equity_v2024_05_14",
+            "investor_type": charge_policy.get("investor_type") or "individual",
+            "apply_cgt": bool(charge_policy.get("apply_cgt", True)),
+            "dp_charge": float(charge_policy.get("dp_charge", 25)),
+        })
+        target_state[db_order.script_name.strip().upper()] = serialize_target_history(history)
+        config_payload["target_state"] = target_state
+        config_payload["lifecycle_active"] = True
+        config_payload["lifecycle_activated_at"] = datetime.utcnow().isoformat()
+        db_order.average_buy_price = entry_price
+    db_order.strategy_config = config_payload
+    db_order.status = "Monitoring"
+    return True, ""
+
+
+async def _prepare_lifecycle_buy_monitor(db_order: ScheduledOrder, tms_user: TmsUser) -> tuple[bool, str]:
+    """Keep a lifecycle BUY from being treated as filled until TMS reports its traded quantity."""
+    payload = dict(getattr(db_order, "strategy_config", None) or {})
+    if (db_order.order_type or "").lower() != "buy" or payload.get("lifecycle_role") != "buy":
+        return True, ""
+    if "baseline_holding_qty" not in payload:
+        payload["baseline_holding_qty"] = await _latest_holding_qty(tms_user, db_order.script_name)
+        db_order.strategy_config = payload
+    submitted_at = payload.get("submitted_at")
+    if not submitted_at:
+        return True, ""
+    submitted_qty = max(1, int(payload.get("submitted_quantity") or db_order.qty or 1))
+    exchange_order_id = str(payload.get("exchange_order_id") or "").strip()
+    try:
+        rows = await tms_user.get_normalized_daily_order_book()
+    except Exception as exc:
+        db_order.status = "Waiting fill"
+        return False, f"LIFECYCLE_WAIT: Could not verify the linked BUY fill from TMS: {exc}"
+    candidates = []
+    for row in rows or []:
+        if str(row.get("symbol") or "").strip().upper() != db_order.script_name.strip().upper():
+            continue
+        if row.get("buyOrSell") not in (None, "", 1, "1", "BUY", "buy"):
+            continue
+        row_exchange_id = str(row.get("exchangeOrderId") or "").strip()
+        if exchange_order_id and row_exchange_id != exchange_order_id:
+            continue
+        try:
+            order_qty = int(float(row.get("orderQuantity") or 0))
+            traded_qty = int(float(row.get("totalTradedQuantity") or 0))
+        except (TypeError, ValueError):
+            continue
+        if order_qty and order_qty != submitted_qty:
+            continue
+        candidates.append((traded_qty, row))
+    traded_qty, matched = max(candidates, key=lambda item: item[0], default=(0, {}))
+    payload["last_fill_check_at"] = datetime.utcnow().isoformat()
+    payload["last_reported_traded_quantity"] = traded_qty
+    payload["last_reported_order_status"] = matched.get("displayActiveStatus") or matched.get("activeStatus")
+    db_order.strategy_config = payload
+    confirmation_source = "TMS traded quantity"
+    if traded_qty < submitted_qty:
+        baseline_qty = max(0, int(payload.get("baseline_holding_qty") or 0))
+        current_holding_qty = await _latest_holding_qty(tms_user, db_order.script_name)
+        if current_holding_qty < baseline_qty + submitted_qty:
+            db_order.status = "Waiting fill"
+            return False, (
+                f"LIFECYCLE_WAIT: Linked BUY traded {traded_qty}/{submitted_qty} kitta and "
+                f"sellable holdings are {current_holding_qty}/{baseline_qty + submitted_qty}."
+            )
+        confirmation_source = "sellable DP holding increase"
+
+    filled_at = str(submitted_at)
+    filled_price = float(
+        matched.get("averageTradePrice")
+        or matched.get("averageTradedPrice")
+        or matched.get("tradePrice")
+        or matched.get("orderPrice")
+        or payload.get("submitted_price")
+        or db_order.execution_price
+        or 0
+    )
+    payload["fill_confirmed"] = True
+    payload["filled_at"] = filled_at
+    payload["filled_quantity"] = submitted_qty
+    payload["filled_average_price"] = filled_price
+    payload["fill_confirmation_source"] = confirmation_source
+    db_order.strategy_config = payload
+    db_order.executed_at = datetime.fromisoformat(filled_at.replace("Z", "+00:00")).replace(tzinfo=None)
+    db_order.remaining_quantity = 0
+    db_order.status = "Executed"
+    session = object_session(db_order)
+    paired_sell_id = payload.get("paired_sell_order_id")
+    paired_sell = session.get(ScheduledOrder, int(paired_sell_id)) if session is not None and paired_sell_id else None
+    if paired_sell is not None:
+        sell_payload = dict(paired_sell.strategy_config or {})
+        sell_payload.update({
+            "linked_buy_fill_confirmed": True,
+            "linked_buy_executed_at": filled_at,
+            "linked_buy_execution_price": filled_price,
+            "linked_buy_filled_quantity": submitted_qty,
+            "linked_buy_baseline_holding_qty": max(0, int(payload.get("baseline_holding_qty") or 0)),
+            "linked_buy_exchange_order_id": exchange_order_id or matched.get("exchangeOrderId"),
+        })
+        paired_sell.strategy_config = sell_payload
+        paired_sell.qty = submitted_qty
+        paired_sell.remaining_quantity = submitted_qty
+    return False, f"LIFECYCLE_READY: Linked BUY fill confirmed for {submitted_qty} kitta."
+
+
+async def _record_lifecycle_buy_submission(
+    db_order: ScheduledOrder, tms_user: TmsUser, *, submitted_price: float, submitted_quantity: int,
+) -> bool:
+    """Record broker acceptance without mislabeling it as a completed trade."""
+    payload = dict(getattr(db_order, "strategy_config", None) or {})
+    is_lifecycle_buy = (
+        (db_order.order_type or "").lower() == "buy"
+        and payload.get("lifecycle_role") == "buy"
+        and payload.get("linear_position_cycle")
+    )
+    if not is_lifecycle_buy:
+        return False
+    submitted_at = datetime.utcnow()
+    exchange_order_id = None
+    try:
+        timing = await tms_user.get_latest_order_timing_for_symbol(
+            db_order.script_name,
+            order_type="buy",
+            order_price=submitted_price,
+            order_quantity=submitted_quantity,
+        )
+        exchange_order_id = timing.get("exchange_order_id")
+        payload["submitted_order_status"] = timing.get("order_status")
+    except Exception as exc:
+        payload["submission_lookup_warning"] = str(exc)
+    payload.update({
+        "submitted_at": submitted_at.isoformat(),
+        "submitted_quantity": submitted_quantity,
+        "submitted_price": submitted_price,
+        "exchange_order_id": exchange_order_id,
+        "fill_confirmed": False,
+    })
+    db_order.strategy_config = payload
+    db_order.executed_at = None
+    db_order.status = "Waiting fill"
+    return True
 
 
 async def _validate_execution_lot_rule(
@@ -354,6 +658,29 @@ def _evaluate_strategy(
         db_order.nepse_alpha_scan_count = next_nepse_scan_count
     db_order.strategy_config = config_payload
 
+    cycle_limits = _linear_cycle_limits(db_order)
+    if cycle_limits and str(db_order.order_type or "").lower() == "sell":
+        minimum_days, maximum_days = cycle_limits
+        holding_sessions = _linear_holding_sessions(db_order)
+        config_payload["linear_holding_sessions"] = holding_sessions
+        if holding_sessions is None:
+            _mark_tracking(db_order, "Waiting minimum time", current_price)
+            return None, "LINEAR_CYCLE_WAIT: Holding start could not be verified from trade history."
+        if holding_sessions < minimum_days:
+            _mark_tracking(db_order, "Waiting minimum time", current_price)
+            return None, f"LINEAR_CYCLE_WAIT: Held {holding_sessions}/{minimum_days} required trading sessions."
+        if holding_sessions >= maximum_days:
+            compiled = dict(config_payload.get("compiled_plan") or {})
+            rules = list(compiled.get("rules") or [])
+            order_action = dict(rules[0].get("order") or {}) if rules else None
+            execution_price, source = _top_level_price(quote, "sell")
+            return {
+                "action": "execute", "price": execution_price or current_price,
+                "qty": int(db_order.remaining_quantity or db_order.qty or 0),
+                "source": f"Maximum {maximum_days}-session holding exit via {source}",
+                "order_action": order_action,
+            }, None
+
     decision = evaluate_strategy(db_order, snapshot, memory, details)
 
     if decision.action == "EXPIRE":
@@ -437,6 +764,35 @@ async def submit_scheduled_order_to_tms(
 
     if not execution_gate.get("can_execute"):
         return TmsSubmissionResult(submitted=False, blocked_reason=execution_gate.get("message"))
+
+    cycle_limits = _linear_cycle_limits(db_order)
+    if cycle_limits:
+        minimum_days, _ = cycle_limits
+        if order_type.lower() == "buy":
+            holding_qty = await _latest_holding_qty(tms_user, db_order.script_name)
+            if holding_qty > 0:
+                return TmsSubmissionResult(
+                    submitted=False,
+                    blocked_reason=(
+                        f"Linear position cycle is waiting for the existing {db_order.script_name} "
+                        f"holding ({holding_qty} kitta) to be sold before another buy."
+                    ),
+                )
+        else:
+            holding_sessions = _linear_holding_sessions(db_order)
+            if holding_sessions is None:
+                return TmsSubmissionResult(
+                    submitted=False,
+                    blocked_reason="Linear position cycle could not verify the holding start date.",
+                )
+            if holding_sessions < minimum_days:
+                return TmsSubmissionResult(
+                    submitted=False,
+                    blocked_reason=(
+                        f"Linear position cycle requires {minimum_days} trading sessions before selling; "
+                        f"currently held for {holding_sessions}."
+                    ),
+                )
 
     target_price = truncate_to_one_decimal_place(float(decision["price"]))
     if order_type.lower() == "buy" and high_price is not None:
@@ -817,6 +1173,20 @@ async def monitor_order_task_func():
                         if updated_config != (db_order.strategy_config or {}):
                             db_order.strategy_config = updated_config
 
+                        lifecycle_ready, lifecycle_message = await _prepare_lifecycle_buy_monitor(
+                            db_order, tms_users_instances[order.client_id],
+                        )
+                        if lifecycle_ready:
+                            lifecycle_ready, lifecycle_message = await _prepare_lifecycle_sell_monitor(
+                                db_order, tms_users_instances[order.client_id],
+                            )
+                        if not lifecycle_ready:
+                            await store_or_update_logs(
+                                db, order.client_id, order.script_name, count_dict[key],
+                                current_price, False, lifecycle_message, commit=False,
+                            )
+                            continue
+
                         requires_nepse_alpha = order_requires_nepse_alpha(db_order)
                         nepse_due = requires_nepse_alpha and (
                             db_order.order_id not in next_nepse_alpha_scan_at
@@ -926,8 +1296,14 @@ async def monitor_order_task_func():
                                 db_order.execution_price = target_price
                                 db_order.execution_price_source = decision.get("source") or "Target price"
                                 db_order.execution_reason = decision.get("reason")
-                                db_order.executed_at = datetime.utcnow()
-                                db_order.remaining_quantity = max(0, int(db_order.remaining_quantity or order.qty) - executed_qty)
+                                is_lifecycle_buy = await _record_lifecycle_buy_submission(
+                                    db_order, tms_user,
+                                    submitted_price=target_price,
+                                    submitted_quantity=executed_qty,
+                                )
+                                if not is_lifecycle_buy:
+                                    db_order.executed_at = datetime.utcnow()
+                                    db_order.remaining_quantity = max(0, int(db_order.remaining_quantity or order.qty) - executed_qty)
                                 if decision.get("leg_id") is not None:
                                     executed_legs = list(db_order.executed_legs or [])
                                     executed_legs.append(decision["leg_id"])
@@ -937,7 +1313,9 @@ async def monitor_order_task_func():
                                     db_order.order_type or "sell",
                                 )
                                 reference_price = float(db_order.stop_loss_price or db_order.price or 0)
-                                if (
+                                if is_lifecycle_buy:
+                                    pass
+                                elif (
                                     db_order.order_type.lower() == "sell"
                                     and reference_price > 0
                                     and sell_price_exceeds_slippage(

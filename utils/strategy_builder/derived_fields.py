@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Dict, Optional
 
 
@@ -42,13 +42,77 @@ def compute_position_performance_fields(
     holding_scans = int(position_state.get("holding_scan_count") or 0)
     entry_at = position_state.get("entry_at")
 
-    profit_percent = _pct_change(ltp, entry)
+    gross_profit_percent = _pct_change(ltp, entry)
+    profit_percent = gross_profit_percent
     runup_percent = _pct_change(highest, entry) if highest is not None and entry else None
     drawdown_from_peak_percent = _pct_change(ltp, highest) if highest not in (None, 0) else None
-    distance_from_entry_percent = profit_percent
+    distance_from_entry_percent = gross_profit_percent
     unrealized_profit = None
     if ltp is not None and entry is not None and qty:
         unrealized_profit = (float(ltp) - float(entry)) * int(qty)
+
+    charge_breakdown: Dict[str, Any] = {}
+    if (
+        position_state.get("apply_nepse_charges")
+        and ltp is not None and entry not in (None, 0) and qty and int(qty) > 0
+    ):
+        from utils.backtesting.nepse_charges import buy_charges, sell_charges
+
+        entry_date = date.today()
+        if entry_at:
+            try:
+                entry_date = datetime.fromisoformat(str(entry_at).replace("Z", "+00:00")).date()
+            except (TypeError, ValueError):
+                pass
+        exit_date = date.today()
+        # CGT holding period is measured in calendar days.  The lifecycle's
+        # `holding_days` value is a trading-session counter used only for the
+        # min/max exit gates and must not change the tax bracket.
+        holding_days = max(0, int(position_state.get("tax_holding_days") or (exit_date - entry_date).days))
+        quantity = int(qty)
+        entry_gross = float(entry) * quantity
+        exit_gross = float(ltp) * quantity
+        charge_model = str(position_state.get("charge_model") or "nepse_equity_v2024_05_14")
+        investor_type = str(position_state.get("investor_type") or "individual")
+        apply_cgt = bool(position_state.get("apply_cgt", True))
+        dp_charge = float(position_state.get("dp_charge") if position_state.get("dp_charge") is not None else 25)
+        entry_charges = buy_charges(entry_gross, entry_date, charge_model=charge_model)
+        entry_total_cost = entry_gross + float(entry_charges["total"])
+        exit_charges = sell_charges(
+            exit_gross,
+            exit_date,
+            entry_total_cost=entry_total_cost,
+            holding_days=holding_days,
+            investor_type=investor_type,
+            apply_cgt=apply_cgt,
+            dp_charge=dp_charge,
+            charge_model=charge_model,
+        )
+        estimated_net_proceeds = exit_gross - float(exit_charges["total"])
+        estimated_net_profit = estimated_net_proceeds - entry_total_cost
+        net_profit_percent = (
+            estimated_net_profit / entry_total_cost * 100.0 if entry_total_cost > 0 else None
+        )
+        profit_percent = net_profit_percent
+        unrealized_profit = estimated_net_profit
+        charge_breakdown = {
+            "gross_profit_percent": gross_profit_percent,
+            "net_profit_percent": net_profit_percent,
+            "entry_gross_amount": entry_gross,
+            "estimated_buy_charges": float(entry_charges["total"]),
+            "entry_total_cost": entry_total_cost,
+            "estimated_exit_gross_amount": exit_gross,
+            "estimated_sell_broker_commission": float(exit_charges["broker_commission"]),
+            "estimated_sell_sebon_fee": float(exit_charges["sebon_fee"]),
+            "estimated_dp_charge": float(exit_charges["dp_charge"]),
+            "estimated_capital_gains_tax": float(exit_charges["capital_gains_tax"]),
+            "estimated_total_sell_charges": float(exit_charges["total"]),
+            "estimated_net_proceeds": estimated_net_proceeds,
+            "estimated_net_profit": estimated_net_profit,
+            "capital_gains_tax_rate_percent": float(exit_charges["tax_rate"]) * 100.0,
+            "charge_holding_days": holding_days,
+            "charge_model": charge_model,
+        }
 
     time_since_entry_minutes = None
     if entry_at:
@@ -62,12 +126,15 @@ def compute_position_performance_fields(
 
     return {
         "profit_percent": profit_percent,
+        "gross_profit_percent": gross_profit_percent,
+        "net_profit_percent": charge_breakdown.get("net_profit_percent"),
         "unrealized_profit": unrealized_profit,
         "runup_percent": runup_percent,
         "drawdown_from_peak_percent": drawdown_from_peak_percent,
         "distance_from_entry_percent": distance_from_entry_percent,
         "holding_scan_count": holding_scans if entry else None,
         "time_since_entry_minutes": time_since_entry_minutes,
+        **charge_breakdown,
     }
 
 

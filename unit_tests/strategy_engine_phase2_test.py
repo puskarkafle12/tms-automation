@@ -16,7 +16,6 @@ class DerivedFieldsTest(unittest.TestCase):
         self.assertAlmostEqual(metrics["profit_percent"], 4.0)
         self.assertAlmostEqual(metrics["drawdown_from_peak_percent"], ((520 - 530) / 530) * 100)
 
-
 class ExecutionSizingTest(unittest.TestCase):
     def test_risk_percent_sizing(self):
         qty = resolve_order_quantity(

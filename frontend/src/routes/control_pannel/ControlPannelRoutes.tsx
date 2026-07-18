@@ -15,6 +15,7 @@ const dashboardSections = [
   DASHBOARD_PATHS.stockGrabber,
   DASHBOARD_PATHS.stockAnalysis,
   DASHBOARD_PATHS.settings,
+  DASHBOARD_PATHS.adminUsers,
 ];
 
 const ControlPannelRoutes = () => {

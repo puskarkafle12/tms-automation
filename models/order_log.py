@@ -1,6 +1,6 @@
 # models/order_log.py
 
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Float, Text, Index
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Float, Text, Index, ForeignKey
 from datetime import datetime, timezone
 from database import Base
 
@@ -8,6 +8,7 @@ class OrderLog(Base):
     __tablename__ = 'order_logs'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id = Column(Integer, ForeignKey("frontend_users.id"), nullable=True, index=True)
     client_id = Column(String, nullable=False)
     script_name = Column(String, nullable=False)
     scanning_count = Column(Integer, default=0)

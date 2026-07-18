@@ -455,8 +455,8 @@ def _risk_metrics(
 def run_backtest(
     *, symbol: str, query_text: str, start_date: date, end_date: date,
     initial_capital: float = 100000, stop_loss_pct: float = 5,
-    take_profit_pct: float = 10, min_holding_days: int = 0,
-    max_holding_days: int = 20, fee_pct: float = 0.4,
+    take_profit_pct: float = 10, min_holding_days: int = 5,
+    max_holding_days: int = 90, fee_pct: float = 0.4,
     fixed_fee: float = 0, slippage_pct: float = 0.1, position_size_pct: float = 100,
     trailing_stop_pct: Optional[float] = None, max_volume_participation_pct: float = 10,
     risk_free_rate_pct: float = 4, data_source: str = "auto",
@@ -467,6 +467,7 @@ def run_backtest(
     compact: bool = False,
     include_trades: bool = False,
     entry_signals: Optional[List[bool]] = None,
+    exit_signals: Optional[List[bool]] = None,
 ) -> Dict[str, Any]:
     clean_symbol = str(symbol or "").strip().upper()
     if initial_capital <= 0:
@@ -569,7 +570,10 @@ def run_backtest(
         raise BacktestError("Prepared historical rows do not match the market bars.")
     if entry_signals is not None and len(entry_signals) != len(market_bars):
         raise BacktestError("Compiled entry signals do not match the market bars.")
+    if exit_signals is not None and len(exit_signals) != len(market_bars):
+        raise BacktestError("Compiled exit signals do not match the market bars.")
     pending_signal: Optional[Dict[str, Any]] = None
+    pending_exit = False
     position: Optional[Dict[str, Any]] = None
     cash = float(initial_capital)
     trades: List[Dict[str, Any]] = []
@@ -653,13 +657,16 @@ def run_backtest(
             held_days = index - position["entry_index"]
             exit_price: Optional[float] = None
             exit_reason = ""
-            if bar.low <= stop_price:
+            if pending_exit:
+                raw_exit_price, exit_reason = bar.open, "condition_exit_next_open"
+                pending_exit = False
+            elif held_days >= min_holding_days and bar.low <= stop_price:
                 raw_exit_price, exit_reason = min(bar.open, stop_price), "trailing_stop" if trailing_price >= fixed_stop_price and trailing_stop_pct else "stop_loss"
             elif held_days >= min_holding_days and bar.high >= target_price:
                 raw_exit_price, exit_reason = max(bar.open, target_price), "take_profit"
             elif held_days >= max_holding_days:
                 raw_exit_price, exit_reason = bar.close, "max_holding_days"
-            elif index == len(market_bars) - 1:
+            elif index == len(market_bars) - 1 and held_days >= min_holding_days:
                 raw_exit_price, exit_reason = bar.close, "end_of_data"
             if exit_reason:
                 exit_price = raw_exit_price * (1 - slippage_pct / 100)
@@ -710,6 +717,8 @@ def run_backtest(
                     "result": "win" if pnl > 0 else "loss" if pnl < 0 else "break_even",
                 })
                 position = None
+            elif exit_signals is not None and held_days >= min_holding_days and exit_signals[index]:
+                pending_exit = True
 
         market_value = position["quantity"] * bar.close if position else 0
         equity_curve.append({"time": bar.timestamp, "date": bar.day, "value": round(cash + market_value, 2)})

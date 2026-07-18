@@ -2,6 +2,7 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import './index.css';
 import App from './App';
+import { installAuthenticatedFetch } from './utils/authenticatedFetch';
 import reportWebVitals from './reportWebVitals';
 import { getDefaultApiUrl, shouldResetStoredApiUrl } from './utils/api';
 import './hooks/monitoringStore';
@@ -28,6 +29,7 @@ const savedApiUrl = localStorage.getItem('apiUrl');
 if (shouldResetStoredApiUrl(savedApiUrl)) {
   localStorage.setItem('apiUrl', getDefaultApiUrl());
 }
+installAuthenticatedFetch();
 
 const root = ReactDOM.createRoot(
   document.getElementById('root') as HTMLElement

@@ -152,6 +152,7 @@ const CustomQueryEditor: React.FC<Props> = ({
   const [schedulePreflightKey, setSchedulePreflightKey] = useState('');
   const skipNextAutoPreviewRef = useRef(false);
   const immediatePreviewRef = useRef(Boolean((initialQuery ?? '').trim()));
+  const delayedInitialQueryAppliedRef = useRef(false);
   const prevClientIdRef = useRef(clientId);
   const [validateDebounceMs, setValidateDebounceMs] = useState(
     () => readUiPortalSettings().customQueryValidateDebounceMs,
@@ -160,6 +161,15 @@ const CustomQueryEditor: React.FC<Props> = ({
   useEffect(() => subscribeUiPortalSettings((settings) => {
     setValidateDebounceMs(settings.customQueryValidateDebounceMs);
   }), []);
+
+  useEffect(() => {
+    const incoming = String(initialQuery || '');
+    if (!delayedInitialQueryAppliedRef.current && incoming.trim() && !queryText.trim()) {
+      delayedInitialQueryAppliedRef.current = true;
+      immediatePreviewRef.current = true;
+      setQueryText(incoming);
+    }
+  }, [initialQuery, queryText]);
 
   const previewContext = useCallback(() => ({
     side,

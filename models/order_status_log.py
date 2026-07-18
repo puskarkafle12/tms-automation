@@ -1,10 +1,11 @@
-from sqlalchemy import JSON, Column, Float, Integer, String, DateTime, func, Index
+from sqlalchemy import JSON, Column, Float, Integer, String, DateTime, func, Index, ForeignKey
 from database import Base
 
 class OrderStatusLog(Base):
     __tablename__ = 'order_status_logs'
 
     log_id = Column(Integer, primary_key=True, autoincrement=True)
+    owner_user_id = Column(Integer, ForeignKey("frontend_users.id"), nullable=True, index=True)
     client_id = Column(String)
     security_details = Column(JSON)
     script_name=Column(String)

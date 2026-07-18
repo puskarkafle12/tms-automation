@@ -110,4 +110,49 @@ describe('orderStrategyDetails', () => {
       ]),
     );
   });
+
+  test('shows live condition states, net position costs, and fixed references', () => {
+    const layout = buildStrategyDetailLayout(
+      {
+        script_name: 'MLBBL',
+        status: 'pending',
+        strategy_type: 'Custom Query Buy',
+        qty: 10,
+        strategy_config: {
+          lifecycle_active: true,
+          min_holding_days: 5,
+          max_holding_days: 90,
+          live_condition_status: {
+            logic: 'AND',
+            matched: false,
+            conditions: [
+              { label: 'SMA 20 trend', matched: true, current_display: 'above', required_display: 'above' },
+              { label: 'MACD', matched: false, current_display: 'Bearish', required_display: 'Bullish' },
+            ],
+          },
+          live_position_metrics: {
+            entry_price: 1000,
+            ltp: 1100,
+            gross_profit_percent: 10,
+            estimated_buy_charges: 350,
+            estimated_total_sell_charges: 600,
+            estimated_net_profit: 9050,
+            profit_percent: 9.02,
+          },
+          field_reference_rows: [{ field_key: 'ltp', numeric_value: 1149 }],
+        },
+      },
+      helpers,
+    );
+
+    expect(layout.conditionLogic).toBe('AND');
+    expect(layout.conditions?.map((item) => item.status)).toEqual(['satisfied', 'waiting']);
+    expect(layout.positionMetrics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ label: 'Estimated net profit', value: 'Rs. 9,050' }),
+      expect.objectContaining({ label: 'profit_percent used by rules', value: '9.02%' }),
+    ]));
+    expect(layout.fixedReferences).toEqual([
+      expect.objectContaining({ label: 'LTP · fixed reference', value: 'Rs. 1,149' }),
+    ]);
+  });
 });

@@ -11,6 +11,7 @@ import {
   extractSymbolsFromCompiledPlan,
   extractPlanSide,
   holdingsMapFromRows,
+  isBuySymbolAllowedForSchedule,
   isCustomQueryStrategy,
   isRuleBasedStrategy,
   planUsesReference,
@@ -92,7 +93,9 @@ const ScheduleOrder: React.FC = () => {
   const [baselineModalOpen, setBaselineModalOpen] = useState(false);
   const [baselineScheduleInput, setBaselineScheduleInput] = useState<ScreenerDropScheduleInput | null>(null);
   const draftRestoredRef = useRef(false);
+  const recommendationHandoffShownRef = useRef(false);
   const feedbackQueryKeyRef = useRef('');
+  const recommendationHandoff = useMemo(() => new URLSearchParams(window.location.search).get('source') === 'backtest-recommendation', []);
 
   const bindSubmitFeedbackToQuery = useCallback((
     queryText: string,
@@ -147,6 +150,24 @@ const ScheduleOrder: React.FC = () => {
       localStorage.removeItem(SCHEDULE_ORDER_DRAFT_KEY);
     }
   }, []);
+
+  useEffect(() => {
+    if (!recommendationHandoff || recommendationHandoffShownRef.current) return;
+    recommendationHandoffShownRef.current = true;
+    try {
+      const source = JSON.parse(localStorage.getItem('tms-strategy-source-v1:schedule-order') || '{}') as Record<string, unknown>;
+      if (String(source.query_text || '').trim()) {
+        setStatus('success');
+        setStatusMessage(`Exact ${String(source.side || 'buy').toUpperCase()} backtest strategy loaded for ${String(source.symbol || 'the selected stock').toUpperCase()}. Review the account, live preview and risk settings, then confirm scheduling.`);
+      } else {
+        setStatus('error');
+        setStatusMessage('The recommendation handoff did not contain a strategy query. Return to Recommendations and choose Schedule again.');
+      }
+    } catch {
+      setStatus('error');
+      setStatusMessage('The recommendation strategy handoff could not be read. Return to Recommendations and choose Schedule again.');
+    }
+  }, [recommendationHandoff]);
 
   useEffect(() => {
     if (!draftRestoredRef.current) {
@@ -697,6 +718,40 @@ const ScheduleOrder: React.FC = () => {
 
   const submitStrategyOrder = async (strategyPayload: StrategyPayload) => {
     const customQuery = isCustomQueryStrategy(strategyPayload.strategy_type);
+    if (customQuery) {
+      try {
+        const source = JSON.parse(localStorage.getItem('tms-strategy-source-v1:schedule-order') || '{}') as Record<string, unknown>;
+        const sourceQuery = String(source.query_text || '').trim();
+        const payloadQuery = String(strategyPayload.strategy_config?.query_text || '').trim();
+        if (sourceQuery && sourceQuery === payloadQuery) {
+          const compiledSource = (source.compiled_plan || {}) as Record<string, any>;
+          const backtestConfig = (compiledSource.backtest || {}) as Record<string, unknown>;
+          const lifecycleConfig = (compiledSource.position_lifecycle || {}) as Record<string, unknown>;
+          strategyPayload.strategy_config = {
+            ...(strategyPayload.strategy_config || {}),
+            source_backtest_result_id: source.source_backtest_result_id,
+            source_backtest_run_id: source.source_backtest_run_id,
+            source_backtest_symbol: source.symbol,
+            source_backtest_side: source.side,
+            linear_position_cycle: true,
+            min_holding_days: Number(lifecycleConfig.min_holding_days ?? backtestConfig.min_holding_days ?? 5),
+            max_holding_days: Number(lifecycleConfig.max_holding_days ?? backtestConfig.max_holding_days ?? 90),
+            live_charge_policy: source.live_charge_policy || {
+              charge_model: 'nepse_equity_v2024_05_14',
+              investor_type: 'individual',
+              apply_cgt: true,
+              dp_charge: 25,
+            },
+            paired_sell_query_text: source.paired_sell_query_text,
+            paired_sell_compiled_plan: source.paired_sell_compiled_plan,
+            activation_requires_filled_buy: true,
+            activation_requires_holding: true,
+          };
+        }
+      } catch {
+        localStorage.removeItem('tms-strategy-source-v1:schedule-order');
+      }
+    }
     if (!customQuery) {
       setStatus('idle');
       setStatusMessage('');
@@ -740,10 +795,14 @@ const ScheduleOrder: React.FC = () => {
     }
 
     const symbolErrors: string[] = [];
+    const serverPreflightApproved = customQuery
+      && Boolean(strategyPayload.strategy_config?.schedule_preflight_ready);
+    const knownBuySymbols = new Set(
+      stockDetails.map((item) => String(item.symbol || '').trim().toUpperCase()),
+    );
     for (const symbol of scheduleSymbols) {
       if (effectiveOrderType === 'buy') {
-        const stock = stockDetails.find((item) => item.symbol === symbol);
-        if (!stock) {
+        if (!isBuySymbolAllowedForSchedule(symbol, knownBuySymbols, serverPreflightApproved)) {
           symbolErrors.push(`${symbol} is not a valid listed scrip for this client.`);
         }
       } else {
@@ -1158,14 +1217,14 @@ const ScheduleOrder: React.FC = () => {
                   </div>
                 ) : null}
                 side={orderType}
-                currentLtp={isCustomQuerySelected ? null : latestLtp}
+                currentLtp={latestLtp}
                 availableQty={orderType === 'sell' && !isCustomQuerySelected ? holdingQty : null}
                 averageBuyPrice={orderType === 'sell' && !isCustomQuerySelected ? averageBuyPrice : null}
-                topBuyPrice={isCustomQuerySelected ? null : (quote?.topBuy?.find((row: any) => Number(row.price || 0) > 0)?.price || null)}
-                topSellPrice={isCustomQuerySelected ? null : (quote?.topSell?.find((row: any) => Number(row.price || 0) > 0)?.price || null)}
+                topBuyPrice={quote?.topBuy?.find((row: any) => Number(row.price || 0) > 0)?.price || null}
+                topSellPrice={quote?.topSell?.find((row: any) => Number(row.price || 0) > 0)?.price || null}
                 initialQty={qty}
                 initialPrice={isCustomQuerySelected ? '' : (latestLtp && latestLtp > 0 ? String(Math.round(latestLtp)) : price)}
-                securityDetails={isCustomQuerySelected ? null : (selectedStock || quote?.security || null)}
+                securityDetails={selectedStock || quote?.security || null}
                 isSubmitting={isSubmitting}
                 submitProgress={submitProgress}
                 submitError={orderType === 'sell' && !isCustomQuerySelected ? holdingError || quoteError : quoteError}
@@ -1186,7 +1245,8 @@ const ScheduleOrder: React.FC = () => {
         </div>
 
         <div className={`schedule-order-side-panel panel ${customQuerySideClass}`}>
-          {!isCustomQuerySelected && selectedStock ? (
+          {selectedStock ? (
+            <>
             <StockDetails
               stock={selectedStock}
               orderType={orderType}
@@ -1204,6 +1264,8 @@ const ScheduleOrder: React.FC = () => {
               holdingError={holdingError}
               onFillFromHolding={fillSellQuantityFromHolding}
             />
+            {isCustomQuerySelected && <div className="schedule-order-ai-side" id="custom-query-ai-side-panel" />}
+            </>
           ) : !isCustomQuerySelected ? (
             <div className="schedule-order-empty-side">
               <span style={{ fontSize: '2rem' }} aria-hidden="true">📈</span>
@@ -1215,7 +1277,7 @@ const ScheduleOrder: React.FC = () => {
         </div>
       </div>
 
-      {chartSymbol && !isCustomQuerySelected && (
+      {chartSymbol && (
         <div className="schedule-order-chart-panel panel">
           <div className="schedule-order-chart-header">
             <div>

@@ -148,6 +148,23 @@ class SchedulePreviewCaptureTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["estimated_trigger_price_display"], "SMA 20 crossed above")
         self.assertFalse(_snapshot_missing_trigger(snapshot))
 
+    def test_snapshot_keeps_each_condition_and_logic_for_order_details(self):
+        snapshot = snapshot_from_preview_row({
+            "trigger": {
+                "kind": "non_price_condition",
+                "strategy_text": "SMA trend and bullish MACD",
+                "logic": "AND",
+                "conditions": [
+                    {"strategy_text": "SMA 20 is above", "matched": True, "current_display": "above", "target_display": "above"},
+                    {"strategy_text": "MACD is bullish", "matched": False, "current_display": "Bearish", "target_display": "Bullish"},
+                ],
+            }
+        })
+        self.assertEqual(snapshot["condition_logic"], "AND")
+        self.assertEqual(len(snapshot["conditions"]), 2)
+        self.assertTrue(snapshot["conditions"][0]["matched"])
+        self.assertFalse(snapshot["conditions"][1]["matched"])
+
     def test_snapshots_from_preview_rows_indexes_by_symbol(self):
         snapshots = snapshots_from_preview_rows([
             {

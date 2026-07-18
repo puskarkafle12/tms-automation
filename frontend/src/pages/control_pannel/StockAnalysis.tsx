@@ -157,6 +157,20 @@ const rowColorForPercentChange = (percentChange: number | null) => {
   return 'lightyellow';
 };
 
+const buildBacktestHistoryUrl = (row: Record<string, unknown>) => {
+  const symbol = String(row.symbol || row.script_name || '').trim().toUpperCase();
+  if (!symbol) return '';
+  const params = new URLSearchParams({ scope: 'all', stock: symbol });
+  if (row.run_id) params.set('run', String(row.run_id));
+  if (row.result_id) params.set('result', String(row.result_id));
+  return `/dashboard/backtest?${params.toString()}`;
+};
+
+const backtestHistoryAction = (row: Record<string, unknown>) => {
+  const url = buildBacktestHistoryUrl(row);
+  return url ? <a className="stock-analysis-backtest-link" href={url}>Open backtesting history</a> : '—';
+};
+
 const isEmptyCell = (value: unknown): boolean => {
   if (value == null || value === '') {
     return true;
@@ -313,7 +327,7 @@ const universeRequiresLogin = (universe: ScreenerUniverse) =>
   universe === 'combined_holdings';
 
 type AnalysisTab = 'screener' | 'new_stocks' | 'data';
-type DataSource = 'combined' | 'sharesansar' | 'merolagani' | 'nepse_alpha';
+type DataSource = 'combined' | 'sharesansar' | 'merolagani' | 'nepse_alpha' | 'technical' | 'recommendations';
 
 interface NewStockRow {
   symbol: string;
@@ -348,6 +362,7 @@ const StockAnalysis: React.FC = () => {
   const [dataSource, setDataSource] = useState<DataSource>('combined');
   const [newStocks, setNewStocks] = useState<NewStockRow[]>([]);
   const [newStocksDays, setNewStocksDays] = useState(15);
+  const [newStocksAgeDraft, setNewStocksAgeDraft] = useState('15');
   const [dismissedNewStocks, setDismissedNewStocks] = useState<string[]>(() => loadDismissedNewStocks());
   const [dataRows, setDataRows] = useState<Record<string, unknown>[]>([]);
   const [dataColumns, setDataColumns] = useState<string[]>(['symbol']);
@@ -656,6 +671,12 @@ const StockAnalysis: React.FC = () => {
   const refreshDataTable = useCallback(async () => {
     setDataRefreshing(true);
     try {
+      if (dataSource === 'recommendations') {
+        await fetchJson('/api/market-recommendations/refresh', { method: 'POST' });
+        const recommendationResponse = await fetchJson<MarketDataResponse>('/market_analysis/data?source=recommendations');
+        if (recommendationResponse.ok) applyMarketDataResponse(recommendationResponse.data);
+        return;
+      }
       const refreshResponse = await fetchJson<{ status?: string }>('/market_analysis/refresh', { method: 'POST' });
       if (refreshResponse.ok && refreshResponse.data.status === 'started') {
         for (let attempt = 0; attempt < 120; attempt += 1) {
@@ -1161,14 +1182,16 @@ const StockAnalysis: React.FC = () => {
     const withUpdated = unique.includes('updated_at')
       ? unique
       : [...unique, 'updated_at'];
-    return reorderColumnsByData(
+    const ordered = reorderColumnsByData(
       withUpdated,
       results as unknown as Record<string, unknown>[],
     );
+    return ordered.includes('backtest_history') ? ordered : [...ordered, 'backtest_history'];
   }, [resultColumns, results]);
 
   const screenerTableRows = useMemo(
-    () => formatMarketTableRows(results as unknown as Record<string, unknown>[], relativeNow),
+    () => formatMarketTableRows(results as unknown as Record<string, unknown>[], relativeNow)
+      .map((row) => ({ ...row, backtest_history: backtestHistoryAction(row) })),
     [results, relativeNow],
   );
 
@@ -1183,14 +1206,15 @@ const StockAnalysis: React.FC = () => {
   );
 
   const dataTableRows = useMemo(
-    () => formatMarketTableRows(dataRows, relativeNow),
+    () => formatMarketTableRows(dataRows, relativeNow)
+      .map((row) => ({ ...row, backtest_history: backtestHistoryAction(row) })),
     [dataRows, relativeNow],
   );
 
-  const displayDataColumns = useMemo(
-    () => reorderColumnsByData(dataColumns, dataRows),
-    [dataColumns, dataRows],
-  );
+  const displayDataColumns = useMemo(() => {
+    const ordered = reorderColumnsByData(dataColumns, dataRows);
+    return ordered.includes('backtest_history') ? ordered : [...ordered, 'backtest_history'];
+  }, [dataColumns, dataRows]);
 
   return (
     <div className="stock-screener-page">
@@ -1212,7 +1236,7 @@ const StockAnalysis: React.FC = () => {
             className={analysisTab === 'new_stocks' ? 'active' : ''}
             onClick={() => setAnalysisTab('new_stocks')}
           >
-            New Stocks (15d)
+            New Stocks ({newStocksDays}d)
           </button>
           <button
             type="button"
@@ -1237,7 +1261,11 @@ const StockAnalysis: React.FC = () => {
               <div className="stock-screener-universe-chips">
                 <Dropdown
                   value={String(newStocksDays)}
-                  onChange={(value) => setNewStocksDays(Number(value) || 15)}
+                  onChange={(value) => {
+                    const days = Number(value) || 15;
+                    setNewStocksDays(days);
+                    setNewStocksAgeDraft(String(days));
+                  }}
                   options={[
                     { label: '7 days', value: '7' },
                     { label: '15 days', value: '15' },
@@ -1245,6 +1273,29 @@ const StockAnalysis: React.FC = () => {
                     { label: '90 days', value: '90' },
                   ]}
                 />
+                <label className="stock-analysis-custom-age">
+                  <span>Custom age</span>
+                  <input
+                    type="number"
+                    min="1"
+                    max="36500"
+                    step="1"
+                    value={newStocksAgeDraft}
+                    aria-label="Custom IPO maximum age in days"
+                    onChange={(event) => setNewStocksAgeDraft(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key !== 'Enter') return;
+                      const days = Math.min(36500, Math.max(1, Number(newStocksAgeDraft) || 15));
+                      setNewStocksAgeDraft(String(days));
+                      setNewStocksDays(days);
+                    }}
+                  />
+                  <button type="button" onClick={() => {
+                    const days = Math.min(36500, Math.max(1, Number(newStocksAgeDraft) || 15));
+                    setNewStocksAgeDraft(String(days));
+                    setNewStocksDays(days);
+                  }}>Apply</button>
+                </label>
                 <span className="badge badge-muted">{visibleNewStocks.length} stocks</span>
                 {dismissedNewStocks.length > 0 && (
                   <button type="button" className="btn-secondary stock-analysis-reset-hidden" onClick={restoreNewStocks}>
@@ -1262,6 +1313,7 @@ const StockAnalysis: React.FC = () => {
                 <CommonTable
                   data={visibleNewStocks.map((row) => ({
                     ...row,
+                    backtest_history: backtestHistoryAction(row as unknown as Record<string, unknown>),
                     removeAction: (
                       <button
                         type="button"
@@ -1274,13 +1326,14 @@ const StockAnalysis: React.FC = () => {
                       </button>
                     ),
                   }))}
-                  columns={['symbol', 'company_name', 'sector', 'listing_date', 'listing_age_days', 'volume', 'removeAction']}
+                  columns={['symbol', 'company_name', 'sector', 'listing_date', 'listing_age_days', 'volume', 'backtest_history', 'removeAction']}
                   columnLabels={{
                     company_name: 'Company',
                     listing_date: 'Listing Date',
                     listing_age_days: 'Age (Days)',
                     removeAction: 'Action',
                     volume: 'Volume',
+                    backtest_history: 'Backtesting history',
                   }}
                   columnLinks={{
                     symbol: (row) => buildNepseAlphaChartUrl(String(row.symbol || '')),
@@ -1302,11 +1355,11 @@ const StockAnalysis: React.FC = () => {
               <div>
                 <h3>Stored market data</h3>
                 <p className="stock-screener-subtitle">
-                  Browse ShareSansar company data, cached Merolagani and Nepse Alpha data, or the combined screener database.
+                  Browse source data, the combined screener database, or every stored technical indicator for each symbol.
                 </p>
               </div>
               <div className="stock-screener-universe-chips">
-                {(['combined', 'sharesansar', 'merolagani', 'nepse_alpha'] as DataSource[]).map((source) => (
+                {(['combined', 'technical', 'recommendations', 'sharesansar', 'merolagani', 'nepse_alpha'] as DataSource[]).map((source) => (
                   <button
                     key={source}
                     type="button"
@@ -1315,6 +1368,10 @@ const StockAnalysis: React.FC = () => {
                   >
                     {source === 'combined'
                       ? 'Combined'
+                      : source === 'technical'
+                        ? 'Technical indicators'
+                      : source === 'recommendations'
+                        ? 'Fresh recommendations'
                       : source === 'sharesansar'
                         ? 'ShareSansar'
                         : source === 'merolagani'
@@ -1336,15 +1393,16 @@ const StockAnalysis: React.FC = () => {
               <p className="stock-analysis-panel-message">Loading table…</p>
             ) : dataRows.length === 0 ? (
               <p className="stock-analysis-panel-message">
-                No cached market data yet. Click Refresh to load ShareSansar, Merolagani, and Nepse Alpha in the background
-                (first run can take a few minutes; the rest of the app stays usable).
+                {dataSource === 'recommendations'
+                  ? 'No recommendation from the latest completed trading session is available for your account. Run or reuse a backtest, then press Refresh; older signals are intentionally not shown.'
+                  : 'No cached market data yet. Click Refresh to load ShareSansar, Merolagani, and Nepse Alpha in the background (first run can take a few minutes; the rest of the app stays usable).'}
               </p>
             ) : (
               <div className="stock-analysis-table-shell">
                 <CommonTable
                   data={dataTableRows}
                   columns={displayDataColumns}
-                  columnLabels={dataColumnLabels}
+                  columnLabels={{ ...dataColumnLabels, backtest_history: 'Backtesting history' }}
                   columnLinks={{
                     symbol: (row) => buildNepseAlphaChartUrl(String(row.symbol || '')),
                   }}
@@ -1944,7 +2002,7 @@ const StockAnalysis: React.FC = () => {
                 <CommonTable
                   data={screenerTableRows}
                   columns={displayColumns}
-                  columnLabels={resultColumnLabels}
+                  columnLabels={{ ...resultColumnLabels, backtest_history: 'Backtesting history' }}
                   columnLinks={symbolColumnLinks}
                 />
               </div>

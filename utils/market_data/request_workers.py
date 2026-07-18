@@ -85,10 +85,41 @@ def worker_update_new_stocks_watchlist(symbols: List[str], *, is_watchlist: bool
         db.close()
 
 
-def worker_get_market_data(source: str) -> Dict[str, Any]:
+def worker_get_market_data(source: str, owner_id: Optional[str] = None) -> Dict[str, Any]:
     db = SessionLocal()
     try:
         ensure_read_session(db)
+        if source == "recommendations":
+            if not owner_id:
+                return {"source": source, "count": 0, "rows": [], "columns": ["symbol"], "column_labels": {"symbol": "Symbol"}}
+            from utils.backtesting.recommendations import query_recommendations
+            page = 1
+            recommendation_rows: List[Dict[str, Any]] = []
+            trading_session = None
+            while True:
+                payload = query_recommendations(db, {
+                    "signal": "all", "page": page, "page_size": 100,
+                    "minimum_trades": 0, "minimum_win_rate": 0, "minimum_score": 0,
+                    "sort_by": "recommendation_score", "sort_direction": "desc",
+                }, owner_id=owner_id)
+                trading_session = payload.get("trading_session")
+                recommendation_rows.extend(payload.get("items") or [])
+                if page >= int(payload.get("pages") or 0):
+                    break
+                page += 1
+            columns = [
+                "rank", "symbol", "company_name", "sector", "current_signal_status", "signal_date",
+                "preset_name", "recommendation_score", "win_rate_pct", "total_trades", "net_return_pct",
+                "average_holding_days", "buy_zone_low", "buy_zone_high", "protective_stop",
+                "sell_zone_low", "sell_zone_high", "ltp", "latest_volume", "average_volume_20", "refreshed_at",
+            ]
+            rows = [{**item, "rank": index} for index, item in enumerate(recommendation_rows, 1)]
+            return {
+                "source": source, "count": len(rows), "rows": rows, "columns": columns,
+                "column_labels": {column: get_table_display_metadata(source, [{column: None}])["column_labels"].get(column, column.replace("_", " ").title()) for column in columns},
+                "trading_session": trading_session, "freshness_policy": "latest_completed_trading_session_only",
+                "cache_status": get_cache_status(db),
+            }
         rows = load_latest_daily_stock_rows(db) if source == "sharesansar" else load_table_rows(db, source)
         if not rows and source in {"combined", "merolagani"}:
             fallback_rows = load_latest_daily_stock_rows(db)

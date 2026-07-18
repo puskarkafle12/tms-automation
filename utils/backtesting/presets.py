@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from typing import Any, Dict, List
 
 
@@ -10,7 +11,7 @@ def _preset(
     preset_id: str, name: str, category: str, condition: str, description: str,
     *, stop: float = 5, target: float = 10, holding: int = 20, research_basis: str = "",
 ) -> Dict[str, Any]:
-    source_hash = hashlib.sha256(f"{condition}|{stop}|{target}|{holding}".encode("utf-8")).hexdigest()
+    source_hash = hashlib.sha256(f"{condition}|{stop}|{target}|{holding}|every_match-v3".encode("utf-8")).hexdigest()
     return {
         "id": preset_id,
         "name": name,
@@ -19,9 +20,48 @@ def _preset(
         "description": description,
         "research_basis": research_basis,
         "family": preset_id.rsplit("_", 1)[0],
-        "version": "preset-v1", "source_hash": source_hash,
+        "version": "preset-v3", "source_hash": source_hash,
         "defaults": {"stop_loss_pct": stop, "take_profit_pct": target, "max_holding_days": holding},
     }
+
+
+def _supplied_nepse15_preset(
+    number: int, name: str, stop: float, target: float, holding: int,
+    *, trailing: float | None = None, limitation: str = "",
+) -> Dict[str, Any]:
+    """Create one executable, content-addressed member of the supplied set."""
+    condition = f"technical_nepse15_entry_{number} = 1"
+    exit_condition = f"technical_nepse15_exit_{number} = 1"
+    preset = _preset(
+        f"nepse15_{number:02d}", name, "User-supplied NEPSE 15", condition,
+        "Completed-session OHLCV setup with its own condition exit, conservative daily execution, and Nepal charges.",
+        stop=stop, target=target, holding=holding,
+        research_basis=(
+            "User-supplied research hypothesis; require locked OOS and walk-forward validation. "
+            "The common NEPSE-index-above-EMA50 gate is intentionally not asserted until a versioned "
+            "point-in-time index series is stored. " + limitation
+        ),
+    )
+    preset["family"] = "user_supplied_nepse15"
+    preset["version"] = "nepse15-v1"
+    preset["exit_rule_id"] = f"nepse15_exit_{number}"
+    preset["exit_condition"] = exit_condition
+    preset["order_clause"] = "RISK_PERCENT 1"
+    preset["enforce_preset_holding"] = True
+    preset["defaults"]["min_holding_days"] = 5
+    recommended_order = {1: 1, 2: 2, 6: 3, 4: 4, 15: 5}
+    preset["team_recommended_priority"] = recommended_order.get(number)
+    if trailing is not None:
+        preset["defaults"]["trailing_stop_pct"] = trailing
+    identity = {
+        "condition": condition, "exit_condition": exit_condition,
+        "defaults": preset["defaults"], "order_clause": preset["order_clause"],
+        "engine": "nepse15-v1",
+    }
+    preset["source_hash"] = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return preset
 
 
 def get_backtest_presets() -> List[Dict[str, Any]]:
@@ -208,8 +248,35 @@ def get_backtest_presets() -> List[Dict[str, Any]]:
             stop=stop, target=target, holding=holding, research_basis=research_basis,
         ))
 
-    if len(presets) != 116:
-        raise RuntimeError(f"Expected 116 backtest presets, built {len(presets)}")
+    supplied_nepse15 = (
+        (1, "Trend Pullback + ADX + Volume", 6, 10, 20, None, "ATR distances are represented by conservative percentage risk controls in the current daily simulator."),
+        (2, "20-Session High Breakout + Volume", 8, 12, 30, 8, "ATR distances are represented by conservative percentage risk controls in the current daily simulator."),
+        (3, "MACD Momentum + Trend Filter", 6, 9, 15, None, "ATR distances are represented by conservative percentage risk controls in the current daily simulator."),
+        (4, "RSI Oversold Pullback in Uptrend", 5, 10, 12, None, "Two-stage profit scaling is represented by one conservative portfolio exit."),
+        (5, "52-Week High Breakout", 8, 16, 40, 10, "ATR distances are represented by conservative percentage risk controls in the current daily simulator."),
+        (6, "EMA 10/30 Crossover + ADX", 6, 10, 25, None, "ATR distances are represented by conservative percentage risk controls in the current daily simulator."),
+        (7, "Bollinger Band Squeeze Breakout", 6, 12, 20, None, "ATR distances are represented by conservative percentage risk controls in the current daily simulator."),
+        (8, "Ichimoku Cloud Breakout", 8, 12, 30, None, "Uses non-displaced, past-only cloud values to avoid look-ahead."),
+        (9, "Donchian 20/10 Trend Strategy", 8, 24, 40, 10, "No fixed target is used conceptually; the high target leaves the condition exit in control."),
+        (10, "Support Bounce + Bullish Candle", 6, 15, 15, None, "Support is the prior 20-session low with two prior 1.5% tests."),
+        (11, "Stochastic Pullback Continuation", 6, 15, 15, None, "Swing-low ATR placement is represented by conservative percentage risk controls."),
+        (12, "OBV Accumulation Breakout", 8, 16, 25, None, "The consolidation-height target is represented by a conservative percentage target."),
+        (13, "Five-Session Momentum + Pullback", 6, 15, 15, None, "Pullback-low ATR placement is represented by conservative percentage risk controls."),
+        (14, "Volatility Contraction Pattern", 7, 21, 30, 7, "Contractions are deterministic non-overlapping five-session ranges."),
+        (15, "Relative-Strength Leader Strategy", 8, 24, 40, 10, "Uses absolute 20/60-session strength until versioned NEPSE index history is available."),
+    )
+    presets.extend(
+        _supplied_nepse15_preset(number, name, stop, target, holding, trailing=trailing, limitation=limitation)
+        for number, name, stop, target, holding, trailing, limitation in supplied_nepse15
+    )
+
+    if len(presets) != 131:
+        raise RuntimeError(f"Expected 131 backtest presets, built {len(presets)}")
+    identities: Dict[str, str] = {}
+    for preset in presets:
+        prior = identities.setdefault(str(preset["source_hash"]), str(preset["id"]))
+        if prior != preset["id"]:
+            raise RuntimeError(f"Duplicate executable presets: {prior} and {preset['id']}")
     return presets
 
 
@@ -223,10 +290,11 @@ def build_preset_query(
         "fee_pct": .4, "fixed_fee": 0, "slippage_pct": .1,
         "stop_loss_pct": defaults.get("stop_loss_pct", 5),
         "take_profit_pct": defaults.get("take_profit_pct", 10),
-        "min_holding_days": defaults.get("min_holding_days", 0),
-        "max_holding_days": defaults.get("max_holding_days", 20),
+        "min_holding_days": defaults.get("min_holding_days", 5),
+        "max_holding_days": defaults.get("max_holding_days", 90),
         "position_size_pct": 100, "max_volume_participation_pct": 10,
-        "risk_free_rate_pct": 4, "data_source": "auto", "trailing_stop_pct": None,
+        "risk_free_rate_pct": 4, "data_source": "auto",
+        "trailing_stop_pct": defaults.get("trailing_stop_pct"),
     }
     config.update(backtest_config or {})
     trailing_stop = (
@@ -255,8 +323,8 @@ BACKTEST {{
 }}
 RULE "{preset["name"]}" FOR SYMBOL "{symbol}" {{
   WHEN {preset["condition"]}
-  ORDER PERCENT_OF_AVAILABLE_CASH 100
-  EXECUTE MAX 100 TIMES PER SYMBOL
+  ORDER {preset.get("order_clause") or "PERCENT_OF_AVAILABLE_CASH 100"}
+  EXECUTE ON EVERY MATCH
 }}'''
 
 
@@ -278,8 +346,8 @@ BACKTEST {{
   STOP_LOSS_PCT 5
   TAKE_PROFIT_PCT 10
   TRAILING_STOP_PCT 3
-  MIN_HOLDING_DAYS 0
-  MAX_HOLDING_DAYS 20
+  MIN_HOLDING_DAYS 5
+  MAX_HOLDING_DAYS 90
   POSITION_SIZE_PCT 100
   MAX_VOLUME_PARTICIPATION_PCT 10
   RISK_FREE_RATE_PCT 4
@@ -288,7 +356,7 @@ BACKTEST {{
 RULE "Descriptive strategy name" FOR SYMBOL "{clean_symbol}" {{
   WHEN <historical condition>
   ORDER PERCENT_OF_AVAILABLE_CASH 100
-  EXECUTE MAX 100 TIMES PER SYMBOL
+  EXECUTE ON EVERY MATCH
 }}
 
 Historical fields: ltp, open, high, low, volume, previous_close, change, change_percent,

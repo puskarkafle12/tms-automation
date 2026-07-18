@@ -3,6 +3,7 @@ import pytest
 from utils.backtesting.v2_query import (
     ResultQueryError,
     compile_filters,
+    compile_result_sorts,
     compile_strong_buy_filters,
     compile_strong_buy_sorts,
 )
@@ -23,6 +24,17 @@ def test_result_filters_allow_explicit_non_equity_universe():
     assert sql == "TRUE"
 
 
+def test_result_signal_and_holding_configuration_filters_are_validated():
+    sql, params = compile_filters({"join": "and", "conditions": [
+        {"field": "current_signal_status", "operator": "eq", "value": "strong_buy"},
+        {"field": "min_holding_days", "operator": "eq", "value": 5},
+        {"field": "max_holding_days", "operator": "lte", "value": 90},
+    ]})
+    assert "r.current_signal_status = :filter_0" in sql
+    assert "r.assumptions->>'min_holding_days'" in sql
+    assert params == {"filter_0": "strong_buy", "filter_1": 5.0, "filter_2": 90.0}
+
+
 def test_result_filters_reject_unknown_fields_and_sql_payloads():
     with pytest.raises(ResultQueryError):
         compile_filters({"field": "drop table backtest_results", "operator": "eq", "value": 1})
@@ -35,6 +47,27 @@ def test_nested_or_filters_are_supported():
     ]})
     assert " OR " in sql
     assert params["filter_0"] == "Bank"
+
+
+def test_results_support_validated_multi_column_sorting():
+    inner, outer, sorts = compile_result_sorts({"sorts": [
+        {"field": "robust_score", "direction": "desc"},
+        {"field": "oos_return_pct", "direction": "desc"},
+        {"field": "max_drawdown_pct", "direction": "asc"},
+    ]})
+    assert inner.startswith("r.robust_score DESC NULLS LAST,r.oos_return_pct DESC NULLS LAST,r.max_drawdown_pct ASC NULLS LAST")
+    assert outer.startswith("robust_score DESC NULLS LAST,oos_return_pct DESC NULLS LAST,max_drawdown_pct ASC NULLS LAST")
+    assert sorts[2] == {"field": "max_drawdown_pct", "direction": "asc"}
+
+
+def test_result_sorting_rejects_unknown_and_duplicate_fields():
+    with pytest.raises(ResultQueryError):
+        compile_result_sorts({"sorts": [{"field": "drop table runs", "direction": "desc"}]})
+    with pytest.raises(ResultQueryError):
+        compile_result_sorts({"sorts": [
+            {"field": "win_rate_pct", "direction": "desc"},
+            {"field": "win_rate_pct", "direction": "asc"},
+        ]})
 
 
 def test_recommendations_support_validated_multi_column_sorting():

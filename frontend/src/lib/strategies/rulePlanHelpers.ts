@@ -514,6 +514,14 @@ export function isQueryValidationReady(
   return !findBlockingValidationIssue(validation);
 }
 
+export function isBuySymbolAllowedForSchedule(
+  symbol: string,
+  knownBuySymbols?: Set<string>,
+  schedulePreflightReady = false,
+): boolean {
+  return schedulePreflightReady || Boolean(knownBuySymbols?.has(symbol.trim().toUpperCase()));
+}
+
 export function validatePlanSymbolsForSchedule(
   compiledPlan: Record<string, unknown> | undefined,
   side: 'buy' | 'sell',
@@ -522,6 +530,7 @@ export function validatePlanSymbolsForSchedule(
     holdingsBySymbol?: Record<string, number>;
     scriptListLoading?: boolean;
     holdingsLoading?: boolean;
+    schedulePreflightReady?: boolean;
   } = {},
 ): string | null {
   const symbols = extractSymbolsFromCompiledPlan(compiledPlan);
@@ -530,6 +539,12 @@ export function validatePlanSymbolsForSchedule(
   }
 
   if (side === 'buy') {
+    // A completed server preflight is authoritative. The client-side TMS scrip
+    // dropdown is a convenience cache and can be incomplete while the market is
+    // closed or a client session is being refreshed.
+    if (options.schedulePreflightReady) {
+      return null;
+    }
     if (options.scriptListLoading) {
       return 'Loading stock list for this client…';
     }
@@ -538,7 +553,7 @@ export function validatePlanSymbolsForSchedule(
       return 'Stock list is not loaded yet. Wait for scripts to load or refresh.';
     }
     for (const symbol of symbols) {
-      if (!known.has(symbol)) {
+      if (!isBuySymbolAllowedForSchedule(symbol, known)) {
         return `${symbol} is not a valid listed scrip for this client.`;
       }
     }

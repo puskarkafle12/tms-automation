@@ -783,6 +783,14 @@ class TmsUser:
             "buyOrSell": row.get("buyOrSell") or order_book.get("buyOrSell"),
             "orderQuantity": row.get("orderQuantity") or extension.get("orderQuantity"),
             "orderPrice": row.get("orderPrice") or extension.get("orderPrice"),
+            "averageTradePrice": (
+                row.get("averageTradePrice")
+                or row.get("averageTradedPrice")
+                or row.get("tradePrice")
+                or extension.get("averageTradePrice")
+                or extension.get("averageTradedPrice")
+                or extension.get("tradePrice")
+            ),
             "orderTime": row.get("orderTime") or row.get("orderPlacedTime") or order_book.get("orderTime"),
             "activeStatus": row.get("activeStatus") or order_book.get("activeStatus"),
             "displayActiveStatus": row.get("displayActiveStatus") or row.get("activeStatus") or order_book.get("activeStatus"),

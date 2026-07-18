@@ -107,4 +107,23 @@ export type StrategyDetailLayout = {
   headline: StrategyDetailItem[];
   primary: StrategyDetailItem[];
   secondary: StrategyDetailItem[];
+  conditions?: Array<{
+    label: string;
+    status: 'satisfied' | 'waiting' | 'unavailable';
+    current: string;
+    required: string;
+    explanation?: string;
+  }>;
+  conditionLogic?: 'AND' | 'OR';
+  conditionSummary?: string;
+  workflow?: Array<{
+    label: string;
+    detail: string;
+    state: 'complete' | 'active' | 'pending' | 'blocked';
+  }>;
+  exitRules?: Array<{ label: string; detail: string }>;
+  positionMetrics?: StrategyDetailItem[];
+  fixedReferences?: StrategyDetailItem[];
+  rawQuery?: string;
+  recentLogs?: string;
 };

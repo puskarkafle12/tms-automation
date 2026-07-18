@@ -58,6 +58,86 @@ const numericValue = (value: unknown): number | null => {
   return Number.isFinite(numberValue) && numberValue > 0 ? numberValue : null;
 };
 
+const displayValue = (value: unknown): string => {
+  if (value == null || value === '') return 'Awaiting live data';
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+  if (typeof value === 'number') {
+    return Number.isInteger(value) ? value.toLocaleString('en-NP') : value.toLocaleString('en-NP', { maximumFractionDigits: 2 });
+  }
+  return String(value);
+};
+
+const humanField = (value: unknown): string => String(value || 'Condition')
+  .replace(/^technical_/, '')
+  .replace(/^fundamental_/, '')
+  .replace(/_/g, ' ')
+  .replace(/\bmacd\b/gi, 'MACD')
+  .replace(/\brsi\b/gi, 'RSI')
+  .replace(/\bsma\b/gi, 'SMA')
+  .replace(/\bema\b/gi, 'EMA')
+  .replace(/\bltp\b/gi, 'LTP')
+  .replace(/\bobv\b/gi, 'OBV')
+  .replace(/\bvwap\b/gi, 'VWAP')
+  .replace(/\b\w/g, (letter) => letter.toUpperCase());
+
+const operatorText = (operator: unknown): string => ({
+  eq: 'equals', neq: 'does not equal', gt: 'above', gte: 'at least', lt: 'below', lte: 'at most',
+}[String(operator || '').toLowerCase()] || String(operator || 'matches'));
+
+const literalNodeValue = (node: any): unknown => {
+  if (node && typeof node === 'object' && node.type === 'literal') return node.value;
+  if (node && typeof node === 'object' && node.type === 'field') return humanField(node.name);
+  return node;
+};
+
+const flattenCompiledConditions = (node: any): Array<{ label: string; required: string }> => {
+  if (!node || typeof node !== 'object') return [];
+  if (node.type === 'group') {
+    return (Array.isArray(node.children) ? node.children : []).flatMap(flattenCompiledConditions);
+  }
+  if (node.type === 'not') {
+    return flattenCompiledConditions(node.child).map((item) => ({ ...item, label: `Not: ${item.label}` }));
+  }
+  if (node.type === 'comparison') {
+    const field = node.left?.type === 'field' ? humanField(node.left.name) : 'Calculated value';
+    const required = displayValue(literalNodeValue(node.right));
+    return [{ label: `${field} ${operatorText(node.operator)} ${required}`, required }];
+  }
+  if (node.type === 'function') {
+    return [{ label: humanField(node.name), required: 'Function must return true' }];
+  }
+  return [];
+};
+
+const describeExitRule = (action: any): { label: string; detail: string } => {
+  const condition = action?.when || {};
+  const field = String(condition?.left?.name || 'exit condition');
+  const operator = String(condition?.operator || 'eq');
+  const threshold = literalNodeValue(condition?.right);
+  const mode = String(action?.order_mode || 'all_available').replace(/_/g, ' ');
+  if (field === 'profit_percent' && operator === 'lte' && Number(threshold) < 0) {
+    return { label: 'Protective stop', detail: `Sell ${mode} when estimated net return reaches ${displayValue(threshold)}% or lower.` };
+  }
+  if (field === 'profit_percent' && operator === 'gte') {
+    return { label: 'Profit target', detail: `Sell ${mode} when estimated net return reaches ${displayValue(threshold)}% or higher.` };
+  }
+  if (field === 'drawdown_from_peak_percent') {
+    return { label: 'Trailing protection', detail: `Sell ${mode} after a ${displayValue(threshold)}% move from the highest price reached.` };
+  }
+  return {
+    label: humanField(field),
+    detail: `Sell ${mode} when ${humanField(field)} is ${operatorText(operator)} ${displayValue(threshold)}.`,
+  };
+};
+
+const deduplicateLogs = (value: unknown): string => {
+  const unique: string[] = [];
+  String(value || '').split('\n').map((line) => line.trim()).filter(Boolean).forEach((line) => {
+    if (unique[unique.length - 1] !== line) unique.push(line);
+  });
+  return unique.slice(-8).join('\n');
+};
+
 const stockQuoteCheckCount = (order: Record<string, any>): number | null =>
   numericValue(
     order.tms_scan_count ??
@@ -224,9 +304,6 @@ export function buildStrategyDetailLayout(
         helpers.formatDateTime,
       );
     }
-    if (typeof config.query_text === 'string' && config.query_text.trim()) {
-      secondary.push({ label: 'Strategy Query', value: config.query_text.trim(), kind: 'query' });
-    }
   } else if (isFixedPrice) {
     pushDetail(primary, strategy.includes('Buy') ? 'Buy Price' : 'Sell Price', order.price, helpers.formatCurrency);
   } else if (strategy === 'Capital Protection Sell') {
@@ -275,18 +352,6 @@ export function buildStrategyDetailLayout(
     secondary.push({ label: 'Last Monitor Log', value: String(order.last_monitor_message), kind: 'muted' });
   }
 
-  if (order.monitor_logs) {
-    const recentLogs = order.monitor_logs
-      .split('\n')
-      .map((line: string) => line.trim())
-      .filter(Boolean)
-      .slice(-8)
-      .join('\n');
-    if (recentLogs) {
-      secondary.push({ label: 'Recent Monitor Logs', value: recentLogs, kind: 'logs' });
-    }
-  }
-
   pushDetail(secondary, 'Failed Reason', order.failed_reason);
   pushDetail(secondary, 'Cancelled Reason', order.cancelled_reason);
 
@@ -299,5 +364,127 @@ export function buildStrategyDetailLayout(
     pushDetail(secondary, 'Preview Captured At', snapshot.captured_at, helpers.formatDateTime);
   }
 
-  return { headline, primary, secondary };
+  const rule = Array.isArray((compiledPlan as any)?.rules) ? (compiledPlan as any).rules[0] : undefined;
+  const liveStatus = (config.live_condition_status || {}) as Record<string, any>;
+  const previewConditions = Array.isArray((snapshot as any)?.conditions) ? (snapshot as any).conditions : [];
+  const liveConditions = Array.isArray(liveStatus.conditions) ? liveStatus.conditions : [];
+  const compiledConditions = flattenCompiledConditions(rule?.signal || rule?.when);
+  const conditionCount = Math.max(liveConditions.length, previewConditions.length, compiledConditions.length);
+  const currentRequired = String(snapshot?.current_required_display || '').split('/').map((item) => item.trim());
+  const conditions = Array.from({ length: conditionCount }, (_, index) => {
+    const live = liveConditions[index] || {};
+    const preview = previewConditions[index] || {};
+    const compiled = compiledConditions[index] || {};
+    const matched = typeof live.matched === 'boolean' ? live.matched : preview.matched;
+    const currentRaw = live.actual_value ?? preview.current_display ?? preview.current_value ?? (index === 0 ? currentRequired[0] : undefined);
+    const requiredRaw = live.expected_value ?? preview.required_display ?? preview.required_value ?? compiled.required ?? (index === 0 ? currentRequired[1] : undefined);
+    const current = displayValue(currentRaw);
+    const required = displayValue(requiredRaw);
+    const status = matched === true ? 'satisfied' : matched === false ? 'waiting' : 'unavailable';
+    return {
+      label: String(live.label || preview.label || compiled.label || live.expression || `Condition ${index + 1}`),
+      status,
+      current,
+      required,
+      explanation: status === 'satisfied'
+        ? 'Current market data satisfies this condition.'
+        : status === 'waiting'
+          ? `Waiting for ${required}; current value is ${current}.`
+          : 'A fresh market scan is required to evaluate this condition.',
+    } as const;
+  });
+  const satisfiedCount = conditions.filter((condition) => condition.status === 'satisfied').length;
+  const waitingCount = conditions.filter((condition) => condition.status === 'waiting').length;
+  const conditionLogic = String(liveStatus.logic || (snapshot as any)?.condition_logic || rule?.when?.logic || 'AND').toUpperCase() === 'OR' ? 'OR' : 'AND';
+  const conditionSummary = conditions.length
+    ? waitingCount === 0 && satisfiedCount === conditions.length
+      ? `All ${conditions.length} conditions are satisfied. Waiting for the configured trigger transition and market availability.`
+      : `${satisfiedCount} of ${conditions.length} conditions satisfied${waitingCount ? ` · ${waitingCount} still waiting` : ' · live values pending'}.`
+    : 'No condition breakdown is available for this strategy.';
+
+  const lifecycle = ((compiledPlan as any)?.position_lifecycle || (compiledPlan as any)?.backtest || {}) as Record<string, any>;
+  const minDays = Number(config.min_holding_days ?? lifecycle.min_holding_days ?? 5);
+  const maxDays = Number(config.max_holding_days ?? lifecycle.max_holding_days ?? 90);
+  const role = String(config.lifecycle_role || ((compiledPlan as any)?.lifecycle ? 'buy' : side.toLowerCase()));
+  const holdingDays = Number(config.linear_holding_sessions ?? 0);
+  const fillConfirmed = Boolean(config.fill_confirmed || config.linked_buy_fill_confirmed);
+  const submitted = Boolean(config.submitted_at);
+  const holdingVerified = Boolean(config.lifecycle_holding_verified);
+  const lifecycleEnabled = Boolean(config.linear_position_cycle || (compiledPlan as any)?.lifecycle || (compiledPlan as any)?.position_lifecycle);
+  const workflow = lifecycleEnabled ? [
+    {
+      label: 'Entry signal',
+      detail: conditions.length ? conditionSummary : 'Monitor the configured entry rule.',
+      state: (submitted || fillConfirmed) ? 'complete' as const : conditions.length && waitingCount === 0 ? 'active' as const : 'pending' as const,
+    },
+    {
+      label: 'BUY fill confirmation',
+      detail: fillConfirmed ? 'TMS reports the BUY as fully traded.' : submitted ? 'BUY submitted; waiting for the complete TMS fill.' : 'Begins only after the entry signal fires.',
+      state: fillConfirmed ? 'complete' as const : submitted ? 'active' as const : 'pending' as const,
+    },
+    {
+      label: 'Settlement and minimum hold',
+      detail: role === 'sell' && holdingVerified
+        ? `Sellable holding verified · ${holdingDays}/${minDays} required trading sessions.`
+        : `Wait for sellable DP holdings and at least ${minDays} trading sessions after the filled BUY.`,
+      state: holdingVerified && holdingDays >= minDays ? 'complete' as const : fillConfirmed ? 'active' as const : 'pending' as const,
+    },
+    {
+      label: 'Exit monitoring',
+      detail: `Monitor stop, target, and strategy exits; force an exit by ${maxDays} trading sessions.`,
+      state: Boolean(config.lifecycle_active) ? 'active' as const : 'pending' as const,
+    },
+  ] : [];
+
+  const exitRules = (Array.isArray((compiledPlan as any)?.position_exit)
+    ? (compiledPlan as any).position_exit
+    : []).map(describeExitRule);
+  if (lifecycleEnabled) {
+    exitRules.push({ label: 'Maximum holding exit', detail: `Close the position after ${maxDays} trading sessions if no earlier exit condition matches.` });
+  }
+
+  const position = (config.live_position_metrics || {}) as Record<string, any>;
+  const positionMetrics: StrategyDetailItem[] = [];
+  pushDetail(positionMetrics, 'Bought price', position.entry_price ?? order.average_buy_price, helpers.formatCurrency);
+  pushDetail(positionMetrics, 'Current LTP', position.ltp ?? order.current_price ?? order.last_checked_ltp, helpers.formatCurrency);
+  pushDetail(positionMetrics, 'Gross price return', position.gross_profit_percent, helpers.formatPercent);
+  pushDetail(positionMetrics, 'Estimated buy charges', position.estimated_buy_charges, helpers.formatCurrency);
+  pushDetail(positionMetrics, 'Estimated sell commission', position.estimated_sell_broker_commission, helpers.formatCurrency);
+  pushDetail(positionMetrics, 'Estimated SEBON fee', position.estimated_sell_sebon_fee, helpers.formatCurrency);
+  pushDetail(positionMetrics, 'DP charge', position.estimated_dp_charge, helpers.formatCurrency);
+  pushDetail(positionMetrics, 'Estimated CGT', position.estimated_capital_gains_tax, helpers.formatCurrency);
+  pushDetail(positionMetrics, 'Estimated net profit', position.estimated_net_profit, helpers.formatCurrency);
+  pushDetail(positionMetrics, 'profit_percent used by rules', position.profit_percent, helpers.formatPercent);
+
+  const fixedReferences: StrategyDetailItem[] = [];
+  const referenceRows = Array.isArray(config.field_reference_rows) ? config.field_reference_rows : [];
+  referenceRows.forEach((reference: any) => {
+    const raw = reference.numeric_value ?? reference.text_value ?? reference.boolean_value;
+    pushDetail(
+      fixedReferences,
+      `${humanField(reference.field_key)} · fixed reference`,
+      raw,
+      reference.numeric_value != null && /price|ltp/.test(String(reference.field_key || '').toLowerCase())
+        ? helpers.formatCurrency
+        : displayValue,
+    );
+  });
+  if (!fixedReferences.length && order.reference_ltp != null) {
+    pushDetail(fixedReferences, 'LTP · fixed reference', order.reference_ltp, helpers.formatCurrency);
+  }
+
+  return {
+    headline,
+    primary,
+    secondary,
+    conditions,
+    conditionLogic,
+    conditionSummary,
+    workflow,
+    exitRules,
+    positionMetrics,
+    fixedReferences,
+    rawQuery: typeof config.query_text === 'string' ? config.query_text.trim() : undefined,
+    recentLogs: deduplicateLogs(order.monitor_logs),
+  };
 }

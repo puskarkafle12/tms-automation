@@ -126,8 +126,22 @@ def _run_symbol_task(task: Dict[str, Any]) -> Dict[str, Any]:
     errors: List[str] = []
     for preset in selected_presets:
         defaults = preset["defaults"]
-        effective_min_holding_days = int(settings.get("min_holding_days") or defaults.get("min_holding_days") or 0)
-        effective_max_holding_days = int(settings.get("max_holding_days") or defaults["max_holding_days"])
+        effective_trailing_stop_pct = (
+            settings.get("trailing_stop_pct")
+            if settings.get("trailing_stop_pct") is not None
+            else defaults.get("trailing_stop_pct")
+        )
+        if preset.get("component_ids") or preset.get("enforce_preset_holding"):
+            effective_min_holding_days = max(
+                int(settings.get("min_holding_days") if settings.get("min_holding_days") is not None else 0),
+                int(defaults.get("min_holding_days") or 0),
+            )
+            effective_max_holding_days = min(
+                int(settings.get("max_holding_days") or 60), int(defaults["max_holding_days"]),
+            )
+        else:
+            effective_min_holding_days = int(settings.get("min_holding_days") if settings.get("min_holding_days") is not None else defaults.get("min_holding_days") or 0)
+            effective_max_holding_days = int(settings.get("max_holding_days") or defaults["max_holding_days"])
         if effective_min_holding_days > effective_max_holding_days:
             errors.append(f'{preset["id"]}: minimum holding days exceeds maximum holding days')
             continue
@@ -142,15 +156,31 @@ def _run_symbol_task(task: Dict[str, Any]) -> Dict[str, Any]:
                     "take_profit_pct": defaults["take_profit_pct"],
                     "min_holding_days": effective_min_holding_days,
                     "max_holding_days": effective_max_holding_days,
+                    "trailing_stop_pct": effective_trailing_stop_pct,
                     "data_source": source,
                 },
             )
         )
         try:
             entry_signals = None
-            if professional and not custom_query_template:
+            exit_signals = None
+            if professional and preset.get("component_ids"):
                 from utils.backtesting.accelerated import compile_preset_signals
+                component_signals = [
+                    compile_preset_signals(component_id, prepared_rows, trigger_on_cross=False)
+                    for component_id in preset["component_ids"]
+                ]
+                combined_state = [all(values) for values in zip(*component_signals)]
+                entry_signals = combined_state.copy()
+                for index in range(1, len(entry_signals)):
+                    entry_signals[index] = combined_state[index] and not combined_state[index - 1]
+                from utils.backtesting.strategy_discovery import compile_discovery_exit_signals
+                exit_signals = compile_discovery_exit_signals(preset, prepared_rows)
+            elif professional and not custom_query_template:
+                from utils.backtesting.accelerated import compile_preset_exit_signals, compile_preset_signals
                 entry_signals = compile_preset_signals(preset["id"], prepared_rows)
+                if preset.get("exit_condition"):
+                    exit_signals = compile_preset_exit_signals(preset["id"], prepared_rows)
             output = run_backtest(
                 symbol=symbol, query_text=executable_query,
                 start_date=start_date, end_date=end_date, bars=bars,
@@ -159,7 +189,7 @@ def _run_symbol_task(task: Dict[str, Any]) -> Dict[str, Any]:
                 charge_model=settings["charge_model"], investor_type=settings["investor_type"],
                 apply_cgt=settings["apply_cgt"], dp_charge=settings["dp_charge"],
                 position_size_pct=settings["position_size_pct"],
-                trailing_stop_pct=settings["trailing_stop_pct"],
+                trailing_stop_pct=effective_trailing_stop_pct,
                 max_volume_participation_pct=settings["max_volume_participation_pct"],
                 risk_free_rate_pct=settings["risk_free_rate_pct"],
                 stop_loss_pct=defaults["stop_loss_pct"],
@@ -168,6 +198,7 @@ def _run_symbol_task(task: Dict[str, Any]) -> Dict[str, Any]:
                 max_holding_days=effective_max_holding_days,
                 prepared_rows=prepared_rows, compact=True, include_trades=professional,
                 entry_signals=entry_signals,
+                exit_signals=exit_signals,
             )
         except Exception as exc:
             errors.append(f'{preset["id"]}: {exc}')
@@ -183,12 +214,13 @@ def _run_symbol_task(task: Dict[str, Any]) -> Dict[str, Any]:
                     start_date=date.fromisoformat(bars[split].day), end_date=end_date,
                     bars=bars[split:], prepared_rows=prepared_rows[split:], compact=True,
                     entry_signals=entry_signals[split:] if entry_signals is not None else None,
+                    exit_signals=exit_signals[split:] if exit_signals is not None else None,
                     initial_capital=settings["initial_capital"], fee_pct=settings["fee_pct"],
                     fixed_fee=settings["fixed_fee"], slippage_pct=settings["slippage_pct"],
                     charge_model=settings["charge_model"], investor_type=settings["investor_type"],
                     apply_cgt=settings["apply_cgt"], dp_charge=settings["dp_charge"],
                     position_size_pct=settings["position_size_pct"],
-                    trailing_stop_pct=settings["trailing_stop_pct"],
+                    trailing_stop_pct=effective_trailing_stop_pct,
                     max_volume_participation_pct=settings["max_volume_participation_pct"],
                     risk_free_rate_pct=settings["risk_free_rate_pct"],
                     stop_loss_pct=defaults["stop_loss_pct"], take_profit_pct=defaults["take_profit_pct"],
@@ -282,6 +314,7 @@ def _run_symbol_task(task: Dict[str, Any]) -> Dict[str, Any]:
             "assumptions": {
                 **(output.get("assumptions") or {}), "initial_capital": summary.get("initial_capital"),
                 "stop_loss_pct": defaults["stop_loss_pct"], "take_profit_pct": defaults["take_profit_pct"],
+                "trailing_stop_pct": effective_trailing_stop_pct,
                 "min_holding_days": effective_min_holding_days,
                 "max_holding_days": effective_max_holding_days, "preset_version": preset.get("version"),
                 "preset_source_hash": preset.get("source_hash"), "period": output.get("period"),
@@ -289,10 +322,15 @@ def _run_symbol_task(task: Dict[str, Any]) -> Dict[str, Any]:
                 "strategy_mode": "custom" if custom_query_template else "preset",
                 "strategy_query": executable_query,
                 "strategy_query_template": custom_query_template,
+                "exit_rule_id": preset.get("exit_rule_id"),
+                "exit_condition": preset.get("exit_condition"),
             },
             "trades": output["trades"] if professional else [],
             **professional_fields, **current_fields,
         })
+        if preset.get("exit_condition"):
+            from utils.backtesting.strategy_discovery import build_discovery_sell_query
+            results[-1]["assumptions"]["sell_strategy_query"] = build_discovery_sell_query(preset, symbol)
     return {
         "symbol": symbol, "results": results,
         "market_profile": {

@@ -46,6 +46,19 @@ def snapshot_from_preview_row(row: Dict[str, Any]) -> Dict[str, Any]:
         "trigger_kind": trigger_kind or None,
         "is_exact_trigger_price": bool(trigger.get("is_exact_price")),
         "trigger_strategy_text": trigger.get("strategy_text"),
+        "condition_logic": trigger.get("logic"),
+        "conditions": [
+            {
+                "label": condition.get("strategy_text"),
+                "matched": condition.get("matched"),
+                "current_value": condition.get("current_value"),
+                "required_value": condition.get("target_value"),
+                "current_display": condition.get("current_display"),
+                "required_display": condition.get("target_display"),
+            }
+            for condition in (trigger.get("conditions") or [])
+            if isinstance(condition, dict)
+        ],
         "current_required_display": _current_required_display(trigger),
         "quantity_description": quantity.get("description"),
         "estimated_quantity": estimated_quantity_int,
@@ -55,6 +68,7 @@ def snapshot_from_preview_row(row: Dict[str, Any]) -> Dict[str, Any]:
         "reference_ltp_display": row.get("reference_ltp"),
         "execution_price_description": execution_price.get("description"),
         "reason": row.get("reason"),
+        "execution_policy": (row.get("execution_policy") or {}).get("display"),
         "captured_at": datetime.now(timezone.utc).isoformat(),
     }
 

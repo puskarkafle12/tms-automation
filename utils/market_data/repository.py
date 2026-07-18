@@ -598,6 +598,38 @@ def get_cache_status(db: Session) -> Dict[str, Any]:
 
 def load_table_rows(db: Session, source: str, symbols: Optional[List[str]] = None) -> List[Dict[str, Any]]:
     ensure_read_session(db)
+    if source == "technical":
+        params: Dict[str, Any] = {}
+        symbol_clause = ""
+        if symbols:
+            normalized = sorted({str(item).strip().upper() for item in symbols if str(item).strip()})
+            placeholders = ", ".join(f":tech_sym_{index}" for index, _ in enumerate(normalized))
+            params = {f"tech_sym_{index}": symbol for index, symbol in enumerate(normalized)}
+            symbol_clause = f"WHERE symbol IN ({placeholders})" if normalized else "WHERE FALSE"
+        rows = db.execute(text(f"""
+            SELECT symbol,as_of_date,engine_version,bars_count,history_start,history_end,
+                   latest_volume,average_volume_20,median_volume_20,average_turnover_20,
+                   indicators,updated_at
+            FROM market_technical_indicators {symbol_clause}
+            ORDER BY symbol ASC
+        """), params).mappings().all()
+        output: List[Dict[str, Any]] = []
+        for row in rows:
+            indicators = row.get("indicators") or {}
+            if isinstance(indicators, str):
+                indicators = json.loads(indicators)
+            item = dict(indicators) if isinstance(indicators, dict) else {}
+            # Auditable typed metadata wins over duplicated JSON snapshot fields.
+            item.update({
+                "symbol": row["symbol"], "as_of_date": row.get("as_of_date"),
+                "engine_version": row.get("engine_version"), "bars_count": row.get("bars_count"),
+                "history_start": row.get("history_start"), "history_end": row.get("history_end"),
+                "latest_volume": row.get("latest_volume"), "average_volume_20": row.get("average_volume_20"),
+                "median_volume_20": row.get("median_volume_20"), "average_turnover_20": row.get("average_turnover_20"),
+                "updated_at": row.get("updated_at"),
+            })
+            output.append(item)
+        return output
     column_map = {
         "merolagani": "merolagani_data",
         "nepse_alpha": "nepse_alpha_data",

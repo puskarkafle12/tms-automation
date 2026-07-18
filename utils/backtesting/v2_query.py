@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import csv
+import io
+import json
 from math import ceil
 from typing import Any, Dict, Iterable, List, Tuple
 
@@ -19,7 +22,7 @@ _LIVE_VOLUME_SQL = """COALESCE(
 
 
 RESULT_FIELDS = {
-    "result_id": "r.result_id", "symbol": "r.symbol", "preset_id": "r.preset_id",
+    "result_id": "r.result_id", "run_id": "r.run_id", "symbol": "r.symbol", "preset_id": "r.preset_id",
     "preset_name": "r.preset_name", "preset_family": "r.preset_family", "category": "r.category",
     "bars": "r.bars", "total_trades": "r.total_trades", "wins": "r.wins", "losses": "r.losses",
     "win_rate_pct": "r.win_rate_pct", "win_rate_ci_low": "r.win_rate_ci_low",
@@ -46,11 +49,22 @@ RESULT_FIELDS = {
     "current_signal_date": "r.current_signal_date", "current_technical_score": "r.current_technical_score",
     "reliability_score": "r.reliability_score", "strong_buy_qualified": "r.strong_buy_qualified",
     "current_evidence": "r.current_evidence",
+    "min_holding_days": "NULLIF(r.assumptions->>'min_holding_days','')::double precision",
+    "max_holding_days": "NULLIF(r.assumptions->>'max_holding_days','')::double precision",
+    "stop_loss_pct": "NULLIF(r.assumptions->>'stop_loss_pct','')::double precision",
+    "take_profit_pct": "NULLIF(r.assumptions->>'take_profit_pct','')::double precision",
+    "trailing_stop_pct": "NULLIF(r.assumptions->>'trailing_stop_pct','')::double precision",
+    "slippage_pct_each_side": "NULLIF(r.assumptions->>'slippage_pct_each_side','')::double precision",
 }
+
+# A unique simulation is more specific than stock + preset. Daily end dates and
+# calculated summaries are intentionally excluded so a continuing scan replaces
+# its older equivalent while materially different risk/execution settings remain.
+RESULT_CONFIGURATION_IDENTITY_SQL = "r.configuration_hash"
 
 NUMERIC_FIELDS = {
     key for key in RESULT_FIELDS if key not in {
-        "symbol", "preset_id", "preset_name", "preset_family", "category", "sample_quality",
+        "run_id", "symbol", "preset_id", "preset_name", "preset_family", "category", "sample_quality",
         "recommendation_status", "security_type", "sector", "technical_signal", "current_signal_status",
         "current_signal_date", "current_signal_active", "strong_buy_qualified", "warning_codes", "current_evidence",
     }
@@ -214,35 +228,131 @@ def compile_filters(filters: Dict[str, Any] | None, *, include_non_equities: boo
     return clause or "TRUE", params
 
 
+def compile_result_sorts(body: Dict[str, Any]) -> Tuple[str, str, List[Dict[str, str]]]:
+    """Build validated inner/outer ordering for normal and de-duplicated result queries."""
+    requested = body.get("sorts") or [{
+        "field": str(body.get("sort_by") or "robust_score"),
+        "direction": str(body.get("sort_direction") or "desc"),
+    }]
+    if not isinstance(requested, list) or not requested or len(requested) > 8:
+        raise ResultQueryError("Result sorting requires between one and eight columns.")
+    inner: List[str] = []
+    outer: List[str] = []
+    normalized: List[Dict[str, str]] = []
+    seen = set()
+    for item in requested:
+        if not isinstance(item, dict):
+            raise ResultQueryError("Each result sort must contain a field and direction.")
+        field = str(item.get("field") or "")
+        direction = str(item.get("direction") or "desc").lower()
+        if field not in RESULT_FIELDS or field == "warning_codes" or direction not in {"asc", "desc"}:
+            raise ResultQueryError("Unsupported result sort field or direction.")
+        if field in seen:
+            raise ResultQueryError(f"Result sort field {field!r} was selected more than once.")
+        seen.add(field)
+        sql_direction = direction.upper()
+        inner.append(f"{RESULT_FIELDS[field]} {sql_direction} NULLS LAST")
+        outer.append(f"{field} {sql_direction} NULLS LAST")
+        normalized.append({"field": field, "direction": direction})
+    if "total_trades" not in seen:
+        inner.append("r.total_trades DESC NULLS LAST")
+        outer.append("total_trades DESC NULLS LAST")
+    if "result_id" not in seen:
+        inner.append("r.result_id ASC")
+        outer.append("result_id ASC")
+    return ",".join(inner), ",".join(outer), normalized
+
+
 def query_results(session, run_id: str, body: Dict[str, Any], *, owner_id: str = "local") -> Dict[str, Any]:
     page = max(1, int(body.get("page") or 1))
     page_size = min(100, max(1, int(body.get("page_size") or 100)))
-    sort_by = str(body.get("sort_by") or "robust_score")
-    if sort_by not in RESULT_FIELDS or sort_by == "warning_codes":
-        raise ResultQueryError(f"Unsupported sort field: {sort_by}.")
-    direction = "ASC" if str(body.get("sort_direction") or "desc").lower() == "asc" else "DESC"
+    inner_order, outer_order, sorts = compile_result_sorts(body)
     where, params = compile_filters(body.get("filters"), include_non_equities=bool(body.get("include_non_equities")))
     params.update({"run_id": run_id, "owner_id": owner_id, "limit": page_size, "offset": (page - 1) * page_size})
-    ownership = "EXISTS (SELECT 1 FROM backtest_runs br WHERE br.run_id=r.run_id AND br.owner_id=:owner_id AND br.deleted_at IS NULL)"
-    base = "FROM backtest_results r JOIN backtest_run_symbols s ON s.run_id=r.run_id AND s.symbol=r.symbol"
-    total = int(session.execute(text(f"SELECT COUNT(*) {base} WHERE r.run_id=:run_id AND {ownership} AND {where}"), params).scalar() or 0)
+    ownership = "br.owner_id=:owner_id AND br.deleted_at IS NULL"
+    scope = "(:run_id='all' OR r.run_id=:run_id)"
+    base = "FROM backtest_results r JOIN backtest_run_symbols s ON s.run_id=r.run_id AND s.symbol=r.symbol JOIN backtest_runs br ON br.run_id=r.run_id"
     select = ",".join(f"{column} AS {key}" for key, column in RESULT_FIELDS.items())
-    rows = session.execute(text(
-        f"SELECT {select} {base} WHERE r.run_id=:run_id AND {ownership} AND {where} "
-        f"ORDER BY {RESULT_FIELDS[sort_by]} {direction} NULLS LAST,r.total_trades DESC,r.result_id ASC LIMIT :limit OFFSET :offset"
-    ), params).mappings().all()
+    unique_by_symbol = bool(body.get("unique_by_symbol"))
+    unique_by_strategy = bool(body.get("unique_by_strategy"))
+    if unique_by_symbol:
+        total = int(session.execute(text(f"SELECT COUNT(DISTINCT r.symbol) {base} WHERE {scope} AND {ownership} AND {where}"), params).scalar() or 0)
+        rows = session.execute(text(
+            f"WITH ranked_ids AS (SELECT r.result_id,ROW_NUMBER() OVER (PARTITION BY r.symbol "
+            f"ORDER BY {inner_order}) AS selected_rank "
+            f"{base} WHERE {scope} AND {ownership} AND {where}) "
+            f"SELECT {select} {base} JOIN ranked_ids selected ON selected.result_id=r.result_id "
+            f"WHERE selected.selected_rank=1 "
+            f"ORDER BY {outer_order} LIMIT :limit OFFSET :offset"
+        ), params).mappings().all()
+    elif unique_by_strategy:
+        canonical_base = f"{base} JOIN backtest_canonical_results canonical ON canonical.result_id=r.result_id AND canonical.owner_id=:owner_id"
+        explicit_where, _ = compile_filters(body.get("filters"), include_non_equities=True)
+        if explicit_where == "TRUE":
+            canonical_security = "TRUE" if body.get("include_non_equities") else "canonical.security_type='ordinary_share'"
+            total = int(session.execute(text(
+                "SELECT COUNT(*) FROM backtest_canonical_results canonical "
+                "WHERE canonical.owner_id=:owner_id AND (:run_id='all' OR canonical.run_id=:run_id) "
+                f"AND {canonical_security}"
+            ), params).scalar() or 0)
+        else:
+            total = int(session.execute(text(
+                f"SELECT COUNT(*) {canonical_base} WHERE {scope} AND {ownership} AND {where}"
+            ), params).scalar() or 0)
+        rows = session.execute(text(
+            f"SELECT {select} {canonical_base} WHERE {scope} AND {ownership} AND {where} "
+            f"ORDER BY {outer_order} LIMIT :limit OFFSET :offset"
+        ), params).mappings().all()
+    else:
+        total = int(session.execute(text(f"SELECT COUNT(*) {base} WHERE {scope} AND {ownership} AND {where}"), params).scalar() or 0)
+        rows = session.execute(text(
+            f"SELECT {select} {base} WHERE {scope} AND {ownership} AND {where} "
+            f"ORDER BY {inner_order} LIMIT :limit OFFSET :offset"
+        ), params).mappings().all()
     items = []
     for row in rows:
         item = dict(row)
         item["warning_codes"] = list(item.get("warning_codes") or [])
         items.append(item)
-    return {"items": items, "page": page, "page_size": page_size, "total": total, "pages": ceil(total / page_size) if total else 0, "sort_by": sort_by, "sort_direction": direction.lower()}
+    return {"items": items, "page": page, "page_size": page_size, "total": total, "pages": ceil(total / page_size) if total else 0, "sorts": sorts, "sort_by": sorts[0]["field"], "sort_direction": sorts[0]["direction"], "unique_by_symbol": unique_by_symbol, "unique_by_strategy": unique_by_strategy}
+
+
+def stream_results_csv(session_factory, run_id: str, body: Dict[str, Any], *, owner_id: str):
+    """Stream every matching normalized result without loading the export into memory."""
+    inner_order, _, _ = compile_result_sorts(body)
+    where, params = compile_filters(body.get("filters"), include_non_equities=bool(body.get("include_non_equities")))
+    params.update({"run_id": run_id, "owner_id": owner_id})
+    ownership = "br.owner_id=:owner_id AND br.deleted_at IS NULL"
+    base = "FROM backtest_results r JOIN backtest_run_symbols s ON s.run_id=r.run_id AND s.symbol=r.symbol JOIN backtest_runs br ON br.run_id=r.run_id"
+    select = ",".join(f"{column} AS {key}" for key, column in RESULT_FIELDS.items())
+    statement = text(
+        f"SELECT {select} {base} WHERE (:run_id='all' OR r.run_id=:run_id) AND {ownership} AND {where} "
+        f"ORDER BY {inner_order}"
+    )
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=list(RESULT_FIELDS), extrasaction="ignore")
+    writer.writeheader()
+    yield buffer.getvalue(); buffer.seek(0); buffer.truncate(0)
+    session = session_factory()
+    try:
+        for row in session.execute(statement, params).mappings().yield_per(1000):
+            item = dict(row)
+            for key, value in list(item.items()):
+                if isinstance(value, (dict, list)):
+                    item[key] = json.dumps(value, separators=(",", ":"), default=str)
+            writer.writerow(item)
+            if buffer.tell() >= 64 * 1024:
+                yield buffer.getvalue(); buffer.seek(0); buffer.truncate(0)
+        if buffer.tell():
+            yield buffer.getvalue()
+    finally:
+        session.close()
 
 
 def result_detail(session, result_id: int, *, owner_id: str = "local") -> Dict[str, Any]:
     select = ",".join(f"{column} AS {key}" for key, column in RESULT_FIELDS.items())
     row = session.execute(text(
-        f"SELECT {select},r.assumptions,r.technical_snapshot,r.run_id FROM backtest_results r "
+        f"SELECT {select},r.assumptions,r.technical_snapshot FROM backtest_results r "
         "JOIN backtest_runs br ON br.run_id=r.run_id JOIN backtest_run_symbols s ON s.run_id=r.run_id AND s.symbol=r.symbol "
         "WHERE r.result_id=:result_id AND br.owner_id=:owner_id AND br.deleted_at IS NULL"
     ), {"result_id": result_id, "owner_id": owner_id}).mappings().first()
@@ -278,7 +388,7 @@ def query_strong_buys(session, run_id: str, body: Dict[str, Any], *, owner_id: s
                        ELSE session_date END)<=CURRENT_DATE
              AND EXTRACT(ISODOW FROM (CASE WHEN source_timestamp IS NOT NULL
                        THEN (to_timestamp(source_timestamp) AT TIME ZONE 'UTC')::date
-                       ELSE session_date END)) BETWEEN 1 AND 5"""
+                       ELSE session_date END)) <> 6"""
     )).scalar()
     params = {
         "run_id": run_id, "owner_id": owner_id, "min_trades": int(body.get("minimum_trades", 5)),
@@ -302,11 +412,15 @@ def query_strong_buys(session, run_id: str, body: Dict[str, Any], *, owner_id: s
     }
     if signal_mode not in signal_requirements:
         raise ResultQueryError("Unsupported current-signal filter.")
+    # Default "best pick" ranking: reward validated return and consistency,
+    # while explicitly penalizing drawdown. Raw return/win rate alone must not
+    # place a fragile strategy at the top of the Buy table.
     recommendation_score = """ROUND((
-        COALESCE(r.win_rate_pct,0)*0.45
-        + GREATEST(0,LEAST(100,COALESCE(r.net_return_pct,0)))*0.30
-        + GREATEST(0,LEAST(100,COALESCE(r.total_trades,0)*2))*0.15
-        + GREATEST(0,LEAST(100,COALESCE(r.reliability_score,0)))*0.10
+        GREATEST(0,LEAST(100,COALESCE(r.robust_score,r.reliability_score,0)))*0.35
+        + GREATEST(0,LEAST(100,COALESCE(r.net_return_pct,0)))*0.20
+        + GREATEST(0,LEAST(100,COALESCE(r.sharpe_ratio,0)*25))*0.15
+        + GREATEST(0,100-LEAST(100,COALESCE(r.max_drawdown_pct,100)*2.5))*0.20
+        + GREATEST(0,LEAST(100,(COALESCE(r.profit_factor,1)-1)*50))*0.10
     )::numeric,2)::double precision"""
     advanced_where, normalized_filters = compile_strong_buy_filters(body.get("filters"), params, recommendation_score)
     requirements = f"""{signal_requirements[signal_mode]}
@@ -351,7 +465,8 @@ def query_strong_buys(session, run_id: str, body: Dict[str, Any], *, owner_id: s
     for rank, row in enumerate(rows, start=(page - 1) * page_size + 1):
         item = dict(row)
         item.update({"rank": rank, "loss_rate_pct": round(100 - float(item.get("win_rate_pct") or 0), 2),
-                     "signal_date": item.pop("current_signal_date")})
+                     "signal_date": item.pop("current_signal_date"),
+                     "recommendation_score_version": "risk-adjusted-v2"})
         item.update(_strategy_planning_range(item))
         item.pop("row_no", None)
         items.append(item)

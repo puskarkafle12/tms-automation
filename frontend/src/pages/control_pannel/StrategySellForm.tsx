@@ -126,7 +126,16 @@ const StrategySellForm: React.FC<Props> = ({
   const isRuleBuilder = strategy === 'Technical Buy' || strategy === 'Technical Sell';
   const isCustomQuery = isCustomQueryStrategy(strategy);
   const isRuleBased = isRuleBuilder || isCustomQuery;
-  const [ruleQueryText, setRuleQueryText] = useState(() => prefill?.ruleQueryText ?? '');
+  const [ruleQueryText, setRuleQueryText] = useState(() => {
+    if (prefill?.ruleQueryText != null) return prefill.ruleQueryText;
+    if (!draftKey) return '';
+    try {
+      const draft = JSON.parse(localStorage.getItem(`tms-strategy-form-draft-v1:${draftKey}`) || '{}') as { ruleQueryText?: unknown };
+      return draft.ruleQueryText == null ? '' : String(draft.ruleQueryText);
+    } catch {
+      return '';
+    }
+  });
   const [compiledPlan, setCompiledPlan] = useState<Record<string, unknown> | undefined>(undefined);
   const [planValidationError, setPlanValidationError] = useState('');
   const [queryValidating, setQueryValidating] = useState(false);

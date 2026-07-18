@@ -16,13 +16,14 @@ from ta.trend import AroonIndicator, MassIndex, PSARIndicator, TRIXIndicator, Vo
 from ta.volatility import KeltnerChannel, UlcerIndex
 from ta.volume import ForceIndexIndicator, VolumePriceTrendIndicator, VolumeWeightedAveragePrice
 
-ENGINE_VERSION = "ohlcv-ta-v3-ta-0.11.0"
+ENGINE_VERSION = "ohlcv-ta-v4-ta-0.11.0"
 
 NUMERIC_FIELDS = (
     "technical_sma_10_value", "technical_sma_20_value", "technical_sma_50_value",
     "technical_sma_100_value", "technical_sma_200_value", "technical_ema_9_value",
-    "technical_ema_12_value", "technical_ema_20_value", "technical_ema_26_value",
-    "technical_ema_50_value", "technical_ema_200_value", "technical_rsi_14",
+    "technical_ema_10_value", "technical_ema_12_value", "technical_ema_20_value",
+    "technical_ema_26_value", "technical_ema_30_value", "technical_ema_50_value",
+    "technical_ema_200_value", "technical_rsi_14",
     "technical_macd_value", "technical_macd_signal_value", "technical_macd_histogram",
     "technical_adx_14", "technical_plus_di_14", "technical_minus_di_14",
     "technical_stochastic_k_14", "technical_stochastic_d_3", "technical_williams_r_14",
@@ -56,6 +57,8 @@ NUMERIC_FIELDS = (
     "technical_outside_bar", "technical_bullish_marubozu",
     "technical_higher_high_3", "technical_higher_low_3",
     "technical_buy_score", "technical_sell_score", "technical_signal_score",
+    *(f"technical_nepse15_entry_{index}" for index in range(1, 16)),
+    *(f"technical_nepse15_exit_{index}" for index in range(1, 16)),
 )
 TEXT_FIELDS = (
     "technical_macd", "technical_sma_10", "technical_sma_20", "technical_sma_50",
@@ -166,7 +169,7 @@ def calculate_indicator_rows(bars: Sequence[Any]) -> List[Dict[str, Any]]:
 
     for period in (10, 20, 50, 100, 200):
         frame[f"technical_sma_{period}_value"] = close.rolling(period, min_periods=period).mean()
-    for period in (9, 12, 20, 26, 50, 200):
+    for period in (9, 10, 12, 20, 26, 30, 50, 200):
         frame[f"technical_ema_{period}_value"] = close.ewm(span=period, adjust=False, min_periods=period).mean()
 
     delta = close.diff()
@@ -358,6 +361,170 @@ def calculate_indicator_rows(bars: Sequence[Any]) -> List[Dict[str, Any]]:
     ).astype(float)
     frame["technical_higher_high_3"] = (high > high.shift(1).rolling(2).max()).astype(float)
     frame["technical_higher_low_3"] = (low > low.shift(1).rolling(2).max()).astype(float)
+
+    # User-supplied NEPSE research set.  These setup/exit states are calculated
+    # once from completed daily bars and are shared by backtests and live
+    # monitoring.  The common liquidity/history gates are deliberately part of
+    # every entry so a UI name cannot accidentally bypass them.
+    frame = frame.copy()
+    ema10 = frame["technical_ema_10_value"]
+    ema20 = frame["technical_ema_20_value"]
+    ema30 = frame["technical_ema_30_value"]
+    ema50 = frame["technical_ema_50_value"]
+    ema200 = frame["technical_ema_200_value"]
+    rsi = frame["technical_rsi_14"]
+    adx = frame["technical_adx_14"]
+    plus_di = frame["technical_plus_di_14"]
+    minus_di = frame["technical_minus_di_14"]
+    volume_ratio = frame["technical_volume_ratio_20"]
+    atr_value = frame["technical_atr_14"]
+    stoch_k = frame["technical_stochastic_k_14"]
+    stoch_d = frame["technical_stochastic_d_3"]
+    macd_value = frame["technical_macd_value"]
+    macd_signal_value = frame["technical_macd_signal_value"]
+    macd_histogram = frame["technical_macd_histogram"]
+    obv = frame["technical_obv"]
+    turnover20 = (close * volume).rolling(20, min_periods=20).mean()
+    common = (turnover20 >= 2_000_000) & (rsi <= 80) & (pd.Series(np.arange(len(frame)), index=frame.index) >= 249)
+    cross_up = lambda left, right: (left > right) & (left.shift(1) <= right.shift(1))
+    cross_down = lambda left, right: (left < right) & (left.shift(1) >= right.shift(1))
+    ema_stack = (ema20 > ema50) & (ema50 > ema200)
+    close_up = close > close.shift(1)
+    close_below_ema20_twice = (close < ema20) & (close.shift(1) < ema20.shift(1))
+    prior_high10 = high.shift(1).rolling(10, min_periods=10).max()
+    prior_low10 = low.shift(1).rolling(10, min_periods=10).min()
+
+    # 1 Trend Pullback + ADX + Volume.
+    frame["technical_nepse15_entry_1"] = (
+        common & (close > ema50) & ema_stack & (adx > 20) & rsi.between(42, 62) &
+        ((low <= ema20) | ((close - ema20).abs() <= atr_value)) & close_up & (volume_ratio > 1.10)
+    ).astype(float)
+    frame["technical_nepse15_exit_1"] = close_below_ema20_twice.astype(float)
+
+    # 2 20-session breakout + participation.
+    frame["technical_nepse15_entry_2"] = (
+        common & (close > frame["technical_prior_high_20"]) & (close > ema50) & (ema20 > ema50) &
+        (adx > 20) & rsi.between(55, 75) & (volume_ratio > 1.5)
+    ).astype(float)
+    frame["technical_nepse15_exit_2"] = (close < ema20).astype(float)
+
+    # 3 MACD momentum + trend.
+    frame["technical_nepse15_entry_3"] = (
+        common & (close > ema50) & (ema20 > ema50) & cross_up(macd_value, macd_signal_value) &
+        (macd_histogram > macd_histogram.shift(1)) & rsi.between(50, 68) & (adx > 18) & (volume_ratio > 1)
+    ).astype(float)
+    frame["technical_nepse15_exit_3"] = cross_down(macd_value, macd_signal_value).astype(float)
+
+    # 4 Oversold Bollinger recovery.  The recovery must occur no more than
+    # three sessions after an oversold lower-band touch.
+    oversold_touch = (close > frame["technical_sma_200_value"]) & (frame["technical_sma_50_value"] > frame["technical_sma_200_value"]) & (rsi < 35) & (low <= lower)
+    recent_touch = oversold_touch.shift(1).rolling(3, min_periods=1).max().fillna(0).astype(bool)
+    frame["technical_nepse15_entry_4"] = (common & recent_touch & cross_up(close, lower) & close_up).astype(float)
+    frame["technical_nepse15_exit_4"] = (rsi > 70).astype(float)
+
+    # 5 52-week high breakout.
+    frame["technical_nepse15_entry_5"] = (
+        common & (close >= high.rolling(252, min_periods=252).max() * .98) &
+        (close > high.shift(1).rolling(60, min_periods=60).max()) & ema_stack &
+        (adx > 22) & rsi.between(55, 78) & (volume_ratio > 1.5)
+    ).astype(float)
+    frame["technical_nepse15_exit_5"] = close_below_ema20_twice.astype(float)
+
+    # 6 EMA 10/30 crossover + ADX.
+    frame["technical_nepse15_entry_6"] = (
+        common & cross_up(ema10, ema30) & (close > ema50) & (adx > 20) &
+        (plus_di > minus_di) & rsi.between(50, 70) & (volume_ratio > 1)
+    ).astype(float)
+    frame["technical_nepse15_exit_6"] = cross_down(ema10, ema30).astype(float)
+
+    # 7 Bollinger squeeze release.
+    bandwidth = frame["technical_bollinger_bandwidth_20"]
+    prior_squeeze_low = bandwidth.shift(1) <= bandwidth.shift(1).rolling(20, min_periods=20).min()
+    frame["technical_nepse15_entry_7"] = (
+        common & prior_squeeze_low & (bandwidth > bandwidth.shift(1)) & (close > upper) &
+        (close > ema50) & (volume_ratio > 1.5) & rsi.between(55, 75)
+    ).astype(float)
+    frame["technical_nepse15_exit_7"] = (close < middle).astype(float)
+
+    # 8 Past-only Ichimoku cloud breakout (cloud values are intentionally not
+    # displaced into the future; see the engine comment above).
+    cloud_top = pd.concat((frame["technical_ichimoku_span_a_26"], frame["technical_ichimoku_span_b_52"]), axis=1).max(axis=1)
+    cloud_bottom = pd.concat((frame["technical_ichimoku_span_a_26"], frame["technical_ichimoku_span_b_52"]), axis=1).min(axis=1)
+    frame["technical_nepse15_entry_8"] = (
+        common & cross_up(close, cloud_top) & (conversion > base) &
+        (frame["technical_ichimoku_span_a_26"] > frame["technical_ichimoku_span_b_52"]) &
+        (close > close.shift(26)) & (adx > 20) & (volume_ratio > 1)
+    ).astype(float)
+    frame["technical_nepse15_exit_8"] = (cross_down(conversion, base) | close.between(cloud_bottom, cloud_top)).astype(float)
+
+    # 9 Donchian 20/10 trend.
+    frame["technical_nepse15_entry_9"] = (
+        common & (close > frame["technical_prior_high_20"]) & (ema50 > ema50.shift(5)) &
+        (adx > 22) & (volume_ratio > 1.2) & (rsi < 78)
+    ).astype(float)
+    frame["technical_nepse15_exit_9"] = (close < prior_low10).astype(float)
+
+    # 10 Support bounce + bullish reversal.  Support is the prior 20-session
+    # low and must have been approached at least twice before today's candle.
+    support = low.shift(1).rolling(20, min_periods=20).min()
+    support_tests = ((low.shift(1) - support).abs() / support.replace(0, np.nan) <= .015).rolling(20, min_periods=20).sum()
+    morning_star = (close.shift(2) < open_price.shift(2)) & ((close.shift(1) - open_price.shift(1)).abs() <= (high.shift(1) - low.shift(1)) * .35) & (close > open_price) & (close > (open_price.shift(2) + close.shift(2)) / 2)
+    bullish_reversal = (frame["technical_bullish_engulfing"] == 1) | (frame["technical_hammer"] == 1) | morning_star
+    frame["technical_nepse15_entry_10"] = (
+        common & (close > ema200) & ((close - support).abs() / support.replace(0, np.nan) <= .015) &
+        (support_tests >= 2) & rsi.between(35, 50) & bullish_reversal & (close > high.shift(1)) & (volume_ratio > 1.2)
+    ).astype(float)
+    frame["technical_nepse15_exit_10"] = (close < support).astype(float)
+
+    # 11 Stochastic pullback continuation.
+    stoch_was_oversold = stoch_k.shift(1).rolling(5, min_periods=1).min() < 25
+    frame["technical_nepse15_entry_11"] = (
+        common & (ema20 > ema50) & (close > ema50) & stoch_was_oversold & cross_up(stoch_k, stoch_d) &
+        (rsi > 40) & (adx > 18) & close_up
+    ).astype(float)
+    frame["technical_nepse15_exit_11"] = (cross_down(stoch_k, stoch_d) & (stoch_k.shift(1) > 80)).astype(float)
+
+    # 12 OBV accumulation breakout.
+    consolidation_high = high.shift(1).rolling(10, min_periods=10).max()
+    consolidation_low = low.shift(1).rolling(10, min_periods=10).min()
+    consolidation = (consolidation_high / consolidation_low.replace(0, np.nan) - 1) <= .08
+    frame["technical_nepse15_entry_12"] = (
+        common & consolidation & (obv > obv.shift(1).rolling(20, min_periods=20).max()) &
+        (close > close.shift(1).rolling(10, min_periods=10).max()) & (volume_ratio > 1.3) & (close > ema50)
+    ).astype(float)
+    frame["technical_nepse15_exit_12"] = (obv < obv.ewm(span=10, adjust=False, min_periods=10).mean()).astype(float)
+
+    # 13 Five-session momentum followed by a controlled 1-3 session pullback.
+    rises5 = (close.diff() > 0).rolling(5, min_periods=5).sum() >= 4
+    return5 = close.pct_change(5, fill_method=None) * 100
+    momentum = rises5 & return5.between(3, 12) & (close > ema20) & (ema20 > ema50)
+    recent_momentum = momentum.shift(1).rolling(3, min_periods=1).max().fillna(0).astype(bool)
+    controlled_volume = volume.shift(1).rolling(3, min_periods=1).mean() < frame["technical_volume_sma_20"]
+    frame["technical_nepse15_entry_13"] = (common & recent_momentum & controlled_volume & (close > high.shift(1))).astype(float)
+    frame["technical_nepse15_exit_13"] = (close < ema20).astype(float)
+
+    # 14 Volatility contraction: three consecutive five-session ranges shrink,
+    # followed by a high-volume escape from the prior contraction.
+    range_5 = high.rolling(5, min_periods=5).max() - low.rolling(5, min_periods=5).min()
+    contractions = (range_5.shift(5) < range_5.shift(10)) & (range_5.shift(10) < range_5.shift(15))
+    declining_volume = volume.shift(1).rolling(5).mean() < volume.shift(6).rolling(5).mean()
+    contraction_high = high.shift(1).rolling(15, min_periods=15).max()
+    frame["technical_nepse15_entry_14"] = (
+        common & contractions & declining_volume & (close > ema50) &
+        (close > contraction_high) & (volume_ratio > 1.5)
+    ).astype(float)
+    frame["technical_nepse15_exit_14"] = (close < ema10).astype(float)
+
+    # 15 Relative-strength leader.  Until a versioned NEPSE index series is
+    # available, this uses auditable absolute 20/60-session strength instead
+    # of inventing benchmark-relative observations.
+    return20 = close.pct_change(20, fill_method=None) * 100
+    return60 = close.pct_change(60, fill_method=None) * 100
+    frame["technical_nepse15_entry_15"] = (
+        common & (return20 >= 5) & (return60 > 0) & (close > ema20) & ema_stack &
+        (adx > 20) & rsi.between(55, 75) & (volume_ratio > 1.1) & (close > prior_high10)
+    ).astype(float)
+    frame["technical_nepse15_exit_15"] = close_below_ema20_twice.astype(float)
 
     # Consolidate blocks after the extended field insertions. This keeps the
     # final label/score calculations fast when a whole market is prepared.
