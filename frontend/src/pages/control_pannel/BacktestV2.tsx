@@ -3,6 +3,18 @@ import * as echarts from 'echarts/core';
 import { BarChart, CandlestickChart, LineChart, ScatterChart } from 'echarts/charts';
 import { AxisPointerComponent, DataZoomComponent, GridComponent, LegendComponent, TooltipComponent } from 'echarts/components';
 import { CanvasRenderer } from 'echarts/renderers';
+import {
+  CandlestickSeries,
+  ColorType,
+  CrosshairMode,
+  HistogramSeries,
+  LineStyle,
+  createChart,
+  createSeriesMarkers,
+  type IChartApi,
+  type SeriesMarker,
+  type Time,
+} from 'lightweight-charts';
 import { fetchJson, getApiUrl } from '../../utils/api';
 import NepseAlphaSymbolLink from '../../components/NepseAlphaSymbolLink';
 import { nextBacktestSortRules } from './backtestSort';
@@ -13,6 +25,26 @@ import './StrongBuy.css';
 import './StockScopePicker.css';
 
 echarts.use([BarChart, CandlestickChart, LineChart, ScatterChart, AxisPointerComponent, DataZoomComponent, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer]);
+
+const toChartTime = (value: string): string => String(value || '').slice(0, 10);
+
+const timeKey = (value: Time): string => {
+  if (typeof value === 'string') return value.slice(0, 10);
+  if (typeof value === 'number') return new Date(value * 1000).toISOString().slice(0, 10);
+  return `${value.year}-${String(value.month).padStart(2, '0')}-${String(value.day).padStart(2, '0')}`;
+};
+
+const snapToCandleTime = (dates: string[], value: string): string | null => {
+  const target = toChartTime(value);
+  if (!target || !dates.length) return null;
+  if (dates.includes(target)) return target;
+  let best: string | null = null;
+  for (const date of dates) {
+    if (date <= target) best = date;
+    else break;
+  }
+  return best ?? dates[0];
+};
 
 type Preset = { id: string; name: string; category: string; family: string; description: string };
 type Run = {
@@ -207,68 +239,243 @@ const StrongBuyCharts: React.FC<{ trades: Array<Record<string, any>> }> = ({ tra
 
 const TradeCandlestickChart: React.FC<{ resultId: number; symbol: string }> = ({ resultId, symbol }) => {
   const ref = useRef<HTMLDivElement | null>(null);
-  const chartRef = useRef<echarts.ECharts | null>(null);
+  const shellRef = useRef<HTMLDivElement | null>(null);
+  const bandRef = useRef<HTMLDivElement | null>(null);
+  const chartRef = useRef<IChartApi | null>(null);
+  const rangeDragRef = useRef<{ startX: number; pointerId: number } | null>(null);
   const [payload, setPayload] = useState<ExecutionChartPayload | null>(null);
+  const [activeCandleIndex, setActiveCandleIndex] = useState<number | null>(null);
   const [chartError, setChartError] = useState('');
+  const zoomModifierLabel = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent) ? '⌘+drag' : 'Ctrl+drag';
   useEffect(() => {
-    setPayload(null); setChartError('');
+    setPayload(null); setActiveCandleIndex(null); setChartError('');
     void fetchJson<ExecutionChartPayload>(`/api/backtests/v2/results/${resultId}/chart`).then((response) => {
       if (response.ok) setPayload(response.data); else setChartError(response.error || 'Could not load price history.');
     });
   }, [resultId]);
   useEffect(() => {
     if (!ref.current || !payload?.candles?.length) return undefined;
-    const chart = echarts.init(ref.current);
-    chartRef.current = chart;
-    const dates = payload.candles.map((bar) => bar.date);
-    const initialStart = Math.max(0, 100 - Math.min(100, 260 / dates.length * 100));
-    const candleData = payload.candles.map((bar) => [Number(bar.open), Number(bar.close), Number(bar.low), Number(bar.high)]);
-    const volumeData = payload.candles.map((bar) => ({ value: Number(bar.volume || 0), itemStyle: { color: Number(bar.close) >= Number(bar.open) ? '#21a66f' : '#e05252' } }));
-    const buys = payload.trades.map((trade) => [trade.entry_date, Number(trade.entry_price), Number(trade.quantity || 0)]);
-    const sells = payload.trades.map((trade) => [trade.exit_date, Number(trade.exit_price), Number(trade.pnl || 0)]);
+    const el = ref.current;
+    const shell = shellRef.current;
+    const dates = payload.candles.map((bar) => toChartTime(bar.date)).filter(Boolean);
+    const indexByDate = new Map(dates.map((date, index) => [date, index]));
+    const candleData = payload.candles.map((bar) => ({
+      time: toChartTime(bar.date) as Time,
+      open: Number(bar.open),
+      high: Number(bar.high),
+      low: Number(bar.low),
+      close: Number(bar.close),
+    }));
+    const volumeData = payload.candles.map((bar) => ({
+      time: toChartTime(bar.date) as Time,
+      value: Number(bar.volume || 0),
+      color: Number(bar.close) >= Number(bar.open) ? 'rgba(33,166,111,.55)' : 'rgba(224,82,82,.55)',
+    }));
     const npr = (value: number) => `${value >= 0 ? '+' : '−'}NPR ${Math.abs(value).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
-    chart.setOption({
-      animation: false, backgroundColor: '#131722',
-      legend: { top: 11, left: 14, icon: 'roundRect', itemWidth: 10, itemHeight: 8, itemGap: 16, textStyle: { color: '#b9c4d5', fontSize: 11, fontWeight: 600 }, data: [`${symbol} daily`, 'Buy', 'Sell', 'Volume'] },
-      tooltip: { trigger: 'axis', axisPointer: { type: 'cross', crossStyle: { color: '#8493a8', width: 1, type: 'dashed' }, label: { backgroundColor: '#2962ff', color: '#fff' } }, backgroundColor: 'rgba(19,23,34,.98)', borderColor: '#394252', borderWidth: 1, padding: [9, 11], textStyle: { color: '#d7dee9' } },
-      axisPointer: { link: [{ xAxisIndex: 'all' }] },
-      grid: [{ left: 12, right: 76, top: 48, height: '64%' }, { left: 12, right: 76, top: '76%', height: '13%' }],
-      xAxis: [
-        { type: 'category', data: dates, boundaryGap: true, axisLine: { lineStyle: { color: '#2a2e39' } }, axisTick: { show: false }, axisLabel: { color: '#a7b0c0', hideOverlap: true, fontSize: 10 }, splitLine: { show: false } },
-        { type: 'category', gridIndex: 1, data: dates, boundaryGap: true, axisLine: { lineStyle: { color: '#2a2e39' } }, axisTick: { show: false }, axisLabel: { show: false }, splitLine: { show: false } },
-      ],
-      yAxis: [
-        { scale: true, position: 'right', axisLine: { show: true, lineStyle: { color: '#2a2e39' } }, axisTick: { show: false }, axisLabel: { color: '#b9c4d5', inside: false, fontSize: 10 }, splitLine: { lineStyle: { color: '#232936', type: 'dashed' } } },
-        { scale: true, gridIndex: 1, position: 'right', axisLine: { show: true, lineStyle: { color: '#2a2e39' } }, axisTick: { show: false }, axisLabel: { color: '#9ca8ba', formatter: (value: number) => value >= 1000000 ? `${(value / 1000000).toFixed(1)}m` : value >= 1000 ? `${(value / 1000).toFixed(0)}k` : String(value), fontSize: 10 }, splitLine: { show: false } },
-      ],
-      dataZoom: [
-        { type: 'inside', xAxisIndex: [0, 1], start: initialStart, end: 100, filterMode: 'none', zoomOnMouseWheel: true, moveOnMouseMove: true, moveOnMouseWheel: true, preventDefaultMouseMove: false },
-        { type: 'slider', xAxisIndex: [0, 1], bottom: 7, height: 16, borderColor: '#2a2e39', backgroundColor: '#1c212c', fillerColor: 'rgba(41,98,255,.32)', handleStyle: { color: '#2962ff', borderColor: '#8eb1ff' }, textStyle: { color: '#8f9bac', fontSize: 9 }, dataBackground: { lineStyle: { color: '#485365' }, areaStyle: { color: '#242b38' } } },
-      ],
-      series: [
-        { name: `${symbol} daily`, type: 'candlestick', data: candleData, itemStyle: { color: '#20b27a', color0: '#e45454', borderColor: '#20b27a', borderColor0: '#e45454' } },
-        { name: 'Buy', type: 'scatter', symbol: 'triangle', symbolSize: 13, data: buys, itemStyle: { color: '#42d392', borderColor: '#d9fff0', borderWidth: 1 }, label: { show: true, position: 'bottom', formatter: 'BUY', color: '#7cf0ba', fontSize: 9, fontWeight: 700 } },
-        { name: 'Sell', type: 'scatter', symbol: 'diamond', symbolSize: 13, data: sells, itemStyle: { color: (params: any) => Number(params.value?.[2] || 0) >= 0 ? '#34d399' : '#ff5e66', borderColor: '#f4fff9', borderWidth: 1 }, label: { show: true, position: 'top', distance: 5, formatter: (params: any) => { const value = Number(params.value?.[2] || 0); return `{${value >= 0 ? 'profit' : 'loss'}|${npr(value)}}`; }, backgroundColor: 'rgba(8,15,25,.9)', padding: [3, 5], borderRadius: 3, fontSize: 10, fontWeight: 800, rich: { profit: { color: '#57e69b', fontWeight: 800, textShadowColor: '#06110c', textShadowBlur: 2 }, loss: { color: '#ff737a', fontWeight: 800, textShadowColor: '#160607', textShadowBlur: 2 } } } },
-        { name: 'Volume', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: volumeData, barMaxWidth: 8 },
-      ],
+    const markers: SeriesMarker<Time>[] = [];
+    payload.trades.forEach((trade) => {
+      const entry = snapToCandleTime(dates, String(trade.entry_date || ''));
+      const exit = snapToCandleTime(dates, String(trade.exit_date || ''));
+      if (entry) markers.push({ time: entry as Time, position: 'belowBar', color: '#42d392', shape: 'arrowUp', text: 'BUY' });
+      if (exit) {
+        const pnl = Number(trade.pnl || 0);
+        markers.push({ time: exit as Time, position: 'aboveBar', color: pnl >= 0 ? '#34d399' : '#ff5e66', shape: 'arrowDown', text: npr(pnl) });
+      }
     });
-    const observer = new ResizeObserver(() => chart.resize()); observer.observe(ref.current);
-    return () => { observer.disconnect(); chart.dispose(); chartRef.current = null; };
+    markers.sort((a, b) => timeKey(a.time).localeCompare(timeKey(b.time)));
+
+    const chart = createChart(el, {
+      autoSize: true,
+      layout: {
+        background: { type: ColorType.Solid, color: '#131722' },
+        textColor: '#a7b0c0',
+        fontSize: 11,
+        attributionLogo: true,
+      },
+      grid: {
+        vertLines: { color: '#1e2330' },
+        horzLines: { color: '#1e2330' },
+      },
+      crosshair: {
+        mode: CrosshairMode.Normal,
+        vertLine: { color: '#8493a8', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#2962ff' },
+        horzLine: { color: '#8493a8', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#2962ff' },
+      },
+      rightPriceScale: { borderColor: '#2a2e39', scaleMargins: { top: 0.08, bottom: 0.08 } },
+      timeScale: {
+        borderColor: '#2a2e39',
+        rightOffset: 6,
+        barSpacing: 7,
+        minBarSpacing: 2,
+        timeVisible: false,
+      },
+      handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: true },
+      handleScale: { axisPressedMouseMove: { time: true, price: true }, mouseWheel: true, pinch: true },
+    });
+    chartRef.current = chart;
+
+    const candleSeries = chart.addSeries(CandlestickSeries, {
+      upColor: '#20b27a',
+      downColor: '#e45454',
+      borderUpColor: '#20b27a',
+      borderDownColor: '#e45454',
+      wickUpColor: '#20b27a',
+      wickDownColor: '#e45454',
+    });
+    candleSeries.setData(candleData);
+    createSeriesMarkers(candleSeries, markers);
+
+    const volumeSeries = chart.addSeries(HistogramSeries, {
+      priceFormat: { type: 'volume' },
+      priceScaleId: 'volume',
+    }, 1);
+    volumeSeries.setData(volumeData);
+    chart.priceScale('volume').applyOptions({
+      borderColor: '#2a2e39',
+      scaleMargins: { top: 0.15, bottom: 0 },
+    });
+    const panes = chart.panes();
+    if (panes[0]) panes[0].setStretchFactor(3.2);
+    if (panes[1]) panes[1].setStretchFactor(1);
+
+    const showRecent = () => {
+      const from = Math.max(0, candleData.length - 260);
+      chart.timeScale().setVisibleLogicalRange({ from: from - 0.5, to: candleData.length - 0.5 });
+    };
+    showRecent();
+
+    const setScrollEnabled = (enabled: boolean) => {
+      chart.applyOptions({
+        handleScroll: { mouseWheel: true, pressedMouseMove: enabled, horzTouchDrag: enabled, vertTouchDrag: enabled },
+      });
+    };
+    const setRangeBand = (left: number | null, width = 0) => {
+      const band = bandRef.current;
+      if (!band) return;
+      if (left == null) {
+        band.hidden = true;
+        band.style.width = '0px';
+        return;
+      }
+      band.hidden = false;
+      band.style.left = `${left}px`;
+      band.style.width = `${Math.max(0, width)}px`;
+    };
+    const clearRangeDrag = () => {
+      rangeDragRef.current = null;
+      setRangeBand(null);
+      el.classList.remove('range-selecting');
+      setScrollEnabled(true);
+    };
+    const syncModifierArm = (armed: boolean) => {
+      shell?.classList.toggle('range-zoom-armed', armed);
+      el.classList.toggle('range-zoom-armed', armed);
+      if (!rangeDragRef.current) setScrollEnabled(!armed);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Meta' || event.key === 'Control') syncModifierArm(true);
+    };
+    const onKeyUp = (event: KeyboardEvent) => {
+      if (event.key === 'Meta' || event.key === 'Control') {
+        if (rangeDragRef.current) return;
+        syncModifierArm(false);
+      }
+    };
+    const onBlur = () => { clearRangeDrag(); syncModifierArm(false); };
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.button !== 0 || !(event.metaKey || event.ctrlKey)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      rangeDragRef.current = { startX: event.clientX, pointerId: event.pointerId };
+      setScrollEnabled(false);
+      el.classList.add('range-selecting');
+      const localX = event.clientX - el.getBoundingClientRect().left;
+      setRangeBand(localX, 0);
+      el.setPointerCapture(event.pointerId);
+    };
+    const onPointerMove = (event: PointerEvent) => {
+      const drag = rangeDragRef.current;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      const rect = el.getBoundingClientRect();
+      const startLocal = drag.startX - rect.left;
+      const currentLocal = event.clientX - rect.left;
+      setRangeBand(Math.min(startLocal, currentLocal), Math.abs(currentLocal - startLocal));
+    };
+    const onPointerUp = (event: PointerEvent) => {
+      const drag = rangeDragRef.current;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      const startX = drag.startX;
+      const endX = event.clientX;
+      clearRangeDrag();
+      syncModifierArm(event.metaKey || event.ctrlKey);
+      if (Math.abs(endX - startX) < 8) return;
+      const rect = el.getBoundingClientRect();
+      const fromTime = chart.timeScale().coordinateToTime(startX - rect.left);
+      const toTime = chart.timeScale().coordinateToTime(endX - rect.left);
+      if (fromTime == null || toTime == null) return;
+      const a = timeKey(fromTime);
+      const b = timeKey(toTime);
+      const from = a <= b ? a : b;
+      const to = a <= b ? b : a;
+      if (from === to) return;
+      chart.timeScale().setVisibleRange({ from: from as Time, to: to as Time });
+    };
+    const onCrosshair = (param: { time?: Time }) => {
+      if (param.time == null) return;
+      const nextIndex = indexByDate.get(timeKey(param.time));
+      if (nextIndex != null) setActiveCandleIndex(nextIndex);
+    };
+
+    chart.subscribeCrosshairMove(onCrosshair);
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', onBlur);
+    el.addEventListener('pointerdown', onPointerDown, true);
+    el.addEventListener('pointermove', onPointerMove);
+    el.addEventListener('pointerup', onPointerUp);
+    el.addEventListener('pointercancel', onPointerUp);
+
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', onBlur);
+      el.removeEventListener('pointerdown', onPointerDown, true);
+      el.removeEventListener('pointermove', onPointerMove);
+      el.removeEventListener('pointerup', onPointerUp);
+      el.removeEventListener('pointercancel', onPointerUp);
+      chart.unsubscribeCrosshairMove(onCrosshair);
+      chart.remove();
+      chartRef.current = null;
+    };
   }, [payload, symbol]);
   if (chartError) return <div className="research-alert">{chartError}</div>;
   if (!payload) return <div className="trade-chart-loading">Loading the exact daily price and trade history…</div>;
   if (!payload.candles.length) return <div className="research-alert">No cached OHLCV candles are available for this result period.</div>;
   const resetView = () => {
     if (!chartRef.current || !payload?.candles?.length) return;
-    chartRef.current.dispatchAction({ type: 'dataZoom', start: Math.max(0, 100 - Math.min(100, 260 / payload.candles.length * 100)), end: 100 });
+    const from = Math.max(0, payload.candles.length - 260);
+    chartRef.current.timeScale().setVisibleLogicalRange({ from: from - 0.5, to: payload.candles.length - 0.5 });
   };
+  const activeCandle = payload.candles[activeCandleIndex ?? payload.candles.length - 1];
+  const price = (value: number) => Number(value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const rising = Number(activeCandle.close) >= Number(activeCandle.open);
   return <div className="backtest-trade-chart">
     <div className="trade-chart-toolbar">
       <span className="trade-chart-symbol"><i />{symbol} <small>1D</small></span>
-      <span className="trade-chart-gesture">Drag to pan · Scroll to zoom</span>
+      <span className={`trade-chart-ohlc ${rising ? 'up' : 'down'}`} aria-live="polite">
+        <span>O <b>{price(activeCandle.open)}</b></span>
+        <span>H <b>{price(activeCandle.high)}</b></span>
+        <span>L <b>{price(activeCandle.low)}</b></span>
+        <span>C <b>{price(activeCandle.close)}</b></span>
+      </span>
+      <span className="trade-chart-gesture">{zoomModifierLabel} to zoom · Drag to pan · Scroll to zoom</span>
+      <a className="trade-chart-tv" href="https://www.tradingview.com/" target="_blank" rel="noreferrer">TradingView</a>
       <button type="button" onClick={resetView}>Reset view</button>
     </div>
-    <div ref={ref} className="trade-chart-canvas" aria-label={`${symbol} candlestick chart with every simulated buy and sell. Drag to pan and use the mouse wheel to zoom.`} />
+    <div className="trade-chart-shell" ref={shellRef}>
+      <div ref={ref} className="trade-chart-canvas" aria-label={`${symbol} candlestick chart with every simulated buy and sell. ${zoomModifierLabel} selects a range to zoom, drag to pan, and use the mouse wheel to zoom.`} />
+      <div ref={bandRef} className="trade-chart-range-band" hidden aria-hidden="true" />
+    </div>
   </div>;
 };
 
