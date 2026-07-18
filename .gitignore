@@ -10,6 +10,7 @@ test.py
 *.jsonl
 *.csv
 node_modules
+artifacts/
 
 # Keep captcha solver reference data tracked.
 !utils/tms_captcha_solver/bold_data.json
