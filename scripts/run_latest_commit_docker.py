@@ -204,7 +204,9 @@ def ensure_primary_branch(branch: str) -> None:
 def fast_forward_from_origin(branch: str) -> None:
     """Fetch and fast-forward the exact configured branch without relying on upstream config."""
     remote_ref = f"refs/remotes/origin/{branch}"
-    run(["git", "fetch", "--prune", "origin", f"{branch}:{remote_ref}"])
+    # Use the remote's configured fetch map. Combining --prune with a custom
+    # remote-tracking refspec can prune that same ref on some Git versions.
+    run(["git", "fetch", "--prune", "origin"])
     remote_exists = subprocess.run(
         ["git", "show-ref", "--verify", "--quiet", remote_ref], cwd=ROOT,
     ).returncode == 0
