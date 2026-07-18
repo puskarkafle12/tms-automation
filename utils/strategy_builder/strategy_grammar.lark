@@ -1,6 +1,26 @@
 ?start: document
 
-document: strategy_version side defaults_block? portfolio_limits_block? position_protection_block? position_exit_block? rank_block? rule+
+document: strategy_version side backtest_block? defaults_block? portfolio_limits_block? position_protection_block? position_exit_block? rank_block? rule+
+
+backtest_block: "BACKTEST" "{" backtest_stmt* "}"
+backtest_stmt: "INITIAL_CAPITAL" NUMBER -> bt_initial_capital
+    | "CHARGE_MODEL" STRING -> bt_charge_model
+    | "INVESTOR_TYPE" STRING -> bt_investor_type
+    | "APPLY_CGT" "TRUE" -> bt_apply_cgt_true
+    | "APPLY_CGT" "FALSE" -> bt_apply_cgt_false
+    | "DP_CHARGE" NUMBER -> bt_dp_charge
+    | "FEE_PCT" NUMBER -> bt_fee_pct
+    | "FIXED_FEE" NUMBER -> bt_fixed_fee
+    | "SLIPPAGE_PCT" NUMBER -> bt_slippage_pct
+    | "STOP_LOSS_PCT" NUMBER -> bt_stop_loss_pct
+    | "TAKE_PROFIT_PCT" NUMBER -> bt_take_profit_pct
+    | "TRAILING_STOP_PCT" NUMBER -> bt_trailing_stop_pct
+    | "MIN_HOLDING_DAYS" NUMBER -> bt_min_holding_days
+    | "MAX_HOLDING_DAYS" NUMBER -> bt_max_holding_days
+    | "POSITION_SIZE_PCT" NUMBER -> bt_position_size_pct
+    | "MAX_VOLUME_PARTICIPATION_PCT" NUMBER -> bt_max_volume_participation_pct
+    | "RISK_FREE_RATE_PCT" NUMBER -> bt_risk_free_rate_pct
+    | "DATA_SOURCE" STRING -> bt_data_source
 
 position_exit_block: "POSITION_EXIT" "{" position_exit_stmt* "}"
 

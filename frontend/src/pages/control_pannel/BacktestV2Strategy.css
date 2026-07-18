@@ -1,0 +1,57 @@
+.research-custom-query {
+  margin-top: 18px;
+  border: 1px solid #cddbea;
+  border-radius: 12px;
+  background: #f8fbff;
+  padding: 14px;
+}
+
+.research-custom-query > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.research-custom-query > div > span { flex: 1; }
+.research-custom-query b, .research-custom-query small { display: block; }
+.research-custom-query small { margin-top: 4px; color: #66758b; line-height: 1.45; }
+
+.research-custom-query button, .execution-promotion button {
+  border: 0;
+  border-radius: 8px;
+  background: #176da6;
+  color: #fff;
+  padding: 9px 12px;
+  font-weight: 750;
+}
+
+.research-custom-query em { font-size: 12px; color: #187548; }
+.research-custom-query textarea {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  border: 1px solid #bfcddd;
+  border-radius: 9px;
+  background: #132035;
+  color: #d9eafa;
+  padding: 13px;
+  font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.execution-promotion { border-color: #a9d6c1 !important; background: #f4fbf7; }
+.execution-promotion > div { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; }
+.execution-promotion label { font-size: 12px; font-weight: 700; color: #536276; }
+.execution-promotion input { display: block; margin-top: 5px; padding: 9px; border: 1px solid #bdd0c5; border-radius: 8px; }
+.execution-promotion a { padding: 9px 12px; border: 1px solid #9dbfad; border-radius: 8px; color: #176443; text-decoration: none; font-weight: 750; }
+.execution-promotion > strong { display: block; margin-top: 10px; color: #176443; }
+.stock-chart-links { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; }
+.stock-chart-links .nepse-alpha-symbol-link { font-size: 10px; white-space: nowrap; }
+.strong-buy-drawer .drawer-nepse-chart { display: inline-block; margin-top: 9px; color: #9de7ff; font-size: 12px; }
+.strong-buy-table table { min-width: 2450px; }
+.signal-pill.near_trigger { background: #f1e8ff; color: #7041a3; }
+.signal-pill.no_signal, .signal-pill.stale { background: #edf1f5; color: #5b6878; }
+
+@media (max-width: 650px) {
+  .research-custom-query > div, .execution-promotion > div { align-items: stretch; flex-direction: column; }
+}

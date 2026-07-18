@@ -25,6 +25,7 @@ from utils.strategy_builder.strategy_models import StrategyPlanAST, ValidationIs
 from utils.strategy_builder.strategy_parser import StrategyQueryError, parse_strategy_query
 from utils.strategy_builder.strategy_validator import validate_strategy_plan
 from utils.strategies.normalize import get_script_details, normalize_tms_quote
+from utils.technical_indicators import INDICATOR_FIELDS
 from config.app_environment import is_testing
 
 NEPSE_ALPHA_CATEGORIES = {
@@ -33,6 +34,13 @@ NEPSE_ALPHA_CATEGORIES = {
     "statistical",
     "sector",
 }
+
+_EXTERNALLY_AVAILABLE_TECHNICAL_FIELDS = {
+    "technical_rsi_14", "technical_mfi_14", "technical_percent_b", "technical_macd",
+    "technical_sma_10", "technical_sma_20", "technical_sma_50", "technical_sma_200",
+    "technical_volume_trend",
+}
+_LOCAL_TECHNICAL_FIELDS = set(INDICATOR_FIELDS) - _EXTERNALLY_AVAILABLE_TECHNICAL_FIELDS
 
 TMS_CATEGORIES = {"live", "derived_live", "market_depth"}
 
@@ -81,6 +89,8 @@ _SOFT_MISSING_NEPSE_FIELDS = {
 def _field_data_source(field_name: str) -> str:
     if classify_field(field_name) == "UNSUPPORTED_DATA":
         return "unsupported"
+    if field_name in _LOCAL_TECHNICAL_FIELDS:
+        return "runtime"
     if field_name in _DERIVED_STATISTICAL_KEYS:
         return "derived_statistical"
     if field_name in _DERIVED_LIVE_KEYS:

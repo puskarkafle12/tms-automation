@@ -8,6 +8,7 @@ const dashboardSections = [
   DASHBOARD_PATHS.tmsLogin,
   DASHBOARD_PATHS.scheduleOrder,
   DASHBOARD_PATHS.strategyDetails,
+  DASHBOARD_PATHS.backtest,
   DASHBOARD_PATHS.dpHoldings,
   DASHBOARD_PATHS.stockTable,
   DASHBOARD_PATHS.stockGrabber,

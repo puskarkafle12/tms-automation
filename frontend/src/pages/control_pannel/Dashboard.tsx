@@ -10,6 +10,8 @@ import StockGrabberPage from './StockGrabberPage';
 import StockAnalysis from './StockAnalysis';
 import StrategyDetails from './StrategyDetails';
 import Settings from './Settings';
+import Backtest from './Backtest';
+import BacktestV2 from './BacktestV2';
 import AppShell, { NavItem } from '../../components/layout/AppShell';
 import { pathToTab, TAB_TO_PATH } from '../../routes/control_pannel/dashboardPaths';
 
@@ -22,6 +24,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'StockAnalysis', label: 'Market Analysis', icon: '🔎' },
   { id: 'StockGrabber', label: 'Stock Grabber', icon: '⚡' },
   { id: 'StrategyDetails', label: 'Strategy Details', icon: '🧭' },
+  { id: 'Backtest', label: 'Backtest', icon: '🧪' },
   { id: 'StockTable', label: 'Stock Table', icon: '📈' },
   { id: 'EDIS', label: 'EDIS', icon: '📝' },
   { id: 'Settings', label: 'Settings', icon: '⚙️' },
@@ -32,6 +35,7 @@ const PAGE_META: Record<string, { title: string; subtitle: string }> = {
   Login: { title: 'TMS Login', subtitle: 'Connect your broker account to NEPSE TMS' },
   ScheduleOrder: { title: 'Schedule Order', subtitle: 'Queue orders and monitor until price conditions are met' },
   StrategyDetails: { title: 'Strategy Details', subtitle: 'Simple guide for buy and sell strategy logic' },
+  Backtest: { title: 'Strategy Backtest', subtitle: 'Test custom queries on historical NEPSE market data' },
   OrderStatus: { title: 'Order Logs', subtitle: 'View order history and status updates' },
   CheckOrders: { title: 'Check Orders', subtitle: 'Monitor and verify pending orders' },
   DPHoldings: { title: 'Portfolio', subtitle: 'Holdings, buy cost, and profit/loss overview' },
@@ -96,6 +100,8 @@ const DashBoardPage: React.FC = () => {
         return <ScheduleOrder />;
       case 'StrategyDetails':
         return <StrategyDetails />;
+      case 'Backtest':
+        return new URLSearchParams(window.location.search).get('legacy') === '1' ? <Backtest /> : <BacktestV2 />;
       case 'OrderStatus':
         return <OrderStatus />;
       case 'DPHoldings':

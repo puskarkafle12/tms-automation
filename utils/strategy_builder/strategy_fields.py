@@ -102,7 +102,11 @@ ENUM_VALUES: Dict[str, List[str]] = {
     "technical_sma_50": ["above", "below"],
     "technical_sma_200": ["above", "below"],
     "technical_volume_trend": ["Trending Up", "Trending Down", "Flat"],
+    "technical_supertrend": ["Bullish", "Bearish"],
+    "technical_psar": ["Bullish", "Bearish"],
+    "technical_squeeze": ["On", "Released", "Neutral"],
     "technical_3m_price_tend": ["Trending Up", "Trending Down", "Flat"],
+    "technical_signal": ["Strong Buy", "Buy", "Neutral", "Sell", "Strong Sell"],
 }
 
 SUPPORTED_FUNCTIONS: List[Dict[str, Any]] = [

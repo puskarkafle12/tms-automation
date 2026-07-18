@@ -1,5 +1,6 @@
 import logging
 import json
+import os
 import uuid
 import aiohttp
 import time as monotonic_time
@@ -775,6 +776,13 @@ async def ensure_database_indexes() -> None:
     from utils.market_data.scheduler import market_data_scheduler_loop
 
     await asyncio.to_thread(ensure_performance_indexes)
+    from utils.backtesting.jobs import resume_persisted_batch_jobs
+    await asyncio.to_thread(resume_persisted_batch_jobs)
+    if os.getenv("BACKTEST_V2", "true").strip().lower() in {"1", "true", "yes", "on"}:
+        from utils.backtesting.v2_jobs import start_worker as start_backtest_v2_worker
+        start_backtest_v2_worker()
+    from utils.technical_indicators.refresh import start_indicator_refresh_background
+    start_indicator_refresh_background()
     await asyncio.to_thread(_seed_market_screen_presets)
     await asyncio.to_thread(load_portal_settings)
     scheduled_supervisor_task = asyncio.create_task(scheduled_monitor_supervisor_loop())

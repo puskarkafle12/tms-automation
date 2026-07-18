@@ -117,6 +117,21 @@ def _numeric_arg(
     return float(raw)
 
 
+def _plain_arg(args: Dict[str, Any], keys: tuple[str, ...], default: Any) -> Any:
+    """Unwrap named parser arguments represented as literal/field AST nodes."""
+    raw: Any = default
+    for key in keys:
+        if key in args:
+            raw = args[key]
+            break
+    raw = _node_as_dict(raw)
+    if isinstance(raw, dict) and raw.get("type") == "literal":
+        return raw.get("value")
+    if isinstance(raw, dict) and raw.get("type") == "field":
+        return raw.get("name")
+    return raw
+
+
 def _compare(left: Any, operator: str, right: Any) -> bool:
     if operator == "eq":
         return left == right
@@ -375,19 +390,19 @@ def _evaluate_node(
             matched = changed_from_to(field_name, history, from_value, to_value)
             return ConditionResult(expression=f"CHANGED_FROM_TO({field_name})", matched=matched, actual_value=flat.get(field_name))
         if name == "STDDEV":
-            window = int(args.get("scans") or args.get("window") or args.get("count") or 10)
+            window = int(_plain_arg(args, ("scans", "window", "count"), 10))
             values = _rolling_values(field_name, history, window)
             actual = rolling_stddev(values)
             threshold = _resolve_value(args.get("threshold") or args.get("value"), flat, history)
-            operator = str(args.get("operator") or "lt")
+            operator = str(_plain_arg(args, ("operator",), "lt"))
             matched = _compare(actual, operator, threshold) if actual is not None and threshold is not None else actual is not None
             return ConditionResult(expression=f"STDDEV({field_name}, {window})", matched=matched, actual_value=actual, expected_value=threshold)
         if name == "SLOPE":
-            window = int(args.get("scans") or args.get("window") or args.get("count") or 5)
+            window = int(_plain_arg(args, ("scans", "window", "count"), 5))
             values = _rolling_values(field_name, history, window)
             actual = rolling_slope(values)
             threshold = _resolve_value(args.get("threshold") or args.get("value"), flat, history)
-            operator = str(args.get("operator") or "gt")
+            operator = str(_plain_arg(args, ("operator",), "gt"))
             matched = _compare(actual, operator, threshold) if actual is not None and threshold is not None else actual is not None
             return ConditionResult(expression=f"SLOPE({field_name}, {window})", matched=matched, actual_value=actual, expected_value=threshold)
         if name == "TREND":
@@ -489,7 +504,7 @@ def _evaluate_node(
             matched = matches_in_last(values, required, window)
             return ConditionResult(expression=f"MATCHES_IN_LAST(..., {required}, {window})", matched=matched)
         if name in {"AVERAGE", "MIN_VALUE", "MAX_VALUE", "SUM_VALUE"}:
-            window = int(args.get("window") or args.get("count") or 5)
+            window = int(_plain_arg(args, ("window", "count"), 5))
             values = _rolling_values(field_name, history, window)
             if not values:
                 return ConditionResult(expression=name, matched=False)
@@ -502,7 +517,7 @@ def _evaluate_node(
             else:
                 actual = sum(values)
             threshold = _resolve_value(args.get("threshold") or args.get("value"), flat, history)
-            operator = str(args.get("operator") or "gte")
+            operator = str(_plain_arg(args, ("operator",), "gte"))
             matched = _compare(actual, operator, threshold) if threshold is not None else actual is not None
             return ConditionResult(expression=name, matched=matched, actual_value=actual, expected_value=threshold)
         if name == "DEPTH_QUANTITY":

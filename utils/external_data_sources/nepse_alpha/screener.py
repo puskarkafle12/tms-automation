@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from utils.external_data_sources.nepse_alpha.client import get_nepse_alpha_signals_async
 from utils.strategies.helpers import parse_nepse_stat_number, safe_number
 from utils.external_data_sources.nepse_alpha.stats_parsing import extract_week_range_from_stats
+from utils.technical_indicators import INDICATOR_FIELDS
 
 SCREENER_CACHE_TTL_SECONDS = 5 * 60
 _MAX_CONCURRENT_FETCHES = 6
@@ -149,6 +150,22 @@ FIELD_CATALOG: List[Dict[str, Any]] = [
     {"key": "technical_volume_trend", "label": "Volume Trend", "category": "Technical", "type": "text"},
     {"key": "technical_3m_price_tend", "label": "3M Price Trend", "category": "Technical", "type": "text"},
 ]
+
+# Locally calculated OHLCV fields share this catalog with external fields so
+# the GUI, query parser, SQL screener, live evaluator, and backtester agree.
+_LOCAL_TEXT_INDICATORS = {
+    "technical_macd", "technical_sma_10", "technical_sma_20", "technical_sma_50",
+    "technical_sma_200", "technical_volume_trend", "technical_supertrend",
+    "technical_psar", "technical_squeeze", "technical_signal",
+}
+_catalog_keys = {item["key"] for item in FIELD_CATALOG}
+for _key in sorted(INDICATOR_FIELDS - _catalog_keys):
+    FIELD_CATALOG.append({
+        "key": _key,
+        "label": _key.removeprefix("technical_").replace("_", " ").title(),
+        "category": "Technical",
+        "type": "text" if _key in _LOCAL_TEXT_INDICATORS else "number",
+    })
 
 NUMERIC_OPERATORS = ["gt", "gte", "lt", "lte", "eq", "neq", "between"]
 TEXT_OPERATORS = ["eq", "neq", "contains", "in"]

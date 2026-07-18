@@ -6,6 +6,7 @@ from utils.strategy_builder.strategy_parser import (
     format_expression,
     format_strategy_query,
     parse_strategy_query,
+    retarget_strategy_query,
 )
 from utils.strategy_builder.strategy_validator import validate_strategy_plan
 
@@ -123,6 +124,36 @@ EXECUTE ONCE PER SYMBOL
         )
         self.assertEqual(plan.rules[0].execution.frequency, "max_times_per_symbol")
         self.assertEqual(plan.rules[0].execution.max_times, 3)
+
+    def test_retarget_preserves_strategy_and_changes_only_symbols(self):
+        query = """
+STRATEGY_VERSION 1
+SIDE BUY
+BACKTEST {
+INITIAL_CAPITAL 100000
+CHARGE_MODEL "nepse_equity"
+INVESTOR_TYPE "individual"
+APPLY_CGT TRUE
+DP_CHARGE 25
+STOP_LOSS_PCT 6
+TAKE_PROFIT_PCT 15
+}
+RULE "Reusable" FOR SYMBOL "NABIL" {
+WHEN technical_supertrend = "Bullish" AND technical_ppo_histogram > 0
+ORDER PERCENT_OF_AVAILABLE_CASH 100
+EXECUTE MAX 100 TIMES PER SYMBOL
+}
+"""
+        retargeted = retarget_strategy_query(query, ["NMB", "NABIL"])
+        plan = parse_strategy_query(retargeted)
+        self.assertEqual(plan.rules[0].symbols, ["NMB", "NABIL"])
+        self.assertEqual(plan.rules[0].when.model_dump(), parse_strategy_query(query).rules[0].when.model_dump())
+        self.assertEqual(plan.backtest.charge_model, "nepse_equity")
+        self.assertEqual(plan.backtest.stop_loss_pct, 6)
+
+    def test_retarget_rejects_invalid_symbol(self):
+        with self.assertRaises(StrategyQueryError):
+            retarget_strategy_query(SAMPLE_SELL_QUERY, ["NABIL; DROP TABLE"])
 
 
 if __name__ == "__main__":

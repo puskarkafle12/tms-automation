@@ -500,6 +500,61 @@ def load_cached_records(db: Session, symbols: Optional[List[str]] = None) -> Lis
     return records
 
 
+def save_technical_indicator_snapshot(
+    db: Session, *, symbol: str, as_of_date: date, indicators: Dict[str, Any],
+    engine_version: str, bars_count: int, history_start: date, history_end: date,
+) -> None:
+    """Persist one auditable latest snapshot and surface it in combined_data."""
+    normalized = symbol.strip().upper()
+    payload = _json_dump(indicators)
+    db.execute(text("""
+        INSERT INTO market_technical_indicators (
+            symbol, as_of_date, indicators, engine_version, bars_count,
+            history_start, history_end, updated_at
+        ) VALUES (
+            :symbol, :as_of_date, CAST(:indicators AS JSONB), :engine_version,
+            :bars_count, :history_start, :history_end, NOW()
+        )
+        ON CONFLICT (symbol) DO UPDATE SET
+            as_of_date = EXCLUDED.as_of_date,
+            indicators = EXCLUDED.indicators,
+            engine_version = EXCLUDED.engine_version,
+            bars_count = EXCLUDED.bars_count,
+            history_start = EXCLUDED.history_start,
+            history_end = EXCLUDED.history_end,
+            updated_at = NOW()
+    """), {
+        "symbol": normalized, "as_of_date": as_of_date, "indicators": payload,
+        "engine_version": engine_version, "bars_count": bars_count,
+        "history_start": history_start, "history_end": history_end,
+    })
+    db.execute(text("""
+        UPDATE market_screener_cache
+        SET combined_data = COALESCE(combined_data::jsonb, '{}'::jsonb) || CAST(:indicators AS JSONB),
+            updated_at = NOW()
+        WHERE symbol = :symbol
+    """), {"symbol": normalized, "indicators": payload})
+
+
+def load_technical_indicator_snapshot(symbol: str) -> Dict[str, Any]:
+    """Return locally calculated live strategy fields without failing previews."""
+    from database import SessionLocal
+    session = SessionLocal()
+    try:
+        value = session.execute(
+            text("SELECT indicators FROM market_technical_indicators WHERE symbol = :symbol"),
+            {"symbol": symbol.strip().upper()},
+        ).scalar()
+        if isinstance(value, str):
+            value = json.loads(value)
+        return dict(value) if isinstance(value, dict) else {}
+    except Exception:
+        session.rollback()
+        return {}
+    finally:
+        session.close()
+
+
 def get_cache_status(db: Session) -> Dict[str, Any]:
     ensure_read_session(db)
     counts = db.execute(

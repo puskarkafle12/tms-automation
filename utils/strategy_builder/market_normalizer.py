@@ -162,6 +162,8 @@ def build_symbol_snapshot_from_parts(symbol: str, snapshot: MarketSnapshot, deta
     depth = _depth_fields(snapshot)
     merged_flat = dict(flat or {})
     merged_flat.update(_script_details_to_fields(details))
+    from utils.market_data.repository import load_technical_indicator_snapshot
+    merged_flat.update(load_technical_indicator_snapshot(symbol))
     merged_flat.update(live)
     merged_flat.update(_derived_stat_fields(merged_flat, live))
     merged_flat.update(depth)

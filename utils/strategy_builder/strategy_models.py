@@ -103,6 +103,26 @@ class ExecutionConfig(BaseModel):
     missing_holding: str = "warn_and_skip"
 
 
+class BacktestConfig(BaseModel):
+    initial_capital: float = 100000
+    charge_model: str = "nepse_equity"
+    investor_type: str = "individual"
+    apply_cgt: bool = True
+    dp_charge: float = 25
+    fee_pct: float = 0.4
+    fixed_fee: float = 0
+    slippage_pct: float = 0.1
+    stop_loss_pct: float = 5
+    take_profit_pct: float = 10
+    trailing_stop_pct: Optional[float] = None
+    min_holding_days: int = 0
+    max_holding_days: int = 20
+    position_size_pct: float = 100
+    max_volume_participation_pct: float = 10
+    risk_free_rate_pct: float = 4
+    data_source: str = "auto"
+
+
 class RuleBlock(BaseModel):
     rule_id: str
     name: str
@@ -156,6 +176,7 @@ class StrategyPlanAST(BaseModel):
     version: int = 1
     side: Literal["BUY", "SELL"]
     defaults: ExecutionConfig = Field(default_factory=ExecutionConfig)
+    backtest: Optional[BacktestConfig] = None
     portfolio_limits: Optional[PortfolioLimits] = None
     position_protection: Optional["PositionProtectionConfig"] = None
     position_exit: List[PositionExitAction] = Field(default_factory=list)

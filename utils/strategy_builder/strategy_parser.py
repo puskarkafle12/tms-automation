@@ -23,6 +23,7 @@ from utils.strategy_builder.strategy_fields import resolve_field_name
 from utils.strategies.strategy_query_catalog import normalize_query_param_name
 from utils.strategy_builder.strategy_models import (
     ConfirmationConfig,
+    BacktestConfig,
     ExecutionConfig,
     OrderSizing,
     PortfolioLimits,
@@ -433,6 +434,35 @@ class StrategyTransformer(Transformer):
     def defaults_block(self, body):
         return _parse_execution_block(body)
 
+    def bt_initial_capital(self, value): return {"initial_capital": float(value)}
+    def bt_charge_model(self, value): return {"charge_model": str(value)}
+    def bt_investor_type(self, value): return {"investor_type": str(value)}
+    def bt_apply_cgt_true(self): return {"apply_cgt": True}
+    def bt_apply_cgt_false(self): return {"apply_cgt": False}
+    def bt_dp_charge(self, value): return {"dp_charge": float(value)}
+    def bt_fee_pct(self, value): return {"fee_pct": float(value)}
+    def bt_fixed_fee(self, value): return {"fixed_fee": float(value)}
+    def bt_slippage_pct(self, value): return {"slippage_pct": float(value)}
+    def bt_stop_loss_pct(self, value): return {"stop_loss_pct": float(value)}
+    def bt_take_profit_pct(self, value): return {"take_profit_pct": float(value)}
+    def bt_trailing_stop_pct(self, value): return {"trailing_stop_pct": float(value)}
+    def bt_min_holding_days(self, value): return {"min_holding_days": int(value)}
+    def bt_max_holding_days(self, value): return {"max_holding_days": int(value)}
+    def bt_position_size_pct(self, value): return {"position_size_pct": float(value)}
+    def bt_max_volume_participation_pct(self, value): return {"max_volume_participation_pct": float(value)}
+    def bt_risk_free_rate_pct(self, value): return {"risk_free_rate_pct": float(value)}
+    def bt_data_source(self, value): return {"data_source": str(value)}
+
+    def backtest_stmt(self, stmt):
+        return stmt
+
+    def backtest_block(self, *stmts):
+        payload: Dict[str, Any] = {}
+        for stmt in stmts:
+            if isinstance(stmt, dict):
+                payload.update(stmt)
+        return BacktestConfig(**payload)
+
     def portfolio_limits_block(self, body):
         limits: Dict[str, Any] = {}
         for key, value in body.items():
@@ -537,6 +567,7 @@ class StrategyTransformer(Transformer):
     def document(self, version, side, *rest):
         defaults = ExecutionConfig()
         portfolio_limits = None
+        backtest = None
         position_protection = None
         position_exit: List[PositionExitAction] = []
         rank = None
@@ -546,6 +577,8 @@ class StrategyTransformer(Transformer):
                 continue
             if isinstance(item, ExecutionConfig):
                 defaults = item
+            elif isinstance(item, BacktestConfig):
+                backtest = item
             elif isinstance(item, PortfolioLimits):
                 portfolio_limits = item
             elif isinstance(item, PositionProtectionConfig):
@@ -560,6 +593,7 @@ class StrategyTransformer(Transformer):
             version=int(version),
             side=str(side),
             defaults=defaults,
+            backtest=backtest,
             portfolio_limits=portfolio_limits,
             position_protection=position_protection,
             position_exit=position_exit,
@@ -654,6 +688,31 @@ def extract_symbols_from_query(query_text: str) -> List[str]:
     return symbols
 
 
+def retarget_strategy_query(query_text: str, symbols: List[str]) -> str:
+    """Return the same validated strategy with only its instrument targets changed.
+
+    Market backtests use this to execute one custom strategy independently for
+    every instrument. Conditions, sizing, exits, charges, and execution controls
+    remain byte-for-byte equivalent after canonical formatting.
+    """
+    normalized = []
+    seen: set[str] = set()
+    for symbol in symbols:
+        clean = str(symbol or "").strip().upper()
+        if not clean or not re.fullmatch(r"[A-Z0-9._-]+", clean):
+            raise StrategyQueryError(f'Invalid NEPSE symbol target: "{symbol}"')
+        if clean not in seen:
+            seen.add(clean)
+            normalized.append(clean)
+    if not normalized:
+        raise StrategyQueryError("At least one symbol target is required.")
+    plan = parse_strategy_query(query_text).model_copy(deep=True)
+    for rule in plan.rules:
+        rule.symbols = list(normalized)
+        rule.target_type = "single" if len(normalized) == 1 else "symbol_list"
+    return format_strategy_query(plan)
+
+
 def _format_parse_error(exc: Exception) -> str:
     if isinstance(exc, ValidationError):
         first = exc.errors()[0] if exc.errors() else {}
@@ -683,7 +742,7 @@ def parse_strategy_query(query_text: str) -> StrategyPlanAST:
         raise StrategyQueryError(_format_parse_error(exc)) from exc
     if not isinstance(result, StrategyPlanAST):
         raise StrategyQueryError("Failed to compile strategy query")
-    if result.version != STRATEGY_QUERY_VERSION:
+    if result.version not in {STRATEGY_QUERY_VERSION, 2}:
         raise StrategyQueryError(f"Unsupported strategy version: {result.version}")
     return result
 
@@ -724,6 +783,30 @@ def _format_strategy_param_line(name: str, value: Any) -> str:
 
 def format_strategy_query(plan: StrategyPlanAST) -> str:
     lines = [f"STRATEGY_VERSION {plan.version}", f"SIDE {plan.side}", ""]
+    if plan.backtest:
+        config = plan.backtest
+        lines.extend([
+            "BACKTEST {",
+            f"    INITIAL_CAPITAL {config.initial_capital:g}",
+            f'    CHARGE_MODEL "{config.charge_model}"',
+            f'    INVESTOR_TYPE "{config.investor_type}"',
+            f"    APPLY_CGT {'TRUE' if config.apply_cgt else 'FALSE'}",
+            f"    DP_CHARGE {config.dp_charge:g}",
+            f"    FEE_PCT {config.fee_pct:g}",
+            f"    FIXED_FEE {config.fixed_fee:g}",
+            f"    SLIPPAGE_PCT {config.slippage_pct:g}",
+            f"    STOP_LOSS_PCT {config.stop_loss_pct:g}",
+            f"    TAKE_PROFIT_PCT {config.take_profit_pct:g}",
+            *([f"    TRAILING_STOP_PCT {config.trailing_stop_pct:g}"] if config.trailing_stop_pct is not None else []),
+            f"    MIN_HOLDING_DAYS {config.min_holding_days}",
+            f"    MAX_HOLDING_DAYS {config.max_holding_days}",
+            f"    POSITION_SIZE_PCT {config.position_size_pct:g}",
+            f"    MAX_VOLUME_PARTICIPATION_PCT {config.max_volume_participation_pct:g}",
+            f"    RISK_FREE_RATE_PCT {config.risk_free_rate_pct:g}",
+            f'    DATA_SOURCE "{config.data_source}"',
+            "}",
+            "",
+        ])
     if plan.rank and plan.rank.fields:
         rank_parts = []
         for item in plan.rank.fields:
@@ -775,7 +858,13 @@ def format_strategy_query(plan: StrategyPlanAST) -> str:
         if rule.execution.max_slippage_pct is not None:
             lines.append(f"    MAX_SLIPPAGE_PCT {rule.execution.max_slippage_pct}")
         lines.append(f"    TRIGGER {rule.execution.trigger.upper()}")
-        lines.append(f"    EXECUTE {rule.execution.frequency.upper().replace('_', ' ')}")
+        if rule.execution.frequency in {"max_times", "max_times_per_symbol"}:
+            suffix = " PER SYMBOL" if rule.execution.frequency == "max_times_per_symbol" else ""
+            lines.append(f"    EXECUTE MAX {int(rule.execution.max_times or 1)} TIMES{suffix}")
+        elif rule.execution.frequency == "once_per_market_day":
+            lines.append("    EXECUTE ONCE PER MARKET DAY")
+        else:
+            lines.append(f"    EXECUTE {rule.execution.frequency.upper().replace('_', ' ')}")
         lines.append("}")
         lines.append("")
     return "\n".join(lines).strip() + "\n"
@@ -831,7 +920,7 @@ def _render_arg(value: Any) -> str:
 
 def _order_to_text(order: OrderSizing) -> str:
     order_data = _node_as_dict(order)
-    mode = str(order_data.get("mode") or order.mode).upper().replace("_", " ")
+    mode = str(order_data.get("mode") or order.mode).upper()
     value = order_data.get("value", order.value)
     price_source = str(order_data.get("price_source") or order.price_source or "ltp").upper()
     price_suffix = f" PRICE {price_source}" if price_source and price_source != "LTP" else ""

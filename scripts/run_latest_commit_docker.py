@@ -24,6 +24,7 @@ COMPOSE_IMAGE_TAG = "all-in-one"
 DEPS_IMAGE_TAG = "python-deps"
 SOURCE_LABEL = "org.opencontainers.image.source-version"
 DEPS_VERSION_LABEL = "org.opencontainers.image.deps-version"
+PRIMARY_BRANCH = os.environ.get("TMS_PRIMARY_BRANCH", "codex/backtesting")
 EXCLUDED_DIRS = {
     ".git",
     ".venv",
@@ -138,6 +139,36 @@ def current_branch() -> str:
 
 def dirty_status() -> str:
     return capture(["git", "status", "--short"], check=False)
+
+
+def ensure_primary_branch(branch: str) -> None:
+    """Switch to the configured branch, including from a fresh main checkout."""
+    current = current_branch()
+    if current == branch:
+        print(f"Primary branch: {branch}")
+        return
+    if current == "HEAD":
+        raise SystemExit(f"Cannot switch a detached HEAD to primary branch {branch!r}.")
+    if dirty_status():
+        raise SystemExit(
+            f"This runner uses primary branch {branch!r}, but the current branch is {current!r} "
+            "and has local changes. Commit or move those changes before running it."
+        )
+    local_exists = subprocess.run(
+        ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=ROOT,
+    ).returncode == 0
+    if local_exists:
+        run(["git", "switch", branch])
+    else:
+        print(f"Primary branch {branch!r} is not local; fetching it from origin.")
+        run(["git", "fetch", "origin", f"{branch}:refs/remotes/origin/{branch}"])
+        remote_exists = subprocess.run(
+            ["git", "show-ref", "--verify", "--quiet", f"refs/remotes/origin/{branch}"], cwd=ROOT,
+        ).returncode == 0
+        if not remote_exists:
+            raise SystemExit(f"Primary branch {branch!r} was not found on origin.")
+        run(["git", "switch", "--track", "-c", branch, f"origin/{branch}"])
+    print(f"Primary branch: {branch}")
 
 
 def should_include(path: Path) -> bool:
@@ -265,6 +296,11 @@ def main() -> int:
         help="Run git pull --ff-only before checking the current files.",
     )
     parser.add_argument(
+        "--branch",
+        default=PRIMARY_BRANCH,
+        help=f"Primary branch to build (default: {PRIMARY_BRANCH}).",
+    )
+    parser.add_argument(
         "--no-cache",
         action="store_true",
         help="Build without Docker layer cache.",
@@ -288,6 +324,7 @@ def main() -> int:
 
     ensure_required_tools()
     compose = docker_compose_command()
+    ensure_primary_branch(args.branch)
 
     if args.pull_git:
         branch = current_branch()
