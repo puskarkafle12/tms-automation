@@ -69,6 +69,22 @@ def cached_history(
         session.close()
 
 
+def available_history(symbol: str, start_date: date, end_date: date, *, source: str = SOURCE) -> List[Dict[str, Any]]:
+    """Return the cached portion of a range so refreshes fetch only its missing tail."""
+    session = _session()
+    try:
+        return [dict(row) for row in session.execute(text(
+            """SELECT session_date, source_timestamp, open_price, high_price,
+                      low_price, close_price, volume, quality_flags
+               FROM market_ohlcv_daily
+               WHERE symbol=:symbol AND source=:source AND adjusted=TRUE
+                 AND session_date BETWEEN :start_date AND :end_date
+               ORDER BY session_date"""
+        ), {"symbol": symbol, "source": source, "start_date": start_date, "end_date": end_date}).mappings().all()]
+    finally:
+        session.close()
+
+
 def store_history(
     symbol: str, bars: Sequence[Any], requested_start: date, requested_end: date,
     *, source: str = SOURCE,

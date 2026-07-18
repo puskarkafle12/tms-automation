@@ -1,0 +1,32 @@
+.recommendation-page { padding: 22px; background: #f4f7fb; min-height: 100%; color: #172033; }
+.recommendation-hero { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 25px 28px; border-radius: 18px; background: linear-gradient(120deg,#102d4f,#106c73); color: #fff; }
+.recommendation-hero span { font-size: 12px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; color: #8fe3dc; }
+.recommendation-hero h1 { margin: 6px 0; }
+.recommendation-hero p { margin: 0; color: #d4e8ea; }
+.recommendation-hero > div:last-child { text-align: right; }
+.recommendation-hero b { display: block; font-size: 34px; }
+.recommendation-hero small { display: block; }
+.recommendation-controls { display: grid; grid-template-columns: repeat(5,minmax(130px,1fr)) auto; gap: 10px; margin: 14px 0; padding: 14px; background: #fff; border: 1px solid #dce5ee; border-radius: 12px; align-items: end; }
+.recommendation-controls label { font-size: 11px; font-weight: 750; color: #526177; }
+.recommendation-controls input,.recommendation-controls select { display: block; width: 100%; box-sizing: border-box; margin-top: 5px; padding: 9px; border: 1px solid #ccd8e4; border-radius: 8px; }
+.recommendation-controls button,.recommendation-schedule { border: 0; border-radius: 8px; background: #126e75; color: #fff; padding: 10px 13px; font-weight: 750; }
+.recommendation-table-wrap { overflow: auto; background: #fff; border: 1px solid #dce5ee; border-radius: 12px; }
+.recommendation-table-wrap table { border-collapse: separate; border-spacing: 0; width: 100%; min-width: 1900px; font-size: 12px; }
+.recommendation-table-wrap th { position: sticky; top: 0; background: #eef4f7; color: #3e5268; padding: 10px; text-align: left; white-space: nowrap; border-bottom: 1px solid #d5e0e9; }
+.recommendation-table-wrap th.sortable { cursor: pointer; }
+.recommendation-table-wrap th.sortable:hover { background: #e1ebf1; color: #123e5d; }
+.recommendation-table-wrap td { padding: 10px; white-space: nowrap; border-bottom: 1px solid #edf1f5; }
+.recommendation-table-wrap th:nth-child(2),.recommendation-table-wrap td:nth-child(2) { position: sticky; left: 0; background: #fff; z-index: 2; }
+.recommendation-symbol { display: flex; flex-direction: column; gap: 3px; }
+.recommendation-symbol button { border: 0; background: none; padding: 0; text-align: left; font-weight: 850; color: #126ca5; cursor: pointer; }
+.recommendation-symbol a { font-size: 10px; }
+.recommendation-signal { display: inline-flex; padding: 4px 7px; border-radius: 999px; background: #e8eef5; color: #40546a; font-size: 10px; font-weight: 800; text-transform: capitalize; }
+.recommendation-signal.strong_buy { background: #d8f7e8; color: #087044; }
+.recommendation-signal.buy { background: #e2f4ee; color: #137557; }
+.recommendation-signal.near_trigger { background: #fff2cc; color: #805a00; }
+.recommendation-error { padding: 10px; background: #feeaea; color: #9a2727; }
+.recommendation-empty { padding: 30px; text-align: center; }
+.recommendation-pagination { display: flex; justify-content: flex-end; align-items: center; gap: 12px; margin-top: 10px; }
+.recommendation-pagination button { padding: 7px 12px; border: 1px solid #c8d5e1; border-radius: 8px; background: #fff; color: #28445e; }
+.recommendation-footer { display: flex; justify-content: space-between; gap: 15px; margin-top: 10px; font-size: 11px; color: #66758b; }
+@media(max-width:1000px) { .recommendation-controls { grid-template-columns: repeat(2,1fr); } .recommendation-hero,.recommendation-footer { align-items: flex-start; flex-direction: column; } }

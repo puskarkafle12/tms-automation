@@ -168,6 +168,27 @@ def get_backtest_presets() -> List[Dict[str, Any]]:
             research_basis="Candlestick and price-action hypotheses require regime confirmation and out-of-sample validation.",
         ))
 
+    price_volume_research = (
+        ("pv_dryup_trend_pullback", "Volume Dry-Up Trend Pullback", 'ltp <= technical_ema_20_value AND ltp > technical_ema_50_value AND technical_ema_20_value > technical_ema_50_value AND technical_volume_ratio_20 <= 0.75 AND technical_rsi_14 BETWEEN 40 AND 60', 5, 15, 30, "Low-participation pullback inside an established daily uptrend."),
+        ("pv_obv_breakout", "OBV Participation Breakout", 'technical_breakout_20 = 1 AND technical_obv > AVERAGE(field=technical_obv, window=20) AND technical_volume_ratio_20 >= 1.3 AND technical_close_location_value >= 0.7', 7, 20, 40, "Range breakout confirmed by independent volume-flow and closing-strength measures."),
+        ("pv_52w_high_volume", "52W High + Volume Momentum", 'position_in_52_week_range_percent >= 85 AND change_percent >= 1 AND technical_volume_ratio_20 >= 1.5 AND technical_cmf_20 > 0', 7, 21, 45, "52-week-high momentum with high-volume accumulation confirmation."),
+        ("pv_squeeze_breakout", "Squeeze + Volume Breakout", 'technical_squeeze = "Released" AND technical_breakout_20 = 1 AND technical_volume_ratio_20 >= 1.5 AND technical_choppiness_14 < 45', 7, 22, 40, "Volatility expansion, range escape, and participation must agree on the same completed session."),
+        ("pv_engulfing_accumulation", "Engulfing Accumulation", 'technical_bullish_engulfing = 1 AND ltp > technical_ema_50_value AND technical_cmf_20 >= 0.05 AND technical_volume_ratio_20 >= 1.2', 5, 15, 30, "Bullish reversal candle restricted to positive money flow and above-average volume."),
+        ("pv_liquid_momentum_risk", "Liquid Momentum Risk Control", 'CHANGE_PERCENT(field=ltp, scans_back=63) BETWEEN 5 AND 25 AND technical_volume_ratio_20 >= 1.2 AND technical_atr_percent <= 5 AND technical_adx_14 >= 20 AND technical_sma_200 = "above"', 6, 18, 45, "Medium-horizon momentum with liquidity, volatility, trend, and crash-risk controls."),
+        ("pv_vwap_obv_reclaim", "VWAP + OBV Reclaim", 'ltp > technical_vwap_20 AND technical_obv > AVERAGE(field=technical_obv, window=20) AND technical_cmf_20 > 0 AND technical_volume_ratio_20 >= 1.1', 5, 16, 30, "Fair-value reclaim confirmed by two independent accumulation measures."),
+        ("pv_cmf_low_chop_breakout", "CMF Low-Chop Breakout", 'technical_breakout_20 = 1 AND technical_cmf_20 >= 0.1 AND technical_choppiness_14 < 40 AND technical_volume_ratio_20 >= 1.25', 7, 21, 40, "Range escape requires accumulation, participation, and a non-choppy regime."),
+        ("pv_force_kama_impulse", "Force + KAMA Impulse", 'technical_force_index_13 > 0 AND ltp > technical_kama_10 AND technical_ppo_histogram > 0 AND technical_volume_ratio_20 >= 1.1', 6, 18, 35, "Volume-weighted price impulse aligned with an adaptive trend and momentum."),
+        ("pv_donchian_low_vol", "Donchian Low-Vol Participation", 'ltp >= technical_donchian_upper_20 AND technical_volume_ratio_20 >= 1.3 AND technical_historical_volatility_20 <= 40 AND technical_atr_percent <= 5', 6, 19, 40, "Liquid breakout filtered against excessive historical and current volatility."),
+        ("pv_supertrend_squeeze_flow", "Supertrend Squeeze Flow", 'technical_supertrend = "Bullish" AND technical_squeeze = "Released" AND technical_cmf_20 > 0 AND technical_volume_ratio_20 >= 1.2', 7, 20, 40, "Trend, volatility expansion, money flow, and participation must align."),
+        ("pv_multi_horizon_flow", "Multi-Horizon Momentum Flow", 'CHANGE_PERCENT(field=ltp, scans_back=63) >= 5 AND CHANGE_PERCENT(field=ltp, scans_back=126) >= 10 AND technical_cmf_20 > 0 AND technical_volume_ratio_20 >= 1.1 AND technical_sma_200 = "above"', 7, 22, 60, "Three- and six-month momentum confirmed by long trend and current accumulation."),
+    )
+    for preset_id, name, condition, stop, target, holding, research_basis in price_volume_research:
+        presets.append(_preset(
+            preset_id, name, "Price-volume research", condition,
+            "Evidence-informed daily OHLCV hypothesis; rank by locked out-of-sample results, not headline win rate.",
+            stop=stop, target=target, holding=holding, research_basis=research_basis,
+        ))
+
     adaptive_regime = (
         ("ichimoku_cloud_adx", "Ichimoku Cloud + ADX", 'ltp > technical_ichimoku_span_a_26 AND ltp > technical_ichimoku_span_b_52 AND technical_ichimoku_conversion_9 > technical_ichimoku_base_26 AND technical_adx_14 >= 20', 7, 20, 45, "Multi-horizon trend state with independent trend-strength confirmation."),
         ("kama_adaptive_momentum", "KAMA Adaptive Momentum", 'ltp > technical_kama_10 AND SLOPE(field=technical_kama_10, window=5, operator="gt", threshold=0) AND technical_ppo_histogram > 0 AND technical_efficiency_ratio_20 >= 0.3', 6, 17, 35, "Adaptive trend filter with path-efficiency and momentum confirmation."),
@@ -187,8 +208,8 @@ def get_backtest_presets() -> List[Dict[str, Any]]:
             stop=stop, target=target, holding=holding, research_basis=research_basis,
         ))
 
-    if len(presets) != 104:
-        raise RuntimeError(f"Expected 104 backtest presets, built {len(presets)}")
+    if len(presets) != 116:
+        raise RuntimeError(f"Expected 116 backtest presets, built {len(presets)}")
     return presets
 
 

@@ -230,9 +230,17 @@ def ensure_performance_indexes():
             bars_count INTEGER NOT NULL,
             history_start DATE,
             history_end DATE,
+            latest_volume DOUBLE PRECISION,
+            average_volume_20 DOUBLE PRECISION,
+            median_volume_20 DOUBLE PRECISION,
+            average_turnover_20 DOUBLE PRECISION,
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )""",
         "CREATE INDEX IF NOT EXISTS ix_market_technical_indicators_updated ON market_technical_indicators (updated_at DESC)",
+        "ALTER TABLE market_technical_indicators ADD COLUMN IF NOT EXISTS latest_volume DOUBLE PRECISION",
+        "ALTER TABLE market_technical_indicators ADD COLUMN IF NOT EXISTS average_volume_20 DOUBLE PRECISION",
+        "ALTER TABLE market_technical_indicators ADD COLUMN IF NOT EXISTS median_volume_20 DOUBLE PRECISION",
+        "ALTER TABLE market_technical_indicators ADD COLUMN IF NOT EXISTS average_turnover_20 DOUBLE PRECISION",
         """CREATE TABLE IF NOT EXISTS market_data_refresh_log (
             id SERIAL PRIMARY KEY,
             refresh_type VARCHAR NOT NULL,
@@ -288,6 +296,45 @@ def ensure_performance_indexes():
         )""",
         "CREATE INDEX IF NOT EXISTS ix_market_ohlcv_daily_date ON market_ohlcv_daily (session_date DESC, symbol)",
         "CREATE INDEX IF NOT EXISTS ix_market_ohlcv_daily_symbol ON market_ohlcv_daily (symbol, session_date)",
+        """WITH sessions AS (
+               SELECT DISTINCT ON (symbol,trading_date) symbol,trading_date,volume,close_price
+               FROM (
+                   SELECT symbol,CASE WHEN source_timestamp IS NOT NULL
+                                      THEN (to_timestamp(source_timestamp) AT TIME ZONE 'UTC')::date
+                                      ELSE session_date END AS trading_date,
+                          volume,close_price,fetched_at
+                   FROM market_ohlcv_daily WHERE adjusted=TRUE
+               ) normalized
+               ORDER BY symbol,trading_date,fetched_at DESC
+           ), ranked AS (
+               SELECT symbol,volume,close_price,
+                      ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY trading_date DESC) AS row_number
+               FROM sessions
+           ), volume_stats AS (
+               SELECT symbol,
+                      MAX(volume) FILTER (WHERE row_number=1) AS latest_volume,
+                      AVG(volume) FILTER (WHERE row_number<=20) AS average_volume_20,
+                      PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY volume)
+                          FILTER (WHERE row_number<=20) AS median_volume_20,
+                      AVG(volume*close_price) FILTER (WHERE row_number<=20) AS average_turnover_20
+               FROM ranked GROUP BY symbol
+           )
+           UPDATE market_technical_indicators t SET
+               latest_volume=v.latest_volume,average_volume_20=v.average_volume_20,
+               median_volume_20=v.median_volume_20,average_turnover_20=v.average_turnover_20,
+               indicators=t.indicators || jsonb_build_object(
+                   'latest_volume',v.latest_volume,'average_volume_20',v.average_volume_20,
+                   'median_volume_20',v.median_volume_20,'average_turnover_20',v.average_turnover_20,
+                   'technical_as_of_date',t.as_of_date,'technical_engine_version',t.engine_version
+               )
+           FROM volume_stats v
+           WHERE v.symbol=t.symbol AND (t.latest_volume IS NULL OR t.average_volume_20 IS NULL)""",
+        """UPDATE market_screener_cache c SET
+               combined_data=COALESCE(c.combined_data::jsonb,'{}'::jsonb) || t.indicators,
+               updated_at=NOW()
+           FROM market_technical_indicators t
+           WHERE t.symbol=c.symbol AND t.average_volume_20 IS NOT NULL
+             AND (c.combined_data IS NULL OR NOT (c.combined_data::jsonb ? 'average_volume_20'))""",
         """CREATE TABLE IF NOT EXISTS market_history_cache_state (
             symbol VARCHAR(30) NOT NULL,
             source VARCHAR(40) NOT NULL,
@@ -331,6 +378,7 @@ def ensure_performance_indexes():
         """CREATE TABLE IF NOT EXISTS backtest_runs (
             run_id VARCHAR(64) PRIMARY KEY,
             owner_id VARCHAR(100) NOT NULL DEFAULT 'local',
+            scan_key VARCHAR(64),
             name VARCHAR(200) NOT NULL,
             notes TEXT,
             run_type VARCHAR(20) NOT NULL DEFAULT 'market_scan',
@@ -354,10 +402,14 @@ def ensure_performance_indexes():
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             started_at TIMESTAMPTZ,
             finished_at TIMESTAMPTZ,
+            last_refresh_at TIMESTAMPTZ,
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             deleted_at TIMESTAMPTZ
         )""",
         "CREATE INDEX IF NOT EXISTS ix_backtest_runs_owner_created ON backtest_runs (owner_id, created_at DESC) WHERE deleted_at IS NULL",
+        "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS scan_key VARCHAR(64)",
+        "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS last_refresh_at TIMESTAMPTZ",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_backtest_runs_owner_scan_key ON backtest_runs (owner_id, scan_key) WHERE deleted_at IS NULL AND scan_key IS NOT NULL",
         "CREATE INDEX IF NOT EXISTS ix_backtest_runs_queue ON backtest_runs (status, created_at) WHERE deleted_at IS NULL",
         """CREATE TABLE IF NOT EXISTS backtest_run_symbols (
             run_id VARCHAR(64) NOT NULL REFERENCES backtest_runs(run_id) ON DELETE CASCADE,
@@ -367,6 +419,7 @@ def ensure_performance_indexes():
             listing_age_days INTEGER,
             ltp DOUBLE PRECISION,
             latest_volume DOUBLE PRECISION,
+            average_volume_20 DOUBLE PRECISION,
             median_volume_20 DOUBLE PRECISION,
             average_turnover_20 DOUBLE PRECISION,
             status VARCHAR(20) NOT NULL DEFAULT 'queued',
@@ -375,9 +428,21 @@ def ensure_performance_indexes():
             error TEXT,
             started_at TIMESTAMPTZ,
             completed_at TIMESTAMPTZ,
+            last_tested_session DATE,
             PRIMARY KEY (run_id, symbol)
         )""",
         "CREATE INDEX IF NOT EXISTS ix_backtest_run_symbols_status ON backtest_run_symbols (run_id, status)",
+        "ALTER TABLE backtest_run_symbols ADD COLUMN IF NOT EXISTS average_volume_20 DOUBLE PRECISION",
+        "ALTER TABLE backtest_run_symbols ADD COLUMN IF NOT EXISTS last_tested_session DATE",
+        """UPDATE backtest_run_symbols s
+           SET average_volume_20=(
+               SELECT AVG(recent.volume) FROM (
+                   SELECT m.volume FROM market_ohlcv_daily m
+                   WHERE m.symbol=s.symbol AND m.adjusted=TRUE AND m.volume IS NOT NULL
+                   ORDER BY m.source_timestamp DESC NULLS LAST,m.session_date DESC LIMIT 20
+               ) recent
+           )
+           WHERE s.average_volume_20 IS NULL""",
         """CREATE TABLE IF NOT EXISTS backtest_results (
             result_id BIGSERIAL PRIMARY KEY,
             run_id VARCHAR(64) NOT NULL REFERENCES backtest_runs(run_id) ON DELETE CASCADE,
@@ -442,6 +507,10 @@ def ensure_performance_indexes():
         "CREATE INDEX IF NOT EXISTS ix_backtest_results_current_buy ON backtest_results (run_id, strong_buy_qualified, reliability_score DESC) WHERE current_signal_active = TRUE",
         "CREATE INDEX IF NOT EXISTS ix_backtest_results_symbol ON backtest_results (run_id, symbol, robust_score DESC)",
         "CREATE INDEX IF NOT EXISTS ix_backtest_results_preset ON backtest_results (run_id, preset_id, robust_score DESC)",
+        """UPDATE backtest_run_symbols s SET last_tested_session=(
+               SELECT MAX(r.current_signal_date) FROM backtest_results r
+               WHERE r.run_id=s.run_id AND r.symbol=s.symbol
+           ) WHERE s.last_tested_session IS NULL""",
         """CREATE TABLE IF NOT EXISTS backtest_trades (
             trade_id BIGSERIAL PRIMARY KEY,
             result_id BIGINT NOT NULL REFERENCES backtest_results(result_id) ON DELETE CASCADE,
@@ -507,6 +576,25 @@ def ensure_performance_indexes():
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             UNIQUE (owner_id, name)
         )""",
+        """CREATE TABLE IF NOT EXISTS market_backtest_recommendations (
+            owner_id VARCHAR(100) NOT NULL DEFAULT 'local',
+            symbol VARCHAR(30) NOT NULL,
+            result_id BIGINT NOT NULL REFERENCES backtest_results(result_id) ON DELETE CASCADE,
+            run_id VARCHAR(64) NOT NULL REFERENCES backtest_runs(run_id) ON DELETE CASCADE,
+            preset_id VARCHAR(120) NOT NULL,
+            preset_name VARCHAR(200) NOT NULL,
+            signal_status VARCHAR(30) NOT NULL,
+            signal_date DATE NOT NULL,
+            recommendation_score DOUBLE PRECISION NOT NULL DEFAULT 0,
+            win_rate_pct DOUBLE PRECISION NOT NULL DEFAULT 0,
+            total_trades INTEGER NOT NULL DEFAULT 0,
+            net_return_pct DOUBLE PRECISION NOT NULL DEFAULT 0,
+            average_volume_20 DOUBLE PRECISION,
+            payload JSONB NOT NULL,
+            refreshed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (owner_id, symbol)
+        )""",
+        "CREATE INDEX IF NOT EXISTS ix_market_backtest_recommendations_rank ON market_backtest_recommendations (owner_id, signal_date DESC, recommendation_score DESC)",
         """CREATE TABLE IF NOT EXISTS backtest_ai_audits (
             audit_id BIGSERIAL PRIMARY KEY,
             run_id VARCHAR(64) REFERENCES backtest_runs(run_id) ON DELETE SET NULL,

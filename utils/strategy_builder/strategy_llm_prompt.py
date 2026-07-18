@@ -109,7 +109,7 @@ def _forbidden_section() -> str:
         + "\n".join(f"- {item}" for item in blocked_fields)
         + "\nFunctions:\n"
         "- (none currently beyond unregistered/custom functions)\n"
-        + "\nOther blocked indicators: technical_adx, adx, ADX, and any custom indicator not in FIELD REGISTRY.\n"
+        + "\nOther blocked indicators: any custom indicator not in FIELD REGISTRY. Registered local OHLCV indicators such as technical_adx_14 are supported.\n"
         "Market depth is available only through registered stock quote fields/functions; do not invent unlisted depth names."
     )
 
@@ -179,7 +179,7 @@ def _strict_output_contract_section() -> str:
 def _hard_rules_section() -> str:
     return """HARD RULES — follow without exception:
 1. Use ONLY field keys from FIELD REGISTRY and functions from SUPPORTED FUNCTIONS in the Query block.
-2. If the user asks for ADX or any unlisted indicator/field/function:
+2. If the user asks for an unlisted indicator/field/function:
    - Prefer STATUS: OK with the closest registered substitute that preserves the trading intent (e.g. technical_rsi_14, technical_macd, volatility, or technical_volume_trend).
    - Add a Limitation Summary bullet: We don't have <name>; used <substitute> — close, not exact.
    - Use STATUS: ERROR only if no reasonable substitute exists and no valid rule can be built.
@@ -215,7 +215,7 @@ def _data_sources_section() -> str:
    distance_from_52_week_high_percent, distance_from_52_week_low_percent, etc.
 9. Position state — after a buy entry: profit_percent, effective_stop_price, drawdown_from_peak_percent, etc.
 
-NOT available: ADX, unregistered indicators, or raw order-book level fields outside the registered depth fields/functions."""
+NOT available: unregistered indicators or raw order-book level fields outside the registered depth fields/functions. ADX is available as technical_adx_14."""
 
 
 def _scheduling_preflight_section() -> str:
@@ -1008,7 +1008,7 @@ COMMON MISTAKES (avoid)
 ================================================================================
 - SIDE mismatch (BUY rules when portal side is SELL)
 - SQL/Python syntax
-- Unknown or forbidden fields (technical_adx, adx, or any field not in FIELD REGISTRY)
+- Unknown or forbidden fields (any field not in FIELD REGISTRY; use registered fields such as technical_adx_14 exactly)
 - Unknown/custom functions not listed in SUPPORTED FUNCTIONS
 - Wrong enum strings for MACD/SMA/volume trend
 - Positional function args instead of field= / count= named args

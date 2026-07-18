@@ -506,14 +506,19 @@ def save_technical_indicator_snapshot(
 ) -> None:
     """Persist one auditable latest snapshot and surface it in combined_data."""
     normalized = symbol.strip().upper()
-    payload = _json_dump(indicators)
+    enriched = dict(indicators)
+    enriched.setdefault("technical_as_of_date", as_of_date.isoformat())
+    enriched.setdefault("technical_engine_version", engine_version)
+    payload = _json_dump(enriched)
     db.execute(text("""
         INSERT INTO market_technical_indicators (
             symbol, as_of_date, indicators, engine_version, bars_count,
-            history_start, history_end, updated_at
+            history_start, history_end,latest_volume,average_volume_20,
+            median_volume_20,average_turnover_20,updated_at
         ) VALUES (
             :symbol, :as_of_date, CAST(:indicators AS JSONB), :engine_version,
-            :bars_count, :history_start, :history_end, NOW()
+            :bars_count, :history_start, :history_end,:latest_volume,:average_volume_20,
+            :median_volume_20,:average_turnover_20,NOW()
         )
         ON CONFLICT (symbol) DO UPDATE SET
             as_of_date = EXCLUDED.as_of_date,
@@ -522,11 +527,19 @@ def save_technical_indicator_snapshot(
             bars_count = EXCLUDED.bars_count,
             history_start = EXCLUDED.history_start,
             history_end = EXCLUDED.history_end,
+            latest_volume = EXCLUDED.latest_volume,
+            average_volume_20 = EXCLUDED.average_volume_20,
+            median_volume_20 = EXCLUDED.median_volume_20,
+            average_turnover_20 = EXCLUDED.average_turnover_20,
             updated_at = NOW()
     """), {
         "symbol": normalized, "as_of_date": as_of_date, "indicators": payload,
         "engine_version": engine_version, "bars_count": bars_count,
         "history_start": history_start, "history_end": history_end,
+        "latest_volume": enriched.get("latest_volume"),
+        "average_volume_20": enriched.get("average_volume_20"),
+        "median_volume_20": enriched.get("median_volume_20"),
+        "average_turnover_20": enriched.get("average_turnover_20"),
     })
     db.execute(text("""
         UPDATE market_screener_cache

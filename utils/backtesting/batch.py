@@ -26,6 +26,38 @@ from utils.technical_indicators import ENGINE_VERSION
 ProgressCallback = Callable[[int, int, str, int, Optional[Dict[str, Any]]], None]
 
 
+def background_worker_limit(requested_workers: Optional[int]) -> int:
+    """Reserve CPU for HTTP, database, and market-data work during scans.
+
+    Whole-market backtests are intentionally conservative by default. A server
+    operator may raise BACKTEST_MAX_WORKERS after measuring capacity, but scan
+    requests can never consume the configured CPU reserve.
+    """
+    try:
+        configured_limit = max(1, int(os.getenv("BACKTEST_MAX_WORKERS", "1")))
+    except ValueError:
+        configured_limit = 1
+    try:
+        reserved_cpus = max(1, int(os.getenv("BACKTEST_RESERVED_CPUS", "1")))
+    except ValueError:
+        reserved_cpus = 1
+    available_cpus = max(1, (os.cpu_count() or 2) - reserved_cpus)
+    requested = max(1, int(requested_workers or 1))
+    return min(requested, configured_limit, available_cpus, 12)
+
+
+def initialize_background_worker() -> None:
+    """Lower OS scheduling priority for CPU-heavy child scan processes."""
+    try:
+        niceness = max(0, int(os.getenv("BACKTEST_WORKER_NICE", "10")))
+        if niceness:
+            os.nice(niceness)
+    except (AttributeError, OSError, ValueError):
+        # Niceness is a best-effort Linux/macOS optimization; scans still run
+        # correctly on platforms that do not expose it.
+        pass
+
+
 def get_backtest_universe(
     start_date: date, end_date: date, symbols: Optional[List[str]] = None,
     *, ordinary_shares_only: bool = True, max_listing_age_days: Optional[int] = None,
@@ -265,6 +297,7 @@ def _run_symbol_task(task: Dict[str, Any]) -> Dict[str, Any]:
         "symbol": symbol, "results": results,
         "market_profile": {
             "ltp": float(bars[-1].close), "latest_volume": float(bars[-1].volume),
+            "average_volume_20": round(sum(float(bar.volume or 0) for bar in bars[-20:]) / max(len(bars[-20:]), 1), 2),
             "median_volume_20": float(sorted(float(bar.volume or 0) for bar in bars[-20:])[len(bars[-20:]) // 2]),
             "average_turnover_20": round(sum(float(bar.close) * float(bar.volume or 0) for bar in bars[-20:]) / max(len(bars[-20:]), 1), 2),
         },
@@ -369,7 +402,7 @@ def run_market_batch_backtest(
     if clean_source not in {"combined", "merolagani"}:
         raise BacktestError("Market scans require combined or merolagani as the data source.")
     cpu_limit = max(os.cpu_count() or 2, 2)
-    workers = max(1, min(int(max_workers or 8), 12, cpu_limit))
+    workers = min(background_worker_limit(max_workers), cpu_limit)
     symbol_outputs = list(completed_symbol_outputs or [])
     completed_symbols = {output["symbol"] for output in symbol_outputs}
     remaining_symbols = [symbol for symbol in universe if symbol not in completed_symbols]
@@ -400,7 +433,9 @@ def run_market_batch_backtest(
                 progress_callback(len(symbol_outputs), len(universe), output["symbol"], combinations, output)
     elif tasks:
         context = multiprocessing.get_context("spawn")
-        with ProcessPoolExecutor(max_workers=workers, mp_context=context) as executor:
+        with ProcessPoolExecutor(
+            max_workers=workers, mp_context=context, initializer=initialize_background_worker,
+        ) as executor:
             futures = {executor.submit(_run_symbol_task, task): task["symbol"] for task in tasks}
             for future in as_completed(futures):
                 output = future.result()

@@ -119,7 +119,7 @@ class BacktestBatchRequest(BaseModel):
     preset_ids: Optional[List[str]] = None
     symbols: Optional[List[str]] = None
     data_source: str = "combined"
-    max_workers: int = Field(default=8, ge=1, le=12)
+    max_workers: int = Field(default=1, ge=1, le=12)
     initial_capital: float = Field(default=100000, gt=0)
     charge_model: str = Field(default="nepse_equity", pattern="^(nepse_equity|nepse_equity_v2024_05_14|legacy_flat)$")
     investor_type: str = Field(default="individual", pattern="^(individual|institution|other)$")
@@ -214,6 +214,19 @@ class BacktestV2StrongBuyQuery(BaseModel):
     sort_direction: str = Field(default="desc", pattern="^(asc|desc)$")
     sorts: List[BacktestV2SortItem] = Field(default_factory=list, max_length=8)
     filters: List[BacktestV2StrongBuyFilter] = Field(default_factory=list, max_length=12)
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=25, ge=1, le=100)
+
+
+class MarketRecommendationQuery(BaseModel):
+    signal: str = Field(default="actionable", pattern="^(actionable|strong_buy|buy|near_trigger|all)$")
+    signal_date: Optional[date] = None
+    minimum_win_rate: float = Field(default=0, ge=0, le=100)
+    minimum_trades: int = Field(default=5, ge=0)
+    minimum_score: float = Field(default=0, ge=0, le=100)
+    search: str = Field(default="", max_length=100)
+    sort_by: str = Field(default="recommendation_score", max_length=80)
+    sort_direction: str = Field(default="desc", pattern="^(asc|desc)$")
     page: int = Field(default=1, ge=1)
     page_size: int = Field(default=25, ge=1, le=100)
 
@@ -389,26 +402,60 @@ async def query_backtest_v2_strong_buys(run_id: str, body: BacktestV2StrongBuyQu
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.post("/market-recommendations/query")
+async def query_market_recommendations(body: MarketRecommendationQuery, db: Session = Depends(get_db)):
+    from utils.backtesting.recommendations import query_recommendations
+    try:
+        return query_recommendations(db, body.model_dump(mode="json"), owner_id="local")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/market-recommendations/refresh")
+async def refresh_market_recommendations(db: Session = Depends(get_db)):
+    from utils.backtesting.recommendations import materialize_recommendations
+    payload = materialize_recommendations(db, owner_id="local")
+    db.commit()
+    return payload
+
+
 @router.get("/backtests/v2/runs/{run_id}/strong-buys/{symbol}")
 async def read_backtest_v2_strong_buy_stock(
     run_id: str, symbol: str, result_id: Optional[int] = Query(None, ge=1), db: Session = Depends(get_db),
 ):
     from sqlalchemy import text
+    from utils.backtesting.v2_query import _LIVE_LTP_SQL, _LIVE_VOLUME_SQL
     rows = db.execute(text(
         """SELECT r.result_id,r.symbol,r.preset_id,r.preset_name,r.category,r.current_signal_status,
                   r.current_signal_date,r.reliability_score,r.current_technical_score,r.current_evidence,
                   r.total_trades,r.wins,r.losses,r.win_rate_pct,r.confidence_score,r.net_return_pct,
                   r.max_drawdown_pct,r.sharpe_ratio,r.sortino_ratio,r.profit_factor,r.expectancy_pct,
-                  r.assumptions,r.warning_codes,s.ltp,s.latest_volume,s.sector
+                  r.assumptions,r.warning_codes,{live_ltp} AS ltp,{live_volume} AS latest_volume,
+                  s.average_volume_20,s.sector
            FROM backtest_results r JOIN backtest_runs br ON br.run_id=r.run_id
            JOIN backtest_run_symbols s ON s.run_id=r.run_id AND s.symbol=r.symbol
-           WHERE r.run_id=:run_id AND br.owner_id='local' AND br.deleted_at IS NULL AND r.symbol=:symbol
+           LEFT JOIN market_screener_cache c ON c.symbol=r.symbol
+           WHERE (:run_id='all' OR r.run_id=:run_id) AND br.owner_id='local'
+             AND br.deleted_at IS NULL AND r.symbol=:symbol
            ORDER BY CASE WHEN r.result_id=:result_id THEN 0 ELSE 1 END,
-                    r.current_signal_active DESC,r.reliability_score DESC,r.robust_score DESC"""
+                    r.current_signal_active DESC,r.reliability_score DESC,r.robust_score DESC""".format(
+                        live_ltp=_LIVE_LTP_SQL, live_volume=_LIVE_VOLUME_SQL,
+                    )
     ), {"run_id": run_id, "symbol": symbol.strip().upper(), "result_id": result_id or -1}).mappings().all()
     if not rows:
         raise HTTPException(status_code=404, detail="No saved backtest strategy was found for this stock.")
-    return {"best": dict(rows[0]), "alternatives": [dict(row) for row in rows[1:]],
+    from utils.backtesting.v2_query import _strategy_planning_range
+    mapped = []
+    seen_presets = set()
+    for row in rows:
+        item = dict(row)
+        preset_key = str(item.get("preset_id") or "")
+        if preset_key in seen_presets:
+            continue
+        seen_presets.add(preset_key)
+        item.update(_strategy_planning_range(item))
+        mapped.append(item)
+    return {"best": mapped[0], "alternatives": mapped[1:],
             "disclaimer": "Backtested historical performance does not guarantee future results."}
 
 
@@ -457,6 +504,7 @@ async def read_backtest_v2_result_trades(
 
 @router.get("/backtests/v2/results/{result_id}/chart")
 async def read_backtest_v2_result_chart(result_id: int, db: Session = Depends(get_db)):
+    from sqlalchemy import text
     from utils.backtesting.v2_query import ResultQueryError, result_detail, result_trades
     try:
         detail = result_detail(db, result_id, owner_id="local")
@@ -469,7 +517,37 @@ async def read_backtest_v2_result_chart(result_id: int, db: Session = Depends(ge
     for trade in trades:
         equity += float(trade.get("pnl") or 0)
         curve.append({"date": trade["exit_date"], "equity": round(equity, 2), "trade_return_pct": trade["return_pct"]})
-    return {"symbol": detail["symbol"], "equity_curve": curve, "trades": trades}
+    period = (detail.get("assumptions") or {}).get("period") or {}
+    candle_rows = db.execute(text("""
+        WITH normalized AS (
+            SELECT CASE WHEN source_timestamp IS NOT NULL
+                        THEN (to_timestamp(source_timestamp) AT TIME ZONE 'UTC')::date
+                        ELSE session_date END AS trading_date,
+                   open_price,high_price,low_price,close_price,volume,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY CASE WHEN source_timestamp IS NOT NULL
+                              THEN (to_timestamp(source_timestamp) AT TIME ZONE 'UTC')::date
+                              ELSE session_date END
+                       ORDER BY fetched_at DESC,session_date DESC
+                   ) AS row_number
+            FROM market_ohlcv_daily
+            WHERE symbol=:symbol AND adjusted=TRUE
+        )
+        SELECT trading_date,open_price,high_price,low_price,close_price,volume
+        FROM normalized
+        WHERE row_number=1
+          AND (:start_date IS NULL OR trading_date>=CAST(:start_date AS DATE))
+          AND (:end_date IS NULL OR trading_date<=CAST(:end_date AS DATE))
+        ORDER BY trading_date
+        LIMIT 5000
+    """), {
+        "symbol": detail["symbol"], "start_date": period.get("start"), "end_date": period.get("end"),
+    }).mappings().all()
+    candles = [{
+        "date": row["trading_date"].isoformat(), "open": row["open_price"], "high": row["high_price"],
+        "low": row["low_price"], "close": row["close_price"], "volume": row["volume"],
+    } for row in candle_rows]
+    return {"symbol": detail["symbol"], "equity_curve": curve, "candles": candles, "trades": trades}
 
 
 @router.get("/backtests/v2/results/{result_id}/robustness")

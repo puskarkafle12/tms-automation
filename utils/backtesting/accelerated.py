@@ -240,6 +240,31 @@ def compile_preset_signals(preset_id: str, rows: Sequence[Dict[str, Any]]) -> Li
         signal = (gap >= 1) & (close_location >= .7) & (volume_ratio >= 1.3) & _text_is(rows, "technical_sma_50", "above")
     elif preset_id == "pa_vwap_reclaim":
         signal = (close > vwap) & (price_zscore <= 1.5) & (cmf > 0) & positive
+    elif preset_id == "pv_dryup_trend_pullback":
+        signal = (close <= ema_20) & (close > ema_50) & (ema_20 > ema_50) & (volume_ratio <= .75) & (rsi >= 40) & (rsi <= 60)
+    elif preset_id == "pv_obv_breakout":
+        signal = (breakout == 1) & (obv > _rolling_mean(obv, 20)) & (volume_ratio >= 1.3) & (close_location >= .7)
+    elif preset_id == "pv_52w_high_volume":
+        signal = (range_position >= 85) & (change >= 1) & (volume_ratio >= 1.5) & (cmf > 0)
+    elif preset_id == "pv_squeeze_breakout":
+        signal = _text_is(rows, "technical_squeeze", "released") & (breakout == 1) & (volume_ratio >= 1.5) & (choppiness < 45)
+    elif preset_id == "pv_engulfing_accumulation":
+        signal = (bullish_engulfing == 1) & (close > ema_50) & (cmf >= .05) & (volume_ratio >= 1.2)
+    elif preset_id == "pv_liquid_momentum_risk":
+        momentum_63 = _change_percent(close, 63)
+        signal = (momentum_63 >= 5) & (momentum_63 <= 25) & (volume_ratio >= 1.2) & (atr_percent <= 5) & (adx >= 20) & _text_is(rows, "technical_sma_200", "above")
+    elif preset_id == "pv_vwap_obv_reclaim":
+        signal = (close > vwap) & (obv > _rolling_mean(obv, 20)) & (cmf > 0) & (volume_ratio >= 1.1)
+    elif preset_id == "pv_cmf_low_chop_breakout":
+        signal = (breakout == 1) & (cmf >= .1) & (choppiness < 40) & (volume_ratio >= 1.25)
+    elif preset_id == "pv_force_kama_impulse":
+        signal = (force_index > 0) & (close > kama) & (ppo_histogram > 0) & (volume_ratio >= 1.1)
+    elif preset_id == "pv_donchian_low_vol":
+        signal = (close >= donchian_upper) & (volume_ratio >= 1.3) & (historical_volatility <= 40) & (atr_percent <= 5)
+    elif preset_id == "pv_supertrend_squeeze_flow":
+        signal = _text_is(rows, "technical_supertrend", "bullish") & _text_is(rows, "technical_squeeze", "released") & (cmf > 0) & (volume_ratio >= 1.2)
+    elif preset_id == "pv_multi_horizon_flow":
+        signal = (_change_percent(close, 63) >= 5) & (_change_percent(close, 126) >= 10) & (cmf > 0) & (volume_ratio >= 1.1) & _text_is(rows, "technical_sma_200", "above")
     elif preset_id == "ichimoku_cloud_adx":
         signal = (close > ichimoku_span_a) & (close > ichimoku_span_b) & (ichimoku_conversion > ichimoku_base) & (adx >= 20)
     elif preset_id == "kama_adaptive_momentum":

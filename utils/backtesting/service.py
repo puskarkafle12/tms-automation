@@ -64,7 +64,11 @@ class Bar:
 
     @property
     def day(self) -> str:
-        return datetime.fromtimestamp(self.timestamp, NEPAL_TZ).date().isoformat()
+        # MeroLagani daily candles are epoch-stamped near the UTC end of the
+        # trading session. Converting that epoch to Nepal time can roll a valid
+        # Friday candle into Saturday. UTC preserves the source's session date;
+        # locally-created 15:00 NPT combined-table bars retain the same date too.
+        return datetime.fromtimestamp(self.timestamp, timezone.utc).date().isoformat()
 
 
 def _epoch_start(value: date) -> int:
@@ -100,14 +104,36 @@ def fetch_historical_bars(symbol: str, start_date: date, end_date: date) -> List
             return result
 
     bars: Dict[int, Bar] = {}
-    # The chart handler accepts the complete supported date range. Fetching it
-    # once per symbol is important for a 60-preset, whole-market scan.
+    request_start = start_date
+    try:
+        from utils.backtesting.cache import available_history
+        partial = available_history(clean_symbol, start_date, end_date)
+    except Exception:
+        partial = []
+    for item in partial:
+        cached_bar = Bar(
+            timestamp=int(item["source_timestamp"] or datetime(
+                item["session_date"].year, item["session_date"].month,
+                item["session_date"].day, 15, 0, tzinfo=NEPAL_TZ,
+            ).timestamp()),
+            open=float(item["open_price"]), high=float(item["high_price"]),
+            low=float(item["low_price"]), close=float(item["close_price"]),
+            volume=float(item["volume"] or 0),
+            extras={"quality_flags": item.get("quality_flags") or [], "cached": True},
+        )
+        bars[cached_bar.timestamp] = cached_bar
+    if partial:
+        # Keep one overlapping session so an upstream end-of-day correction is
+        # refreshed while the older history remains entirely local.
+        request_start = max(start_date, partial[-1]["session_date"] - timedelta(days=1))
+    # The chart handler supports a bounded range, so continuing scans request
+    # only the missing tail plus one overlap session.
     for attempt in range(2):
         params = urlencode({
             "type": "get_advanced_chart",
             "symbol": clean_symbol,
             "resolution": "1D",
-            "rangeStartDate": _epoch_start(start_date),
+            "rangeStartDate": _epoch_start(request_start),
             "rangeEndDate": _epoch_start(end_date + timedelta(days=1)) - 1,
             "from": "",
             "isAdjust": 1,
@@ -146,7 +172,7 @@ def fetch_historical_bars(symbol: str, start_date: date, end_date: date) -> List
             except (TypeError, ValueError):
                 continue
             bar_date = datetime.fromtimestamp(bar.timestamp, NEPAL_TZ).date()
-            if start_date <= bar_date <= end_date and min(bar.open, bar.high, bar.low, bar.close) > 0:
+            if request_start <= bar_date <= end_date and min(bar.open, bar.high, bar.low, bar.close) > 0:
                 bars[bar.timestamp] = bar
         break
 

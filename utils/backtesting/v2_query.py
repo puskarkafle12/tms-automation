@@ -7,6 +7,16 @@ from typing import Any, Dict, Iterable, List, Tuple
 
 from sqlalchemy import text
 
+from utils.market_status import MARKET_HOURS_LABEL, get_market_hours_status, get_nepal_now
+
+
+_LIVE_LTP_SQL = """COALESCE(
+    NULLIF(regexp_replace(COALESCE(c.combined_data->>'ltp',c.combined_data->>'ml_ltp',c.combined_data->>'close',''),
+           '[^0-9.-]','','g'),'')::double precision,s.ltp)"""
+_LIVE_VOLUME_SQL = """COALESCE(
+    NULLIF(regexp_replace(COALESCE(c.combined_data->>'qty',c.combined_data->>'volume',c.combined_data->>'ml_quantity',''),
+           '[^0-9.-]','','g'),'')::double precision,s.latest_volume)"""
+
 
 RESULT_FIELDS = {
     "result_id": "r.result_id", "symbol": "r.symbol", "preset_id": "r.preset_id",
@@ -25,7 +35,8 @@ RESULT_FIELDS = {
     "data_completeness_pct": "r.data_completeness_pct", "liquidity_score": "r.liquidity_score",
     "sample_quality": "r.sample_quality", "recommendation_status": "r.recommendation_status",
     "security_type": "s.security_type", "sector": "s.sector", "listing_age_days": "s.listing_age_days",
-    "ltp": "s.ltp", "latest_volume": "s.latest_volume", "median_volume_20": "s.median_volume_20",
+    "ltp": "s.ltp", "latest_volume": "s.latest_volume", "average_volume_20": "s.average_volume_20",
+    "median_volume_20": "s.median_volume_20",
     "average_turnover_20": "s.average_turnover_20", "warning_codes": "r.warning_codes",
     "technical_signal": "r.technical_snapshot->>'technical_signal'",
     "technical_signal_score": "NULLIF(r.technical_snapshot->>'technical_signal_score','')::double precision",
@@ -63,6 +74,7 @@ STRONG_BUY_SORT_FIELDS = {
     "profit_factor": "profit_factor", "max_drawdown_pct": "max_drawdown_pct",
     "sharpe_ratio": "sharpe_ratio", "reliability_score": "reliability_score",
     "condition_progress_pct": "condition_progress_pct", "latest_volume": "latest_volume",
+    "average_volume_20": "average_volume_20",
 }
 
 STRONG_BUY_FILTER_TYPES = {
@@ -72,7 +84,7 @@ STRONG_BUY_FILTER_TYPES = {
     "loss_rate_pct": "number", "confidence_score": "number", "net_return_pct": "number",
     "net_profit": "number", "profit_factor": "number", "max_drawdown_pct": "number",
     "sharpe_ratio": "number", "reliability_score": "number", "condition_progress_pct": "number",
-    "latest_volume": "number", "median_volume_20": "number",
+    "latest_volume": "number", "average_volume_20": "number", "median_volume_20": "number",
 }
 STRONG_BUY_FILTER_OPERATORS = {
     "eq": "=", "neq": "<>", "gt": ">", "gte": ">=", "lt": "<", "lte": "<=", "contains": "ILIKE",
@@ -115,7 +127,7 @@ def compile_strong_buy_filters(
     expressions = {
         "symbol": "r.symbol", "current_signal_status": "r.current_signal_status",
         "preset_name": "r.preset_name", "category": "r.category", "sector": "s.sector",
-        "recommendation_score": f"({recommendation_score_sql})", "ltp": "s.ltp",
+        "recommendation_score": f"({recommendation_score_sql})", "ltp": _LIVE_LTP_SQL,
         "win_rate_pct": "r.win_rate_pct", "wins": "r.wins", "losses": "r.losses",
         "total_trades": "r.total_trades", "average_holding_days": "r.average_holding_days",
         "loss_rate_pct": "(100-COALESCE(r.win_rate_pct,0))", "confidence_score": "r.confidence_score",
@@ -124,7 +136,8 @@ def compile_strong_buy_filters(
         "profit_factor": "r.profit_factor", "max_drawdown_pct": "r.max_drawdown_pct",
         "sharpe_ratio": "r.sharpe_ratio", "reliability_score": "r.reliability_score",
         "condition_progress_pct": "COALESCE(NULLIF(r.current_evidence->>'condition_progress_pct','')::double precision,0)",
-        "latest_volume": "s.latest_volume", "median_volume_20": "s.median_volume_20",
+        "latest_volume": _LIVE_VOLUME_SQL, "average_volume_20": "s.average_volume_20",
+        "median_volume_20": "s.median_volume_20",
     }
     clauses: List[str] = []
     normalized: List[Dict[str, Any]] = []
@@ -254,6 +267,19 @@ def query_strong_buys(session, run_id: str, body: Dict[str, Any], *, owner_id: s
     page = max(1, int(body.get("page") or 1))
     page_size = min(100, max(1, int(body.get("page_size") or 25)))
     order_sql, normalized_sorts = compile_strong_buy_sorts(body)
+    fresh_session = session.execute(text(
+        """SELECT MAX(CASE WHEN source_timestamp IS NOT NULL
+                       THEN (to_timestamp(source_timestamp) AT TIME ZONE 'UTC')::date
+                       ELSE session_date END)
+           FROM market_ohlcv_daily
+           WHERE adjusted=TRUE
+             AND (CASE WHEN source_timestamp IS NOT NULL
+                       THEN (to_timestamp(source_timestamp) AT TIME ZONE 'UTC')::date
+                       ELSE session_date END)<=CURRENT_DATE
+             AND EXTRACT(ISODOW FROM (CASE WHEN source_timestamp IS NOT NULL
+                       THEN (to_timestamp(source_timestamp) AT TIME ZONE 'UTC')::date
+                       ELSE session_date END)) BETWEEN 1 AND 5"""
+    )).scalar()
     params = {
         "run_id": run_id, "owner_id": owner_id, "min_trades": int(body.get("minimum_trades", 5)),
         "min_win": float(body.get("minimum_win_rate", 0)), "min_confidence": float(body.get("minimum_confidence", 0)),
@@ -261,7 +287,7 @@ def query_strong_buys(session, run_id: str, body: Dict[str, Any], *, owner_id: s
         "max_dd": float(body.get("maximum_drawdown", 100)), "min_return": float(body.get("minimum_return", 0)),
         "min_volume": float(body.get("minimum_volume") or 0), "category": str(body.get("category") or ""),
         "signal": str(body.get("current_signal") or "all"), "latest_date": body.get("latest_signal_date"),
-        "limit": page_size, "offset": (page - 1) * page_size,
+        "limit": page_size, "offset": (page - 1) * page_size, "fresh_session": fresh_session,
     }
     universe = "TRUE" if body.get("include_non_equities") else "s.security_type='ordinary_share'"
     signal_mode = params["signal"]
@@ -287,14 +313,22 @@ def query_strong_buys(session, run_id: str, body: Dict[str, Any], *, owner_id: s
         AND r.total_trades>=:min_trades AND r.win_rate_pct>=:min_win AND r.confidence_score>=:min_confidence
         AND r.net_return_pct>=:min_return AND (r.profit_factor IS NULL OR r.profit_factor>=:min_pf)
         AND COALESCE(r.sharpe_ratio,-999)>=:min_sharpe AND r.max_drawdown_pct<=:max_dd
-        AND COALESCE(s.latest_volume,0)>=:min_volume
+        AND COALESCE({_LIVE_VOLUME_SQL},0)>=:min_volume
         AND (:category='' OR r.category=:category)
         AND (:latest_date IS NULL OR r.current_signal_date>=CAST(:latest_date AS DATE))
+        AND (:fresh_session IS NULL OR r.current_signal_date=CAST(:fresh_session AS DATE)
+             OR (r.current_signal_date=CAST(:fresh_session AS DATE)+1
+                 AND EXTRACT(ISODOW FROM r.current_signal_date)=6))
         AND {advanced_where}"""
-    columns = """r.result_id,r.symbol,r.preset_id,r.preset_name,r.category,r.current_signal_status,
-        r.current_signal_date,r.reliability_score,r.current_technical_score,r.win_rate_pct,r.wins,r.losses,
+    columns = f"""r.result_id,r.run_id,r.symbol,r.preset_id,r.preset_name,r.category,r.current_signal_status,
+        CASE WHEN :fresh_session IS NOT NULL
+                   AND r.current_signal_date=CAST(:fresh_session AS DATE)+1
+                   AND EXTRACT(ISODOW FROM r.current_signal_date)=6
+             THEN CAST(:fresh_session AS DATE) ELSE r.current_signal_date END AS current_signal_date,
+        r.reliability_score,r.current_technical_score,r.win_rate_pct,r.wins,r.losses,
         r.total_trades,r.average_holding_days,r.confidence_score,r.net_return_pct,r.profit_factor,r.max_drawdown_pct,r.sharpe_ratio,
-        r.current_evidence,r.assumptions,s.security_type,s.sector,s.ltp,s.latest_volume,s.median_volume_20,
+        r.current_evidence,r.assumptions,s.security_type,s.sector,{_LIVE_LTP_SQL} AS ltp,{_LIVE_VOLUME_SQL} AS latest_volume,
+        s.average_volume_20,s.median_volume_20,
         NULLIF(r.assumptions->'summary'->>'net_profit','')::double precision AS net_profit,
         100-COALESCE(r.win_rate_pct,0) AS loss_rate_pct,
         COALESCE(NULLIF(r.current_evidence->>'condition_progress_pct','')::double precision,0) AS condition_progress_pct,
@@ -303,7 +337,8 @@ def query_strong_buys(session, run_id: str, body: Dict[str, Any], *, owner_id: s
     base = f"""FROM backtest_results r JOIN backtest_runs br ON br.run_id=r.run_id
         JOIN backtest_run_symbols s ON s.run_id=r.run_id AND s.symbol=r.symbol
         LEFT JOIN market_screener_cache c ON c.symbol=r.symbol
-        WHERE r.run_id=:run_id AND br.owner_id=:owner_id AND br.deleted_at IS NULL AND {universe} AND {requirements}"""
+        WHERE (:run_id='all' OR r.run_id=:run_id) AND br.owner_id=:owner_id
+          AND br.deleted_at IS NULL AND {universe} AND {requirements}"""
     cte = f"""WITH candidates AS (SELECT {columns},{recommendation_score} AS recommendation_score,
         ROW_NUMBER() OVER(PARTITION BY r.symbol ORDER BY {recommendation_score} DESC,
             NULLIF(r.assumptions->'summary'->>'net_profit','')::double precision DESC NULLS LAST,
@@ -317,10 +352,60 @@ def query_strong_buys(session, run_id: str, body: Dict[str, Any], *, owner_id: s
         item = dict(row)
         item.update({"rank": rank, "loss_rate_pct": round(100 - float(item.get("win_rate_pct") or 0), 2),
                      "signal_date": item.pop("current_signal_date")})
+        item.update(_strategy_planning_range(item))
         item.pop("row_no", None)
         items.append(item)
+    nepal_now = get_nepal_now()
+    market_status = get_market_hours_status(nepal_now)
     return {"items": items, "page": page, "page_size": page_size, "total": total,
             "pages": ceil(total / page_size) if total else 0,
             "sorts": normalized_sorts,
             "filters": normalized_filters,
+            "scope": "all_deduplicated_runs" if run_id == "all" else "single_run",
+            "freshness": {"latest_completed_session": fresh_session.isoformat() if fresh_session else None,
+                          "status": "fresh_trading_session_only", "trading_calendar": MARKET_HOURS_LABEL,
+                          "checked_at_nepal": nepal_now.isoformat(),
+                          "is_trading_day_today": market_status["is_trading_day"]},
             "disclaimer": "Backtested historical performance does not guarantee future results."}
+
+
+def _strategy_planning_range(item: Dict[str, Any]) -> Dict[str, Any]:
+    """Create transparent ATR-sized planning zones from the saved strategy risk settings."""
+    if str(item.get("current_signal_status") or "") not in {"strong_buy", "buy", "watch", "near_trigger"}:
+        return {"buy_zone_low": None, "buy_zone_high": None, "protective_stop": None,
+                "sell_zone_low": None, "sell_zone_high": None, "planning_range_basis": None}
+    try:
+        price = float(item.get("ltp") or 0)
+    except (TypeError, ValueError):
+        price = 0
+    if price <= 0:
+        return {"buy_zone_low": None, "buy_zone_high": None, "protective_stop": None,
+                "sell_zone_low": None, "sell_zone_high": None, "planning_range_basis": None}
+    evidence = dict(item.get("current_evidence") or {})
+    latest = dict(evidence.get("latest_values") or {})
+    assumptions = dict(item.get("assumptions") or {})
+    try:
+        atr_pct = float(latest.get("technical_atr_percent") or 2)
+    except (TypeError, ValueError):
+        atr_pct = 2
+    try:
+        stop_pct = float(assumptions.get("stop_loss_pct") or 5)
+        target_pct = float(assumptions.get("take_profit_pct") or 10)
+    except (TypeError, ValueError):
+        stop_pct, target_pct = 5, 10
+    entry_buffer_pct = max(.4, min(2.5, atr_pct * .25))
+    target_price = price * (1 + target_pct / 100)
+    target_buffer_pct = entry_buffer_pct * .5
+    return {
+        "buy_zone_low": round(price * (1 - entry_buffer_pct / 100), 2),
+        "buy_zone_high": round(price * (1 + entry_buffer_pct / 100), 2),
+        "protective_stop": round(price * (1 - stop_pct / 100), 2),
+        "sell_zone_low": round(target_price * (1 - target_buffer_pct / 100), 2),
+        "sell_zone_high": round(target_price * (1 + target_buffer_pct / 100), 2),
+        "planning_range_basis": {
+            "reference_price": round(price, 2), "atr_percent": round(atr_pct, 2),
+            "entry_buffer_percent": round(entry_buffer_pct, 2), "stop_loss_percent": stop_pct,
+            "take_profit_percent": target_pct,
+            "description": "ATR-sized planning zone using the saved strategy stop and target; actual next-open fills can differ.",
+        },
+    }

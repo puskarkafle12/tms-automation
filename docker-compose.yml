@@ -29,6 +29,12 @@ services:
       ZROK_RESERVED_NAME: ${ZROK_RESERVED_NAME:-tmsautomationlive}
       ZROK_STALE_ENV_ZIDS: ${ZROK_STALE_ENV_ZIDS:-}
       ZROK_RESET_SHARES: ${ZROK_RESET_SHARES:-all}
+      # Keep the web/API process responsive while a market scan is running.
+      # Raise only after measuring spare server CPU capacity.
+      BACKTEST_MAX_WORKERS: ${BACKTEST_MAX_WORKERS:-1}
+      BACKTEST_RESERVED_CPUS: ${BACKTEST_RESERVED_CPUS:-1}
+      BACKTEST_WORKER_NICE: ${BACKTEST_WORKER_NICE:-10}
+      BACKTEST_DAILY_REFRESH_ENABLED: ${BACKTEST_DAILY_REFRESH_ENABLED:-true}
     env_file:
       - .env
     volumes:

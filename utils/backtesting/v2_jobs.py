@@ -11,12 +11,16 @@ import threading
 import time
 import uuid
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 
-from utils.backtesting.batch import _run_symbol_task, get_backtest_universe
+from utils.backtesting.batch import (
+    _run_symbol_task, background_worker_limit, get_backtest_universe,
+    initialize_background_worker,
+)
 from utils.backtesting.jobs import _symbol_metadata
 from utils.backtesting.presets import get_backtest_presets
 from utils.backtesting.professional import ROBUST_SCORE_VERSION, assign_robust_scores
@@ -33,6 +37,36 @@ BACKTEST_ENGINE_VERSION = "nepse-daily-v2"
 _WORKER_LOCK = threading.Lock()
 _WORKER_STARTED = False
 _WORKER_ID = f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+NEPAL_TZ = ZoneInfo("Asia/Kathmandu")
+DAILY_REFRESH_HOURS = (10, 11)
+_LAST_DAILY_REFRESH_SLOT: Optional[str] = None
+
+
+def _scan_key(config: Dict[str, Any], universe: List[str], selected: List[Dict[str, Any]]) -> str:
+    """Stable identity for a continuing scan; its end date and display name may advance."""
+    requested_symbols = sorted({str(item).strip().upper() for item in (config.get("symbols") or []) if str(item).strip()})
+    identity = {
+        "run_type": config.get("run_type") or "market_scan",
+        "history_mode": config.get("history_mode") or "all_available",
+        "start_date": config.get("start_date"),
+        # An all-market scan must keep the same identity when a security is newly
+        # listed. Explicit single/multi-symbol scans remain scoped to those symbols.
+        "symbols": requested_symbols or "all_matching_universe",
+        "ordinary_shares_only": bool(config.get("ordinary_shares_only", True)),
+        "strategy_mode": config.get("strategy_mode") or "presets",
+        "strategies": sorted((item.get("id"), item.get("source_hash")) for item in selected),
+        "data_source": config.get("data_source") or "merolagani",
+        "costs": {key: config.get(key) for key in (
+            "initial_capital", "charge_model", "investor_type", "apply_cgt", "dp_charge",
+            "fee_pct", "fixed_fee", "slippage_pct", "position_size_pct",
+        )},
+        "risk": {key: config.get(key) for key in (
+            "min_holding_days", "max_holding_days", "trailing_stop_pct",
+            "max_volume_participation_pct", "risk_free_rate_pct",
+        )},
+    }
+    encoded = json.dumps(identity, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _custom_strategy_descriptor(query_text: str, config: Dict[str, Any]) -> Dict[str, Any]:
@@ -106,7 +140,7 @@ def create_run(configuration: Dict[str, Any], *, owner_id: str = "local") -> Dic
         config["strategy_mode"] = "presets"
         config["preset_ids"] = [item["id"] for item in selected]
     config.setdefault("ordinary_shares_only", True)
-    config.setdefault("max_workers", 8)
+    config.setdefault("max_workers", 1)
     config.setdefault("data_source", "merolagani")
     config.setdefault("initial_capital", 100000)
     config.setdefault("charge_model", "nepse_equity")
@@ -122,6 +156,9 @@ def create_run(configuration: Dict[str, Any], *, owner_id: str = "local") -> Dic
     config.setdefault("trailing_stop_pct", None)
     config.setdefault("max_volume_participation_pct", 10)
     config.setdefault("risk_free_rate_pct", 4)
+    config.setdefault("auto_refresh", True)
+    config.setdefault("refresh_times_nepal", ["10:00", "11:00"])
+    config.setdefault("refresh_mode", "incremental_market_data_full_metric_replay")
     if config["max_holding_days"] is not None and int(config["min_holding_days"]) > int(config["max_holding_days"]):
         raise ValueError("Minimum holding days cannot exceed maximum holding days.")
     config.setdefault("portfolio", {
@@ -136,6 +173,8 @@ def create_run(configuration: Dict[str, Any], *, owner_id: str = "local") -> Dic
     )
     if not universe:
         raise ValueError("No instruments match the selected universe filters.")
+    scan_key = _scan_key(config, universe, selected)
+    config["scan_key"] = scan_key
     session = _session()
     try:
         metadata = _symbol_metadata(session)
@@ -148,6 +187,83 @@ def create_run(configuration: Dict[str, Any], *, owner_id: str = "local") -> Dic
         import hashlib
         encoded = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
         snapshot_id = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+        existing = session.execute(text(
+            """SELECT run_id,status,configuration FROM backtest_runs
+               WHERE owner_id=:owner_id AND scan_key=:scan_key AND deleted_at IS NULL
+               FOR UPDATE"""
+        ), {"owner_id": owner_id, "scan_key": scan_key}).mappings().first()
+        if not existing:
+            # Adopt an exact pre-scan-key workspace instead of creating the first
+            # post-upgrade duplicate. Missing/new strategy IDs intentionally make
+            # a different identity.
+            legacy_rows = session.execute(text(
+                """SELECT run_id,status,configuration FROM backtest_runs
+                   WHERE owner_id=:owner_id AND scan_key IS NULL AND deleted_at IS NULL
+                   ORDER BY updated_at DESC FOR UPDATE"""
+            ), {"owner_id": owner_id}).mappings().all()
+            preset_catalog = {item["id"]: item for item in get_backtest_presets()}
+            for legacy in legacy_rows:
+                legacy_config = dict(legacy["configuration"] or {})
+                try:
+                    if str(legacy_config.get("strategy_mode") or "presets") == "custom":
+                        legacy_selected = [legacy_config.get("custom_strategy") or _custom_strategy_descriptor(
+                            str(legacy_config.get("custom_query_text") or ""), legacy_config,
+                        )]
+                    else:
+                        legacy_selected = [preset_catalog[item] for item in legacy_config.get("preset_ids") or [] if item in preset_catalog]
+                    if legacy_selected and _scan_key(legacy_config, [], legacy_selected) == scan_key:
+                        session.execute(text(
+                            "UPDATE backtest_runs SET scan_key=:scan_key WHERE run_id=:run_id"
+                        ), {"scan_key": scan_key, "run_id": legacy["run_id"]})
+                        existing = legacy
+                        break
+                except (TypeError, ValueError):
+                    continue
+        if existing:
+            existing_config = dict(existing["configuration"] or {})
+            existing_end = date.fromisoformat(str(existing_config.get("end_date") or config["end_date"]))
+            if existing["status"] in {"queued", "running", "paused"} or end <= existing_end:
+                session.rollback()
+                return get_run(str(existing["run_id"]), owner_id=owner_id)
+            session.execute(text(
+                """INSERT INTO backtest_data_snapshots
+                   (snapshot_id, source, universe, manifest, data_hash)
+                   VALUES (:snapshot_id, :source, CAST(:universe AS JSONB), CAST(:manifest AS JSONB), :data_hash)
+                   ON CONFLICT (snapshot_id) DO NOTHING"""
+            ), {"snapshot_id": snapshot_id, "source": config["data_source"], "universe": json.dumps(universe), "manifest": encoded, "data_hash": snapshot_id})
+            symbol_rows = []
+            for symbol in universe:
+                item = metadata.get(symbol, {})
+                symbol_rows.append({
+                    "run_id": existing["run_id"], "symbol": symbol,
+                    "security_type": item.get("security_type"), "sector": item.get("sector"),
+                    "listing_age_days": item.get("listing_age_days"), "ltp": item.get("ltp"),
+                    "latest_volume": item.get("latest_volume"),
+                })
+            session.execute(text(
+                """INSERT INTO backtest_run_symbols
+                   (run_id, symbol, security_type, sector, listing_age_days, ltp, latest_volume)
+                   VALUES (:run_id, :symbol, :security_type, :sector, :listing_age_days, :ltp, :latest_volume)
+                   ON CONFLICT (run_id, symbol) DO UPDATE SET
+                     security_type=EXCLUDED.security_type,sector=EXCLUDED.sector,
+                     listing_age_days=EXCLUDED.listing_age_days,ltp=EXCLUDED.ltp,
+                     latest_volume=EXCLUDED.latest_volume"""
+            ), symbol_rows)
+            session.execute(text(
+                """UPDATE backtest_run_symbols SET status='queued',error=NULL,completed_at=NULL
+                   WHERE run_id=:run_id"""
+            ), {"run_id": existing["run_id"]})
+            session.execute(text(
+                """UPDATE backtest_runs SET name=:name,notes=:notes,status='queued',configuration=CAST(:configuration AS JSONB),
+                          data_snapshot_id=:snapshot_id,symbols_completed=0,
+                          symbols_total=(SELECT COUNT(*) FROM backtest_run_symbols WHERE run_id=:run_id),
+                          progress_pct=0,current_symbol=NULL,cancel_requested=FALSE,pause_requested=FALSE,
+                          error_summary=NULL,finished_at=NULL,updated_at=NOW()
+                   WHERE run_id=:run_id"""
+            ), {"run_id": existing["run_id"], "name": str(config.get("name") or "NEPSE research")[:200],
+                "notes": config.get("notes"), "configuration": json.dumps(config), "snapshot_id": snapshot_id})
+            session.commit()
+            return get_run(str(existing["run_id"]), owner_id=owner_id)
         run_id = uuid.uuid4().hex
         session.execute(text(
             """INSERT INTO backtest_data_snapshots
@@ -157,14 +273,14 @@ def create_run(configuration: Dict[str, Any], *, owner_id: str = "local") -> Dic
         ), {"snapshot_id": snapshot_id, "source": config["data_source"], "universe": json.dumps(universe), "manifest": encoded, "data_hash": snapshot_id})
         session.execute(text(
             """INSERT INTO backtest_runs
-               (run_id, owner_id, name, notes, run_type, status, configuration,
+               (run_id, owner_id, scan_key, name, notes, run_type, status, configuration,
                 strategy_version, engine_version, indicator_engine_version,
                 data_snapshot_id, symbols_total)
-               VALUES (:run_id, :owner_id, :name, :notes, :run_type, 'queued',
+               VALUES (:run_id, :owner_id, :scan_key, :name, :notes, :run_type, 'queued',
                        CAST(:configuration AS JSONB), :strategy_version, :engine_version,
                        :indicator_version, :snapshot_id, :symbols_total)"""
         ), {
-            "run_id": run_id, "owner_id": owner_id,
+            "run_id": run_id, "owner_id": owner_id, "scan_key": scan_key,
             "name": str(config.get("name") or f"NEPSE research {start} to {end}")[:200],
             "notes": config.get("notes"), "run_type": config.get("run_type") or "market_scan",
             "configuration": json.dumps(config), "engine_version": BACKTEST_ENGINE_VERSION,
@@ -222,14 +338,29 @@ def get_run(run_id: str, *, owner_id: str = "local") -> Dict[str, Any]:
 def list_runs(*, owner_id: str = "local", page: int = 1, page_size: int = 25) -> Dict[str, Any]:
     session = _session()
     try:
-        total = int(session.execute(text(
-            "SELECT COUNT(*) FROM backtest_runs WHERE owner_id=:owner_id AND deleted_at IS NULL"
-        ), {"owner_id": owner_id}).scalar() or 0)
         rows = session.execute(text(
             """SELECT * FROM backtest_runs WHERE owner_id=:owner_id AND deleted_at IS NULL
-               ORDER BY created_at DESC LIMIT :limit OFFSET :offset"""
-        ), {"owner_id": owner_id, "limit": page_size, "offset": (page - 1) * page_size}).mappings().all()
-        return {"items": [_public_run(dict(row)) for row in rows], "page": page, "page_size": page_size, "total": total}
+               ORDER BY CASE WHEN status IN ('queued','running','paused') THEN 0 ELSE 1 END,
+                        updated_at DESC,created_at DESC"""
+        ), {"owner_id": owner_id}).mappings().all()
+        unique: List[Dict[str, Any]] = []
+        seen = set()
+        for mapped in rows:
+            row = dict(mapped)
+            config = dict(row.get("configuration") or {})
+            legacy_identity = dict(config)
+            for key in ("name", "notes", "end_date", "max_workers", "scan_key"):
+                legacy_identity.pop(key, None)
+            display_key = row.get("scan_key") or hashlib.sha256(json.dumps(
+                legacy_identity, sort_keys=True, separators=(",", ":"), default=str,
+            ).encode("utf-8")).hexdigest()
+            if display_key in seen:
+                continue
+            seen.add(display_key)
+            unique.append(_public_run(row))
+        total = len(unique)
+        offset = (page - 1) * page_size
+        return {"items": unique[offset:offset + page_size], "page": page, "page_size": page_size, "total": total}
     finally:
         session.close()
 
@@ -366,14 +497,31 @@ def _persist_symbol_output(run_id: str, output: Dict[str, Any]) -> None:
             """UPDATE backtest_run_symbols SET status=:status,bars_count=:bars,
                       combinations_completed=:count,error=:error,completed_at=NOW(),
                       ltp=COALESCE(:ltp,ltp),latest_volume=COALESCE(:latest_volume,latest_volume),
-                      median_volume_20=:median_volume_20,average_turnover_20=:average_turnover_20
+                      average_volume_20=:average_volume_20,median_volume_20=:median_volume_20,
+                      average_turnover_20=:average_turnover_20,last_tested_session=:last_tested_session
                WHERE run_id=:run_id AND symbol=:symbol"""
         ), {"status": status, "bars": int((output.get("technical_snapshot") or {}).get("bars_count") or 0),
             "count": len(output.get("results") or []), "error": output.get("error"),
             "ltp": profile.get("ltp"), "latest_volume": profile.get("latest_volume"),
+            "average_volume_20": profile.get("average_volume_20"),
             "median_volume_20": profile.get("median_volume_20"),
             "average_turnover_20": profile.get("average_turnover_20"),
+            "last_tested_session": (output.get("technical_snapshot") or {}).get("as_of_date"),
             "run_id": run_id, "symbol": symbol})
+        technical_snapshot = dict(output.get("technical_snapshot") or {})
+        indicators = dict(technical_snapshot.get("indicators") or {})
+        indicators.update({key: profile.get(key) for key in (
+            "latest_volume", "average_volume_20", "median_volume_20", "average_turnover_20",
+        )})
+        if indicators and technical_snapshot.get("as_of_date"):
+            from utils.market_data.repository import save_technical_indicator_snapshot
+            save_technical_indicator_snapshot(
+                session, symbol=symbol, as_of_date=date.fromisoformat(str(technical_snapshot["as_of_date"])),
+                indicators=indicators, engine_version=str(technical_snapshot.get("engine_version") or ENGINE_VERSION),
+                bars_count=int(technical_snapshot.get("bars_count") or 0),
+                history_start=date.fromisoformat(str(technical_snapshot.get("history_start") or technical_snapshot["as_of_date"])),
+                history_end=date.fromisoformat(str(technical_snapshot.get("history_end") or technical_snapshot["as_of_date"])),
+            )
         session.execute(text(
             """UPDATE backtest_runs SET symbols_completed=(SELECT COUNT(*) FROM backtest_run_symbols WHERE run_id=:run_id AND status IN ('completed','failed')),
                       combinations_completed=(SELECT COUNT(*) FROM backtest_results WHERE run_id=:run_id),
@@ -420,6 +568,9 @@ def _finalize_scores(run_id: str) -> None:
         from utils.backtesting.portfolio import build_portfolios_for_run
         build_portfolios_for_run(session, run_id, configuration)
         session.commit()
+        from utils.backtesting.recommendations import materialize_recommendations
+        materialize_recommendations(session, owner_id="local")
+        session.commit()
     finally:
         session.close()
 
@@ -456,11 +607,13 @@ def run_claimed_run(run_id: str) -> None:
     tasks = [{"symbol": symbol, "start_date": date.fromisoformat(config["start_date"]),
               "end_date": date.fromisoformat(config["end_date"]), "data_source": config.get("data_source") or "merolagani",
               "presets": presets, "settings": settings} for symbol in symbols]
-    workers = max(1, min(int(config.get("max_workers") or 8), 12, os.cpu_count() or 2))
+    workers = background_worker_limit(config.get("max_workers"))
     try:
         if tasks:
             context = multiprocessing.get_context("spawn")
-            with ProcessPoolExecutor(max_workers=workers, mp_context=context) as executor:
+            with ProcessPoolExecutor(
+                max_workers=workers, mp_context=context, initializer=initialize_background_worker,
+            ) as executor:
                 futures = {executor.submit(_run_symbol_task, task): task["symbol"] for task in tasks}
                 for future in as_completed(futures):
                     control = _control_state(run_id)
@@ -486,6 +639,7 @@ def run_claimed_run(run_id: str) -> None:
             session.execute(text(
                 """UPDATE backtest_runs SET status=:status,progress_pct=CASE WHEN :status='completed' THEN 100 ELSE progress_pct END,
                           current_symbol=NULL,finished_at=CASE WHEN :status IN ('completed','cancelled') THEN NOW() ELSE finished_at END,
+                          last_refresh_at=CASE WHEN :status='completed' THEN NOW() ELSE last_refresh_at END,
                           lease_owner=NULL,lease_expires_at=NULL,updated_at=NOW()
                    WHERE run_id=:run_id"""
             ), {"status": status, "run_id": run_id})
@@ -504,8 +658,81 @@ def run_claimed_run(run_id: str) -> None:
             session.close()
 
 
+def _queue_scheduled_refreshes() -> int:
+    """Queue each continuing scan once at 10:00 and 11:00 Nepal time."""
+    global _LAST_DAILY_REFRESH_SLOT
+    if os.getenv("BACKTEST_DAILY_REFRESH_ENABLED", "true").strip().lower() not in {"1", "true", "yes", "on"}:
+        return 0
+    now = datetime.now(NEPAL_TZ)
+    if now.hour not in DAILY_REFRESH_HOURS:
+        return 0
+    from utils.market_status import get_market_hours_status
+    if not get_market_hours_status(now)["is_trading_day"]:
+        return 0
+    slot = f"{now.date().isoformat()}T{now.hour:02d}:00+05:45"
+    check_minute = f"{slot}:{now.minute:02d}"
+    if check_minute == _LAST_DAILY_REFRESH_SLOT:
+        return 0
+    _LAST_DAILY_REFRESH_SLOT = check_minute
+    session = _session()
+    queued = 0
+    try:
+        rows = session.execute(text(
+            """SELECT DISTINCT ON (COALESCE(scan_key,run_id)) run_id,configuration,status
+               FROM backtest_runs
+               WHERE deleted_at IS NULL AND COALESCE((configuration->>'auto_refresh')::boolean,TRUE)=TRUE
+               ORDER BY COALESCE(scan_key,run_id),updated_at DESC"""
+        )).mappings().all()
+        metadata = _symbol_metadata(session)
+        for row in rows:
+            if row["status"] in {"queued", "running", "paused"}:
+                continue
+            config = dict(row["configuration"] or {})
+            if config.get("last_refresh_slot") == slot:
+                continue
+            config["end_date"] = now.date().isoformat()
+            config["last_refresh_slot"] = slot
+            metadata_updates = [
+                {"run_id": row["run_id"], "symbol": symbol, "ltp": item.get("ltp"),
+                 "latest_volume": item.get("latest_volume")}
+                for symbol, item in metadata.items()
+            ]
+            stale_symbols = 0
+            if metadata_updates:
+                stale_symbols = session.execute(text(
+                    """UPDATE backtest_run_symbols SET status='queued',error=NULL,completed_at=NULL,
+                              ltp=COALESCE(:ltp,ltp),latest_volume=COALESCE(:latest_volume,latest_volume)
+                       WHERE run_id=:run_id AND symbol=:symbol
+                         AND (last_tested_session IS NULL OR last_tested_session < COALESCE((
+                             SELECT MAX((to_timestamp(m.source_timestamp) AT TIME ZONE 'UTC')::date)
+                             FROM market_ohlcv_daily m WHERE m.symbol=:symbol AND m.adjusted=TRUE
+                         ),last_tested_session))"""
+                ), metadata_updates).rowcount
+            if not stale_symbols:
+                config["last_refresh_slot"] = slot
+                session.execute(text(
+                    "UPDATE backtest_runs SET configuration=CAST(:configuration AS JSONB),last_refresh_at=NOW(),updated_at=NOW() WHERE run_id=:run_id"
+                ), {"run_id": row["run_id"], "configuration": json.dumps(config)})
+                continue
+            session.execute(text(
+                """UPDATE backtest_runs SET status='queued',configuration=CAST(:configuration AS JSONB),
+                          symbols_completed=0,progress_pct=0,current_symbol=NULL,cancel_requested=FALSE,
+                          pause_requested=FALSE,error_summary=NULL,finished_at=NULL,updated_at=NOW()
+                   WHERE run_id=:run_id"""
+            ), {"run_id": row["run_id"], "configuration": json.dumps(config)})
+            queued += 1
+        session.commit()
+        return queued
+    except Exception:
+        session.rollback()
+        return 0
+    finally:
+        session.close()
+
+
 def worker_loop() -> None:
     while True:
+        _queue_scheduled_refreshes()
         run_id = _claim_next_run()
         if run_id:
             run_claimed_run(run_id)
