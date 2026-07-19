@@ -161,7 +161,9 @@ class BacktestV2RunRequest(BacktestBatchRequest):
     custom_query_text: Optional[str] = Field(default=None, min_length=20, max_length=50000)
     discovery_budget: int = Field(default=1000, ge=10, le=10000)
     discovery_seed: int = Field(default=20260718, ge=0, le=2147483647)
-    discovery_base_ids: List[str] = Field(default_factory=list, max_length=116)
+    # Generous ceiling so the base-signal catalog can grow without breaking validation;
+    # unknown ids are ignored downstream by generate_discovery_presets.
+    discovery_base_ids: List[str] = Field(default_factory=list, max_length=1000)
 
 
 class BacktestV2SortItem(BaseModel):
