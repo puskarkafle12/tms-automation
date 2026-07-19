@@ -1,7 +1,8 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { fetchJson } from "../../utils/api";
 import NepseAlphaSymbolLink from "../../components/NepseAlphaSymbolLink";
+import ColumnPickerModal from "../../components/ColumnPickerModal";
 import "./Recommendations.css";
 
 type Row = Record<string, any>;
@@ -27,10 +28,15 @@ const recommendationPrompts = [
   "Show low-risk recommendations ranked by robust score with drawdown below 25%.",
 ];
 const RECOMMENDATION_COLUMN_WIDTHS_KEY = "tms-recommendation-column-widths-v1";
-const RECOMMENDATION_VISIBLE_COLUMNS_KEY = "tms-recommendation-visible-columns-v1";
+const RECOMMENDATION_VISIBLE_COLUMNS_KEY = "tms-recommendation-visible-columns-v2";
 const DEFAULT_VISIBLE_COLUMNS: Record<"buy" | "sell", string[]> = {
   buy: ["symbol", "current_signal_status", "recommendation_score", "current_ltp", "buy_range", "sell_range", "current_ltp_estimated_profit_pct", "current_ltp_estimated_loss_pct", "preset_name", "win_rate_pct", "total_trades", "average_holding_days"],
   sell: ["symbol", "current_signal_status", "recommendation_score", "ltp", "holding_quantity", "preset_name", "win_rate_pct", "total_trades", "net_return_pct", "average_holding_days"],
+};
+const normalizeRecommendationColumns = (keys: string[], availableKeys: string[]) => {
+  const known = new Set(availableKeys);
+  const ordered = keys.map(String).filter((key, index, all) => known.has(key) && all.indexOf(key) === index && key !== "symbol");
+  return ["symbol", ...ordered];
 };
 const DEFAULT_COLUMN_WIDTHS: Record<string, number> = {
   symbol: 120,
@@ -104,12 +110,15 @@ const Recommendations: React.FC = () => {
   const [refreshBusy, setRefreshBusy] = useState(false);
   const [refreshMessage, setRefreshMessage] = useState("");
   const [tableHelpOpen, setTableHelpOpen] = useState(false);
+  const [columnPickerOpen, setColumnPickerOpen] = useState(false);
   const [selectedStockDetail, setSelectedStockDetail] = useState<Row | null>(null);
   const [visibleColumns, setVisibleColumns] = useState<Record<"buy" | "sell", string[]>>(() => {
     const read = (side: "buy" | "sell") => {
       try {
         const saved = JSON.parse(localStorage.getItem(`${RECOMMENDATION_VISIBLE_COLUMNS_KEY}:${preferenceUserId}:${side}`) || "[]");
-        return Array.isArray(saved) && saved.length ? saved.map(String) : DEFAULT_VISIBLE_COLUMNS[side];
+        if (Array.isArray(saved) && saved.length) return saved.map(String);
+        const legacy = JSON.parse(localStorage.getItem(`tms-recommendation-visible-columns-v1:${preferenceUserId}:${side}`) || "[]");
+        return Array.isArray(legacy) && legacy.length ? legacy.map(String) : DEFAULT_VISIBLE_COLUMNS[side];
       } catch {
         return DEFAULT_VISIBLE_COLUMNS[side];
       }
@@ -120,11 +129,18 @@ const Recommendations: React.FC = () => {
     localStorage.setItem(`${RECOMMENDATION_VISIBLE_COLUMNS_KEY}:${preferenceUserId}:${recommendationSide}`, JSON.stringify(visibleColumns[recommendationSide]));
   }, [preferenceUserId, recommendationSide, visibleColumns]);
   useEffect(() => {
-    if (!tableHelpOpen && !selectedStockDetail) return undefined;
-    const close = (event: KeyboardEvent) => { if (event.key === "Escape") { setTableHelpOpen(false); setSelectedStockDetail(null); } };
+    if (!tableHelpOpen && !selectedStockDetail && !columnPickerOpen) return undefined;
+    const close = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (columnPickerOpen) setColumnPickerOpen(false);
+      else {
+        setTableHelpOpen(false);
+        setSelectedStockDetail(null);
+      }
+    };
     window.addEventListener("keydown", close);
     return () => window.removeEventListener("keydown", close);
-  }, [tableHelpOpen, selectedStockDetail]);
+  }, [tableHelpOpen, selectedStockDetail, columnPickerOpen]);
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(() => {
     try {
       const saved = JSON.parse(localStorage.getItem(`${RECOMMENDATION_COLUMN_WIDTHS_KEY}:${preferenceUserId}`) || "{}") as Record<string, unknown>;
@@ -333,7 +349,9 @@ const Recommendations: React.FC = () => {
     setScheduleMessage("Strategy validated. Opening Schedule Order for final confirmation…");
     navigate(`/dashboard/schedule-order?side=${side}&symbol=${encodeURIComponent(symbol)}&source=backtest-recommendation`);
   };
-  const columns: Array<{ key: string; label: string; sortKey?: string }> = [
+  const availableColumns = useMemo(
+    () => (recommendationSide === "buy"
+      ? [
     { key: "symbol", label: "Stock", sortKey: "symbol" },
     { key: "current_signal_status", label: "Signal", sortKey: "signal_status" },
     {
@@ -361,10 +379,7 @@ const Recommendations: React.FC = () => {
       sortKey: "average_volume_20",
     },
     { key: "signal_date", label: "Trading session", sortKey: "signal_date" },
-  ];
-  const availableColumns =
-    recommendationSide === "buy"
-      ? columns
+  ]
       : [
           { key: "symbol", label: "Stock", sortKey: "symbol" },
           { key: "current_signal_status", label: "Signal", sortKey: "signal_status" },
@@ -389,17 +404,36 @@ const Recommendations: React.FC = () => {
           },
           { key: "average_holding_days", label: "Avg hold", sortKey: "average_holding_days" },
           { key: "signal_date", label: "Signal session", sortKey: "signal_date" },
-        ];
-  const activeColumns = availableColumns.filter((column) => (
-    column.key === "symbol" || visibleColumns[recommendationSide].includes(column.key)
-  ));
-  const toggleColumn = (key: string) => {
-    if (key === "symbol") return;
-    setVisibleColumns((current) => {
-      const selected = new Set(current[recommendationSide]);
-      if (selected.has(key)) selected.delete(key); else selected.add(key);
-      return { ...current, [recommendationSide]: Array.from(selected) };
-    });
+        ]),
+    [recommendationSide],
+  );
+  const pickerColumns = useMemo(
+    () => availableColumns.map((column) => ({
+      key: column.key,
+      label: column.label,
+      locked: column.key === "symbol",
+    })),
+    [availableColumns],
+  );
+  const orderedVisibleKeys = useMemo(
+    () => normalizeRecommendationColumns(
+      visibleColumns[recommendationSide],
+      availableColumns.map((column) => column.key),
+    ),
+    [availableColumns, recommendationSide, visibleColumns],
+  );
+  const activeColumns = useMemo(() => {
+    const byKey = new Map(availableColumns.map((column) => [column.key, column]));
+    return orderedVisibleKeys.map((key) => byKey.get(key)).filter(Boolean) as typeof availableColumns;
+  }, [availableColumns, orderedVisibleKeys]);
+  const setSideColumns = (keys: string[]) => {
+    setVisibleColumns((current) => ({
+      ...current,
+      [recommendationSide]: normalizeRecommendationColumns(
+        keys,
+        availableColumns.map((column) => column.key),
+      ),
+    }));
   };
   const renderCell = (row: Row, key: string) => {
     if (key === "symbol")
@@ -637,29 +671,21 @@ const Recommendations: React.FC = () => {
         </div>
         <div className="recommendation-table-tool-actions">
           <button type="button" onClick={() => setTableHelpOpen(true)}>How this table works</button>
-          <details className="recommendation-column-picker">
-            <summary>Columns <b>{activeColumns.length}/{availableColumns.length}</b></summary>
-            <div>
-              <header>
-                <span>Add or remove columns</span>
-                <button type="button" onClick={() => setVisibleColumns((current) => ({ ...current, [recommendationSide]: DEFAULT_VISIBLE_COLUMNS[recommendationSide] }))}>Trader default</button>
-                <button type="button" onClick={() => setVisibleColumns((current) => ({ ...current, [recommendationSide]: availableColumns.map((column) => column.key) }))}>Show all</button>
-              </header>
-              {availableColumns.map((column) => (
-                <label key={column.key}>
-                  <input
-                    type="checkbox"
-                    checked={column.key === "symbol" || visibleColumns[recommendationSide].includes(column.key)}
-                    disabled={column.key === "symbol"}
-                    onChange={() => toggleColumn(column.key)}
-                  />
-                  <span>{column.label}</span>
-                </label>
-              ))}
-            </div>
-          </details>
+          <button type="button" onClick={() => setColumnPickerOpen(true)}>
+            Columns <b>{activeColumns.length}/{availableColumns.length}</b>
+          </button>
         </div>
       </section>
+      <ColumnPickerModal
+        open={columnPickerOpen}
+        title="Recommendation columns"
+        subtitle="Show or hide fields and drag them into the order you want to trade from."
+        columns={pickerColumns}
+        selectedKeys={orderedVisibleKeys}
+        defaultKeys={DEFAULT_VISIBLE_COLUMNS[recommendationSide]}
+        onClose={() => setColumnPickerOpen(false)}
+        onChange={setSideColumns}
+      />
       <section className="recommendation-table-wrap">
         <table style={{ width: activeColumns.reduce((sum, column) => sum + columnWidth(column.key), columnWidth("action")) }}>
           <colgroup>

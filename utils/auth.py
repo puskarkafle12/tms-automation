@@ -19,7 +19,9 @@ from models.frontend_user import FrontendUser
 
 JWT_SECRET = os.getenv("APP_SECRET_KEY") or os.getenv("SECRET_KEY") or "change-this-local-secret"
 JWT_ALGORITHM = "HS256"
-JWT_LIFETIME_HOURS = max(1, int(os.getenv("AUTH_TOKEN_HOURS", "12")))
+# Long-lived browser sessions: stay signed in across reloads and daily use.
+# Override with AUTH_TOKEN_HOURS when a shorter window is required.
+JWT_LIFETIME_HOURS = max(1, int(os.getenv("AUTH_TOKEN_HOURS", "720")))
 PASSWORD_ITERATIONS = 310_000
 
 FEATURES = (

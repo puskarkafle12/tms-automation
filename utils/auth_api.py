@@ -233,7 +233,13 @@ def login(body: LoginBody, request: Request, db: Session = Depends(get_db)):
 
 @router.get("/auth/me")
 def me(user: FrontendUser = Depends(get_current_user)):
-    return {"user": _serialize(user), "features": list(FEATURES)}
+    # Sliding session: each successful check issues a fresh token so active
+    # users stay signed in without re-entering credentials.
+    return {
+        "user": _serialize(user),
+        "features": list(FEATURES),
+        "access_token": create_access_token(user),
+    }
 
 
 @router.post("/auth/logout")

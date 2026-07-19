@@ -23,6 +23,15 @@ const LoginPage: React.FC = () => {
     catch (captchaError) { setError(extractApiErrorMessage(captchaError)); }
   };
   useEffect(() => { if (mode === 'signup') void loadCaptcha(); }, [mode]);
+  useEffect(() => {
+    if (!localStorage.getItem('accessToken')) return;
+    let cancelled = false;
+    void authService
+      .me()
+      .then(() => { if (!cancelled) navigate('/dashboard/order-logs', { replace: true }); })
+      .catch(() => { /* keep the login form when the saved session is truly invalid */ });
+    return () => { cancelled = true; };
+  }, [navigate]);
 
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();

@@ -58,8 +58,14 @@ export const authService = {
   },
   me: async () => {
     const response = await axios.get(`${getApiUrl()}/api/auth/me`);
-    const user = response.data.user as AuthUser;
+    const payload = response.data as { user: AuthUser; access_token?: string };
+    const user = payload.user;
+    if (payload.access_token) {
+      localStorage.setItem('accessToken', payload.access_token);
+      axios.defaults.headers.common.Authorization = `Bearer ${payload.access_token}`;
+    }
     localStorage.setItem('authUser', JSON.stringify(user));
+    localStorage.setItem('userId', String(user.id));
     return user;
   },
   storedUser: (): AuthUser | null => {

@@ -5,6 +5,7 @@ import { AxisPointerComponent, DataZoomComponent, GridComponent, LegendComponent
 import { CanvasRenderer } from 'echarts/renderers';
 import { fetchJson, getApiUrl } from '../../utils/api';
 import NepseAlphaSymbolLink from '../../components/NepseAlphaSymbolLink';
+import ColumnPickerModal from '../../components/ColumnPickerModal';
 import TradeLightweightChart, { type TradeChartCandle, type TradeChartTrade } from '../../components/TradeLightweightChart';
 import { nextBacktestSortRules } from './backtestSort';
 import './BacktestV2.css';
@@ -67,14 +68,35 @@ RULE "Supertrend PPO Confirmation" FOR SYMBOL "NABIL" {
   ORDER PERCENT_OF_AVAILABLE_CASH 100
   EXECUTE ON EVERY MATCH
 }`;
-const columns = [
-  ['symbol', 'Symbol'], ['preset_name', 'Strategy'], ['current_signal_status', 'Signal'], ['current_signal_date', 'Signal session'], ['sector', 'Sector'], ['robust_score', 'Robust'],
-  ['oos_return_pct', 'OOS return %'], ['oos_expectancy_pct', 'OOS expectancy %'], ['oos_trades', 'OOS trades'],
-  ['win_rate_pct', 'Win rate %'], ['total_trades', 'Trades'], ['max_drawdown_pct', 'Drawdown %'],
-  ['min_holding_days', 'Min hold'], ['max_holding_days', 'Max hold'],
-  ['walk_forward_profitable_pct', 'Stable folds %'], ['data_completeness_pct', 'Data %'],
-  ['latest_volume', 'Latest volume'], ['recommendation_status', 'Status'],
-] as const;
+const RESULT_COLUMNS: Array<{ key: string; label: string; locked?: boolean }> = [
+  { key: 'symbol', label: 'Symbol', locked: true },
+  { key: 'preset_name', label: 'Strategy' },
+  { key: 'current_signal_status', label: 'Signal' },
+  { key: 'current_signal_date', label: 'Signal session' },
+  { key: 'sector', label: 'Sector' },
+  { key: 'robust_score', label: 'Robust' },
+  { key: 'oos_return_pct', label: 'OOS return %' },
+  { key: 'oos_expectancy_pct', label: 'OOS expectancy %' },
+  { key: 'oos_trades', label: 'OOS trades' },
+  { key: 'win_rate_pct', label: 'Win rate %' },
+  { key: 'total_trades', label: 'Trades' },
+  { key: 'max_drawdown_pct', label: 'Drawdown %' },
+  { key: 'min_holding_days', label: 'Min hold' },
+  { key: 'max_holding_days', label: 'Max hold' },
+  { key: 'walk_forward_profitable_pct', label: 'Stable folds %' },
+  { key: 'data_completeness_pct', label: 'Data %' },
+  { key: 'latest_volume', label: 'Latest volume' },
+  { key: 'recommendation_status', label: 'Status' },
+];
+const columns = RESULT_COLUMNS;
+const DEFAULT_VISIBLE_RESULT_COLUMNS = RESULT_COLUMNS.map((column) => column.key);
+const BACKTEST_VISIBLE_COLUMNS_KEY = 'tms-backtest-v2-visible-columns-v1';
+const resultColumnLabel = (key: string) => RESULT_COLUMNS.find((column) => column.key === key)?.label || key;
+const normalizeVisibleResultColumns = (keys: string[]) => {
+  const known = new Set(DEFAULT_VISIBLE_RESULT_COLUMNS);
+  const ordered = keys.map(String).filter((key, index, all) => known.has(key) && all.indexOf(key) === index && key !== 'symbol');
+  return ['symbol', ...ordered];
+};
 const opportunityColumns: Array<{ key: string; label: string; sortKey?: string }> = [
   { key: 'rank', label: 'Rank' }, { key: 'symbol', label: 'Stock', sortKey: 'symbol' },
   { key: 'signal', label: 'Signal state', sortKey: 'current_signal_status' },
@@ -261,6 +283,25 @@ const BacktestV2: React.FC = () => {
   const [stockSuggestions, setStockSuggestions] = useState<Array<{ symbol: string; company_name: string; sector?: string }>>([]);
   const [error, setError] = useState('');
   const [showHowItWorks, setShowHowItWorks] = useState(false);
+  const [columnPickerOpen, setColumnPickerOpen] = useState(false);
+  const preferenceUserId = localStorage.getItem('userId') || 'local';
+  const [visibleResultColumns, setVisibleResultColumns] = useState<string[]>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(`${BACKTEST_VISIBLE_COLUMNS_KEY}:${preferenceUserId}`) || '[]');
+      return Array.isArray(saved) && saved.length ? normalizeVisibleResultColumns(saved.map(String)) : [...DEFAULT_VISIBLE_RESULT_COLUMNS];
+    } catch {
+      return [...DEFAULT_VISIBLE_RESULT_COLUMNS];
+    }
+  });
+  const activeResultColumns = useMemo(
+    () => normalizeVisibleResultColumns(visibleResultColumns)
+      .map((key) => RESULT_COLUMNS.find((column) => column.key === key))
+      .filter(Boolean) as typeof RESULT_COLUMNS,
+    [visibleResultColumns],
+  );
+  useEffect(() => {
+    localStorage.setItem(`${BACKTEST_VISIBLE_COLUMNS_KEY}:${preferenceUserId}`, JSON.stringify(visibleResultColumns));
+  }, [preferenceUserId, visibleResultColumns]);
   const [tab, setTab] = useState<'opportunities' | 'combinations' | 'portfolio' | 'ai' | 'quality'>('combinations');
   const [results, setResults] = useState<ResultPage>({ items: [], page: 1, page_size: 50, total: 0, pages: 0 });
   const [resultScope, setResultScope] = useState<'run' | 'all' | 'strategies' | 'holistic'>(() => {
@@ -467,11 +508,15 @@ const BacktestV2: React.FC = () => {
   useEffect(() => { if (tab === 'opportunities') void loadOpportunities(1); }, [activeRun?.run_id, activeRun?.combinations_completed, tab, opportunityFilters, opportunitySorts, appliedOpportunityFilters, includeNonEquities, opportunities.page_size]);
 
   useEffect(() => {
-    if (!showHowItWorks) return undefined;
-    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') setShowHowItWorks(false); };
+    if (!showHowItWorks && !columnPickerOpen) return undefined;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      if (columnPickerOpen) setColumnPickerOpen(false);
+      else setShowHowItWorks(false);
+    };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [showHowItWorks]);
+  }, [columnPickerOpen, showHowItWorks]);
 
   useEffect(() => {
     if (!selectedOpportunity || fullPageDetail) return undefined;
@@ -701,6 +746,16 @@ const BacktestV2: React.FC = () => {
 
     {error && <div className="research-alert" role="alert">{error}<button onClick={() => setError('')}>Dismiss</button></div>}
 
+    {columnPickerOpen && <ColumnPickerModal
+      open={columnPickerOpen}
+      title="Backtest result columns"
+      subtitle="Choose which result fields to show and drag them into your preferred order."
+      columns={RESULT_COLUMNS}
+      selectedKeys={visibleResultColumns}
+      defaultKeys={DEFAULT_VISIBLE_RESULT_COLUMNS}
+      onClose={() => setColumnPickerOpen(false)}
+      onChange={(keys) => setVisibleResultColumns(normalizeVisibleResultColumns(keys))}
+    />}
     {showHowItWorks && <div className="backtest-help-backdrop" role="presentation">
       <section className="backtest-help-modal" role="dialog" aria-modal="true" aria-labelledby="backtest-help-title">
         <header><div><span>NEPSE Research Lab guide</span><h2 id="backtest-help-title">How this backtest and table work</h2><p>Use this page to compare historical research results—not as a promise of future performance.</p></div><button type="button" className="backtest-help-close" onClick={() => setShowHowItWorks(false)} aria-label="Close how it works">×</button></header>
@@ -805,14 +860,14 @@ const BacktestV2: React.FC = () => {
               <footer>{!resultsBusy && <span>{`${appliedResultFilters.length} active condition${appliedResultFilters.length === 1 ? '' : 's'} · ${resultFilterJoin.toUpperCase()} · stable at this checkpoint`}</span>}<div><button type="button" className="secondary" disabled={resultsBusy} onClick={() => void loadResults(1)}>Refresh new scan results</button><button type="button" className="secondary" disabled={resultsBusy} onClick={resetResultFilters}>Reset filters</button></div></footer>
             </section>
             <div className="recommendation-sort-guide"><span><b>Multi-column ranking:</b> click a heading to make it primary and toggle ↓/↑. Hold Shift while clicking to add or change a secondary rule.</span><button type="button" onClick={() => setResultSorts([{ field: 'win_rate_pct', direction: 'desc' }])}>Reset to win rate</button></div>
-            <div className="research-table-summary"><div><b>{results.total.toLocaleString()} {resultScope === 'holistic' ? 'unique stocks across all runs' : resultScope === 'strategies' ? 'unique simulation configurations across all runs' : resultScope === 'all' ? 'historical results across all runs' : 'results from this run'}</b><span>{resultScope === 'holistic' ? 'Best validated result per stock · duplicate runs removed' : resultScope === 'strategies' ? 'Exact duplicates only: symbol + complete entry/exit strategy + holding/risk/cost/sizing settings + engine versions' : resultScope === 'all' ? 'Complete cached stock × strategy history across every run' : 'Every scanned stock × strategy combination in the selected workspace'} · {resultSorts.map((item, index) => `${index + 1}. ${(columns.find(([key]) => key === item.field)?.[1] || item.field)} ${item.direction === 'desc' ? '↓' : '↑'}`).join(' · ')}</span></div><div className="csv-export-control"><label><span>CSV dataset</span><select value={exportScope} onChange={(event) => setExportScope(event.target.value as 'run' | 'all')}><option value="run">This run · current filters</option><option value="all">All my cached backtests</option></select></label><button type="button" disabled={exporting} onClick={() => void downloadCsv(exportScope)}>{exporting ? 'Preparing download…' : '↓ Download CSV'}</button>{exportStatus && <small>{exportStatus}</small>}</div></div>
-            <div className={`research-table-wrap ${resultsBusy ? 'is-loading' : ''}`} aria-busy={resultsBusy}><table><thead><tr>{columns.map(([key, label]) => { const sortIndex = resultSorts.findIndex((item) => item.field === key); return <th key={key} aria-sort={sortIndex === 0 ? (resultSorts[0].direction === 'desc' ? 'descending' : 'ascending') : undefined}><button type="button" className={`recommendation-sort-button ${sortIndex >= 0 ? 'active' : ''}`} disabled={resultsBusy} title="Click for primary sort; Shift-click to add a sorting rule" onClick={(event) => toggleResultSort(key, event.shiftKey)}>{label}<span>{resultSortMarker(key)}</span></button></th>; })}</tr></thead><tbody>{results.items.map((row) => <tr key={row.result_id} className={row.recommendation_status === 'recommended' ? 'recommended' : ''}>{columns.map(([key]) => <td key={key}>{key === 'symbol' ? <div className="stock-chart-links"><button type="button" className="symbol-link" title={`View ${row.symbol} backtest details`} onClick={() => void openOpportunity(row as Opportunity)}>{row.symbol}</button><NepseAlphaSymbolLink symbol={row.symbol}>Chart ↗</NepseAlphaSymbolLink></div> : key === 'preset_name' ? <button type="button" className="result-detail-link" title={`View ${row.preset_name} details`} onClick={() => void openOpportunity(row as Opportunity)}>{row.preset_name}</button> : key === 'current_signal_status' ? <span className={`signal-pill ${row.current_signal_status}`}>{signalLabel(row.current_signal_status)}</span> : key === 'robust_score' ? <span className={`score score-${Math.floor(Number(row[key] || 0) / 20)}`}>{fmt(row[key], key)}</span> : fmt(row[key], key)}</td>)}</tr>)}</tbody></table>{resultsBusy && <div className="result-table-loading"><span className="filter-spinner" />Ranking exact matches…</div>}{!resultsBusy && results.items.length === 0 && <div className="research-empty">No result matches these exact filters. Filters were not silently weakened.</div>}</div>
+            <div className="research-table-summary"><div><b>{results.total.toLocaleString()} {resultScope === 'holistic' ? 'unique stocks across all runs' : resultScope === 'strategies' ? 'unique simulation configurations across all runs' : resultScope === 'all' ? 'historical results across all runs' : 'results from this run'}</b><span>{resultScope === 'holistic' ? 'Best validated result per stock · duplicate runs removed' : resultScope === 'strategies' ? 'Exact duplicates only: symbol + complete entry/exit strategy + holding/risk/cost/sizing settings + engine versions' : resultScope === 'all' ? 'Complete cached stock × strategy history across every run' : 'Every scanned stock × strategy combination in the selected workspace'} · {resultSorts.map((item, index) => `${index + 1}. ${resultColumnLabel(item.field)} ${item.direction === 'desc' ? '↓' : '↑'}`).join(' · ')}</span></div><div className="research-table-actions"><button type="button" className="research-columns-button" onClick={() => setColumnPickerOpen(true)}>Columns <b>{activeResultColumns.length}/{RESULT_COLUMNS.length}</b></button><div className="csv-export-control"><label><span>CSV dataset</span><select value={exportScope} onChange={(event) => setExportScope(event.target.value as 'run' | 'all')}><option value="run">This run · current filters</option><option value="all">All my cached backtests</option></select></label><button type="button" disabled={exporting} onClick={() => void downloadCsv(exportScope)}>{exporting ? 'Preparing download…' : '↓ Download CSV'}</button>{exportStatus && <small>{exportStatus}</small>}</div></div></div>
+            <div className={`research-table-wrap ${resultsBusy ? 'is-loading' : ''}`} aria-busy={resultsBusy}><table><thead><tr>{activeResultColumns.map(({ key, label }) => { const sortIndex = resultSorts.findIndex((item) => item.field === key); return <th key={key} aria-sort={sortIndex === 0 ? (resultSorts[0].direction === 'desc' ? 'descending' : 'ascending') : undefined}><button type="button" className={`recommendation-sort-button ${sortIndex >= 0 ? 'active' : ''}`} disabled={resultsBusy} title="Click for primary sort; Shift-click to add a sorting rule" onClick={(event) => toggleResultSort(key, event.shiftKey)}>{label}<span>{resultSortMarker(key)}</span></button></th>; })}</tr></thead><tbody>{results.items.map((row) => <tr key={row.result_id} className={row.recommendation_status === 'recommended' ? 'recommended' : ''}>{activeResultColumns.map(({ key }) => <td key={key}>{key === 'symbol' ? <div className="stock-chart-links"><button type="button" className="symbol-link" title={`View ${row.symbol} backtest details`} onClick={() => void openOpportunity(row as Opportunity)}>{row.symbol}</button><NepseAlphaSymbolLink symbol={row.symbol}>Chart ↗</NepseAlphaSymbolLink></div> : key === 'preset_name' ? <button type="button" className="result-detail-link" title={`View ${row.preset_name} details`} onClick={() => void openOpportunity(row as Opportunity)}>{row.preset_name}</button> : key === 'current_signal_status' ? <span className={`signal-pill ${row.current_signal_status}`}>{signalLabel(row.current_signal_status)}</span> : key === 'robust_score' ? <span className={`score score-${Math.floor(Number(row[key] || 0) / 20)}`}>{fmt(row[key], key)}</span> : fmt(row[key], key)}</td>)}</tr>)}</tbody></table>{resultsBusy && <div className="result-table-loading"><span className="filter-spinner" />Ranking exact matches…</div>}{!resultsBusy && results.items.length === 0 && <div className="research-empty">No result matches these exact filters. Filters were not silently weakened.</div>}</div>
             <div className="research-pagination"><button disabled={resultsBusy || results.page <= 1} onClick={() => void loadResults(results.page - 1)}>Previous</button><span>{resultsBusy ? 'Loading exact page…' : `Page ${results.page} of ${results.pages || 1}`}</span><button disabled={resultsBusy || results.page >= results.pages} onClick={() => void loadResults(results.page + 1)}>Next</button></div>
           </section>}
 
           {tab === 'portfolio' && <section className="research-panel"><div className="research-panel-title"><div><h3>Shared-capital strategy leaderboard</h3><p>One cash balance · max 10 positions · 10% per stock · 30% per sector · 5% reserve.</p></div></div><div className="portfolio-grid">{portfolios.map((item) => <article key={item.preset_id}><span>{item.preset_name}</span><strong className={item.summary.net_return_pct >= 0 ? 'positive' : 'negative'}>{fmt(item.summary.net_return_pct, 'return')}%</strong><dl><div><dt>Final equity</dt><dd>NPR {fmt(item.summary.final_equity, 'money')}</dd></div><div><dt>Drawdown</dt><dd>{fmt(item.summary.max_drawdown_pct, 'percent')}%</dd></div><div><dt>Accepted</dt><dd>{item.summary.accepted_signals}</dd></div><div><dt>Rejected</dt><dd>{item.summary.rejected_signals}</dd></div></dl></article>)}</div>{portfolios.length === 0 && <div className="research-empty">Portfolio results are finalized after the stock scan completes.</div>}</section>}
 
-          {tab === 'ai' && <section className="research-panel"><div className="research-panel-title"><div><h3>Ask AI for the top 10</h3><p>Search every cached strategy result using a validated query plan. Generated SQL is never executed.</p></div><label>Search scope<select value={aiScope} onChange={(e) => setAiScope(e.target.value as 'all' | 'run')}><option value="all">All my backtest data</option><option value="run">Current run only</option></select></label></div><div className="ai-backtest-presets" aria-label="AI backtest prompt presets">{aiBacktestPresets.map((prompt, index) => <button type="button" key={prompt} onClick={() => setAiQuestion(prompt)}><b>Preset {index + 1}</b><span>{prompt}</span></button>)}</div><div className="ai-query"><textarea rows={4} value={aiQuestion} onChange={(e) => setAiQuestion(e.target.value)} placeholder="Describe the stocks, strategies, risk limits, and ranking you want…" /><button disabled={aiBusy} onClick={() => void askAi()}>{aiBusy ? 'Validating…' : 'Generate query + top 10'}</button></div>{aiAnswer && <><pre>{aiAnswer.generated_query}</pre><p>{aiAnswer.explanation}</p><p><b>{aiAnswer.recommendation_summary}</b></p>{aiAnswer.total_matches === 0 && <div className="research-alert">No exact matches. {aiAnswer.suggested_relaxations.join(' ')}</div>}<div className="research-table-wrap"><table><thead><tr>{columns.slice(0, 10).map(([key, label]) => <th key={key}>{label}</th>)}<th>Why it matched</th></tr></thead><tbody>{aiAnswer.items.map((row: ResultRow) => <tr key={row.result_id}>{columns.slice(0, 10).map(([key]) => <td key={key}>{fmt(row[key], key)}</td>)}<td>{(row.match_reasons || []).join(' · ')}</td></tr>)}</tbody></table></div></>}</section>}
+          {tab === 'ai' && <section className="research-panel"><div className="research-panel-title"><div><h3>Ask AI for the top 10</h3><p>Search every cached strategy result using a validated query plan. Generated SQL is never executed.</p></div><label>Search scope<select value={aiScope} onChange={(e) => setAiScope(e.target.value as 'all' | 'run')}><option value="all">All my backtest data</option><option value="run">Current run only</option></select></label></div><div className="ai-backtest-presets" aria-label="AI backtest prompt presets">{aiBacktestPresets.map((prompt, index) => <button type="button" key={prompt} onClick={() => setAiQuestion(prompt)}><b>Preset {index + 1}</b><span>{prompt}</span></button>)}</div><div className="ai-query"><textarea rows={4} value={aiQuestion} onChange={(e) => setAiQuestion(e.target.value)} placeholder="Describe the stocks, strategies, risk limits, and ranking you want…" /><button disabled={aiBusy} onClick={() => void askAi()}>{aiBusy ? 'Validating…' : 'Generate query + top 10'}</button></div>{aiAnswer && <><pre>{aiAnswer.generated_query}</pre><p>{aiAnswer.explanation}</p><p><b>{aiAnswer.recommendation_summary}</b></p>{aiAnswer.total_matches === 0 && <div className="research-alert">No exact matches. {aiAnswer.suggested_relaxations.join(' ')}</div>}<div className="research-table-wrap"><table><thead><tr>{columns.slice(0, 10).map(({ key, label }) => <th key={key}>{label}</th>)}<th>Why it matched</th></tr></thead><tbody>{aiAnswer.items.map((row: ResultRow) => <tr key={row.result_id}>{columns.slice(0, 10).map(({ key }) => <td key={key}>{fmt(row[key], key)}</td>)}<td>{(row.match_reasons || []).join(' · ')}</td></tr>)}</tbody></table></div></>}</section>}
 
           {tab === 'quality' && <section className="research-panel quality-grid"><article><b>Universe snapshot</b><strong>{activeRun.symbols_total}</strong><p>Instrument membership is frozen when the run starts.</p></article><article><b>Completed symbols</b><strong>{activeRun.symbols_completed}</strong><p>Each completion is checkpointed for restart recovery.</p></article><article><b>Ordinary-share enforcement</b><strong>{activeRun.configuration.ordinary_shares_only ? 'On' : 'Explicitly off'}</strong><p>Non-equities stay excluded at the API unless explicitly requested.</p></article><article><b>Validation split</b><strong>70 / 30</strong><p>The newest 30% of sessions are locked for out-of-sample metrics.</p></article></section>}
         </>}

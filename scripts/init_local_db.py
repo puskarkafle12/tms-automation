@@ -36,10 +36,13 @@ def main() -> None:
             if not str(existing.password).startswith("pbkdf2_sha256$"):
                 # Preserve an existing legacy password while upgrading its storage.
                 existing.password = hash_password(str(existing.password))
-            elif seed_password != "admin" and verify_password("admin", str(existing.password)):
-                # One-time migration away from the historical public default.
+            if not verify_password(seed_password, str(existing.password)):
+                # Keep the seed login in sync with FRONTEND_SEED_PASSWORD so a
+                # fresh pull + restart always accepts the configured credentials.
+                # Do not bump token_version here — that would force every open
+                # browser session to sign in again after a routine restart.
                 existing.password = hash_password(seed_password)
-                existing.token_version = int(existing.token_version or 1) + 1
+                print(f"Reset password for seed user: {seed_user}")
             existing.role = "superuser"
             existing.is_active = True
             print(f"Frontend user already exists: {seed_user}")

@@ -18,6 +18,8 @@ services:
       DB_NAME: stock
       FRONTEND_SEED_USER: ${FRONTEND_SEED_USER:-admin}
       FRONTEND_SEED_PASSWORD: ${FRONTEND_SEED_PASSWORD:-nepse2026}
+      # Keep the browser session signed in across reloads (30 days).
+      AUTH_TOKEN_HOURS: ${AUTH_TOKEN_HOURS:-720}
       FRONTEND_ADMIN_USER: ${FRONTEND_ADMIN_USER:-manager}
       FRONTEND_ADMIN_PASSWORD: ${FRONTEND_ADMIN_PASSWORD:-manager2026}
       FRONTEND_NORMAL_USER: ${FRONTEND_NORMAL_USER:-user}
