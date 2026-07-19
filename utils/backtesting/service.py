@@ -75,7 +75,13 @@ def _epoch_start(value: date) -> int:
     return int(datetime(value.year, value.month, value.day, tzinfo=timezone.utc).timestamp())
 
 
-def fetch_historical_bars(symbol: str, start_date: date, end_date: date) -> List[Bar]:
+def fetch_historical_bars(
+    symbol: str,
+    start_date: date,
+    end_date: date,
+    *,
+    force_tail_refresh: bool = False,
+) -> List[Bar]:
     clean_symbol = str(symbol or "").strip().upper()
     if not SYMBOL_RE.fullmatch(clean_symbol):
         raise BacktestError("Enter a valid uppercase NEPSE symbol.")
@@ -89,7 +95,7 @@ def fetch_historical_bars(symbol: str, start_date: date, end_date: date) -> List
         cached = cached_history(clean_symbol, start_date, end_date)
     except Exception:
         cached = None
-    if cached is not None:
+    if cached is not None and not force_tail_refresh:
         result = [Bar(
             timestamp=int(item["source_timestamp"] or datetime(
                 item["session_date"].year, item["session_date"].month,

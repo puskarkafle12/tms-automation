@@ -359,6 +359,19 @@ async def retry_backtest_v2_run(run_id: str, current_user: FrontendUser = Depend
     return await _control_backtest_v2_run(run_id, "retry", str(current_user.id))
 
 
+@router.post("/backtests/v2/runs/{run_id}/refresh", status_code=202)
+async def refresh_backtest_v2_run(run_id: str, current_user: FrontendUser = Depends(require_permission("backtest"))):
+    from utils.backtesting.v2_jobs import refresh_run_incrementally
+    try:
+        return await run_in_threadpool(
+            refresh_run_incrementally,
+            run_id,
+            owner_id=str(current_user.id),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.post("/backtests/v2/runs/{run_id}/clone-with-name", status_code=202)
 async def clone_backtest_v2_run(run_id: str, body: BacktestV2CloneRequest, current_user: FrontendUser = Depends(require_permission("backtest"))):
     from utils.backtesting.v2_jobs import clone_run

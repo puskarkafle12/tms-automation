@@ -253,6 +253,7 @@ const BacktestV2: React.FC = () => {
   const [creating, setCreating] = useState(false);
   const [runControlBusy, setRunControlBusy] = useState<'pause' | 'resume' | 'cancel' | 'retry' | null>(null);
   const [runControlMessage, setRunControlMessage] = useState('');
+  const [workspaceRefreshBusy, setWorkspaceRefreshBusy] = useState(false);
   const [uniqueConfigurationTotal, setUniqueConfigurationTotal] = useState(0);
   const [runScope, setRunScope] = useState<'all' | 'single'>('all');
   const [stockSearch, setStockSearch] = useState('');
@@ -321,6 +322,29 @@ const BacktestV2: React.FC = () => {
     setActiveRun((current) => current
       ? response.data.items.find((item) => item.run_id === current.run_id) || current
       : response.data.items.find((item) => item.run_id === requested) || response.data.items[0] || null);
+  };
+
+  const refreshActiveWorkspace = async () => {
+    if (!activeRun) { await loadRuns(); return; }
+    setWorkspaceRefreshBusy(true);
+    setError('');
+    const response = await fetchJson<Run>(`/api/backtests/v2/runs/${activeRun.run_id}/refresh`, {
+      method: 'POST',
+    });
+    setWorkspaceRefreshBusy(false);
+    if (!response.ok) {
+      setError(response.error || 'Could not queue the incremental refresh.');
+      return;
+    }
+    setActiveRun(response.data);
+    setRuns((current) => current.map((run) => (
+      run.run_id === response.data.run_id ? response.data : run
+    )));
+    setRunControlMessage(
+      response.data.status === 'running' || response.data.status === 'queued'
+        ? 'Checking for new market sessions. Unchanged stock and strategy results will be reused.'
+        : 'Workspace is already up to date.',
+    );
   };
 
   useEffect(() => {
@@ -693,7 +717,7 @@ const BacktestV2: React.FC = () => {
     </div>}
 
     <section className="research-run-library" aria-label="Saved backtest runs">
-      <div className="research-run-library-head"><span><small>Continuous research</small><h2>Scan workspaces</h2><p>Identical stock and strategy scans update one workspace instead of creating duplicates.</p></span><div><strong>{runs.length}</strong><span>unique</span><button onClick={() => void loadRuns()}>Refresh</button></div></div>
+      <div className="research-run-library-head"><span><small>Continuous research</small><h2>Scan workspaces</h2><p>Identical stock and strategy scans update one workspace. Refresh checks only missing market-data tails and reuses unchanged results.</p></span><div><strong>{runs.length}</strong><span>unique</span><button disabled={workspaceRefreshBusy} onClick={() => void refreshActiveWorkspace()}>{workspaceRefreshBusy ? 'Checking…' : 'Refresh new data'}</button></div></div>
       <div className="research-run-strip">{runs.length > 0 && <button className={`all-runs-card ${allRunsSelected ? 'active' : ''}`} onClick={() => { setAllRunsSelected(true); setResultScope('strategies'); setTab('combinations'); }}><span className="research-run-card-top"><b>All runs</b><em>combined</em></span><span className="research-run-card-metrics"><small><strong>{runs.length}</strong> workspaces</small><small><strong>{uniqueConfigurationTotal.toLocaleString()}</strong> unique configurations</small></span><span className="research-run-card-progress"><i style={{ width: '100%' }} /></span></button>}{runs.length === 0 ? <p>No v2 research runs yet.</p> : runs.map((run) => <button key={run.run_id} className={!allRunsSelected && activeRun?.run_id === run.run_id ? 'active' : ''} onClick={() => { setAllRunsSelected(false); setResultScope('run'); setActiveRun(run); }}><span className="research-run-card-top"><b>{run.name}</b><em className={`run-${run.status}`}>{run.status}</em></span><span className="research-run-card-metrics"><small><strong>{run.symbols_completed}/{run.symbols_total}</strong> stocks</small><small><strong>{run.combinations_completed.toLocaleString()}</strong> results</small></span><span className="research-run-card-progress"><i style={{ width: `${Math.max(0, Math.min(100, run.progress_pct || 0))}%` }} /></span></button>)}</div>
     </section>
 

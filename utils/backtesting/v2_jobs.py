@@ -7,10 +7,12 @@ import hashlib
 import multiprocessing
 import os
 import socket
+import subprocess
+import sys
 import threading
 import time
 import uuid
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
@@ -38,6 +40,7 @@ from utils.strategy_builder.strategy_parser import (
 BACKTEST_ENGINE_VERSION = "nepse-daily-v2"
 _WORKER_LOCK = threading.Lock()
 _WORKER_STARTED = False
+_WORKER_PROCESS: Optional[subprocess.Popen] = None
 _WORKER_ID = f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
 NEPAL_TZ = ZoneInfo("Asia/Kathmandu")
 DAILY_REFRESH_HOURS = (10, 16)
@@ -743,6 +746,42 @@ def _persist_symbol_output(
         session.close()
 
 
+def _complete_unchanged_symbol(run_id: str, symbol: str) -> None:
+    """Checkpoint an incremental cache hit without rewriting its results."""
+    session = _session()
+    try:
+        session.execute(text(
+            """UPDATE backtest_run_symbols
+               SET status='completed',error=NULL,completed_at=NOW()
+               WHERE run_id=:run_id AND symbol=:symbol"""
+        ), {"run_id": run_id, "symbol": symbol})
+        session.execute(text(
+            """UPDATE backtest_runs
+               SET symbols_completed=(
+                     SELECT COUNT(*) FROM backtest_run_symbols
+                     WHERE run_id=:run_id AND status IN ('completed','failed')
+                   ),
+                   combinations_completed=(
+                     SELECT COUNT(*) FROM backtest_results WHERE run_id=:run_id
+                   ),
+                   current_symbol=:symbol,
+                   progress_pct=ROUND((
+                     100.0*(SELECT COUNT(*) FROM backtest_run_symbols
+                            WHERE run_id=:run_id AND status IN ('completed','failed'))
+                     / NULLIF(symbols_total,0)
+                   )::numeric,1)::double precision,
+                   heartbeat_at=NOW(),lease_expires_at=NOW()+INTERVAL '45 seconds',
+                   updated_at=NOW()
+               WHERE run_id=:run_id"""
+        ), {"run_id": run_id, "symbol": symbol})
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
 def _finalize_scores(run_id: str) -> None:
     session = _session()
     try:
@@ -786,9 +825,16 @@ def run_claimed_run(run_id: str) -> None:
     try:
         row = session.execute(text("SELECT configuration FROM backtest_runs WHERE run_id=:run_id"), {"run_id": run_id}).mappings().one()
         config = dict(row["configuration"] or {})
-        symbols = session.execute(text(
-            "SELECT symbol FROM backtest_run_symbols WHERE run_id=:run_id AND status NOT IN ('completed') ORDER BY symbol"
-        ), {"run_id": run_id}).scalars().all()
+        symbol_rows = session.execute(text(
+            """SELECT symbol,last_tested_session
+               FROM backtest_run_symbols
+               WHERE run_id=:run_id AND status NOT IN ('completed')
+               ORDER BY symbol"""
+        ), {"run_id": run_id}).mappings().all()
+        symbols = [str(item["symbol"]) for item in symbol_rows]
+        last_tested_by_symbol = {
+            str(item["symbol"]): item["last_tested_session"] for item in symbol_rows
+        }
     finally:
         session.close()
     if config.get("strategy_mode") == "custom" and config.get("custom_strategy"):
@@ -824,6 +870,54 @@ def run_claimed_run(run_id: str) -> None:
             repair_session.close()
     else:
         presets = [item for item in get_backtest_presets() if item["id"] in set(config.get("preset_ids") or [])]
+    incremental_refresh = bool(config.get("refresh_discover_new_data"))
+    if incremental_refresh:
+        # Probe only the missing tail before consulting result artifacts. The
+        # history fetcher keeps one overlap session for upstream corrections,
+        # while unchanged symbols retain the same artifact key and finish from
+        # cache without replaying any strategy.
+        from utils.backtesting.service import fetch_historical_bars
+
+        refresh_workers = min(
+            8,
+            max(1, int(os.getenv("BACKTEST_REFRESH_FETCH_WORKERS", "4"))),
+        )
+
+        def refresh_tail(symbol: str) -> None:
+            if str(config.get("data_source") or "merolagani") == "merolagani":
+                fetch_historical_bars(
+                    str(symbol),
+                    date.fromisoformat(config["start_date"]),
+                    date.fromisoformat(config["end_date"]),
+                    force_tail_refresh=True,
+                )
+
+        with ThreadPoolExecutor(
+            max_workers=refresh_workers,
+            thread_name_prefix="backtest-tail-refresh",
+        ) as refresh_executor:
+            refresh_futures = {
+                refresh_executor.submit(refresh_tail, str(symbol)): str(symbol)
+                for symbol in symbols
+            }
+            for future in as_completed(refresh_futures):
+                try:
+                    future.result()
+                except Exception:
+                    # The normal symbol task retries failed fetches and records a
+                    # per-symbol error without aborting the rest of the workspace.
+                    continue
+        config["refresh_discover_new_data"] = False
+        refresh_session = _session()
+        try:
+            refresh_session.execute(text(
+                """UPDATE backtest_runs
+                   SET configuration=CAST(:configuration AS JSONB),updated_at=NOW()
+                   WHERE run_id=:run_id"""
+            ), {"run_id": run_id, "configuration": json.dumps(config)})
+            refresh_session.commit()
+        finally:
+            refresh_session.close()
     settings = {
         "initial_capital": float(config.get("initial_capital") or 100000),
         "charge_model": str(config.get("charge_model") or "nepse_equity"),
@@ -867,19 +961,26 @@ def run_claimed_run(run_id: str) -> None:
     # workers. The bundled web/database container defaults to one background
     # process so scans cannot starve normal application requests.
     workers = background_worker_limit(int(config.get("max_workers") or 1))
+    results_changed = False
     try:
         # Complete cache-only symbols immediately so partial tables update without
         # waiting for the process pool or recomputing any historical combination.
         for symbol in symbols:
             cached = cached_by_symbol[str(symbol)]
             if not cached["missing"]:
-                _persist_symbol_output(
-                    run_id, {
-                        "symbol": str(symbol), "results": cached["results"],
-                        "market_profile": cached["market_profile"],
-                        "technical_snapshot": cached["technical_snapshot"], "error": None,
-                    }, config=config, presets=[], cache_results=False,
-                )
+                cached_session = cached.get("data_session")
+                last_tested = last_tested_by_symbol.get(str(symbol))
+                if incremental_refresh and cached_session and last_tested and cached_session <= last_tested:
+                    _complete_unchanged_symbol(run_id, str(symbol))
+                else:
+                    _persist_symbol_output(
+                        run_id, {
+                            "symbol": str(symbol), "results": cached["results"],
+                            "market_profile": cached["market_profile"],
+                            "technical_snapshot": cached["technical_snapshot"], "error": None,
+                        }, config=config, presets=[], cache_results=False,
+                    )
+                    results_changed = True
         if tasks:
             context = multiprocessing.get_context("spawn")
             with ProcessPoolExecutor(
@@ -908,6 +1009,7 @@ def run_claimed_run(run_id: str) -> None:
                         run_id, merged, config=config, presets=list(cached["missing"]),
                         cache_results=bool(computed),
                     )
+                    results_changed = True
         control = _control_state(run_id)
         session = _session()
         try:
@@ -916,7 +1018,8 @@ def run_claimed_run(run_id: str) -> None:
             elif control["pause"]:
                 status = "paused"
             else:
-                _finalize_scores(run_id)
+                if not incremental_refresh or results_changed:
+                    _finalize_scores(run_id)
                 status = "completed"
             session.execute(text(
                 """UPDATE backtest_runs SET status=:status,progress_pct=CASE WHEN :status='completed' THEN 100 ELSE progress_pct END,
@@ -938,6 +1041,67 @@ def run_claimed_run(run_id: str) -> None:
             session.commit()
         finally:
             session.close()
+
+
+def _queue_incremental_refresh(
+    session,
+    *,
+    run_id: str,
+    config: Dict[str, Any],
+    refresh_slot: Optional[str] = None,
+) -> None:
+    """Queue one workspace to discover new tails and reuse unchanged artifacts."""
+    today = datetime.now(NEPAL_TZ).date()
+    configured_end = date.fromisoformat(str(config.get("end_date") or today.isoformat()))
+    config["end_date"] = max(configured_end, today).isoformat()
+    config["refresh_discover_new_data"] = True
+    if refresh_slot:
+        config["last_refresh_slot"] = refresh_slot
+    session.execute(text(
+        """UPDATE backtest_run_symbols
+           SET status='queued',error=NULL,completed_at=NULL
+           WHERE run_id=:run_id"""
+    ), {"run_id": run_id})
+    session.execute(text(
+        """UPDATE backtest_runs
+           SET status='queued',configuration=CAST(:configuration AS JSONB),
+               symbols_completed=0,
+               symbols_total=(SELECT COUNT(*) FROM backtest_run_symbols WHERE run_id=:run_id),
+               progress_pct=0,current_symbol=NULL,cancel_requested=FALSE,
+               pause_requested=FALSE,error_summary=NULL,finished_at=NULL,updated_at=NOW()
+           WHERE run_id=:run_id"""
+    ), {"run_id": run_id, "configuration": json.dumps(config)})
+
+
+def refresh_run_incrementally(run_id: str, *, owner_id: str = "local") -> Dict[str, Any]:
+    """Request a fast refresh that replays only symbols whose data changed."""
+    session = _session()
+    try:
+        row = session.execute(text(
+            """SELECT run_id,status,configuration
+               FROM backtest_runs
+               WHERE run_id=:run_id AND owner_id=:owner_id AND deleted_at IS NULL
+               FOR UPDATE"""
+        ), {"run_id": run_id, "owner_id": owner_id}).mappings().first()
+        if not row:
+            raise ValueError("Backtest workspace was not found.")
+        if row["status"] in {"queued", "running", "paused"}:
+            session.rollback()
+            return get_run(run_id, owner_id=owner_id)
+        config = dict(row["configuration"] or {})
+        _queue_incremental_refresh(
+            session,
+            run_id=run_id,
+            config=config,
+            refresh_slot=f"manual:{datetime.now(NEPAL_TZ).isoformat(timespec='seconds')}",
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+    return get_run(run_id, owner_id=owner_id)
 
 
 def _queue_scheduled_refreshes() -> int:
@@ -972,36 +1136,24 @@ def _queue_scheduled_refreshes() -> int:
             config = dict(row["configuration"] or {})
             if config.get("last_refresh_slot") == slot:
                 continue
-            config["end_date"] = now.date().isoformat()
-            config["last_refresh_slot"] = slot
             metadata_updates = [
                 {"run_id": row["run_id"], "symbol": symbol, "ltp": item.get("ltp"),
                  "latest_volume": item.get("latest_volume")}
                 for symbol, item in metadata.items()
             ]
-            stale_symbols = 0
             if metadata_updates:
-                stale_symbols = session.execute(text(
-                    """UPDATE backtest_run_symbols SET status='queued',error=NULL,completed_at=NULL,
-                              ltp=COALESCE(:ltp,ltp),latest_volume=COALESCE(:latest_volume,latest_volume)
-                       WHERE run_id=:run_id AND symbol=:symbol
-                         AND (last_tested_session IS NULL OR last_tested_session < COALESCE((
-                             SELECT MAX((to_timestamp(m.source_timestamp) AT TIME ZONE 'UTC')::date)
-                             FROM market_ohlcv_daily m WHERE m.symbol=:symbol AND m.adjusted=TRUE
-                         ),last_tested_session))"""
-                ), metadata_updates).rowcount
-            if not stale_symbols:
-                config["last_refresh_slot"] = slot
                 session.execute(text(
-                    "UPDATE backtest_runs SET configuration=CAST(:configuration AS JSONB),last_refresh_at=NOW(),updated_at=NOW() WHERE run_id=:run_id"
-                ), {"run_id": row["run_id"], "configuration": json.dumps(config)})
-                continue
-            session.execute(text(
-                """UPDATE backtest_runs SET status='queued',configuration=CAST(:configuration AS JSONB),
-                          symbols_completed=0,progress_pct=0,current_symbol=NULL,cancel_requested=FALSE,
-                          pause_requested=FALSE,error_summary=NULL,finished_at=NULL,updated_at=NOW()
-                   WHERE run_id=:run_id"""
-            ), {"run_id": row["run_id"], "configuration": json.dumps(config)})
+                    """UPDATE backtest_run_symbols
+                       SET ltp=COALESCE(:ltp,ltp),
+                           latest_volume=COALESCE(:latest_volume,latest_volume)
+                       WHERE run_id=:run_id AND symbol=:symbol"""
+                ), metadata_updates)
+            _queue_incremental_refresh(
+                session,
+                run_id=str(row["run_id"]),
+                config=config,
+                refresh_slot=slot,
+            )
             queued += 1
         session.commit()
         return queued
@@ -1060,12 +1212,34 @@ def worker_loop() -> None:
 
 
 def start_worker() -> bool:
-    global _WORKER_STARTED
+    global _WORKER_PROCESS, _WORKER_STARTED
     with _WORKER_LOCK:
-        if _WORKER_STARTED:
+        if _WORKER_PROCESS is not None and _WORKER_PROCESS.poll() is None:
             return False
+        environment = dict(os.environ)
+        environment["BACKTEST_V2"] = "false"
+        _WORKER_PROCESS = subprocess.Popen(
+            [sys.executable, "-m", "utils.backtesting.v2_worker"],
+            env=environment,
+        )
         _WORKER_STARTED = True
-    threading.Thread(target=worker_loop, name="backtest-v2-worker", daemon=True).start()
+    return True
+
+
+def stop_worker() -> bool:
+    global _WORKER_PROCESS, _WORKER_STARTED
+    with _WORKER_LOCK:
+        process = _WORKER_PROCESS
+        _WORKER_PROCESS = None
+        _WORKER_STARTED = False
+    if process is None or process.poll() is not None:
+        return False
+    process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
     return True
 
 

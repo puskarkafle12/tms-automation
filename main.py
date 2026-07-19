@@ -813,6 +813,9 @@ async def close_cached_tms_users() -> None:
     await live_quote_manager.close_all()
     for client_id in list(tms_user_cache.keys()):
         await invalidate_cached_tms_user(client_id)
+    if os.getenv("BACKTEST_V2", "true").strip().lower() in {"1", "true", "yes", "on"}:
+        from utils.backtesting.v2_jobs import stop_worker as stop_backtest_v2_worker
+        await asyncio.to_thread(stop_backtest_v2_worker)
 
 @app.on_event("startup")
 async def ensure_database_indexes() -> None:

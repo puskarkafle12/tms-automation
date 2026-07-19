@@ -38,6 +38,9 @@ services:
       BACKTEST_MAX_WORKERS: ${BACKTEST_MAX_WORKERS:-1}
       BACKTEST_RESERVED_CPUS: ${BACKTEST_RESERVED_CPUS:-1}
       BACKTEST_WORKER_NICE: ${BACKTEST_WORKER_NICE:-10}
+      # Tail discovery is network-bound; modest concurrency makes daily
+      # incremental checks fast without increasing strategy replay CPU.
+      BACKTEST_REFRESH_FETCH_WORKERS: ${BACKTEST_REFRESH_FETCH_WORKERS:-4}
       # Prevent NumPy/BLAS inside each scan process from creating its own CPU
       # pool and starving normal API/dashboard requests.
       OMP_NUM_THREADS: ${BACKTEST_NUMERIC_THREADS:-1}
