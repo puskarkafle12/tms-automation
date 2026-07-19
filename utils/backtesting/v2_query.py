@@ -269,7 +269,7 @@ def query_results(session, run_id: str, body: Dict[str, Any], *, owner_id: str =
     inner_order, outer_order, sorts = compile_result_sorts(body)
     where, params = compile_filters(body.get("filters"), include_non_equities=bool(body.get("include_non_equities")))
     params.update({"run_id": run_id, "owner_id": owner_id, "limit": page_size, "offset": (page - 1) * page_size})
-    ownership = "br.owner_id=:owner_id AND br.deleted_at IS NULL"
+    ownership = "br.owner_id=:owner_id AND br.deleted_at IS NULL AND br.archived_at IS NULL"
     scope = "(:run_id='all' OR r.run_id=:run_id)"
     base = "FROM backtest_results r JOIN backtest_run_symbols s ON s.run_id=r.run_id AND s.symbol=r.symbol JOIN backtest_runs br ON br.run_id=r.run_id"
     select = ",".join(f"{column} AS {key}" for key, column in RESULT_FIELDS.items())
@@ -292,7 +292,9 @@ def query_results(session, run_id: str, body: Dict[str, Any], *, owner_id: str =
             canonical_security = "TRUE" if body.get("include_non_equities") else "canonical.security_type='ordinary_share'"
             total = int(session.execute(text(
                 "SELECT COUNT(*) FROM backtest_canonical_results canonical "
+                "JOIN backtest_runs br ON br.run_id=canonical.run_id "
                 "WHERE canonical.owner_id=:owner_id AND (:run_id='all' OR canonical.run_id=:run_id) "
+                "AND br.deleted_at IS NULL AND br.archived_at IS NULL "
                 f"AND {canonical_security}"
             ), params).scalar() or 0)
         else:
@@ -322,7 +324,7 @@ def stream_results_csv(session_factory, run_id: str, body: Dict[str, Any], *, ow
     inner_order, _, _ = compile_result_sorts(body)
     where, params = compile_filters(body.get("filters"), include_non_equities=bool(body.get("include_non_equities")))
     params.update({"run_id": run_id, "owner_id": owner_id})
-    ownership = "br.owner_id=:owner_id AND br.deleted_at IS NULL"
+    ownership = "br.owner_id=:owner_id AND br.deleted_at IS NULL AND br.archived_at IS NULL"
     base = "FROM backtest_results r JOIN backtest_run_symbols s ON s.run_id=r.run_id AND s.symbol=r.symbol JOIN backtest_runs br ON br.run_id=r.run_id"
     select = ",".join(f"{column} AS {key}" for key, column in RESULT_FIELDS.items())
     statement = text(
@@ -354,7 +356,7 @@ def result_detail(session, result_id: int, *, owner_id: str = "local") -> Dict[s
     row = session.execute(text(
         f"SELECT {select},r.assumptions,r.technical_snapshot FROM backtest_results r "
         "JOIN backtest_runs br ON br.run_id=r.run_id JOIN backtest_run_symbols s ON s.run_id=r.run_id AND s.symbol=r.symbol "
-        "WHERE r.result_id=:result_id AND br.owner_id=:owner_id AND br.deleted_at IS NULL"
+        "WHERE r.result_id=:result_id AND br.owner_id=:owner_id AND br.deleted_at IS NULL AND br.archived_at IS NULL"
     ), {"result_id": result_id, "owner_id": owner_id}).mappings().first()
     if not row:
         raise ResultQueryError("Backtest result was not found.")
@@ -452,7 +454,7 @@ def query_strong_buys(session, run_id: str, body: Dict[str, Any], *, owner_id: s
         JOIN backtest_run_symbols s ON s.run_id=r.run_id AND s.symbol=r.symbol
         LEFT JOIN market_screener_cache c ON c.symbol=r.symbol
         WHERE (:run_id='all' OR r.run_id=:run_id) AND br.owner_id=:owner_id
-          AND br.deleted_at IS NULL AND {universe} AND {requirements}"""
+          AND br.deleted_at IS NULL AND br.archived_at IS NULL AND {universe} AND {requirements}"""
     cte = f"""WITH candidates AS (SELECT {columns},{recommendation_score} AS recommendation_score,
         ROW_NUMBER() OVER(PARTITION BY r.symbol ORDER BY {recommendation_score} DESC,
             NULLIF(r.assumptions->'summary'->>'net_profit','')::double precision DESC NULLS LAST,

@@ -36,10 +36,11 @@ services:
       ZROK_STALE_ENV_ZIDS: ${ZROK_STALE_ENV_ZIDS:-}
       ZROK_RESET_SHARES: ${ZROK_RESET_SHARES:-all}
       # Keep the web/API process responsive while a market scan is running.
-      # Raise only after measuring spare server CPU capacity.
-      BACKTEST_MAX_WORKERS: ${BACKTEST_MAX_WORKERS:-1}
+      # Default 2 workers uses spare cores; raise only after measuring capacity.
+      BACKTEST_MAX_WORKERS: ${BACKTEST_MAX_WORKERS:-2}
       BACKTEST_RESERVED_CPUS: ${BACKTEST_RESERVED_CPUS:-1}
-      BACKTEST_WORKER_NICE: ${BACKTEST_WORKER_NICE:-10}
+      # Mild niceness: yield under load, but use idle CPU for faster scans.
+      BACKTEST_WORKER_NICE: ${BACKTEST_WORKER_NICE:-5}
       # Tail discovery is network-bound; modest concurrency makes daily
       # incremental checks fast without increasing strategy replay CPU.
       BACKTEST_REFRESH_FETCH_WORKERS: ${BACKTEST_REFRESH_FETCH_WORKERS:-4}

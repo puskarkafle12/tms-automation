@@ -228,7 +228,7 @@ async def query_sell_recommendations(session, body: Dict[str, Any], *, owner_id:
             PARTITION BY r.symbol ORDER BY r.robust_score DESC NULLS LAST,r.total_trades DESC,r.result_id DESC
           ) AS candidate_rank
           FROM backtest_results r JOIN backtest_runs br ON br.run_id=r.run_id
-          WHERE br.owner_id=:owner_id AND br.deleted_at IS NULL
+          WHERE br.owner_id=:owner_id AND br.deleted_at IS NULL AND br.archived_at IS NULL
             AND r.symbol=ANY(CAST(:symbols AS TEXT[]))
             AND COALESCE(r.assumptions->>'sell_strategy_query','')<>''
         )

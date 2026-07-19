@@ -476,11 +476,14 @@ def ensure_performance_indexes():
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             deleted_at TIMESTAMPTZ
         )""",
-        "CREATE INDEX IF NOT EXISTS ix_backtest_runs_owner_created ON backtest_runs (owner_id, created_at DESC) WHERE deleted_at IS NULL",
+        "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ",
+        "CREATE INDEX IF NOT EXISTS ix_backtest_runs_owner_created ON backtest_runs (owner_id, created_at DESC) WHERE deleted_at IS NULL AND archived_at IS NULL",
         "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS scan_key VARCHAR(64)",
         "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS last_refresh_at TIMESTAMPTZ",
-        "CREATE UNIQUE INDEX IF NOT EXISTS uq_backtest_runs_owner_scan_key ON backtest_runs (owner_id, scan_key) WHERE deleted_at IS NULL AND scan_key IS NOT NULL",
-        "CREATE INDEX IF NOT EXISTS ix_backtest_runs_queue ON backtest_runs (status, created_at) WHERE deleted_at IS NULL",
+        "DROP INDEX IF EXISTS uq_backtest_runs_owner_scan_key",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_backtest_runs_owner_scan_key ON backtest_runs (owner_id, scan_key) WHERE deleted_at IS NULL AND archived_at IS NULL AND scan_key IS NOT NULL",
+        "CREATE INDEX IF NOT EXISTS ix_backtest_runs_queue ON backtest_runs (status, created_at) WHERE deleted_at IS NULL AND archived_at IS NULL",
+        "CREATE INDEX IF NOT EXISTS ix_backtest_runs_archived ON backtest_runs (owner_id, archived_at) WHERE deleted_at IS NULL AND archived_at IS NOT NULL",
         """UPDATE backtest_runs SET owner_id=(SELECT id::text FROM frontend_users WHERE username=:seed_username)
            WHERE owner_id='local' AND EXISTS (SELECT 1 FROM frontend_users WHERE username=:seed_username)""",
         """CREATE TABLE IF NOT EXISTS backtest_run_symbols (
@@ -603,7 +606,7 @@ def ensure_performance_indexes():
         "CREATE INDEX IF NOT EXISTS ix_backtest_results_symbol ON backtest_results (run_id, symbol, robust_score DESC)",
         "CREATE INDEX IF NOT EXISTS ix_backtest_results_preset ON backtest_results (run_id, preset_id, robust_score DESC)",
         "CREATE INDEX IF NOT EXISTS ix_backtest_results_configuration ON backtest_results (configuration_hash)",
-        "CREATE INDEX IF NOT EXISTS ix_backtest_runs_owner_active ON backtest_runs (owner_id, run_id) WHERE deleted_at IS NULL",
+        "CREATE INDEX IF NOT EXISTS ix_backtest_runs_owner_active ON backtest_runs (owner_id, run_id) WHERE deleted_at IS NULL AND archived_at IS NULL",
         """CREATE TABLE IF NOT EXISTS backtest_canonical_results (
             owner_id VARCHAR(100) NOT NULL,
             configuration_hash VARCHAR(32) NOT NULL,
@@ -636,7 +639,7 @@ def ensure_performance_indexes():
                SELECT 1
                FROM backtest_results r
                JOIN backtest_runs br ON br.run_id=r.run_id
-               WHERE r.result_id=canonical.result_id AND br.deleted_at IS NULL
+               WHERE r.result_id=canonical.result_id AND br.deleted_at IS NULL AND br.archived_at IS NULL
            )""",
         """INSERT INTO backtest_canonical_results
                (owner_id,configuration_hash,result_id,run_id,symbol,security_type,data_session,updated_at)
@@ -646,7 +649,7 @@ def ensure_performance_indexes():
            FROM backtest_results r
            JOIN backtest_runs br ON br.run_id=r.run_id
            JOIN backtest_run_symbols s ON s.run_id=r.run_id AND s.symbol=r.symbol
-           WHERE br.deleted_at IS NULL AND r.configuration_hash IS NOT NULL
+           WHERE br.deleted_at IS NULL AND br.archived_at IS NULL AND r.configuration_hash IS NOT NULL
            ORDER BY br.owner_id,r.configuration_hash,r.current_signal_date DESC NULLS LAST,r.result_id DESC
            ON CONFLICT (owner_id,configuration_hash) DO UPDATE SET
              result_id=EXCLUDED.result_id,run_id=EXCLUDED.run_id,symbol=EXCLUDED.symbol,

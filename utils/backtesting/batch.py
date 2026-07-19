@@ -29,27 +29,32 @@ ProgressCallback = Callable[[int, int, str, int, Optional[Dict[str, Any]]], None
 def background_worker_limit(requested_workers: Optional[int]) -> int:
     """Reserve CPU for HTTP, database, and market-data work during scans.
 
-    Whole-market backtests are intentionally conservative by default. A server
-    operator may raise BACKTEST_MAX_WORKERS after measuring capacity, but scan
-    requests can never consume the configured CPU reserve.
+    Whole-market backtests stay below the interactive reserve. When
+    BACKTEST_MAX_WORKERS is unset, spare cores are used automatically (up to 3)
+    so scans finish faster on multi-core hosts without starving the API.
     """
-    try:
-        configured_limit = max(1, int(os.getenv("BACKTEST_MAX_WORKERS", "1")))
-    except ValueError:
-        configured_limit = 1
     try:
         reserved_cpus = max(1, int(os.getenv("BACKTEST_RESERVED_CPUS", "1")))
     except ValueError:
         reserved_cpus = 1
     available_cpus = max(1, (os.cpu_count() or 2) - reserved_cpus)
-    requested = max(1, int(requested_workers or 1))
+    raw_limit = os.getenv("BACKTEST_MAX_WORKERS", "").strip()
+    try:
+        if raw_limit:
+            configured_limit = max(1, int(raw_limit))
+        else:
+            # Adaptive default: use spare cores, never more than 3 unless configured.
+            configured_limit = min(3, available_cpus)
+    except ValueError:
+        configured_limit = min(3, available_cpus)
+    requested = max(1, int(requested_workers or configured_limit))
     return min(requested, configured_limit, available_cpus, 12)
 
 
 def initialize_background_worker() -> None:
     """Lower OS scheduling priority for CPU-heavy child scan processes."""
     try:
-        niceness = max(0, int(os.getenv("BACKTEST_WORKER_NICE", "10")))
+        niceness = max(0, int(os.getenv("BACKTEST_WORKER_NICE", "5")))
         if niceness:
             os.nice(niceness)
     except (AttributeError, OSError, ValueError):
@@ -344,6 +349,121 @@ def _run_symbol_task(task: Dict[str, Any]) -> Dict[str, Any]:
             "indicators": {key: value for key, value in prepared_rows[-1].items() if key.startswith("technical_")},
             "engine_version": ENGINE_VERSION, "bars_count": len(bars),
             "history_start": bars[0].day, "history_end": bars[-1].day,
+        },
+        "error": "; ".join(errors[:3]) if errors else None,
+    }
+
+
+def _refresh_symbol_signals_task(task: Dict[str, Any]) -> Dict[str, Any]:
+    """Refresh recent signals while preserving the completed historical backtest."""
+    symbol = task["symbol"]
+    start_date = task["start_date"]
+    end_date = task["end_date"]
+    source = task["data_source"]
+    refresh_window = max(1, int(task.get("refresh_window_sessions") or 10))
+    try:
+        bars = (
+            fetch_combined_snapshot_bars(symbol, start_date, end_date)
+            if source == "combined"
+            else fetch_historical_bars(symbol, start_date, end_date)
+        )
+    except BacktestError as exc:
+        return {"symbol": symbol, "signal_refresh": True, "results": [], "error": str(exc)}
+
+    # Indicators need warm-up history even though only the newest sessions are
+    # being evaluated. This is local/cache work and does not replay trades.
+    analysis_bars = bars[-max(260, refresh_window + 220):]
+    prepared_rows = list(_historical_rows(symbol, analysis_bars))
+    baselines = {str(item["preset_id"]): dict(item) for item in task.get("baselines") or []}
+    updates: List[Dict[str, Any]] = []
+    errors: List[str] = []
+    for preset in task["presets"]:
+        baseline = baselines.get(str(preset["id"]))
+        if not baseline:
+            errors.append(f'{preset["id"]}: historical baseline was not found')
+            continue
+        try:
+            custom_query = preset.get("custom_query_text")
+            if custom_query:
+                from utils.backtesting.current_opportunities import evaluate_latest_completed_query
+                evidence = evaluate_latest_completed_query(
+                    custom_query, symbol, prepared_rows, strategy_name=preset["name"],
+                )
+            else:
+                from utils.backtesting.current_opportunities import evaluate_latest_completed_signal
+                evidence = evaluate_latest_completed_signal(preset, symbol, prepared_rows)
+            active = bool(evidence.get("active"))
+            technical_score = float(prepared_rows[-1].get("technical_signal_score") or 0)
+            indicators_complete = all(prepared_rows[-1].get(field) is not None for field in (
+                "technical_rsi_14", "technical_macd_histogram", "technical_adx_14",
+            ))
+            from utils.backtesting.current_opportunities import qualifies_default, reliability_score
+            liquidity_score = float(baseline.get("liquidity_score") or 0)
+            reliability = reliability_score(
+                baseline,
+                confidence_score=float(baseline.get("confidence_score") or 0),
+                technical_score=technical_score,
+                liquidity_score=liquidity_score,
+                fresh=True,
+                indicators_complete=indicators_complete,
+            )
+            qualified = qualifies_default(
+                baseline, active=active, fresh=True,
+                indicators_complete=indicators_complete, liquidity_score=liquidity_score,
+            )
+            near_trigger = bool(not active and evidence.get("near_trigger"))
+            evidence.update({
+                "signal_date": bars[-1].day,
+                "calculated_from": "incremental_recent_sessions",
+                "refresh_window_sessions": refresh_window,
+                "data_fresh": True,
+                "indicators_complete": indicators_complete,
+                "liquidity_score": liquidity_score,
+                "reliability": reliability,
+                "default_requirements_passed": qualified,
+            })
+            updates.append({
+                "preset_id": preset["id"],
+                "current_signal_active": active,
+                "current_signal_status": (
+                    "strong_buy" if qualified else
+                    "buy" if active and reliability["score"] >= 50 else
+                    "watch" if active else "near_trigger" if near_trigger else "no_signal"
+                ),
+                "current_signal_date": bars[-1].day,
+                "current_technical_score": technical_score,
+                "reliability_score": reliability["score"],
+                "current_evidence": evidence,
+                "strong_buy_qualified": qualified,
+            })
+        except Exception as exc:
+            errors.append(f'{preset["id"]}: {exc}')
+
+    recent_volumes = [float(bar.volume or 0) for bar in bars[-20:]]
+    return {
+        "symbol": symbol,
+        "signal_refresh": True,
+        "results": updates,
+        "market_profile": {
+            "ltp": float(bars[-1].close),
+            "latest_volume": float(bars[-1].volume),
+            "average_volume_20": round(sum(recent_volumes) / max(len(recent_volumes), 1), 2),
+            "median_volume_20": float(sorted(recent_volumes)[len(recent_volumes) // 2]),
+            "average_turnover_20": round(
+                sum(float(bar.close) * float(bar.volume or 0) for bar in bars[-20:])
+                / max(len(bars[-20:]), 1), 2,
+            ),
+        },
+        "technical_snapshot": {
+            "as_of_date": bars[-1].day,
+            "indicators": {
+                key: value for key, value in prepared_rows[-1].items()
+                if key.startswith("technical_")
+            },
+            "engine_version": ENGINE_VERSION,
+            "bars_count": len(bars),
+            "history_start": bars[0].day,
+            "history_end": bars[-1].day,
         },
         "error": "; ".join(errors[:3]) if errors else None,
     }

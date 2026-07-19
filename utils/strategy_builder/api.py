@@ -291,6 +291,39 @@ async def list_backtest_v2_runs(page: int = Query(1, ge=1), page_size: int = Que
     return await run_in_threadpool(list_runs, owner_id=str(current_user.id), page=page, page_size=page_size)
 
 
+@router.get("/backtests/v2/runs/archived")
+async def list_archived_backtest_v2_runs(current_user: FrontendUser = Depends(require_permission("backtest"))):
+    from utils.backtesting.v2_jobs import list_archived_runs
+    return await run_in_threadpool(list_archived_runs, owner_id=str(current_user.id))
+
+
+@router.post("/backtests/v2/runs/{run_id}/archive", status_code=200)
+async def archive_backtest_v2_run(run_id: str, current_user: FrontendUser = Depends(require_permission("backtest"))):
+    from utils.backtesting.v2_jobs import archive_run
+    try:
+        return await run_in_threadpool(archive_run, run_id, owner_id=str(current_user.id))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/backtests/v2/runs/{run_id}/restore", status_code=200)
+async def restore_backtest_v2_run(run_id: str, current_user: FrontendUser = Depends(require_permission("backtest"))):
+    from utils.backtesting.v2_jobs import restore_archived_run
+    try:
+        return await run_in_threadpool(restore_archived_run, run_id, owner_id=str(current_user.id))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.delete("/backtests/v2/runs/{run_id}", status_code=200)
+async def permanently_delete_backtest_v2_run(run_id: str, current_user: FrontendUser = Depends(require_permission("backtest"))):
+    from utils.backtesting.v2_jobs import permanently_delete_run
+    try:
+        return await run_in_threadpool(permanently_delete_run, run_id, owner_id=str(current_user.id))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.get("/backtests/v2/runs/{run_id}")
 async def read_backtest_v2_run(run_id: str, current_user: FrontendUser = Depends(require_permission("backtest"))):
     from utils.backtesting.v2_jobs import get_run
@@ -442,7 +475,7 @@ async def export_backtest_v2_results_csv(
     from utils.backtesting.v2_query import ResultQueryError, query_results, stream_results_csv
     if run_id != "all":
         owned = db.execute(text(
-            "SELECT 1 FROM backtest_runs WHERE run_id=:run_id AND owner_id=:owner_id AND deleted_at IS NULL"
+            "SELECT 1 FROM backtest_runs WHERE run_id=:run_id AND owner_id=:owner_id AND deleted_at IS NULL AND archived_at IS NULL"
         ), {"run_id": run_id, "owner_id": str(current_user.id)}).scalar()
         if not owned:
             raise HTTPException(status_code=404, detail="Backtest run was not found.")
@@ -513,7 +546,7 @@ async def read_backtest_v2_strong_buy_stock(
            JOIN backtest_run_symbols s ON s.run_id=r.run_id AND s.symbol=r.symbol
            LEFT JOIN market_screener_cache c ON c.symbol=r.symbol
            WHERE (:run_id='all' OR r.run_id=:run_id) AND br.owner_id=:owner_id
-             AND br.deleted_at IS NULL AND r.symbol=:symbol
+             AND br.deleted_at IS NULL AND br.archived_at IS NULL AND r.symbol=:symbol
            ORDER BY CASE WHEN r.result_id=:result_id THEN 0 ELSE 1 END,
                     r.current_signal_active DESC,r.reliability_score DESC,r.robust_score DESC""".format(
                         live_ltp=_LIVE_LTP_SQL, live_volume=_LIVE_VOLUME_SQL,

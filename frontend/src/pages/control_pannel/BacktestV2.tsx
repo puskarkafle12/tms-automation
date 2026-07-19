@@ -20,10 +20,14 @@ type Preset = { id: string; name: string; category: string; family: string; desc
 type Run = {
   run_id: string; name: string; status: string; progress_pct: number; symbols_completed: number;
   symbols_total: number; combinations_completed: number; current_symbol?: string; created_at?: string;
+  started_at?: string | null;
   configuration: { start_date: string; end_date: string; preset_ids: string[]; ordinary_shares_only: boolean; history_mode?: 'all_available' | 'custom'; strategy_mode?: 'presets' | 'custom' | 'discovery'; custom_query_text?: string };
   error_summary?: string;
   pause_requested?: boolean;
   cancel_requested?: boolean;
+  archived_at?: string | null;
+  archive_expires_at?: string | null;
+  archive_days_remaining?: number;
 };
 type ResultRow = Record<string, any> & { result_id: number; symbol: string; preset_name: string };
 type ResultPage = { items: ResultRow[]; page: number; page_size: number; total: number; pages: number };
@@ -92,6 +96,41 @@ const columns = RESULT_COLUMNS;
 const DEFAULT_VISIBLE_RESULT_COLUMNS = RESULT_COLUMNS.map((column) => column.key);
 const BACKTEST_VISIBLE_COLUMNS_KEY = 'tms-backtest-v2-visible-columns-v1';
 const resultColumnLabel = (key: string) => RESULT_COLUMNS.find((column) => column.key === key)?.label || key;
+const formatScanDuration = (totalSeconds: number) => {
+  const seconds = Math.max(0, Math.round(totalSeconds));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rem = seconds % 60;
+  if (minutes < 60) return rem ? `${minutes}m ${rem}s` : `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const remMinutes = minutes % 60;
+  return remMinutes ? `${hours}h ${remMinutes}m` : `${hours}h`;
+};
+const estimateScanRemaining = (run: Run | null) => {
+  if (!run) return { label: '—', detail: '' };
+  const remainingStocks = Math.max(0, Number(run.symbols_total || 0) - Number(run.symbols_completed || 0));
+  if (['completed', 'cancelled', 'failed'].includes(run.status)) {
+    return { label: run.status === 'completed' ? 'Done' : 'Stopped', detail: '' };
+  }
+  if (run.status === 'paused' || run.pause_requested) {
+    return { label: 'Paused', detail: remainingStocks ? `${remainingStocks} stocks left` : '' };
+  }
+  if (run.status === 'queued' || run.symbols_completed <= 0) {
+    return { label: 'Estimating…', detail: 'Waiting for the first stock checkpoint' };
+  }
+  const startedMs = Date.parse(String(run.started_at || run.created_at || ''));
+  if (!Number.isFinite(startedMs) || remainingStocks <= 0) {
+    return { label: remainingStocks <= 0 ? 'Finishing…' : 'Estimating…', detail: '' };
+  }
+  const elapsedSec = Math.max(1, (Date.now() - startedMs) / 1000);
+  const stocksPerSec = run.symbols_completed / elapsedSec;
+  if (stocksPerSec <= 0) return { label: 'Estimating…', detail: '' };
+  const etaSec = remainingStocks / stocksPerSec;
+  return {
+    label: `~${formatScanDuration(etaSec)} left`,
+    detail: `${remainingStocks} stocks · ${formatScanDuration(elapsedSec)} elapsed`,
+  };
+};
 const normalizeVisibleResultColumns = (keys: string[]) => {
   const known = new Set(DEFAULT_VISIBLE_RESULT_COLUMNS);
   const ordered = keys.map(String).filter((key, index, all) => known.has(key) && all.indexOf(key) === index && key !== 'symbol');
@@ -276,6 +315,12 @@ const BacktestV2: React.FC = () => {
   const [runControlBusy, setRunControlBusy] = useState<'pause' | 'resume' | 'cancel' | 'retry' | null>(null);
   const [runControlMessage, setRunControlMessage] = useState('');
   const [workspaceRefreshBusy, setWorkspaceRefreshBusy] = useState(false);
+  const [archiveOpen, setArchiveOpen] = useState(false);
+  const [progressTick, setProgressTick] = useState(0);
+  const [archivedRuns, setArchivedRuns] = useState<Run[]>([]);
+  const [archiveRetentionDays, setArchiveRetentionDays] = useState(30);
+  const [archiveBusyId, setArchiveBusyId] = useState<string | null>(null);
+  const [archiveMessage, setArchiveMessage] = useState('');
   const [uniqueConfigurationTotal, setUniqueConfigurationTotal] = useState(0);
   const [runScope, setRunScope] = useState<'all' | 'single'>('all');
   const [stockSearch, setStockSearch] = useState('');
@@ -359,6 +404,11 @@ const BacktestV2: React.FC = () => {
     if (!response.ok) return;
     setRuns(response.data.items);
     setUniqueConfigurationTotal(Number(response.data.unique_configuration_total || 0));
+    void fetchJson<{ items: Run[]; retention_days?: number }>('/api/backtests/v2/runs/archived').then((archived) => {
+      if (!archived.ok) return;
+      setArchivedRuns(archived.data.items || []);
+      setArchiveRetentionDays(Number(archived.data.retention_days || 30));
+    });
     const requested = params.get('run');
     setActiveRun((current) => current
       ? response.data.items.find((item) => item.run_id === current.run_id) || current
@@ -388,6 +438,69 @@ const BacktestV2: React.FC = () => {
     );
   };
 
+  const loadArchivedRuns = async () => {
+    const response = await fetchJson<{ items: Run[]; retention_days?: number }>('/api/backtests/v2/runs/archived');
+    if (!response.ok) {
+      setError(response.error || 'Could not load archived workspaces.');
+      return;
+    }
+    setArchivedRuns(response.data.items || []);
+    setArchiveRetentionDays(Number(response.data.retention_days || 30));
+  };
+
+  const openArchiveModal = async () => {
+    setArchiveOpen(true);
+    setArchiveMessage('');
+    await loadArchivedRuns();
+  };
+
+  const moveRunToArchive = async (runId: string) => {
+    setArchiveBusyId(runId);
+    setArchiveMessage('');
+    const response = await fetchJson<{ items: Run[]; retention_days?: number }>(`/api/backtests/v2/runs/${runId}/archive`, { method: 'POST' });
+    setArchiveBusyId(null);
+    if (!response.ok) {
+      setError(response.error || 'Could not archive that workspace.');
+      return;
+    }
+    setArchivedRuns(response.data.items || []);
+    setArchiveRetentionDays(Number(response.data.retention_days || 30));
+    setArchiveMessage('Workspace moved to archive. Its results are excluded until restored.');
+    await loadRuns();
+    setActiveRun((current) => (current?.run_id === runId ? null : current));
+    setAllRunsSelected(true);
+    setResultScope('strategies');
+  };
+
+  const restoreArchivedRun = async (runId: string) => {
+    setArchiveBusyId(runId);
+    setArchiveMessage('');
+    const response = await fetchJson<{ items: Run[]; retention_days?: number }>(`/api/backtests/v2/runs/${runId}/restore`, { method: 'POST' });
+    setArchiveBusyId(null);
+    if (!response.ok) {
+      setError(response.error || 'Could not restore that workspace.');
+      return;
+    }
+    setArchivedRuns(response.data.items || []);
+    setArchiveMessage('Workspace restored. Its results are included again.');
+    await loadRuns();
+  };
+
+  const permanentlyDeleteArchivedRun = async (runId: string) => {
+    if (!window.confirm('Permanently delete this archived workspace and all of its results? This cannot be undone.')) return;
+    setArchiveBusyId(runId);
+    setArchiveMessage('');
+    const response = await fetchJson<{ items: Run[]; retention_days?: number }>(`/api/backtests/v2/runs/${runId}`, { method: 'DELETE' });
+    setArchiveBusyId(null);
+    if (!response.ok) {
+      setError(response.error || 'Could not permanently delete that workspace.');
+      return;
+    }
+    setArchivedRuns(response.data.items || []);
+    setArchiveMessage('Workspace permanently deleted.');
+    await loadRuns();
+  };
+
   useEffect(() => {
     void fetchJson<{ presets: Preset[] }>('/api/backtest/presets').then((response) => {
       if (response.ok) { setPresets(response.data.presets); setSelected(new Set(response.data.presets.map((item) => item.id))); }
@@ -412,10 +525,16 @@ const BacktestV2: React.FC = () => {
         setRuns((current) => current.map((run) => (
           run.run_id === response.data.run_id ? response.data : run
         )));
+        setProgressTick((value) => value + 1);
       }
     }, 2000);
     return () => window.clearInterval(timer);
   }, [activeRun?.run_id, activeRun?.status]);
+
+  const scanEta = useMemo(
+    () => estimateScanRemaining(allRunsSelected ? null : activeRun),
+    [activeRun, allRunsSelected, progressTick],
+  );
 
   useEffect(() => {
     if (!activeRun) return;
@@ -508,15 +627,16 @@ const BacktestV2: React.FC = () => {
   useEffect(() => { if (tab === 'opportunities') void loadOpportunities(1); }, [activeRun?.run_id, activeRun?.combinations_completed, tab, opportunityFilters, opportunitySorts, appliedOpportunityFilters, includeNonEquities, opportunities.page_size]);
 
   useEffect(() => {
-    if (!showHowItWorks && !columnPickerOpen) return undefined;
+    if (!showHowItWorks && !columnPickerOpen && !archiveOpen) return undefined;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
-      if (columnPickerOpen) setColumnPickerOpen(false);
+      if (archiveOpen) setArchiveOpen(false);
+      else if (columnPickerOpen) setColumnPickerOpen(false);
       else setShowHowItWorks(false);
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [columnPickerOpen, showHowItWorks]);
+  }, [archiveOpen, columnPickerOpen, showHowItWorks]);
 
   useEffect(() => {
     if (!selectedOpportunity || fullPageDetail) return undefined;
@@ -756,6 +876,66 @@ const BacktestV2: React.FC = () => {
       onClose={() => setColumnPickerOpen(false)}
       onChange={(keys) => setVisibleResultColumns(normalizeVisibleResultColumns(keys))}
     />}
+    {archiveOpen && <div className="backtest-help-backdrop" role="presentation" onClick={() => setArchiveOpen(false)}>
+      <section className="backtest-help-modal research-archive-modal" role="dialog" aria-modal="true" aria-labelledby="research-archive-title" onClick={(event) => event.stopPropagation()}>
+        <header>
+          <div>
+            <span>Workspace archive</span>
+            <h2 id="research-archive-title">Archived scan workspaces</h2>
+            <p>Archived runs are excluded from combined results. Restore them anytime, or permanently delete. Unrestored archives auto-delete after {archiveRetentionDays} days.</p>
+          </div>
+          <button type="button" className="backtest-help-close" onClick={() => setArchiveOpen(false)} aria-label="Close archive">×</button>
+        </header>
+        <div className="backtest-help-body research-archive-body">
+          {archiveMessage && <p className="research-archive-message" role="status">{archiveMessage}</p>}
+          <section>
+            <h3>Active workspaces</h3>
+            <p>Move a workspace here to hide its results from All runs and recommendations.</p>
+            {runs.length === 0 ? <p className="research-archive-empty">No active workspaces.</p> : (
+              <ul className="research-archive-list">
+                {runs.map((run) => (
+                  <li key={run.run_id}>
+                    <div>
+                      <b>{run.name}</b>
+                      <span>{run.status} · {run.symbols_completed}/{run.symbols_total} stocks · {run.combinations_completed.toLocaleString()} results</span>
+                    </div>
+                    <button type="button" disabled={archiveBusyId === run.run_id} onClick={() => void moveRunToArchive(run.run_id)}>
+                      {archiveBusyId === run.run_id ? 'Archiving…' : 'Move to archive'}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+          <section>
+            <h3>Archived ({archivedRuns.length})</h3>
+            {archivedRuns.length === 0 ? <p className="research-archive-empty">No archived workspaces yet.</p> : (
+              <ul className="research-archive-list">
+                {archivedRuns.map((run) => (
+                  <li key={run.run_id}>
+                    <div>
+                      <b>{run.name}</b>
+                      <span>
+                        {run.combinations_completed.toLocaleString()} results · auto-deletes in {run.archive_days_remaining ?? archiveRetentionDays} day{(run.archive_days_remaining ?? archiveRetentionDays) === 1 ? '' : 's'}
+                      </span>
+                    </div>
+                    <div className="research-archive-actions">
+                      <button type="button" disabled={archiveBusyId === run.run_id} onClick={() => void restoreArchivedRun(run.run_id)}>
+                        {archiveBusyId === run.run_id ? 'Working…' : 'Restore'}
+                      </button>
+                      <button type="button" className="danger" disabled={archiveBusyId === run.run_id} onClick={() => void permanentlyDeleteArchivedRun(run.run_id)}>
+                        Delete permanently
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        </div>
+        <footer><span>Press <kbd>Esc</kbd> or use × to close.</span><button type="button" onClick={() => setArchiveOpen(false)}>Done</button></footer>
+      </section>
+    </div>}
     {showHowItWorks && <div className="backtest-help-backdrop" role="presentation">
       <section className="backtest-help-modal" role="dialog" aria-modal="true" aria-labelledby="backtest-help-title">
         <header><div><span>NEPSE Research Lab guide</span><h2 id="backtest-help-title">How this backtest and table work</h2><p>Use this page to compare historical research results—not as a promise of future performance.</p></div><button type="button" className="backtest-help-close" onClick={() => setShowHowItWorks(false)} aria-label="Close how it works">×</button></header>
@@ -772,8 +952,8 @@ const BacktestV2: React.FC = () => {
     </div>}
 
     <section className="research-run-library" aria-label="Saved backtest runs">
-      <div className="research-run-library-head"><span><small>Continuous research</small><h2>Scan workspaces</h2><p>Identical stock and strategy scans update one workspace. Refresh checks only missing market-data tails and reuses unchanged results.</p></span><div><strong>{runs.length}</strong><span>unique</span><button disabled={workspaceRefreshBusy} onClick={() => void refreshActiveWorkspace()}>{workspaceRefreshBusy ? 'Checking…' : 'Refresh new data'}</button></div></div>
-      <div className="research-run-strip">{runs.length > 0 && <button className={`all-runs-card ${allRunsSelected ? 'active' : ''}`} onClick={() => { setAllRunsSelected(true); setResultScope('strategies'); setTab('combinations'); }}><span className="research-run-card-top"><b>All runs</b><em>combined</em></span><span className="research-run-card-metrics"><small><strong>{runs.length}</strong> workspaces</small><small><strong>{uniqueConfigurationTotal.toLocaleString()}</strong> unique configurations</small></span><span className="research-run-card-progress"><i style={{ width: '100%' }} /></span></button>}{runs.length === 0 ? <p>No v2 research runs yet.</p> : runs.map((run) => <button key={run.run_id} className={!allRunsSelected && activeRun?.run_id === run.run_id ? 'active' : ''} onClick={() => { setAllRunsSelected(false); setResultScope('run'); setActiveRun(run); }}><span className="research-run-card-top"><b>{run.name}</b><em className={`run-${run.status}`}>{run.status}</em></span><span className="research-run-card-metrics"><small><strong>{run.symbols_completed}/{run.symbols_total}</strong> stocks</small><small><strong>{run.combinations_completed.toLocaleString()}</strong> results</small></span><span className="research-run-card-progress"><i style={{ width: `${Math.max(0, Math.min(100, run.progress_pct || 0))}%` }} /></span></button>)}</div>
+      <div className="research-run-library-head"><span><small>Continuous research</small><h2>Scan workspaces</h2><p>Identical stock and strategy scans update one workspace. Refresh checks only missing market-data tails and reuses unchanged results.</p></span><div><strong>{runs.length}</strong><span>unique</span><button type="button" className="research-archive-button" onClick={() => void openArchiveModal()} title="Open archived workspaces"><span aria-hidden="true">🗄</span> Archive{archivedRuns.length ? ` (${archivedRuns.length})` : ''}</button><button disabled={workspaceRefreshBusy} onClick={() => void refreshActiveWorkspace()}>{workspaceRefreshBusy ? 'Checking…' : 'Refresh new data'}</button></div></div>
+      <div className="research-run-strip">{runs.length > 0 && <button className={`all-runs-card ${allRunsSelected ? 'active' : ''}`} onClick={() => { setAllRunsSelected(true); setResultScope('strategies'); setTab('combinations'); }}><span className="research-run-card-top"><b>All runs</b><em>combined</em></span><span className="research-run-card-metrics"><small><strong>{runs.length}</strong> workspaces</small><small><strong>{uniqueConfigurationTotal.toLocaleString()}</strong> unique configurations</small></span><span className="research-run-card-progress"><i style={{ width: '100%' }} /></span></button>}{runs.length === 0 ? <p>No v2 research runs yet.</p> : runs.map((run) => <div key={run.run_id} className={`research-run-card-wrap ${!allRunsSelected && activeRun?.run_id === run.run_id ? 'active' : ''}`}><button type="button" className={!allRunsSelected && activeRun?.run_id === run.run_id ? 'active' : ''} onClick={() => { setAllRunsSelected(false); setResultScope('run'); setActiveRun(run); }}><span className="research-run-card-top"><b>{run.name}</b><em className={`run-${run.status}`}>{run.status}</em></span><span className="research-run-card-metrics"><small><strong>{run.symbols_completed}/{run.symbols_total}</strong> stocks</small><small><strong>{run.combinations_completed.toLocaleString()}</strong> results</small></span><span className="research-run-card-progress"><i style={{ width: `${Math.max(0, Math.min(100, run.progress_pct || 0))}%` }} /></span></button></div>)}</div>
     </section>
 
     <section className="research-layout">
@@ -790,7 +970,29 @@ const BacktestV2: React.FC = () => {
 
         {activeRun && <>
           <section className="research-run-head"><div><span className={allRunsSelected ? 'run-completed' : `run-${activeRun.status}`}>{allRunsSelected ? 'combined research' : activeRun.cancel_requested ? 'cancelling' : activeRun.pause_requested ? 'pausing' : activeRun.status}</span><h2>{allRunsSelected ? 'All runs · unique simulation configurations' : activeRun.name}</h2><p>{allRunsSelected ? 'Every workspace combined · only exact symbol, strategy, risk, holding, cost, sizing, and engine configurations are merged' : `${activeRun.configuration.start_date} → ${activeRun.configuration.end_date} · ordinary shares ${activeRun.configuration.ordinary_shares_only ? 'default' : 'not restricted'}`}</p>{!allRunsSelected && runControlMessage && <span role="status" aria-live="polite" className={`run-control-feedback ${activeRun.status === 'paused' || activeRun.status === 'cancelled' ? 'confirmed' : ''}`}>{runControlMessage}</span>}</div>{!allRunsSelected && <div className="research-controls">{activeRun.status === 'running' && <button disabled={Boolean(runControlBusy || activeRun.pause_requested || activeRun.cancel_requested)} onClick={() => void control('pause')}>{runControlBusy === 'pause' || activeRun.pause_requested ? 'Pausing…' : 'Pause'}</button>}{activeRun.status === 'paused' && <button disabled={Boolean(runControlBusy || activeRun.cancel_requested)} onClick={() => void control('resume')}>{runControlBusy === 'resume' ? 'Resuming…' : 'Resume'}</button>}{activeRun.status === 'failed' && <button disabled={Boolean(runControlBusy)} onClick={() => void control('retry')}>{runControlBusy === 'retry' ? 'Retrying…' : 'Retry failed'}</button>}{['queued', 'running', 'paused'].includes(activeRun.status) && <button disabled={Boolean(runControlBusy || activeRun.cancel_requested)} className="danger" onClick={() => void control('cancel')}>{runControlBusy === 'cancel' || activeRun.cancel_requested ? 'Cancelling…' : 'Cancel'}</button>}</div>}</section>
-          {!allRunsSelected && <section className="research-progress"><div><b>{activeRun.progress_pct}%</b><span>{activeRun.symbols_completed}/{activeRun.symbols_total} stocks</span><span>{activeRun.combinations_completed.toLocaleString()} persisted results</span><span>{activeRun.current_symbol || 'Waiting for next checkpoint'}</span></div><progress value={activeRun.progress_pct} max="100" /><small>Scan progress updates in the background. The result table stays stable while you analyse it; use Refresh new scan results when you want the latest checkpoint.</small></section>}
+          {!allRunsSelected && activeRun && <section className={`research-progress ${['running', 'queued'].includes(activeRun.status) ? 'is-active' : ''}`}>
+            <div className="research-progress-meta">
+              <b>{Number(activeRun.progress_pct || 0).toFixed(1)}%</b>
+              <span>{activeRun.symbols_completed}/{activeRun.symbols_total} stocks</span>
+              <span>{activeRun.combinations_completed.toLocaleString()} persisted results</span>
+              <span className="research-progress-symbol">{activeRun.current_symbol || 'Waiting for next checkpoint'}</span>
+              <span className="research-progress-eta" title={scanEta.detail || undefined}>
+                <strong>{scanEta.label}</strong>
+                {scanEta.detail ? <small>{scanEta.detail}</small> : null}
+              </span>
+            </div>
+            <div
+              className="research-progress-track"
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={Math.max(0, Math.min(100, Number(activeRun.progress_pct || 0)))}
+              aria-label="Scan progress"
+            >
+              <i style={{ width: `${Math.max(0, Math.min(100, Number(activeRun.progress_pct || 0)))}%` }} />
+            </div>
+            <small>Scan progress updates in the background. Estimated time updates as each stock finishes. The result table stays stable while you analyse it; use Refresh new scan results when you want the latest checkpoint.</small>
+          </section>}
           <nav className="research-tabs">{([['combinations', 'All results'], ['portfolio', 'Portfolio'], ['ai', 'Ask AI'], ['quality', 'Data quality']] as const).map(([key, label]) => <button key={key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}>{label}</button>)}<a href="/dashboard/recommendations">Open live recommendations ↗</a></nav>
 
           {tab === 'opportunities' && <section className="research-panel strong-buy-panel">

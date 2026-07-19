@@ -81,11 +81,34 @@
 .research-run-library-head > div { display: flex; align-items: center; gap: 8px; color: #66758b; font-size: 11px; }
 .research-run-library-head > div > strong { font-size: 20px; color: #153f67; }
 .research-run-library-head button { margin-left: 8px; border: 0; border-radius: 8px; background: #eaf3fb; color: #176da6; padding: 8px 11px; font-weight: 800; cursor: pointer; }
+.research-archive-button { display: inline-flex; align-items: center; gap: 6px; background: #f3f0ea !important; color: #6a5530 !important; }
+.research-archive-button span { font-size: 14px; line-height: 1; }
+.research-run-card-wrap { position: relative; display: flex; flex: 0 0 270px; flex-direction: column; }
+.research-run-card-wrap > button:first-child { flex: 1; width: 100%; }
+.research-run-archive-action { margin-top: 6px; border: 1px solid #e2d8c8; border-radius: 8px; background: #fbf7f0; color: #6d5734; padding: 6px 8px; font-size: 11px; font-weight: 800; cursor: pointer; }
+.research-run-archive-action:disabled { opacity: .55; cursor: wait; }
+.research-archive-modal { width: min(860px, 100%); }
+.research-archive-body { display: grid; gap: 18px; }
+.research-archive-message { margin: 0; padding: 10px 12px; border-radius: 9px; background: #eef8f2; color: #176443; font-size: 12px; font-weight: 700; }
+.research-archive-empty { margin: 0; color: #66758b; font-size: 13px; }
+.research-archive-list { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 8px; }
+.research-archive-list li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px; border: 1px solid #dce6f0; border-radius: 10px; background: #f8fbfd; }
+.research-archive-list b { display: block; color: #153f67; font-size: 13px; }
+.research-archive-list span { display: block; margin-top: 3px; color: #66758b; font-size: 11px; }
+.research-archive-list button { border: 0; border-radius: 8px; background: #176da6; color: #fff; padding: 8px 11px; font-weight: 800; cursor: pointer; white-space: nowrap; }
+.research-archive-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.research-archive-actions .danger { background: #c0392b; }
+.research-archive-list button:disabled { opacity: .55; cursor: wait; }
 .research-run-strip { display: flex; gap: 10px; overflow-x: auto; padding: 1px 1px 7px; scrollbar-width: thin; }
 .research-run-strip > p { margin: 8px 0; color: #66758b; }
-.research-run-strip > button { position: relative; display: flex; flex: 0 0 270px; flex-direction: column; gap: 9px; min-height: 92px; padding: 12px; text-align: left; color: inherit; border: 1px solid #dfe6ef; border-radius: 11px; background: linear-gradient(145deg,#fff,#f7fafd); cursor: pointer; transition: border-color .15s,box-shadow .15s,transform .15s; }
-.research-run-strip > button:hover { border-color: #86b8da; box-shadow: 0 7px 17px rgba(24,91,137,.1); transform: translateY(-1px); }
-.research-run-strip > button.active { border-color: #2679b7; background: linear-gradient(145deg,#f4faff,#eaf5fd); box-shadow: inset 0 0 0 1px #76add3; }
+.research-run-strip > button,
+.research-run-card-wrap > button:first-child { position: relative; display: flex; flex: 0 0 270px; flex-direction: column; gap: 9px; min-height: 92px; padding: 12px; text-align: left; color: inherit; border: 1px solid #dfe6ef; border-radius: 11px; background: linear-gradient(145deg,#fff,#f7fafd); cursor: pointer; transition: border-color .15s,box-shadow .15s,transform .15s; }
+.research-run-card-wrap > button:first-child { flex: 1 1 auto; width: 100%; }
+.research-run-strip > button:hover,
+.research-run-card-wrap > button:first-child:hover { border-color: #86b8da; box-shadow: 0 7px 17px rgba(24,91,137,.1); transform: translateY(-1px); }
+.research-run-strip > button.active,
+.research-run-card-wrap.active > button:first-child,
+.research-run-card-wrap > button:first-child.active { border-color: #2679b7; background: linear-gradient(145deg,#f4faff,#eaf5fd); box-shadow: inset 0 0 0 1px #76add3; }
 .research-run-strip > button.all-runs-card { border-color: #9bc9c4; background: linear-gradient(145deg,#f3fffd,#e7f7f4); }
 .research-run-strip > button.all-runs-card.active { border-color: #147d78; background: linear-gradient(145deg,#e8fbf8,#d7f3ef); box-shadow: inset 0 0 0 1px #48a9a1; }
 .research-run-card-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 9px; }

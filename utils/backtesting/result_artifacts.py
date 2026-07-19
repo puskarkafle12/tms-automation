@@ -152,7 +152,7 @@ def _legacy_artifacts(
         JOIN backtest_run_symbols s ON s.run_id=r.run_id AND s.symbol=r.symbol
         WHERE r.symbol=:symbol AND r.preset_id IN :preset_ids
           AND s.last_tested_session=:data_session AND br.status='completed'
-          AND br.deleted_at IS NULL AND br.engine_version=:engine_version
+          AND br.deleted_at IS NULL AND br.archived_at IS NULL AND br.engine_version=:engine_version
           AND br.indicator_engine_version=:indicator_version
         ORDER BY br.finished_at DESC NULLS LAST,r.result_id DESC
     """).bindparams(bindparam("preset_ids", expanding=True)), {

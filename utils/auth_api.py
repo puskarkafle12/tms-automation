@@ -97,7 +97,7 @@ def _user_workspace_summary(db: Session, user_id: int) -> dict[str, int]:
           (SELECT COUNT(*) FROM users WHERE owner_user_id=:id) AS tms_accounts,
           (SELECT COUNT(*) FROM scheduled_orders WHERE owner_user_id=:id) AS scheduled_orders,
           (SELECT COUNT(*) FROM order_status_logs WHERE owner_user_id=:id AND deleted_at IS NULL) AS order_logs,
-          (SELECT COUNT(*) FROM backtest_runs WHERE owner_id=:owner AND deleted_at IS NULL) AS backtest_runs
+          (SELECT COUNT(*) FROM backtest_runs WHERE owner_id=:owner AND deleted_at IS NULL AND archived_at IS NULL) AS backtest_runs
     """), {"id": user_id, "owner": str(user_id)}).mappings().one()
     return {key: int(value or 0) for key, value in row.items()}
 

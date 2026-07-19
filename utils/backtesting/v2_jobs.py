@@ -13,14 +13,14 @@ import threading
 import time
 import uuid
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 
 from utils.backtesting.batch import (
-    _run_symbol_task, background_worker_limit, get_backtest_universe,
+    _refresh_symbol_signals_task, _run_symbol_task, background_worker_limit, get_backtest_universe,
     initialize_background_worker,
 )
 from utils.backtesting.jobs import _symbol_metadata
@@ -38,15 +38,19 @@ from utils.strategy_builder.strategy_parser import (
 
 
 BACKTEST_ENGINE_VERSION = "nepse-daily-v2"
+ACTIVE_RUN_SQL = "deleted_at IS NULL AND archived_at IS NULL"
+ARCHIVE_RETENTION_DAYS = 30
 _WORKER_LOCK = threading.Lock()
 _WORKER_STARTED = False
 _WORKER_PROCESS: Optional[subprocess.Popen] = None
+_REFRESH_WORKER_PROCESS: Optional[subprocess.Popen] = None
 _WORKER_ID = f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
 NEPAL_TZ = ZoneInfo("Asia/Kathmandu")
 DAILY_REFRESH_HOURS = (10, 16)
 RECOMMENDATION_REFRESH_SLOTS = ((10, 0), (12, 30), (15, 0), (16, 0))
 _LAST_DAILY_REFRESH_SLOT: Optional[str] = None
 _LAST_RECOMMENDATION_REFRESH_SLOT: Optional[str] = None
+_LAST_ARCHIVE_PURGE_AT: Optional[float] = None
 
 
 def _scan_key(config: Dict[str, Any], universe: List[str], selected: List[Dict[str, Any]]) -> str:
@@ -279,9 +283,9 @@ def create_run(configuration: Dict[str, Any], *, owner_id: str = "local") -> Dic
         config["strategy_mode"] = "presets"
         config["preset_ids"] = [item["id"] for item in selected]
     config.setdefault("ordinary_shares_only", True)
-    # Request modest parallelism. background_worker_limit() still applies the
-    # deployment cap and reserves CPU for normal API/dashboard traffic.
-    config.setdefault("max_workers", 2)
+    # Ask for spare-core parallelism; background_worker_limit() still caps to
+    # BACKTEST_MAX_WORKERS and always reserves CPU for API/dashboard traffic.
+    config.setdefault("max_workers", 3)
     config.setdefault("data_source", "merolagani")
     config.setdefault("initial_capital", 100000)
     config.setdefault("charge_model", "nepse_equity")
@@ -335,7 +339,7 @@ def create_run(configuration: Dict[str, Any], *, owner_id: str = "local") -> Dic
         snapshot_id = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
         existing = session.execute(text(
             """SELECT run_id,status,configuration FROM backtest_runs
-               WHERE owner_id=:owner_id AND scan_key=:scan_key AND deleted_at IS NULL
+               WHERE owner_id=:owner_id AND scan_key=:scan_key AND deleted_at IS NULL AND archived_at IS NULL
                FOR UPDATE"""
         ), {"owner_id": owner_id, "scan_key": scan_key}).mappings().first()
         if not existing:
@@ -344,7 +348,7 @@ def create_run(configuration: Dict[str, Any], *, owner_id: str = "local") -> Dic
             # a different identity.
             legacy_rows = session.execute(text(
                 """SELECT run_id,status,configuration FROM backtest_runs
-                   WHERE owner_id=:owner_id AND scan_key IS NULL AND deleted_at IS NULL
+                   WHERE owner_id=:owner_id AND scan_key IS NULL AND deleted_at IS NULL AND archived_at IS NULL
                    ORDER BY updated_at DESC FOR UPDATE"""
             ), {"owner_id": owner_id}).mappings().all()
             preset_catalog = {item["id"]: item for item in get_backtest_presets()}
@@ -369,7 +373,7 @@ def create_run(configuration: Dict[str, Any], *, owner_id: str = "local") -> Dic
             shared = session.execute(text("""
                 SELECT run_id,data_snapshot_id FROM backtest_runs
                 WHERE owner_id<>:owner_id AND scan_key=:scan_key AND status='completed'
-                  AND deleted_at IS NULL AND data_snapshot_id IS NOT NULL
+                  AND deleted_at IS NULL AND archived_at IS NULL AND data_snapshot_id IS NOT NULL
                   AND configuration->>'end_date'=:end_date
                   AND engine_version=:engine_version AND indicator_engine_version=:indicator_version
                 ORDER BY finished_at DESC NULLS LAST LIMIT 1
@@ -478,11 +482,18 @@ def create_run(configuration: Dict[str, Any], *, owner_id: str = "local") -> Dic
 
 def _public_run(row: Dict[str, Any]) -> Dict[str, Any]:
     output = dict(row)
-    for key in ("created_at", "started_at", "finished_at", "updated_at", "heartbeat_at"):
+    for key in ("created_at", "started_at", "finished_at", "updated_at", "heartbeat_at", "archived_at", "deleted_at", "last_refresh_at"):
         output[key] = output[key].isoformat() if output.get(key) else None
     output.pop("lease_owner", None)
     output.pop("lease_expires_at", None)
     output["has_results"] = int(output.get("combinations_completed") or 0) > 0
+    archived_at = row.get("archived_at")
+    if archived_at is not None:
+        when = archived_at if getattr(archived_at, "tzinfo", None) else archived_at.replace(tzinfo=timezone.utc)
+        expires = when + timedelta(days=ARCHIVE_RETENTION_DAYS)
+        remaining = max(0, int((expires - datetime.now(timezone.utc)).total_seconds() // 86400))
+        output["archive_expires_at"] = expires.isoformat()
+        output["archive_days_remaining"] = remaining
     return output
 
 
@@ -491,7 +502,7 @@ def get_run(run_id: str, *, owner_id: str = "local") -> Dict[str, Any]:
     try:
         row = session.execute(text(
             """SELECT * FROM backtest_runs
-               WHERE run_id = :run_id AND owner_id = :owner_id AND deleted_at IS NULL"""
+               WHERE run_id = :run_id AND owner_id = :owner_id AND deleted_at IS NULL AND archived_at IS NULL"""
         ), {"run_id": run_id, "owner_id": owner_id}).mappings().first()
         if not row:
             raise ValueError("Backtest run was not found.")
@@ -504,7 +515,7 @@ def list_runs(*, owner_id: str = "local", page: int = 1, page_size: int = 25) ->
     session = _session()
     try:
         rows = session.execute(text(
-            """SELECT * FROM backtest_runs WHERE owner_id=:owner_id AND deleted_at IS NULL
+            """SELECT * FROM backtest_runs WHERE owner_id=:owner_id AND deleted_at IS NULL AND archived_at IS NULL
                ORDER BY CASE WHEN status IN ('queued','running','paused') THEN 0 ELSE 1 END,
                         updated_at DESC,created_at DESC"""
         ), {"owner_id": owner_id}).mappings().all()
@@ -526,7 +537,9 @@ def list_runs(*, owner_id: str = "local", page: int = 1, page_size: int = 25) ->
         total = len(unique)
         offset = (page - 1) * page_size
         canonical_total = int(session.execute(text(
-            "SELECT COUNT(*) FROM backtest_canonical_results WHERE owner_id=:owner_id"
+            """SELECT COUNT(*) FROM backtest_canonical_results canonical
+               JOIN backtest_runs br ON br.run_id=canonical.run_id
+               WHERE canonical.owner_id=:owner_id AND br.deleted_at IS NULL AND br.archived_at IS NULL"""
         ), {"owner_id": owner_id}).scalar() or 0)
         return {
             "items": unique[offset:offset + page_size], "page": page,
@@ -537,14 +550,24 @@ def list_runs(*, owner_id: str = "local", page: int = 1, page_size: int = 25) ->
         session.close()
 
 
-def _claim_next_run() -> Optional[str]:
+def _claim_next_run(*, refresh_only: bool = False) -> Optional[str]:
     session = _session()
     try:
+        refresh_filter = (
+            "AND COALESCE((configuration->>'incremental_refresh_active')::boolean,FALSE)=TRUE"
+            if refresh_only else ""
+        )
         row = session.execute(text(
-            """SELECT run_id FROM backtest_runs
-               WHERE deleted_at IS NULL AND cancel_requested = FALSE AND pause_requested = FALSE
+            f"""SELECT run_id FROM backtest_runs
+               WHERE deleted_at IS NULL AND archived_at IS NULL AND cancel_requested = FALSE AND pause_requested = FALSE
                  AND (status = 'queued' OR (status = 'running' AND lease_expires_at < NOW()))
-               ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1"""
+                 {refresh_filter}
+               ORDER BY CASE
+                          WHEN COALESCE((configuration->>'refresh_discover_new_data')::boolean,FALSE)
+                          THEN 0 ELSE 1
+                        END,
+                        created_at
+               FOR UPDATE SKIP LOCKED LIMIT 1"""
         )).scalar()
         if not row:
             session.rollback()
@@ -761,9 +784,6 @@ def _complete_unchanged_symbol(run_id: str, symbol: str) -> None:
                      SELECT COUNT(*) FROM backtest_run_symbols
                      WHERE run_id=:run_id AND status IN ('completed','failed')
                    ),
-                   combinations_completed=(
-                     SELECT COUNT(*) FROM backtest_results WHERE run_id=:run_id
-                   ),
                    current_symbol=:symbol,
                    progress_pct=ROUND((
                      100.0*(SELECT COUNT(*) FROM backtest_run_symbols
@@ -774,6 +794,79 @@ def _complete_unchanged_symbol(run_id: str, symbol: str) -> None:
                    updated_at=NOW()
                WHERE run_id=:run_id"""
         ), {"run_id": run_id, "symbol": symbol})
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def _persist_signal_refresh(run_id: str, output: Dict[str, Any]) -> None:
+    """Update recent signal fields without replacing historical metrics or trades."""
+    symbol = str(output["symbol"])
+    session = _session()
+    try:
+        technical_snapshot = dict(output.get("technical_snapshot") or {})
+        for item in output.get("results") or []:
+            session.execute(text("""
+                UPDATE backtest_results
+                SET current_signal_active=:current_signal_active,
+                    current_signal_status=:current_signal_status,
+                    current_signal_date=:current_signal_date,
+                    current_technical_score=:current_technical_score,
+                    reliability_score=:reliability_score,
+                    current_evidence=CAST(:current_evidence AS JSONB),
+                    strong_buy_qualified=:strong_buy_qualified,
+                    technical_snapshot=CAST(:technical_snapshot AS JSONB)
+                WHERE run_id=:run_id AND symbol=:symbol AND preset_id=:preset_id
+            """), {
+                **item,
+                "run_id": run_id,
+                "symbol": symbol,
+                "current_evidence": json.dumps(item.get("current_evidence") or {}, default=str),
+                "technical_snapshot": json.dumps(technical_snapshot, default=str),
+            })
+        profile = dict(output.get("market_profile") or {})
+        status = "failed" if output.get("error") and not output.get("results") else "completed"
+        session.execute(text("""
+            UPDATE backtest_run_symbols
+            SET status=:status,error=:error,completed_at=NOW(),
+                bars_count=:bars,last_tested_session=:last_tested_session,
+                ltp=COALESCE(:ltp,ltp),latest_volume=COALESCE(:latest_volume,latest_volume),
+                average_volume_20=:average_volume_20,
+                median_volume_20=:median_volume_20,
+                average_turnover_20=:average_turnover_20
+            WHERE run_id=:run_id AND symbol=:symbol
+        """), {
+            "status": status,
+            "error": output.get("error"),
+            "bars": int(technical_snapshot.get("bars_count") or 0),
+            "last_tested_session": technical_snapshot.get("as_of_date"),
+            "ltp": profile.get("ltp"),
+            "latest_volume": profile.get("latest_volume"),
+            "average_volume_20": profile.get("average_volume_20"),
+            "median_volume_20": profile.get("median_volume_20"),
+            "average_turnover_20": profile.get("average_turnover_20"),
+            "run_id": run_id,
+            "symbol": symbol,
+        })
+        session.execute(text("""
+            UPDATE backtest_runs
+            SET symbols_completed=(
+                    SELECT COUNT(*) FROM backtest_run_symbols
+                    WHERE run_id=:run_id AND status IN ('completed','failed')
+                ),
+                current_symbol=:symbol,
+                progress_pct=ROUND((
+                    100.0*(SELECT COUNT(*) FROM backtest_run_symbols
+                           WHERE run_id=:run_id AND status IN ('completed','failed'))
+                    / NULLIF(symbols_total,0)
+                )::numeric,1)::double precision,
+                heartbeat_at=NOW(),lease_expires_at=NOW()+INTERVAL '45 seconds',
+                updated_at=NOW()
+            WHERE run_id=:run_id
+        """), {"run_id": run_id, "symbol": symbol})
         session.commit()
     except Exception:
         session.rollback()
@@ -870,8 +963,12 @@ def run_claimed_run(run_id: str) -> None:
             repair_session.close()
     else:
         presets = [item for item in get_backtest_presets() if item["id"] in set(config.get("preset_ids") or [])]
-    incremental_refresh = bool(config.get("refresh_discover_new_data"))
-    if incremental_refresh:
+    incremental_refresh = bool(
+        config.get("incremental_refresh_active")
+        or config.get("refresh_window_sessions")
+        or config.get("refresh_discover_new_data")
+    )
+    if config.get("refresh_discover_new_data"):
         # Probe only the missing tail before consulting result artifacts. The
         # history fetcher keeps one overlap session for upstream corrections,
         # while unchanged symbols retain the same artifact key and finish from
@@ -900,19 +997,23 @@ def run_claimed_run(run_id: str) -> None:
                 refresh_executor.submit(refresh_tail, str(symbol)): str(symbol)
                 for symbol in symbols
             }
-            for future in as_completed(refresh_futures):
+            for completed_count, future in enumerate(as_completed(refresh_futures), start=1):
                 try:
                     future.result()
                 except Exception:
                     # The normal symbol task retries failed fetches and records a
                     # per-symbol error without aborting the rest of the workspace.
-                    continue
+                    pass
+                if completed_count == 1 or completed_count % 10 == 0:
+                    _control_state(run_id)
         config["refresh_discover_new_data"] = False
         refresh_session = _session()
         try:
             refresh_session.execute(text(
                 """UPDATE backtest_runs
-                   SET configuration=CAST(:configuration AS JSONB),updated_at=NOW()
+                   SET configuration=CAST(:configuration AS JSONB),started_at=NOW(),
+                       heartbeat_at=NOW(),lease_expires_at=NOW()+INTERVAL '45 seconds',
+                       updated_at=NOW()
                    WHERE run_id=:run_id"""
             ), {"run_id": run_id, "configuration": json.dumps(config)})
             refresh_session.commit()
@@ -944,6 +1045,34 @@ def run_claimed_run(run_id: str) -> None:
             )
             cached_by_symbol[str(symbol)] = cached
             missing = list(cached["missing"])
+            cached_session = cached.get("data_session")
+            last_tested = last_tested_by_symbol.get(str(symbol))
+            if incremental_refresh:
+                if cached_session and (not last_tested or cached_session > last_tested):
+                    baselines = [dict(item) for item in cache_session.execute(text("""
+                        SELECT preset_id,total_trades,win_rate_pct,net_return_pct,profit_factor,
+                               sharpe_ratio,max_drawdown_pct,confidence_score,liquidity_score
+                        FROM backtest_results
+                        WHERE run_id=:run_id AND symbol=:symbol
+                    """), {"run_id": run_id, "symbol": str(symbol)}).mappings().all()]
+                    baseline_ids = {str(item["preset_id"]) for item in baselines}
+                    if presets and all(str(preset["id"]) in baseline_ids for preset in presets):
+                        tasks.append({
+                            "symbol": symbol,
+                            "start_date": date.fromisoformat(config["start_date"]),
+                            "end_date": date.fromisoformat(config["end_date"]),
+                            "data_source": config.get("data_source") or "merolagani",
+                            "presets": presets,
+                            "baselines": baselines,
+                            "refresh_window_sessions": int(config.get("refresh_window_sessions") or 10),
+                            "signal_refresh": True,
+                        })
+                        continue
+                # Incremental refresh never replays historical trades. If there
+                # is no complete baseline/new cache context, preserve the old
+                # checkpoint and leave full evaluation to an explicit new run.
+                cached["preserve_baseline"] = True
+                continue
             if missing:
                 tasks.append({
                     "symbol": symbol, "start_date": date.fromisoformat(config["start_date"]),
@@ -957,36 +1086,71 @@ def run_claimed_run(run_id: str) -> None:
         raise
     finally:
         cache_session.close()
-    # Respect the deployment cap even for older runs that requested more
-    # workers. The bundled web/database container defaults to one background
-    # process so scans cannot starve normal application requests.
-    workers = background_worker_limit(int(config.get("max_workers") or 1))
+    # Always allow the current deployment worker cap, even when an older run
+    # stored max_workers=1. Reserved CPUs still protect API/dashboard traffic.
+    workers = (
+        1 if incremental_refresh
+        else background_worker_limit(max(int(config.get("max_workers") or 1), 3))
+    )
+    signal_refresh_symbols = {
+        str(task["symbol"]) for task in tasks if task.get("signal_refresh")
+    }
     results_changed = False
+    signals_changed = False
     try:
         # Complete cache-only symbols immediately so partial tables update without
         # waiting for the process pool or recomputing any historical combination.
+        cache_only_outputs: List[tuple[str, Dict[str, Any], bool]] = []
         for symbol in symbols:
+            if str(symbol) in signal_refresh_symbols:
+                continue
             cached = cached_by_symbol[str(symbol)]
-            if not cached["missing"]:
-                cached_session = cached.get("data_session")
-                last_tested = last_tested_by_symbol.get(str(symbol))
-                if incremental_refresh and cached_session and last_tested and cached_session <= last_tested:
-                    _complete_unchanged_symbol(run_id, str(symbol))
-                else:
-                    _persist_symbol_output(
-                        run_id, {
-                            "symbol": str(symbol), "results": cached["results"],
-                            "market_profile": cached["market_profile"],
-                            "technical_snapshot": cached["technical_snapshot"], "error": None,
-                        }, config=config, presets=[], cache_results=False,
-                    )
-                    results_changed = True
+            cached_session = cached.get("data_session")
+            last_tested = last_tested_by_symbol.get(str(symbol))
+            unchanged = bool(
+                incremental_refresh and (
+                    cached.get("preserve_baseline")
+                    or (last_tested and (not cached_session or cached_session <= last_tested))
+                )
+            )
+            if cached["missing"] and not unchanged:
+                continue
+            cache_only_outputs.append((str(symbol), cached, unchanged))
+
+        def persist_cached(item: tuple[str, Dict[str, Any], bool]) -> bool:
+            symbol, cached, unchanged = item
+            if unchanged:
+                _complete_unchanged_symbol(run_id, symbol)
+                return False
+            _persist_symbol_output(
+                run_id, {
+                    "symbol": symbol, "results": cached["results"],
+                    "market_profile": cached["market_profile"],
+                    "technical_snapshot": cached["technical_snapshot"], "error": None,
+                }, config=config, presets=[], cache_results=False,
+            )
+            return True
+
+        if cache_only_outputs:
+            # DB/checkpoint writes are I/O bound; a small thread pool finishes
+            # unchanged stocks quickly without adding strategy CPU load.
+            cache_workers = min(4, max(1, len(cache_only_outputs)))
+            with ThreadPoolExecutor(max_workers=cache_workers, thread_name_prefix="backtest-cache") as cache_executor:
+                for changed in cache_executor.map(persist_cached, cache_only_outputs):
+                    if changed:
+                        results_changed = True
         if tasks:
             context = multiprocessing.get_context("spawn")
             with ProcessPoolExecutor(
                 max_workers=workers, mp_context=context, initializer=initialize_background_worker,
             ) as executor:
-                futures = {executor.submit(_run_symbol_task, task): task["symbol"] for task in tasks}
+                futures = {
+                    executor.submit(
+                        _refresh_symbol_signals_task if task.get("signal_refresh") else _run_symbol_task,
+                        task,
+                    ): task
+                    for task in tasks
+                }
                 for future in as_completed(futures):
                     control = _control_state(run_id)
                     if control["cancel"] or control["pause"]:
@@ -996,7 +1160,17 @@ def run_claimed_run(run_id: str) -> None:
                     try:
                         output = future.result()
                     except Exception as exc:
-                        output = {"symbol": futures[future], "results": [], "error": str(exc)}
+                        task = futures[future]
+                        output = {
+                            "symbol": task["symbol"],
+                            "signal_refresh": bool(task.get("signal_refresh")),
+                            "results": [],
+                            "error": str(exc),
+                        }
+                    if output.get("signal_refresh"):
+                        _persist_signal_refresh(run_id, output)
+                        signals_changed = signals_changed or bool(output.get("results"))
+                        continue
                     cached = cached_by_symbol[str(output["symbol"])]
                     computed = [dict(item) for item in (output.get("results") or [])]
                     merged = {
@@ -1020,14 +1194,30 @@ def run_claimed_run(run_id: str) -> None:
             else:
                 if not incremental_refresh or results_changed:
                     _finalize_scores(run_id)
+                elif signals_changed:
+                    from utils.backtesting.recommendations import materialize_recommendations
+                    refresh_results_session = _session()
+                    try:
+                        owner_id = str(refresh_results_session.execute(text(
+                            "SELECT owner_id FROM backtest_runs WHERE run_id=:run_id"
+                        ), {"run_id": run_id}).scalar_one())
+                        materialize_recommendations(refresh_results_session, owner_id=owner_id)
+                        refresh_results_session.commit()
+                    finally:
+                        refresh_results_session.close()
                 status = "completed"
+            if status == "completed" and incremental_refresh:
+                config["incremental_refresh_active"] = False
+                config["refresh_discover_new_data"] = False
+                config.pop("refresh_window_sessions", None)
             session.execute(text(
                 """UPDATE backtest_runs SET status=:status,progress_pct=CASE WHEN :status='completed' THEN 100 ELSE progress_pct END,
                           current_symbol=NULL,finished_at=CASE WHEN :status IN ('completed','cancelled') THEN NOW() ELSE finished_at END,
                           last_refresh_at=CASE WHEN :status='completed' THEN NOW() ELSE last_refresh_at END,
+                          configuration=CAST(:configuration AS JSONB),
                           lease_owner=NULL,lease_expires_at=NULL,updated_at=NOW()
                    WHERE run_id=:run_id"""
-            ), {"status": status, "run_id": run_id})
+            ), {"status": status, "run_id": run_id, "configuration": json.dumps(config)})
             session.commit()
         finally:
             session.close()
@@ -1055,6 +1245,8 @@ def _queue_incremental_refresh(
     configured_end = date.fromisoformat(str(config.get("end_date") or today.isoformat()))
     config["end_date"] = max(configured_end, today).isoformat()
     config["refresh_discover_new_data"] = True
+    config["incremental_refresh_active"] = True
+    config["refresh_window_sessions"] = 10
     if refresh_slot:
         config["last_refresh_slot"] = refresh_slot
     session.execute(text(
@@ -1068,7 +1260,8 @@ def _queue_incremental_refresh(
                symbols_completed=0,
                symbols_total=(SELECT COUNT(*) FROM backtest_run_symbols WHERE run_id=:run_id),
                progress_pct=0,current_symbol=NULL,cancel_requested=FALSE,
-               pause_requested=FALSE,error_summary=NULL,finished_at=NULL,updated_at=NOW()
+               pause_requested=FALSE,error_summary=NULL,started_at=NULL,finished_at=NULL,
+               heartbeat_at=NULL,lease_owner=NULL,lease_expires_at=NULL,updated_at=NOW()
            WHERE run_id=:run_id"""
     ), {"run_id": run_id, "configuration": json.dumps(config)})
 
@@ -1080,7 +1273,7 @@ def refresh_run_incrementally(run_id: str, *, owner_id: str = "local") -> Dict[s
         row = session.execute(text(
             """SELECT run_id,status,configuration
                FROM backtest_runs
-               WHERE run_id=:run_id AND owner_id=:owner_id AND deleted_at IS NULL
+               WHERE run_id=:run_id AND owner_id=:owner_id AND deleted_at IS NULL AND archived_at IS NULL
                FOR UPDATE"""
         ), {"run_id": run_id, "owner_id": owner_id}).mappings().first()
         if not row:
@@ -1126,7 +1319,7 @@ def _queue_scheduled_refreshes() -> int:
         rows = session.execute(text(
             """SELECT DISTINCT ON (COALESCE(scan_key,run_id)) run_id,configuration,status
                FROM backtest_runs
-               WHERE deleted_at IS NULL AND COALESCE((configuration->>'auto_refresh')::boolean,TRUE)=TRUE
+               WHERE deleted_at IS NULL AND archived_at IS NULL AND COALESCE((configuration->>'auto_refresh')::boolean,TRUE)=TRUE
                ORDER BY COALESCE(scan_key,run_id),updated_at DESC"""
         )).mappings().all()
         metadata = _symbol_metadata(session)
@@ -1185,7 +1378,7 @@ def _refresh_scheduled_recommendations() -> int:
     refreshed = 0
     try:
         owner_ids = session.execute(text(
-            "SELECT DISTINCT owner_id FROM backtest_runs WHERE deleted_at IS NULL"
+            "SELECT DISTINCT owner_id FROM backtest_runs WHERE deleted_at IS NULL AND archived_at IS NULL"
         )).scalars().all()
         from utils.backtesting.recommendations import materialize_recommendations
         for owner_id in owner_ids:
@@ -1200,11 +1393,13 @@ def _refresh_scheduled_recommendations() -> int:
         session.close()
 
 
-def worker_loop() -> None:
+def worker_loop(*, refresh_only: bool = False) -> None:
     while True:
-        _queue_scheduled_refreshes()
-        _refresh_scheduled_recommendations()
-        run_id = _claim_next_run()
+        if not refresh_only:
+            purge_expired_archives()
+            _queue_scheduled_refreshes()
+            _refresh_scheduled_recommendations()
+        run_id = _claim_next_run(refresh_only=refresh_only)
         if run_id:
             run_claimed_run(run_id)
         else:
@@ -1212,7 +1407,7 @@ def worker_loop() -> None:
 
 
 def start_worker() -> bool:
-    global _WORKER_PROCESS, _WORKER_STARTED
+    global _WORKER_PROCESS, _REFRESH_WORKER_PROCESS, _WORKER_STARTED
     with _WORKER_LOCK:
         if _WORKER_PROCESS is not None and _WORKER_PROCESS.poll() is None:
             return False
@@ -1222,25 +1417,204 @@ def start_worker() -> bool:
             [sys.executable, "-m", "utils.backtesting.v2_worker"],
             env=environment,
         )
+        refresh_environment = dict(environment)
+        refresh_environment["BACKTEST_REFRESH_ONLY"] = "true"
+        _REFRESH_WORKER_PROCESS = subprocess.Popen(
+            [sys.executable, "-m", "utils.backtesting.v2_worker"],
+            env=refresh_environment,
+        )
         _WORKER_STARTED = True
     return True
 
 
 def stop_worker() -> bool:
-    global _WORKER_PROCESS, _WORKER_STARTED
+    global _WORKER_PROCESS, _REFRESH_WORKER_PROCESS, _WORKER_STARTED
     with _WORKER_LOCK:
-        process = _WORKER_PROCESS
+        processes = [_WORKER_PROCESS, _REFRESH_WORKER_PROCESS]
         _WORKER_PROCESS = None
+        _REFRESH_WORKER_PROCESS = None
         _WORKER_STARTED = False
-    if process is None or process.poll() is not None:
-        return False
-    process.terminate()
+    stopped = False
+    for process in processes:
+        if process is None or process.poll() is not None:
+            continue
+        stopped = True
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+    return stopped
+
+
+
+def _rebuild_canonical_for_owner(session, owner_id: str) -> None:
+    """Drop inactive run pointers and re-seed active unique configurations."""
+    session.execute(text("""
+        DELETE FROM backtest_canonical_results canonical
+        WHERE canonical.owner_id=:owner_id
+          AND NOT EXISTS (
+              SELECT 1 FROM backtest_results r
+              JOIN backtest_runs br ON br.run_id=r.run_id
+              WHERE r.result_id=canonical.result_id
+                AND br.deleted_at IS NULL AND br.archived_at IS NULL
+          )
+    """), {"owner_id": owner_id})
+    session.execute(text("""
+        INSERT INTO backtest_canonical_results
+            (owner_id,configuration_hash,result_id,run_id,symbol,security_type,data_session,updated_at)
+        SELECT DISTINCT ON (br.owner_id,r.configuration_hash)
+               br.owner_id,r.configuration_hash,r.result_id,r.run_id,r.symbol,s.security_type,
+               r.current_signal_date,NOW()
+        FROM backtest_results r
+        JOIN backtest_runs br ON br.run_id=r.run_id
+        JOIN backtest_run_symbols s ON s.run_id=r.run_id AND s.symbol=r.symbol
+        WHERE br.owner_id=:owner_id AND br.deleted_at IS NULL AND br.archived_at IS NULL
+          AND r.configuration_hash IS NOT NULL
+        ORDER BY br.owner_id,r.configuration_hash,r.current_signal_date DESC NULLS LAST,r.result_id DESC
+        ON CONFLICT (owner_id,configuration_hash) DO UPDATE SET
+            result_id=EXCLUDED.result_id,run_id=EXCLUDED.run_id,symbol=EXCLUDED.symbol,
+            security_type=EXCLUDED.security_type,data_session=EXCLUDED.data_session,updated_at=NOW()
+        WHERE EXCLUDED.data_session IS NOT NULL
+           AND (backtest_canonical_results.data_session IS NULL
+                OR EXCLUDED.data_session>backtest_canonical_results.data_session
+                OR (EXCLUDED.data_session=backtest_canonical_results.data_session
+                    AND EXCLUDED.result_id>backtest_canonical_results.result_id))
+    """), {"owner_id": owner_id})
+
+
+def list_archived_runs(*, owner_id: str = "local") -> Dict[str, Any]:
+    session = _session()
     try:
-        process.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=5)
-    return True
+        rows = session.execute(text("""
+            SELECT * FROM backtest_runs
+            WHERE owner_id=:owner_id AND deleted_at IS NULL AND archived_at IS NOT NULL
+            ORDER BY archived_at DESC, updated_at DESC
+        """), {"owner_id": owner_id}).mappings().all()
+        items = [_public_run(dict(row)) for row in rows]
+        return {"items": items, "total": len(items), "retention_days": ARCHIVE_RETENTION_DAYS}
+    finally:
+        session.close()
+
+
+def archive_run(run_id: str, *, owner_id: str = "local") -> Dict[str, Any]:
+    """Hide a workspace from active scans/results; keep it recoverable for 30 days."""
+    session = _session()
+    try:
+        row = session.execute(text("""
+            SELECT run_id,status FROM backtest_runs
+            WHERE run_id=:run_id AND owner_id=:owner_id AND deleted_at IS NULL AND archived_at IS NULL
+            FOR UPDATE
+        """), {"run_id": run_id, "owner_id": owner_id}).mappings().first()
+        if not row:
+            raise ValueError("Backtest workspace was not found.")
+        if row["status"] in {"queued", "running", "paused"}:
+            session.execute(text("""
+                UPDATE backtest_runs
+                SET cancel_requested=TRUE, status='cancelled', current_symbol=NULL,
+                    finished_at=COALESCE(finished_at,NOW()), updated_at=NOW()
+                WHERE run_id=:run_id AND owner_id=:owner_id
+            """), {"run_id": run_id, "owner_id": owner_id})
+        session.execute(text("""
+            UPDATE backtest_runs
+            SET archived_at=NOW(), updated_at=NOW(),
+                cancel_requested=TRUE, pause_requested=FALSE,
+                lease_owner=NULL, lease_expires_at=NULL
+            WHERE run_id=:run_id AND owner_id=:owner_id
+        """), {"run_id": run_id, "owner_id": owner_id})
+        _rebuild_canonical_for_owner(session, owner_id)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+    return list_archived_runs(owner_id=owner_id)
+
+
+def restore_archived_run(run_id: str, *, owner_id: str = "local") -> Dict[str, Any]:
+    session = _session()
+    try:
+        changed = session.execute(text("""
+            UPDATE backtest_runs
+            SET archived_at=NULL, updated_at=NOW()
+            WHERE run_id=:run_id AND owner_id=:owner_id
+              AND deleted_at IS NULL AND archived_at IS NOT NULL
+        """), {"run_id": run_id, "owner_id": owner_id}).rowcount
+        if not changed:
+            raise ValueError("Archived workspace was not found.")
+        _rebuild_canonical_for_owner(session, owner_id)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+    return list_archived_runs(owner_id=owner_id)
+
+
+def permanently_delete_run(run_id: str, *, owner_id: str = "local") -> Dict[str, Any]:
+    """Hard-delete an archived workspace and all of its stored results."""
+    session = _session()
+    try:
+        row = session.execute(text("""
+            SELECT run_id FROM backtest_runs
+            WHERE run_id=:run_id AND owner_id=:owner_id
+              AND deleted_at IS NULL AND archived_at IS NOT NULL
+            FOR UPDATE
+        """), {"run_id": run_id, "owner_id": owner_id}).mappings().first()
+        if not row:
+            raise ValueError("Only archived workspaces can be permanently deleted.")
+        session.execute(text(
+            "DELETE FROM backtest_canonical_results WHERE run_id=:run_id AND owner_id=:owner_id"
+        ), {"run_id": run_id, "owner_id": owner_id})
+        session.execute(text(
+            "DELETE FROM backtest_runs WHERE run_id=:run_id AND owner_id=:owner_id"
+        ), {"run_id": run_id, "owner_id": owner_id})
+        _rebuild_canonical_for_owner(session, owner_id)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+    return list_archived_runs(owner_id=owner_id)
+
+
+def purge_expired_archives(*, retention_days: int = ARCHIVE_RETENTION_DAYS) -> int:
+    """Permanently remove archived workspaces older than the retention window."""
+    global _LAST_ARCHIVE_PURGE_AT
+    now = time.time()
+    if _LAST_ARCHIVE_PURGE_AT and now - _LAST_ARCHIVE_PURGE_AT < 3600:
+        return 0
+    _LAST_ARCHIVE_PURGE_AT = now
+    session = _session()
+    deleted = 0
+    try:
+        rows = session.execute(text("""
+            SELECT run_id, owner_id FROM backtest_runs
+            WHERE deleted_at IS NULL AND archived_at IS NOT NULL
+              AND archived_at < NOW() - (:days * INTERVAL '1 day')
+        """), {"days": int(retention_days)}).mappings().all()
+        for row in rows:
+            session.execute(text(
+                "DELETE FROM backtest_canonical_results WHERE run_id=:run_id AND owner_id=:owner_id"
+            ), {"run_id": row["run_id"], "owner_id": row["owner_id"]})
+            session.execute(text(
+                "DELETE FROM backtest_runs WHERE run_id=:run_id AND owner_id=:owner_id"
+            ), {"run_id": row["run_id"], "owner_id": row["owner_id"]})
+            deleted += 1
+        if deleted:
+            for owner_id in sorted({str(row["owner_id"]) for row in rows}):
+                _rebuild_canonical_for_owner(session, owner_id)
+        session.commit()
+        return deleted
+    except Exception:
+        session.rollback()
+        return 0
+    finally:
+        session.close()
 
 
 def set_run_control(run_id: str, action: str, *, owner_id: str = "local") -> Dict[str, Any]:
