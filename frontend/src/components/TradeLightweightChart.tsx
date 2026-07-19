@@ -113,19 +113,21 @@ const TradeLightweightChart: React.FC<TradeLightweightChartProps> = ({
       value: Number(bar.volume || 0),
       color: Number(bar.close) >= Number(bar.open) ? 'rgba(33,166,111,.55)' : 'rgba(224,82,82,.55)',
     }));
+    const npr = (value: number) => `${value >= 0 ? '+' : '−'}NPR ${Math.abs(value).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
     const markers: SeriesMarker<Time>[] = [];
     trades.forEach((trade) => {
       const entry = snapToCandleTime(dates, String(trade.entry_date || ''));
       const exit = snapToCandleTime(dates, String(trade.exit_date || ''));
       if (entry) markers.push({ time: entry as Time, position: 'belowBar', color: '#42d392', shape: 'arrowUp', text: 'BUY' });
       if (exit) {
+        // Net P/L already includes commissions, fees, DP charge, CGT and slippage.
         const pnl = Number(trade.pnl || 0);
         markers.push({
           time: exit as Time,
           position: 'aboveBar',
           color: pnl >= 0 ? '#34d399' : '#ff5e66',
           shape: 'arrowDown',
-          text: 'SELL',
+          text: npr(pnl),
         });
       }
     });
