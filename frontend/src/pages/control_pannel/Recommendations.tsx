@@ -29,6 +29,7 @@ const recommendationPrompts = [
 ];
 const RECOMMENDATION_COLUMN_WIDTHS_KEY = "tms-recommendation-column-widths-v1";
 const RECOMMENDATION_VISIBLE_COLUMNS_KEY = "tms-recommendation-visible-columns-v2";
+const RECOMMENDATION_FILTER_HISTORY_KEY = "tms-recommendation-filter-history-v1";
 const DEFAULT_VISIBLE_COLUMNS: Record<"buy" | "sell", string[]> = {
   buy: ["symbol", "current_signal_status", "recommendation_score", "current_ltp", "buy_range", "sell_range", "current_ltp_estimated_profit_pct", "current_ltp_estimated_loss_pct", "preset_name", "win_rate_pct", "total_trades", "average_holding_days"],
   sell: ["symbol", "current_signal_status", "recommendation_score", "ltp", "holding_quantity", "preset_name", "win_rate_pct", "total_trades", "net_return_pct", "average_holding_days"],
@@ -74,6 +75,13 @@ const number = (value: any) =>
 const Recommendations: React.FC = () => {
   const navigate = useNavigate();
   const preferenceUserId = localStorage.getItem("userId") || "local";
+  const [savedFilterState] = useState<any>(() => {
+    try {
+      return JSON.parse(localStorage.getItem(`${RECOMMENDATION_FILTER_HISTORY_KEY}:${preferenceUserId}`) || "{}");
+    } catch {
+      return {};
+    }
+  });
   const [data, setData] = useState<Page>({
     items: [],
     total: 0,
@@ -82,23 +90,23 @@ const Recommendations: React.FC = () => {
     persisted: true,
   });
   const [recommendationSide, setRecommendationSide] = useState<"buy" | "sell">(
-    "buy",
+    savedFilterState.recommendationSide === "sell" ? "sell" : "buy",
   );
-  const [signal, setSignal] = useState("actionable");
-  const [search, setSearch] = useState("");
-  const [minimumWin, setMinimumWin] = useState("");
-  const [minimumTrades, setMinimumTrades] = useState("5");
-  const [minimumScore, setMinimumScore] = useState("");
+  const [signal, setSignal] = useState(String(savedFilterState.signal || "actionable"));
+  const [search, setSearch] = useState(String(savedFilterState.search || ""));
+  const [minimumWin, setMinimumWin] = useState(String(savedFilterState.minimumWin ?? ""));
+  const [minimumTrades, setMinimumTrades] = useState(String(savedFilterState.minimumTrades ?? "5"));
+  const [minimumScore, setMinimumScore] = useState(String(savedFilterState.minimumScore ?? ""));
   const [appliedRules, setAppliedRules] = useState({
-    signal: "actionable",
-    search: "",
-    minimumWin: 0,
-    minimumTrades: 5,
-    minimumScore: 0,
+    signal: String(savedFilterState.appliedRules?.signal || "actionable"),
+    search: String(savedFilterState.appliedRules?.search || ""),
+    minimumWin: Number(savedFilterState.appliedRules?.minimumWin || 0),
+    minimumTrades: Number(savedFilterState.appliedRules?.minimumTrades ?? 5),
+    minimumScore: Number(savedFilterState.appliedRules?.minimumScore || 0),
   });
   const [sort, setSort] = useState({
-    field: "recommendation_score",
-    direction: "desc",
+    field: String(savedFilterState.sort?.field || "recommendation_score"),
+    direction: savedFilterState.sort?.direction === "asc" ? "asc" : "desc",
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -128,6 +136,12 @@ const Recommendations: React.FC = () => {
   useEffect(() => {
     localStorage.setItem(`${RECOMMENDATION_VISIBLE_COLUMNS_KEY}:${preferenceUserId}:${recommendationSide}`, JSON.stringify(visibleColumns[recommendationSide]));
   }, [preferenceUserId, recommendationSide, visibleColumns]);
+  useEffect(() => {
+    localStorage.setItem(`${RECOMMENDATION_FILTER_HISTORY_KEY}:${preferenceUserId}`, JSON.stringify({
+      recommendationSide, signal, search, minimumWin, minimumTrades, minimumScore,
+      appliedRules, sort,
+    }));
+  }, [appliedRules, minimumScore, minimumTrades, minimumWin, preferenceUserId, recommendationSide, search, signal, sort]);
   useEffect(() => {
     if (!tableHelpOpen && !selectedStockDetail && !columnPickerOpen) return undefined;
     const close = (event: KeyboardEvent) => {
@@ -220,6 +234,51 @@ const Recommendations: React.FC = () => {
       setRefreshMessage(response.error || "Recommendation refresh failed.");
     }
     setRefreshBusy(false);
+  };
+  const refreshFilteredRecommendations = async () => {
+    setRefreshBusy(true);
+    setRefreshMessage("Queuing recent-data refresh only for the finalized filtered symbols…");
+    const response = await fetchJson<{ symbol_count: number; strategy_count: number; runs_queued: number; run_ids: string[] }>(
+      "/api/market-recommendations/refresh-filtered",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          side: recommendationSide,
+          signal: appliedRules.signal,
+          search: appliedRules.search,
+          minimum_win_rate: appliedRules.minimumWin,
+          minimum_trades: appliedRules.minimumTrades,
+          minimum_score: appliedRules.minimumScore,
+          sort_by: sort.field,
+          sort_direction: sort.direction,
+          page: 1,
+          page_size: 100,
+        }),
+      },
+      120000,
+    );
+    if (!response.ok) {
+      setRefreshBusy(false);
+      setRefreshMessage(response.error || "Filtered recommendation refresh failed.");
+      return;
+    }
+    setRefreshMessage(`Refreshing ${response.data.strategy_count.toLocaleString()} filtered strategies on existing workspaces…`);
+    const pending = new Set(response.data.run_ids || []);
+    for (let attempt = 0; pending.size && attempt < 300; attempt += 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, 2000));
+      const checkpoints = await Promise.all(Array.from(pending).map(async (runId) => ({
+        runId,
+        response: await fetchJson<{ status: string }>(`/api/backtests/v2/runs/${runId}`),
+      })));
+      checkpoints.forEach(({ runId, response: checkpoint }) => {
+        if (!checkpoint.ok || !["queued", "running", "paused"].includes(checkpoint.data.status)) pending.delete(runId);
+      });
+      setRefreshMessage(`Live refresh: ${response.data.runs_queued - pending.size}/${response.data.runs_queued} workspaces completed · ${response.data.strategy_count.toLocaleString()} filtered strategies`);
+    }
+    await load(1);
+    setRefreshBusy(false);
+    setRefreshMessage(`Filtered recommendations are live. Rechecked ${response.data.strategy_count.toLocaleString()} strategies and loaded any new BUY signals.`);
   };
   const applyRules = () => {
     const win = minimumWin.trim() === "" ? 0 : Number(minimumWin);
@@ -508,7 +567,8 @@ const Recommendations: React.FC = () => {
               ? "ordinary shares"
               : "eligible combined holdings"} · session {data.trading_session || "pending"}
           </small>
-          <button type="button" className="recommendation-manual-refresh" disabled={refreshBusy} onClick={() => void refreshRecommendations()}>{refreshBusy ? "Refreshing…" : "Refresh recommendations"}</button>
+          <button type="button" className="recommendation-manual-refresh" disabled={refreshBusy} onClick={() => void refreshFilteredRecommendations()}>{refreshBusy ? "Refreshing…" : "Refresh filtered data"}</button>
+          <button type="button" className="recommendation-manual-refresh" disabled={refreshBusy} onClick={() => void refreshRecommendations()}>{refreshBusy ? "Refreshing…" : "Refresh all recommendations"}</button>
           <small>Automatic NPT refresh: 10:00 · 12:30 · 15:00 · 16:00 on configured trading days</small>
           {refreshMessage && <small role="status">{refreshMessage}</small>}
         </div>

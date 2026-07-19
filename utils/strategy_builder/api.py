@@ -177,6 +177,7 @@ class BacktestV2ResultQuery(BaseModel):
     sorts: List[BacktestV2SortItem] = Field(default_factory=list, max_length=8)
     unique_by_symbol: bool = False
     unique_by_strategy: bool = False
+    preferred_run_id: Optional[str] = None
     page: int = Field(default=1, ge=1)
     page_size: int = Field(default=100, ge=1, le=100)
 
@@ -238,6 +239,10 @@ class MarketRecommendationQuery(BaseModel):
     sort_direction: str = Field(default="desc", pattern="^(asc|desc)$")
     page: int = Field(default=1, ge=1)
     page_size: int = Field(default=25, ge=1, le=100)
+
+
+class FilteredRecommendationRefreshRequest(MarketRecommendationQuery):
+    side: str = Field(default="buy", pattern="^(buy|sell)$")
 
 
 def _append_ai_symbol_context(message: str, known_symbols: Optional[List[str]], form_symbol: Optional[str]) -> str:
@@ -405,6 +410,28 @@ async def refresh_backtest_v2_run(run_id: str, current_user: FrontendUser = Depe
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+@router.post("/backtests/v2/runs/{run_id}/refresh-filtered", status_code=202)
+async def refresh_filtered_backtest_v2_results(
+    run_id: str, body: BacktestV2ResultQuery, db: Session = Depends(get_db),
+    current_user: FrontendUser = Depends(require_permission("backtest")),
+):
+    from utils.backtesting.v2_jobs import refresh_runs_incrementally_for_selections
+    from utils.backtesting.v2_query import ResultQueryError, query_result_selections
+    owner_id = str(current_user.id)
+    try:
+        payload = body.model_dump()
+        selections = query_result_selections(db, run_id, payload, owner_id=owner_id)
+        preferred = body.preferred_run_id or (None if run_id == "all" else run_id)
+        return await run_in_threadpool(
+            refresh_runs_incrementally_for_selections,
+            selections,
+            owner_id=owner_id,
+            preferred_run_id=preferred,
+        )
+    except (ResultQueryError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/backtests/v2/runs/{run_id}/clone-with-name", status_code=202)
 async def clone_backtest_v2_run(run_id: str, body: BacktestV2CloneRequest, current_user: FrontendUser = Depends(require_permission("backtest"))):
     from utils.backtesting.v2_jobs import clone_run
@@ -526,6 +553,35 @@ async def refresh_market_recommendations(db: Session = Depends(get_db), current_
     payload = materialize_recommendations(db, owner_id=str(current_user.id))
     db.commit()
     return payload
+
+
+@router.post("/market-recommendations/refresh-filtered", status_code=202)
+async def refresh_filtered_market_recommendations(
+    body: FilteredRecommendationRefreshRequest,
+    db: Session = Depends(get_db),
+    current_user: FrontendUser = Depends(require_permission("recommendations")),
+):
+    from utils.backtesting.recommendations import query_recommendation_selections, query_sell_recommendations
+    from utils.backtesting.v2_jobs import refresh_runs_incrementally_for_selections
+    owner_id = str(current_user.id)
+    query = body.model_dump(mode="json")
+    if body.side == "sell":
+        payload = await query_sell_recommendations(
+            db, {**query, "page": 1, "page_size": 100}, owner_id=owner_id,
+        )
+        selections = [
+            {"run_id": str(item["run_id"]), "symbol": str(item["symbol"]), "preset_id": str(item["preset_id"])}
+            for item in payload.get("items") or []
+            if item.get("run_id") and item.get("symbol") and item.get("preset_id")
+        ]
+    else:
+        selections = query_recommendation_selections(db, query, owner_id=owner_id)
+    try:
+        return await run_in_threadpool(
+            refresh_runs_incrementally_for_selections, selections, owner_id=owner_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/backtests/v2/runs/{run_id}/strong-buys/{symbol}")
@@ -847,14 +903,30 @@ async def read_backtest_v2_result_chart(result_id: int, db: Session = Depends(ge
         equity += float(trade.get("pnl") or 0)
         curve.append({"date": trade["exit_date"], "equity": round(equity, 2), "trade_return_pct": trade["return_pct"]})
     period = (detail.get("assumptions") or {}).get("period") or {}
+    signal_date = str(detail.get("current_signal_date") or "")
+    current_signals = []
+    if detail.get("current_signal_active") and signal_date:
+        current_signals.append({
+            "date": signal_date,
+            "side": "buy",
+            "label": "BUY NOW",
+            "status": detail.get("current_signal_status") or "buy",
+        })
+    chart_end = max(str(period.get("end") or ""), signal_date) or None
     candles = _market_ohlcv_candles(
         db,
         detail["symbol"],
         start_date=period.get("start"),
-        end_date=period.get("end"),
+        end_date=chart_end,
         limit=5000,
     )
-    return {"symbol": detail["symbol"], "equity_curve": curve, "candles": candles, "trades": trades}
+    return {
+        "symbol": detail["symbol"],
+        "equity_curve": curve,
+        "candles": candles,
+        "trades": trades,
+        "signals": current_signals,
+    }
 
 
 @router.get("/backtests/v2/results/{result_id}/robustness")

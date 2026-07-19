@@ -189,6 +189,35 @@ def query_recommendations(session, body: Dict[str, Any], *, owner_id: str = "loc
             "trading_session": fresh_session.isoformat() if hasattr(fresh_session, "isoformat") else fresh_session}
 
 
+def query_recommendation_selections(
+    session, body: Dict[str, Any], *, owner_id: str = "local",
+) -> List[Dict[str, str]]:
+    """Resolve exact backtest strategies represented by finalized buy filters."""
+    selected: Dict[tuple[str, str, str], Dict[str, str]] = {}
+    page = 1
+    while True:
+        payload = query_recommendations(
+            session, {**body, "page": page, "page_size": 100}, owner_id=owner_id,
+        )
+        for item in payload.get("items") or []:
+            if not item.get("run_id") or not item.get("symbol") or not item.get("preset_id"):
+                continue
+            key = (str(item["run_id"]), str(item["symbol"]), str(item["preset_id"]))
+            selected[key] = {"run_id": key[0], "symbol": key[1], "preset_id": key[2]}
+        if page >= int(payload.get("pages") or 0):
+            break
+        page += 1
+    return [selected[key] for key in sorted(selected)]
+
+
+def query_recommendation_symbols(
+    session, body: Dict[str, Any], *, owner_id: str = "local",
+) -> List[str]:
+    return sorted({
+        item["symbol"] for item in query_recommendation_selections(session, body, owner_id=owner_id)
+    })
+
+
 async def query_sell_recommendations(session, body: Dict[str, Any], *, owner_id: str) -> Dict[str, Any]:
     """Return fresh, tested exit signals only for the owner's live combined holdings."""
     from models.user import User

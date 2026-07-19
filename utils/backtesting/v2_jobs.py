@@ -1038,9 +1038,15 @@ def run_claimed_run(run_id: str) -> None:
     cached_by_symbol: Dict[str, Dict[str, Any]] = {}
     cache_session = _session()
     try:
+        refresh_strategies = dict(config.get("refresh_strategies") or {})
         for symbol in symbols:
+            selected_preset_ids = {str(value) for value in refresh_strategies.get(str(symbol), [])}
+            target_presets = (
+                [preset for preset in presets if str(preset["id"]) in selected_preset_ids]
+                if incremental_refresh and refresh_strategies else presets
+            )
             cached = load_symbol_artifacts(
-                cache_session, symbol=str(symbol), presets=presets, config=config,
+                cache_session, symbol=str(symbol), presets=target_presets, config=config,
                 engine_version=BACKTEST_ENGINE_VERSION, indicator_version=ENGINE_VERSION,
             )
             cached_by_symbol[str(symbol)] = cached
@@ -1056,14 +1062,14 @@ def run_claimed_run(run_id: str) -> None:
                         WHERE run_id=:run_id AND symbol=:symbol
                     """), {"run_id": run_id, "symbol": str(symbol)}).mappings().all()]
                     baseline_ids = {str(item["preset_id"]) for item in baselines}
-                    if presets and all(str(preset["id"]) in baseline_ids for preset in presets):
+                    if target_presets and all(str(preset["id"]) in baseline_ids for preset in target_presets):
                         tasks.append({
                             "symbol": symbol,
                             "start_date": date.fromisoformat(config["start_date"]),
                             "end_date": date.fromisoformat(config["end_date"]),
                             "data_source": config.get("data_source") or "merolagani",
-                            "presets": presets,
-                            "baselines": baselines,
+                            "presets": target_presets,
+                            "baselines": [item for item in baselines if str(item["preset_id"]) in {str(preset["id"]) for preset in target_presets}],
                             "refresh_window_sessions": int(config.get("refresh_window_sessions") or 10),
                             "signal_refresh": True,
                         })
@@ -1210,6 +1216,8 @@ def run_claimed_run(run_id: str) -> None:
                 config["incremental_refresh_active"] = False
                 config["refresh_discover_new_data"] = False
                 config.pop("refresh_window_sessions", None)
+                config.pop("refresh_symbols", None)
+                config.pop("refresh_strategies", None)
             session.execute(text(
                 """UPDATE backtest_runs SET status=:status,progress_pct=CASE WHEN :status='completed' THEN 100 ELSE progress_pct END,
                           current_symbol=NULL,finished_at=CASE WHEN :status IN ('completed','cancelled') THEN NOW() ELSE finished_at END,
@@ -1239,6 +1247,8 @@ def _queue_incremental_refresh(
     run_id: str,
     config: Dict[str, Any],
     refresh_slot: Optional[str] = None,
+    symbols: Optional[List[str]] = None,
+    strategies: Optional[Dict[str, List[str]]] = None,
 ) -> None:
     """Queue one workspace to discover new tails and reuse unchanged artifacts."""
     today = datetime.now(NEPAL_TZ).date()
@@ -1249,24 +1259,56 @@ def _queue_incremental_refresh(
     config["refresh_window_sessions"] = 10
     if refresh_slot:
         config["last_refresh_slot"] = refresh_slot
+    normalized_strategies = {
+        str(symbol).strip().upper(): sorted({str(preset_id) for preset_id in preset_ids if str(preset_id)})
+        for symbol, preset_ids in (strategies or {}).items() if str(symbol).strip()
+    }
+    normalized_strategies = {symbol: preset_ids for symbol, preset_ids in normalized_strategies.items() if preset_ids}
+    selected = sorted({
+        str(symbol).strip().upper()
+        for symbol in [*(symbols or []), *normalized_strategies]
+        if str(symbol).strip()
+    })
+    if selected:
+        available = set(session.execute(text(
+            "SELECT symbol FROM backtest_run_symbols WHERE run_id=:run_id AND symbol=ANY(CAST(:symbols AS TEXT[]))"
+        ), {"run_id": run_id, "symbols": selected}).scalars().all())
+        selected = [symbol for symbol in selected if symbol in available]
+        if not selected:
+            raise ValueError("No filtered symbols belong to this backtest workspace.")
+        config["refresh_symbols"] = selected
+        if normalized_strategies:
+            config["refresh_strategies"] = {
+                symbol: normalized_strategies[symbol]
+                for symbol in selected if symbol in normalized_strategies
+            }
+        else:
+            config.pop("refresh_strategies", None)
+    else:
+        config.pop("refresh_symbols", None)
+        config.pop("refresh_strategies", None)
     session.execute(text(
         """UPDATE backtest_run_symbols
            SET status='queued',error=NULL,completed_at=NULL
-           WHERE run_id=:run_id"""
-    ), {"run_id": run_id})
+           WHERE run_id=:run_id AND (:refresh_all OR symbol=ANY(CAST(:symbols AS TEXT[])))"""
+    ), {"run_id": run_id, "refresh_all": not selected, "symbols": selected})
     session.execute(text(
         """UPDATE backtest_runs
            SET status='queued',configuration=CAST(:configuration AS JSONB),
-               symbols_completed=0,
+               symbols_completed=(SELECT COUNT(*) FROM backtest_run_symbols WHERE run_id=:run_id AND status IN ('completed','failed')),
                symbols_total=(SELECT COUNT(*) FROM backtest_run_symbols WHERE run_id=:run_id),
-               progress_pct=0,current_symbol=NULL,cancel_requested=FALSE,
+               progress_pct=ROUND((100.0*(SELECT COUNT(*) FROM backtest_run_symbols WHERE run_id=:run_id AND status IN ('completed','failed'))/NULLIF((SELECT COUNT(*) FROM backtest_run_symbols WHERE run_id=:run_id),0))::numeric,1)::double precision,
+               current_symbol=NULL,cancel_requested=FALSE,
                pause_requested=FALSE,error_summary=NULL,started_at=NULL,finished_at=NULL,
                heartbeat_at=NULL,lease_owner=NULL,lease_expires_at=NULL,updated_at=NOW()
            WHERE run_id=:run_id"""
     ), {"run_id": run_id, "configuration": json.dumps(config)})
 
 
-def refresh_run_incrementally(run_id: str, *, owner_id: str = "local") -> Dict[str, Any]:
+def refresh_run_incrementally(
+    run_id: str, *, owner_id: str = "local", symbols: Optional[List[str]] = None,
+    strategies: Optional[Dict[str, List[str]]] = None,
+) -> Dict[str, Any]:
     """Request a fast refresh that replays only symbols whose data changed."""
     session = _session()
     try:
@@ -1278,15 +1320,52 @@ def refresh_run_incrementally(run_id: str, *, owner_id: str = "local") -> Dict[s
         ), {"run_id": run_id, "owner_id": owner_id}).mappings().first()
         if not row:
             raise ValueError("Backtest workspace was not found.")
+        config = dict(row["configuration"] or {})
+        incoming_strategies = {
+            str(symbol).strip().upper(): sorted({str(preset_id) for preset_id in preset_ids if str(preset_id)})
+            for symbol, preset_ids in (strategies or {}).items() if str(symbol).strip()
+        }
+        incoming_strategies = {
+            symbol: preset_ids for symbol, preset_ids in incoming_strategies.items() if preset_ids
+        }
         if row["status"] in {"queued", "running", "paused"}:
+            # Reuse the same workspace card. Merge filtered strategies into the
+            # active refresh instead of spawning another run entry.
+            if incoming_strategies and bool(config.get("incremental_refresh_active")):
+                existing = {
+                    str(symbol).strip().upper(): sorted({str(preset_id) for preset_id in (preset_ids or []) if str(preset_id)})
+                    for symbol, preset_ids in dict(config.get("refresh_strategies") or {}).items()
+                }
+                merged = dict(existing)
+                for symbol, preset_ids in incoming_strategies.items():
+                    merged[symbol] = sorted(set(merged.get(symbol, [])) | set(preset_ids))
+                selected = sorted(merged)
+                config["refresh_strategies"] = merged
+                config["refresh_symbols"] = selected
+                config["refresh_discover_new_data"] = True
+                config["incremental_refresh_active"] = True
+                config["refresh_window_sessions"] = int(config.get("refresh_window_sessions") or 10)
+                session.execute(text("""
+                    UPDATE backtest_run_symbols
+                    SET status='queued',error=NULL,completed_at=NULL
+                    WHERE run_id=:run_id AND symbol=ANY(CAST(:symbols AS TEXT[]))
+                """), {"run_id": run_id, "symbols": selected})
+                session.execute(text("""
+                    UPDATE backtest_runs
+                    SET configuration=CAST(:configuration AS JSONB),updated_at=NOW()
+                    WHERE run_id=:run_id
+                """), {"run_id": run_id, "configuration": json.dumps(config)})
+                session.commit()
+                return get_run(run_id, owner_id=owner_id)
             session.rollback()
             return get_run(run_id, owner_id=owner_id)
-        config = dict(row["configuration"] or {})
         _queue_incremental_refresh(
             session,
             run_id=run_id,
             config=config,
             refresh_slot=f"manual:{datetime.now(NEPAL_TZ).isoformat(timespec='seconds')}",
+            symbols=symbols,
+            strategies=strategies,
         )
         session.commit()
     except Exception:
@@ -1295,6 +1374,133 @@ def refresh_run_incrementally(run_id: str, *, owner_id: str = "local") -> Dict[s
     finally:
         session.close()
     return get_run(run_id, owner_id=owner_id)
+
+
+def refresh_runs_incrementally_for_selections(
+    selections: List[Dict[str, str]], *, owner_id: str = "local",
+    preferred_run_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Queue exact filtered strategies on one reusable workspace card."""
+    requested: Dict[str, Dict[str, List[str]]] = {}
+    for item in selections:
+        run_id = str(item.get("run_id") or "")
+        symbol = str(item.get("symbol") or "").strip().upper()
+        preset_id = str(item.get("preset_id") or "")
+        if not run_id or not symbol or not preset_id:
+            continue
+        requested.setdefault(run_id, {}).setdefault(symbol, []).append(preset_id)
+    if not requested:
+        raise ValueError("The finalized filters do not match any strategies.")
+    session = _session()
+    try:
+        rows = session.execute(text("""
+            SELECT run_id,scan_key,status,updated_at
+            FROM backtest_runs
+            WHERE owner_id=:owner_id AND deleted_at IS NULL AND archived_at IS NULL
+              AND run_id=ANY(CAST(:run_ids AS TEXT[]))
+            ORDER BY updated_at DESC
+        """), {"owner_id": owner_id, "run_ids": list(requested)}).mappings().all()
+        preferred = str(preferred_run_id or "")
+        preferred_row = None
+        if preferred:
+            preferred_row = session.execute(text("""
+                SELECT run_id,scan_key,status,updated_at FROM backtest_runs
+                WHERE owner_id=:owner_id AND deleted_at IS NULL AND archived_at IS NULL
+                  AND run_id=:run_id
+            """), {"owner_id": owner_id, "run_id": preferred}).mappings().first()
+        # Prefer the currently selected workspace so the same refresh never opens
+        # another run card. Otherwise keep one workspace per scan identity.
+        chosen: Dict[str, str] = {}
+        if preferred_row is not None:
+            key = str(preferred_row["scan_key"] or preferred_row["run_id"])
+            chosen[key] = str(preferred_row["run_id"])
+        for row in rows:
+            key = str(row["scan_key"] or row["run_id"])
+            if key in chosen:
+                continue
+            if str(row["status"]) in {"queued", "running", "paused"}:
+                chosen[key] = str(row["run_id"])
+        for row in rows:
+            key = str(row["scan_key"] or row["run_id"])
+            if key not in chosen and str(row["status"]) in {"completed", "cancelled", "failed"}:
+                chosen[key] = str(row["run_id"])
+        # Remap every filtered strategy onto the chosen workspace for that scan.
+        chosen_ids = set(chosen.values())
+        run_meta = {str(row["run_id"]): str(row["scan_key"] or row["run_id"]) for row in rows}
+        if preferred_row is not None:
+            run_meta[str(preferred_row["run_id"])] = str(preferred_row["scan_key"] or preferred_row["run_id"])
+        grouped: Dict[str, Dict[str, List[str]]] = {}
+        for source_run, strategy_map in requested.items():
+            target = chosen.get(run_meta.get(source_run, source_run))
+            if not target:
+                continue
+            dest = grouped.setdefault(target, {})
+            for symbol, preset_ids in strategy_map.items():
+                dest.setdefault(symbol, []).extend(preset_ids)
+        # If the preferred workspace can host the symbols, collapse everything there.
+        if preferred_row is not None:
+            preferred_id = str(preferred_row["run_id"])
+            available = set(session.execute(text("""
+                SELECT symbol FROM backtest_run_symbols WHERE run_id=:run_id
+            """), {"run_id": preferred_id}).scalars().all())
+            collapsed: Dict[str, List[str]] = {}
+            for strategy_map in requested.values():
+                for symbol, preset_ids in strategy_map.items():
+                    if symbol in available:
+                        collapsed.setdefault(symbol, []).extend(preset_ids)
+            if collapsed:
+                grouped = {preferred_id: collapsed}
+    finally:
+        session.close()
+    if not grouped:
+        raise ValueError("No filtered strategies belong to an existing workspace.")
+    queued: List[str] = []
+    already_active: List[str] = []
+    for candidate, strategy_map in grouped.items():
+        before = get_run(candidate, owner_id=owner_id)
+        was_active = before.get("status") in {"queued", "running", "paused"}
+        scoped = refresh_run_incrementally(
+            candidate, owner_id=owner_id, strategies=strategy_map,
+        )
+        if scoped.get("status") in {"queued", "running"}:
+            queued.append(candidate)
+            if was_active:
+                already_active.append(candidate)
+    symbols = sorted({symbol for mapping in grouped.values() for symbol in mapping})
+    strategy_count = sum(len(set(ids)) for mapping in grouped.values() for ids in mapping.values())
+    return {
+        "symbols": symbols, "symbol_count": len(symbols), "strategy_count": strategy_count,
+        "runs_queued": len(queued), "run_ids": queued, "reused_runs": already_active,
+        "created_new_run": False,
+    }
+
+
+def refresh_runs_incrementally_for_symbols(
+    symbols: List[str], *, owner_id: str = "local",
+) -> Dict[str, Any]:
+    """Queue recent-data refreshes only in completed workspaces containing filtered symbols."""
+    selected = sorted({str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()})
+    if not selected:
+        raise ValueError("The finalized filters do not match any symbols.")
+    session = _session()
+    try:
+        run_ids = [str(value) for value in session.execute(text("""
+            SELECT DISTINCT br.run_id
+            FROM backtest_runs br
+            JOIN backtest_run_symbols s ON s.run_id=br.run_id
+            WHERE br.owner_id=:owner_id AND br.deleted_at IS NULL AND br.archived_at IS NULL
+              AND br.status IN ('completed','cancelled','failed')
+              AND s.symbol=ANY(CAST(:symbols AS TEXT[]))
+            ORDER BY br.run_id
+        """), {"owner_id": owner_id, "symbols": selected}).scalars().all()]
+    finally:
+        session.close()
+    queued = []
+    for candidate in run_ids:
+        scoped = refresh_run_incrementally(candidate, owner_id=owner_id, symbols=selected)
+        if scoped.get("status") in {"queued", "running"}:
+            queued.append(candidate)
+    return {"symbols": selected, "symbol_count": len(selected), "runs_queued": len(queued), "run_ids": queued}
 
 
 def _queue_scheduled_refreshes() -> int:

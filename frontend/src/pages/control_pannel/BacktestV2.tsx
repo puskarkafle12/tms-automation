@@ -6,7 +6,11 @@ import { CanvasRenderer } from 'echarts/renderers';
 import { fetchJson, getApiUrl } from '../../utils/api';
 import NepseAlphaSymbolLink from '../../components/NepseAlphaSymbolLink';
 import ColumnPickerModal from '../../components/ColumnPickerModal';
-import TradeLightweightChart, { type TradeChartCandle, type TradeChartTrade } from '../../components/TradeLightweightChart';
+import TradeLightweightChart, {
+  type TradeChartCandle,
+  type TradeChartSignal,
+  type TradeChartTrade,
+} from '../../components/TradeLightweightChart';
 import { nextBacktestSortRules } from './backtestSort';
 import './BacktestV2.css';
 import './BacktestV2Filters.css';
@@ -39,7 +43,12 @@ type OpportunitySort = { field: string; direction: 'asc' | 'desc' };
 type OpportunityAdvancedFilter = { id: number; field: string; operator: string; value: string };
 type OpportunityPage = { items: Opportunity[]; page: number; page_size: number; total: number; pages: number; sorts?: OpportunitySort[]; filters?: Array<Omit<OpportunityAdvancedFilter, 'id'>>; scope?: string; freshness?: { latest_completed_session?: string; status?: string; excluded_weekday?: string }; disclaimer: string };
 type TradePage = { items: Array<Record<string, any>>; page: number; page_size: number; total: number; pages: number };
-type ExecutionChartPayload = { symbol: string; candles: TradeChartCandle[]; trades: TradeChartTrade[] };
+type ExecutionChartPayload = {
+  symbol: string;
+  candles: TradeChartCandle[];
+  trades: TradeChartTrade[];
+  signals: TradeChartSignal[];
+};
 
 const today = new Date().toISOString().slice(0, 10);
 const defaultStart = '2018-01-01';
@@ -95,6 +104,7 @@ const RESULT_COLUMNS: Array<{ key: string; label: string; locked?: boolean }> = 
 const columns = RESULT_COLUMNS;
 const DEFAULT_VISIBLE_RESULT_COLUMNS = RESULT_COLUMNS.map((column) => column.key);
 const BACKTEST_VISIBLE_COLUMNS_KEY = 'tms-backtest-v2-visible-columns-v1';
+const BACKTEST_FILTER_HISTORY_KEY = 'tms-backtest-v2-filter-history-v1';
 const resultColumnLabel = (key: string) => RESULT_COLUMNS.find((column) => column.key === key)?.label || key;
 const formatScanDuration = (totalSeconds: number) => {
   const seconds = Math.max(0, Math.round(totalSeconds));
@@ -269,6 +279,7 @@ const StrongBuyCharts: React.FC<{ trades: Array<Record<string, any>> }> = ({ tra
 
 const EMPTY_CANDLES: TradeChartCandle[] = [];
 const EMPTY_CHART_TRADES: TradeChartTrade[] = [];
+const EMPTY_CHART_SIGNALS: TradeChartSignal[] = [];
 
 const TradeCandlestickChart: React.FC<{ resultId: number; symbol: string }> = ({ resultId, symbol }) => {
   const [payload, setPayload] = useState<ExecutionChartPayload | null>(null);
@@ -285,6 +296,7 @@ const TradeCandlestickChart: React.FC<{ resultId: number; symbol: string }> = ({
         symbol={symbol}
         candles={payload?.candles || EMPTY_CANDLES}
         trades={payload?.trades || EMPTY_CHART_TRADES}
+        signals={payload?.signals || EMPTY_CHART_SIGNALS}
         loading={!payload && !chartError}
         error={chartError}
         emptyMessage="No cached OHLCV candles are available for this result period."
@@ -315,6 +327,7 @@ const BacktestV2: React.FC = () => {
   const [runControlBusy, setRunControlBusy] = useState<'pause' | 'resume' | 'cancel' | 'retry' | null>(null);
   const [runControlMessage, setRunControlMessage] = useState('');
   const [workspaceRefreshBusy, setWorkspaceRefreshBusy] = useState(false);
+  const [filteredRefreshBusy, setFilteredRefreshBusy] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [progressTick, setProgressTick] = useState(0);
   const [archivedRuns, setArchivedRuns] = useState<Run[]>([]);
@@ -330,6 +343,13 @@ const BacktestV2: React.FC = () => {
   const [showHowItWorks, setShowHowItWorks] = useState(false);
   const [columnPickerOpen, setColumnPickerOpen] = useState(false);
   const preferenceUserId = localStorage.getItem('userId') || 'local';
+  const [savedResultFilterState] = useState<any>(() => {
+    try {
+      return JSON.parse(localStorage.getItem(`${BACKTEST_FILTER_HISTORY_KEY}:${preferenceUserId}`) || '{}');
+    } catch {
+      return {};
+    }
+  });
   const [visibleResultColumns, setVisibleResultColumns] = useState<string[]>(() => {
     try {
       const saved = JSON.parse(localStorage.getItem(`${BACKTEST_VISIBLE_COLUMNS_KEY}:${preferenceUserId}`) || '[]');
@@ -351,25 +371,38 @@ const BacktestV2: React.FC = () => {
   const [results, setResults] = useState<ResultPage>({ items: [], page: 1, page_size: 50, total: 0, pages: 0 });
   const [resultScope, setResultScope] = useState<'run' | 'all' | 'strategies' | 'holistic'>(() => {
     const requestedScope = params.get('scope');
-    return requestedScope === 'run' || requestedScope === 'all' || requestedScope === 'holistic'
-      ? requestedScope
+    if (requestedScope === 'run' || requestedScope === 'all' || requestedScope === 'holistic') return requestedScope;
+    return ['run', 'all', 'strategies', 'holistic'].includes(savedResultFilterState.resultScope)
+      ? savedResultFilterState.resultScope
       : 'strategies';
   });
-  const [allRunsSelected, setAllRunsSelected] = useState(() => params.get('scope') !== 'run');
-  const [resultSorts, setResultSorts] = useState<ResultSort[]>([{ field: 'win_rate_pct', direction: 'desc' }]);
+  const [allRunsSelected, setAllRunsSelected] = useState(() => {
+    const requestedScope = params.get('scope');
+    return requestedScope ? requestedScope !== 'run' : savedResultFilterState.resultScope !== 'run';
+  });
+  const [resultSorts, setResultSorts] = useState<ResultSort[]>(() => (
+    Array.isArray(savedResultFilterState.resultSorts) && savedResultFilterState.resultSorts.length
+      ? savedResultFilterState.resultSorts
+      : [{ field: 'win_rate_pct', direction: 'desc' }]
+  ));
   const initialResultSymbol = params.get('stock') || '';
-  const initialResultFilters: ResultAdvancedFilter[] = [
+  const defaultResultFilters: ResultAdvancedFilter[] = [
     ...(initialResultSymbol ? [{ id: 1, field: 'symbol', operator: 'eq', value: initialResultSymbol }] : []),
     { id: initialResultSymbol ? 2 : 1, field: 'total_trades', operator: 'gte', value: '20' },
   ];
-  const [resultFilterJoin, setResultFilterJoin] = useState<'and' | 'or'>('and');
+  const initialResultFilters: ResultAdvancedFilter[] = !initialResultSymbol
+    && Array.isArray(savedResultFilterState.filters)
+    && savedResultFilterState.filters.length
+    ? savedResultFilterState.filters
+    : defaultResultFilters;
+  const [resultFilterJoin, setResultFilterJoin] = useState<'and' | 'or'>(savedResultFilterState.join === 'or' ? 'or' : 'and');
   const [resultFilterRows, setResultFilterRows] = useState<ResultAdvancedFilter[]>(initialResultFilters);
   const [appliedResultFilters, setAppliedResultFilters] = useState<ResultAdvancedFilter[]>(initialResultFilters);
   const appliedResultFilterSignature = useRef(JSON.stringify(initialResultFilters));
   const nextResultFilterId = useRef(initialResultFilters.length + 1);
   const [resultSectors, setResultSectors] = useState<string[]>([]);
   const [resultSymbolSuggestions, setResultSymbolSuggestions] = useState<Array<{ symbol: string; company_name: string; sector?: string }>>([]);
-  const [includeNonEquities, setIncludeNonEquities] = useState(false);
+  const [includeNonEquities, setIncludeNonEquities] = useState(Boolean(savedResultFilterState.includeNonEquities));
   const [resultsBusy, setResultsBusy] = useState(false);
   const [resultFilterStatus, setResultFilterStatus] = useState('');
   const resultRequestId = useRef(0);
@@ -554,6 +587,16 @@ const BacktestV2: React.FC = () => {
   }), [appliedResultFilters, resultFilterJoin]);
 
   useEffect(() => {
+    localStorage.setItem(`${BACKTEST_FILTER_HISTORY_KEY}:${preferenceUserId}`, JSON.stringify({
+      filters: appliedResultFilters,
+      join: resultFilterJoin,
+      resultSorts,
+      resultScope,
+      includeNonEquities,
+    }));
+  }, [appliedResultFilters, includeNonEquities, preferenceUserId, resultFilterJoin, resultScope, resultSorts]);
+
+  useEffect(() => {
     void fetchJson<{ sectors: string[] }>('/api/backtests/v2/filter-options').then((response) => {
       if (response.ok) setResultSectors(response.data.sectors || []);
     });
@@ -573,6 +616,54 @@ const BacktestV2: React.FC = () => {
     }, 350);
     return () => window.clearTimeout(timer);
   }, [resultFilterRows]);
+
+  const refreshFilteredResults = async () => {
+    if (!activeRun) return;
+    setFilteredRefreshBusy(true);
+    setError('');
+    setRunControlMessage('Resolving finalized filters and queuing only matching symbols…');
+    const targetRun = resultScope === 'run' ? activeRun.run_id : 'all';
+    const response = await fetchJson<{ symbol_count: number; strategy_count: number; runs_queued: number; run_ids: string[] }>(
+      `/api/backtests/v2/runs/${targetRun}/refresh-filtered`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          filters: filterAst,
+          include_non_equities: includeNonEquities,
+          sorts: resultSorts,
+          unique_by_symbol: resultScope === 'holistic',
+          unique_by_strategy: resultScope === 'strategies',
+          preferred_run_id: activeRun.run_id,
+          page: 1,
+          page_size: 100,
+        }),
+      },
+      120000,
+    );
+    if (!response.ok) {
+      setFilteredRefreshBusy(false);
+      setError(response.error || 'Could not queue the filtered refresh.');
+      return;
+    }
+    setRunControlMessage(`Refreshing ${response.data.strategy_count.toLocaleString()} filtered strategies on the same workspace…`);
+    const pending = new Set(response.data.run_ids || []);
+    for (let attempt = 0; pending.size && attempt < 300; attempt += 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, 2000));
+      const checkpoints = await Promise.all(Array.from(pending).map(async (runId) => ({
+        runId,
+        response: await fetchJson<Run>(`/api/backtests/v2/runs/${runId}`),
+      })));
+      checkpoints.forEach(({ runId, response: checkpoint }) => {
+        if (!checkpoint.ok || !['queued', 'running', 'paused'].includes(checkpoint.data.status)) pending.delete(runId);
+      });
+      setRunControlMessage(`Live refresh: ${response.data.runs_queued - pending.size}/${response.data.runs_queued} workspaces completed · ${response.data.strategy_count.toLocaleString()} filtered strategies`);
+    }
+    await loadRuns();
+    await loadResults(1);
+    setFilteredRefreshBusy(false);
+    setRunControlMessage(`Filtered data is live on the same workspace. Rechecked ${response.data.strategy_count.toLocaleString()} strategies and loaded any new BUY signals.`);
+  };
 
   const loadResults = async (page = 1) => {
     if (!activeRun) return;
@@ -1059,7 +1150,7 @@ const BacktestV2: React.FC = () => {
                 </div>;
               })}</div>}
               {resultsBusy && <div className="result-filter-progress" role="status" aria-live="polite"><i /><span>{resultFilterStatus}</span></div>}
-              <footer>{!resultsBusy && <span>{`${appliedResultFilters.length} active condition${appliedResultFilters.length === 1 ? '' : 's'} · ${resultFilterJoin.toUpperCase()} · stable at this checkpoint`}</span>}<div><button type="button" className="secondary" disabled={resultsBusy} onClick={() => void loadResults(1)}>Refresh new scan results</button><button type="button" className="secondary" disabled={resultsBusy} onClick={resetResultFilters}>Reset filters</button></div></footer>
+              <footer>{!resultsBusy && <span>{`${appliedResultFilters.length} active condition${appliedResultFilters.length === 1 ? '' : 's'} · ${resultFilterJoin.toUpperCase()} · stable at this checkpoint`}</span>}<div><button type="button" className="secondary" disabled={resultsBusy || filteredRefreshBusy} onClick={() => void refreshFilteredResults()}>{filteredRefreshBusy ? 'Queuing filtered refresh…' : 'Refresh filtered data'}</button><button type="button" className="secondary" disabled={resultsBusy} onClick={() => void loadResults(1)}>Reload scan results</button><button type="button" className="secondary" disabled={resultsBusy} onClick={resetResultFilters}>Reset filters</button></div></footer>
             </section>
             <div className="recommendation-sort-guide"><span><b>Multi-column ranking:</b> click a heading to make it primary and toggle ↓/↑. Hold Shift while clicking to add or change a secondary rule.</span><button type="button" onClick={() => setResultSorts([{ field: 'win_rate_pct', direction: 'desc' }])}>Reset to win rate</button></div>
             <div className="research-table-summary"><div><b>{results.total.toLocaleString()} {resultScope === 'holistic' ? 'unique stocks across all runs' : resultScope === 'strategies' ? 'unique simulation configurations across all runs' : resultScope === 'all' ? 'historical results across all runs' : 'results from this run'}</b><span>{resultScope === 'holistic' ? 'Best validated result per stock · duplicate runs removed' : resultScope === 'strategies' ? 'Exact duplicates only: symbol + complete entry/exit strategy + holding/risk/cost/sizing settings + engine versions' : resultScope === 'all' ? 'Complete cached stock × strategy history across every run' : 'Every scanned stock × strategy combination in the selected workspace'} · {resultSorts.map((item, index) => `${index + 1}. ${resultColumnLabel(item.field)} ${item.direction === 'desc' ? '↓' : '↑'}`).join(' · ')}</span></div><div className="research-table-actions"><button type="button" className="research-columns-button" onClick={() => setColumnPickerOpen(true)}>Columns <b>{activeResultColumns.length}/{RESULT_COLUMNS.length}</b></button><div className="csv-export-control"><label><span>CSV dataset</span><select value={exportScope} onChange={(event) => setExportScope(event.target.value as 'run' | 'all')}><option value="run">This run · current filters</option><option value="all">All my cached backtests</option></select></label><button type="button" disabled={exporting} onClick={() => void downloadCsv(exportScope)}>{exporting ? 'Preparing download…' : '↓ Download CSV'}</button>{exportStatus && <small>{exportStatus}</small>}</div></div></div>

@@ -23,11 +23,18 @@ export type TradeChartCandle = {
 };
 
 export type TradeChartTrade = Record<string, unknown>;
+export type TradeChartSignal = {
+  date: string;
+  side: 'buy' | 'sell';
+  label?: string;
+  status?: string;
+};
 
 type TradeLightweightChartProps = {
   symbol: string;
   candles: TradeChartCandle[];
   trades?: TradeChartTrade[];
+  signals?: TradeChartSignal[];
   loading?: boolean;
   error?: string;
   emptyMessage?: string;
@@ -56,6 +63,7 @@ const snapToCandleTime = (dates: string[], value: string): string | null => {
 };
 
 const EMPTY_TRADES: TradeChartTrade[] = [];
+const EMPTY_SIGNALS: TradeChartSignal[] = [];
 
 const formatVolume = (value: number): string => {
   const volume = Number(value) || 0;
@@ -68,6 +76,7 @@ const TradeLightweightChart: React.FC<TradeLightweightChartProps> = ({
   symbol,
   candles,
   trades = EMPTY_TRADES,
+  signals = EMPTY_SIGNALS,
   loading = false,
   error = '',
   emptyMessage = 'No cached OHLCV candles are available for this symbol.',
@@ -104,7 +113,6 @@ const TradeLightweightChart: React.FC<TradeLightweightChartProps> = ({
       value: Number(bar.volume || 0),
       color: Number(bar.close) >= Number(bar.open) ? 'rgba(33,166,111,.55)' : 'rgba(224,82,82,.55)',
     }));
-    const npr = (value: number) => `${value >= 0 ? '+' : '−'}NPR ${Math.abs(value).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
     const markers: SeriesMarker<Time>[] = [];
     trades.forEach((trade) => {
       const entry = snapToCandleTime(dates, String(trade.entry_date || ''));
@@ -112,8 +120,26 @@ const TradeLightweightChart: React.FC<TradeLightweightChartProps> = ({
       if (entry) markers.push({ time: entry as Time, position: 'belowBar', color: '#42d392', shape: 'arrowUp', text: 'BUY' });
       if (exit) {
         const pnl = Number(trade.pnl || 0);
-        markers.push({ time: exit as Time, position: 'aboveBar', color: pnl >= 0 ? '#34d399' : '#ff5e66', shape: 'arrowDown', text: npr(pnl) });
+        markers.push({
+          time: exit as Time,
+          position: 'aboveBar',
+          color: pnl >= 0 ? '#34d399' : '#ff5e66',
+          shape: 'arrowDown',
+          text: 'SELL',
+        });
       }
+    });
+    signals.forEach((signal) => {
+      const signalTime = snapToCandleTime(dates, signal.date);
+      if (!signalTime) return;
+      const isBuy = signal.side === 'buy';
+      markers.push({
+        time: signalTime as Time,
+        position: isBuy ? 'belowBar' : 'aboveBar',
+        color: signal.status === 'strong_buy' ? '#fbbf24' : isBuy ? '#38bdf8' : '#fb7185',
+        shape: isBuy ? 'arrowUp' : 'arrowDown',
+        text: signal.label || (isBuy ? 'BUY NOW' : 'SELL NOW'),
+      });
     });
     markers.sort((a, b) => timeKey(a.time).localeCompare(timeKey(b.time)));
 
@@ -280,7 +306,7 @@ const TradeLightweightChart: React.FC<TradeLightweightChartProps> = ({
       chart.remove();
       chartRef.current = null;
     };
-  }, [candles, symbol, trades]);
+  }, [candles, signals, symbol, trades]);
 
   if (error) return <div className="trade-chart-alert">{error}</div>;
   if (loading) return <div className="trade-chart-loading">{loadingMessage}</div>;

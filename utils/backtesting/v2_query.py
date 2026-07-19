@@ -319,6 +319,47 @@ def query_results(session, run_id: str, body: Dict[str, Any], *, owner_id: str =
     return {"items": items, "page": page, "page_size": page_size, "total": total, "pages": ceil(total / page_size) if total else 0, "sorts": sorts, "sort_by": sorts[0]["field"], "sort_direction": sorts[0]["direction"], "unique_by_symbol": unique_by_symbol, "unique_by_strategy": unique_by_strategy}
 
 
+def query_result_selections(
+    session, run_id: str, body: Dict[str, Any], *, owner_id: str = "local",
+) -> List[Dict[str, str]]:
+    """Resolve exact run × symbol × strategy rows matching finalized filters."""
+    where, params = compile_filters(
+        body.get("filters"), include_non_equities=bool(body.get("include_non_equities")),
+    )
+    params.update({"run_id": run_id, "owner_id": owner_id})
+    ownership = "br.owner_id=:owner_id AND br.deleted_at IS NULL AND br.archived_at IS NULL"
+    scope = "(:run_id='all' OR r.run_id=:run_id)"
+    base = "FROM backtest_results r JOIN backtest_run_symbols s ON s.run_id=r.run_id AND s.symbol=r.symbol JOIN backtest_runs br ON br.run_id=r.run_id"
+    if body.get("unique_by_symbol"):
+        inner_order, _, _ = compile_result_sorts(body)
+        statement = text(
+            f"WITH ranked AS (SELECT r.run_id,r.symbol,r.preset_id,ROW_NUMBER() OVER (PARTITION BY r.symbol ORDER BY {inner_order}) AS selected_rank "
+            f"{base} WHERE {scope} AND {ownership} AND {where}) "
+            "SELECT run_id,symbol,preset_id FROM ranked WHERE selected_rank=1 ORDER BY run_id,symbol,preset_id"
+        )
+    elif body.get("unique_by_strategy"):
+        statement = text(
+            f"SELECT DISTINCT r.run_id,r.symbol,r.preset_id {base} "
+            "JOIN backtest_canonical_results canonical ON canonical.result_id=r.result_id AND canonical.owner_id=:owner_id "
+            f"WHERE {scope} AND {ownership} AND {where} ORDER BY r.run_id,r.symbol,r.preset_id"
+        )
+    else:
+        statement = text(
+            f"SELECT DISTINCT r.run_id,r.symbol,r.preset_id {base} "
+            f"WHERE {scope} AND {ownership} AND {where} ORDER BY r.run_id,r.symbol,r.preset_id"
+        )
+    return [
+        {"run_id": str(row["run_id"]), "symbol": str(row["symbol"]), "preset_id": str(row["preset_id"])}
+        for row in session.execute(statement, params).mappings().all()
+    ]
+
+
+def query_result_symbols(
+    session, run_id: str, body: Dict[str, Any], *, owner_id: str = "local",
+) -> List[str]:
+    return sorted({item["symbol"] for item in query_result_selections(session, run_id, body, owner_id=owner_id)})
+
+
 def stream_results_csv(session_factory, run_id: str, body: Dict[str, Any], *, owner_id: str):
     """Stream every matching normalized result without loading the export into memory."""
     inner_order, _, _ = compile_result_sorts(body)
