@@ -23,8 +23,8 @@ import {
   isCacheValid,
   setCachedScripSuggestions,
 } from './scriptSuggestionCache';
-import { buildNepseAlphaChartUrl } from '../../lib/nepseAlpha';
 import NepseAlphaSymbolLink from '../../components/NepseAlphaSymbolLink';
+import TradeLightweightChart, { type TradeChartCandle } from '../../components/TradeLightweightChart';
 import ScreenerDropConfirmModal from '../../components/ScreenerDropConfirmModal';
 import {
   mapExpiryActionLabel,
@@ -33,6 +33,40 @@ import {
 
 const getApiUrl = () => localStorage.getItem('apiUrl') || window.location.origin;
 const SCHEDULE_ORDER_DRAFT_KEY = 'tms-schedule-order-draft-v1';
+
+const ScheduleOrderChart: React.FC<{ symbol: string }> = ({ symbol }) => {
+  const [candles, setCandles] = useState<TradeChartCandle[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError('');
+    setCandles([]);
+    void fetchJson<{ symbol: string; candles: TradeChartCandle[] }>(`/api/market/ohlcv/${encodeURIComponent(symbol)}?limit=2000`).then((response) => {
+      if (cancelled) return;
+      if (response.ok) {
+        setCandles(response.data.candles || []);
+        setError('');
+      } else {
+        setCandles([]);
+        setError(response.error || 'Could not load price history.');
+      }
+      setLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [symbol]);
+  return (
+    <TradeLightweightChart
+      symbol={symbol}
+      candles={candles}
+      loading={loading}
+      error={error}
+      emptyMessage={`No cached OHLCV candles are available for ${symbol}.`}
+      loadingMessage={`Loading ${symbol} daily price history…`}
+    />
+  );
+};
 
 interface DPHolding {
   scrip?: string;
@@ -1287,10 +1321,7 @@ const ScheduleOrder: React.FC = () => {
             </div>
           </div>
           <div className="schedule-order-chart-box">
-            <iframe
-              title={`${chartSymbol} NEPSE chart`}
-              src={buildNepseAlphaChartUrl(chartSymbol) || ''}
-            />
+            <ScheduleOrderChart symbol={chartSymbol} />
           </div>
         </div>
       )}

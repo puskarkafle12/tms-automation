@@ -212,13 +212,23 @@
   border: 1px solid var(--color-border);
   border-radius: 8px;
   overflow: hidden;
-  background: #fff;
+  background: #131722;
 }
 
-.schedule-order-chart-box iframe {
-  width: 100%;
+.schedule-order-chart-box .trade-lwc-chart {
   height: 100%;
+  min-height: 0;
   border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.schedule-order-chart-box .trade-chart-loading,
+.schedule-order-chart-box .trade-chart-alert {
+  height: 100%;
+  min-height: 240px;
+  border: 0;
+  border-radius: 0;
 }
 
 .schedule-order-empty-side {

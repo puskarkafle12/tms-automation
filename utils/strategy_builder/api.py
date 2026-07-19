@@ -723,22 +723,14 @@ async def read_backtest_v2_result_trades(
             "total": len(filtered), "pages": (len(filtered) + page_size - 1) // page_size}
 
 
-@router.get("/backtests/v2/results/{result_id}/chart")
-async def read_backtest_v2_result_chart(result_id: int, db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("backtest"))):
-    from sqlalchemy import text
-    from utils.backtesting.v2_query import ResultQueryError, result_detail, result_trades
-    try:
-        detail = result_detail(db, result_id, owner_id=str(current_user.id))
-    except ResultQueryError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    trades = result_trades(db, result_id, owner_id=str(current_user.id))
-    capital = float((detail.get("assumptions") or {}).get("initial_capital") or 100000)
-    equity = capital
-    curve = []
-    for trade in trades:
-        equity += float(trade.get("pnl") or 0)
-        curve.append({"date": trade["exit_date"], "equity": round(equity, 2), "trade_return_pct": trade["return_pct"]})
-    period = (detail.get("assumptions") or {}).get("period") or {}
+def _market_ohlcv_candles(
+    db: Session,
+    symbol: str,
+    *,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    limit: int = 5000,
+) -> List[Dict[str, Any]]:
     candle_rows = db.execute(text("""
         WITH normalized AS (
             SELECT CASE WHEN source_timestamp IS NOT NULL
@@ -753,21 +745,69 @@ async def read_backtest_v2_result_chart(result_id: int, db: Session = Depends(ge
                    ) AS row_number
             FROM market_ohlcv_daily
             WHERE symbol=:symbol AND adjusted=TRUE
+        ),
+        filtered AS (
+            SELECT trading_date,open_price,high_price,low_price,close_price,volume
+            FROM normalized
+            WHERE row_number=1
+              AND (:start_date IS NULL OR trading_date>=CAST(:start_date AS DATE))
+              AND (:end_date IS NULL OR trading_date<=CAST(:end_date AS DATE))
         )
         SELECT trading_date,open_price,high_price,low_price,close_price,volume
-        FROM normalized
-        WHERE row_number=1
-          AND (:start_date IS NULL OR trading_date>=CAST(:start_date AS DATE))
-          AND (:end_date IS NULL OR trading_date<=CAST(:end_date AS DATE))
+        FROM (
+            SELECT *
+            FROM filtered
+            ORDER BY trading_date DESC
+            LIMIT :limit
+        ) recent
         ORDER BY trading_date
-        LIMIT 5000
     """), {
-        "symbol": detail["symbol"], "start_date": period.get("start"), "end_date": period.get("end"),
+        "symbol": symbol.strip().upper(),
+        "start_date": start_date,
+        "end_date": end_date,
+        "limit": limit,
     }).mappings().all()
-    candles = [{
+    return [{
         "date": row["trading_date"].isoformat(), "open": row["open_price"], "high": row["high_price"],
         "low": row["low_price"], "close": row["close_price"], "volume": row["volume"],
     } for row in candle_rows]
+
+
+@router.get("/market/ohlcv/{symbol}")
+async def read_market_ohlcv(
+    symbol: str,
+    limit: int = Query(2000, ge=1, le=5000),
+    db: Session = Depends(get_db),
+):
+    clean = symbol.strip().upper()
+    if not clean:
+        raise HTTPException(status_code=400, detail="Symbol is required.")
+    candles = _market_ohlcv_candles(db, clean, limit=limit)
+    return {"symbol": clean, "candles": candles}
+
+
+@router.get("/backtests/v2/results/{result_id}/chart")
+async def read_backtest_v2_result_chart(result_id: int, db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("backtest"))):
+    from utils.backtesting.v2_query import ResultQueryError, result_detail, result_trades
+    try:
+        detail = result_detail(db, result_id, owner_id=str(current_user.id))
+    except ResultQueryError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    trades = result_trades(db, result_id, owner_id=str(current_user.id))
+    capital = float((detail.get("assumptions") or {}).get("initial_capital") or 100000)
+    equity = capital
+    curve = []
+    for trade in trades:
+        equity += float(trade.get("pnl") or 0)
+        curve.append({"date": trade["exit_date"], "equity": round(equity, 2), "trade_return_pct": trade["return_pct"]})
+    period = (detail.get("assumptions") or {}).get("period") or {}
+    candles = _market_ohlcv_candles(
+        db,
+        detail["symbol"],
+        start_date=period.get("start"),
+        end_date=period.get("end"),
+        limit=5000,
+    )
     return {"symbol": detail["symbol"], "equity_curve": curve, "candles": candles, "trades": trades}
 
 
