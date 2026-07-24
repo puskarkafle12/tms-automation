@@ -1,6 +1,6 @@
 from copy import deepcopy
 
-from utils.backtesting.accelerated import compile_preset_signals
+from utils.backtesting.accelerated import compile_preset_exit_signals, compile_preset_signals
 from utils.backtesting.presets import get_backtest_presets
 
 
@@ -46,3 +46,18 @@ def test_every_catalog_preset_has_an_accelerated_compiler():
     for preset in get_backtest_presets():
         signals = compile_preset_signals(preset["id"], rows)
         assert len(signals) == len(rows)
+
+
+def test_paired_exit_compilers_use_the_selected_sell_rule():
+    rows = _rows(3)
+    rows[1].update({
+        "ltp": 120,
+        "technical_bollinger_middle_20": 110,
+        "technical_bollinger_upper_20": 125,
+        "technical_fib_resistance_exit": 1,
+        "technical_sr_resistance_rejection": 0,
+    })
+    bollinger = compile_preset_exit_signals("bollinger_lower_recovery_middle", rows)
+    fibonacci = compile_preset_exit_signals("fibonacci_pullback_resistance", rows)
+    assert bollinger == [False, True, False]
+    assert fibonacci == [False, True, False]

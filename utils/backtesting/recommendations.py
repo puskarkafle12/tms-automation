@@ -7,11 +7,12 @@ from typing import Any, Dict, List
 
 from sqlalchemy import text
 
-from utils.backtesting.v2_query import query_strong_buys
+from utils.backtesting.result_retention import RETAINED_ROW_SQL
+from utils.backtesting.v2_query import latest_completed_market_session, query_strong_buys
 
 
 SIGNAL_PRIORITY = {"strong_buy": 3, "buy": 2, "near_trigger": 1}
-RECOMMENDATION_SCORE_VERSION = "risk-adjusted-v2"
+RECOMMENDATION_SCORE_VERSION = "risk-adjusted-v3-protection-champion"
 SORT_FIELDS = {
     "recommendation_score": "recommendation_score", "win_rate_pct": "win_rate_pct",
     "total_trades": "total_trades", "net_return_pct": "net_return_pct",
@@ -65,7 +66,8 @@ def _all_candidates(session, mode: str, owner_id: str) -> List[Dict[str, Any]]:
     page, items = 1, []
     while True:
         payload = query_strong_buys(session, "all", {
-            "page": page, "page_size": 100, "minimum_trades": 5, "minimum_return": 0,
+            "page": page, "page_size": 100, "minimum_trades": 0,
+            "minimum_win_rate": 0, "minimum_return": 0,
             "current_signal": mode, "include_non_equities": False,
         }, owner_id=owner_id)
         items.extend(payload["items"])
@@ -106,7 +108,15 @@ def materialize_recommendations(session, *, owner_id: str = "local") -> Dict[str
         "signal_status": item["current_signal_status"], "signal_date": item["signal_date"],
         "score": item["recommendation_score"], "win_rate": item["win_rate_pct"],
         "trades": item["total_trades"], "net_return": item["net_return_pct"],
-        "average_volume": item.get("average_volume_20"), "payload": json.dumps(item, default=str),
+        "average_volume": item.get("average_volume_20"), "payload": json.dumps({
+            **item,
+            "selected_sell_strategy": (item.get("assumptions") or {}).get("exit_rule_id"),
+            "selected_stop_strategy": (
+                ((item.get("assumptions") or {}).get("protection_optimization") or {})
+                .get("champion", {}).get("stop", {}).get("label")
+                or (item.get("assumptions") or {}).get("risk_strategy")
+            ),
+        }, default=str),
     } for item in preferred.values()]
     if rows:
         session.execute(statement, rows)
@@ -128,19 +138,7 @@ def query_recommendations(session, body: Dict[str, Any], *, owner_id: str = "loc
     if not sort_sql:
         raise ValueError("Unsupported recommendation sort field.")
     direction = "ASC" if str(body.get("sort_direction") or "desc").lower() == "asc" else "DESC"
-    fresh_session = body.get("signal_date") or session.execute(text("""
-        SELECT MAX(CASE WHEN source_timestamp IS NOT NULL
-                       THEN (to_timestamp(source_timestamp) AT TIME ZONE 'UTC')::date
-                       ELSE session_date END)
-        FROM market_ohlcv_daily
-        WHERE adjusted=TRUE
-          AND (CASE WHEN source_timestamp IS NOT NULL
-                    THEN (to_timestamp(source_timestamp) AT TIME ZONE 'UTC')::date
-                    ELSE session_date END)<=CURRENT_DATE
-          AND EXTRACT(ISODOW FROM (CASE WHEN source_timestamp IS NOT NULL
-                    THEN (to_timestamp(source_timestamp) AT TIME ZONE 'UTC')::date
-                    ELSE session_date END)) <> 6
-    """)).scalar()
+    fresh_session = body.get("signal_date") or latest_completed_market_session(session)
     stored_session = session.execute(text(
         "SELECT MAX(signal_date) FROM market_backtest_recommendations WHERE owner_id=:owner_id"
     ), {"owner_id": owner_id}).scalar()
@@ -155,11 +153,13 @@ def query_recommendations(session, body: Dict[str, Any], *, owner_id: str = "loc
         session.commit()
     params = {
         "owner_id": owner_id, "fresh": fresh_session,
-        "min_win": float(body.get("minimum_win_rate") or 0), "min_trades": int(body.get("minimum_trades") or 0),
+        "min_win": max(0, float(body.get("minimum_win_rate") or 0)),
+        "min_trades": max(0, int(body.get("minimum_trades") or 0)),
         "min_score": float(body.get("minimum_score") or 0), "search": f"%{str(body.get('search') or '').strip()}%",
         "limit": page_size, "offset": (page - 1) * page_size,
     }
     where = f"""owner_id=:owner_id AND {signal_sql}
+        AND {RETAINED_ROW_SQL}
         AND (:fresh IS NULL OR signal_date=CAST(:fresh AS DATE)
              OR (signal_date=CAST(:fresh AS DATE)+1 AND EXTRACT(ISODOW FROM signal_date)=6))
         AND win_rate_pct>=:min_win AND total_trades>=:min_trades AND recommendation_score>=:min_score
@@ -246,6 +246,9 @@ async def query_sell_recommendations(session, body: Dict[str, Any], *, owner_id:
                 await tms_user.close()
     symbols = sorted(combined)
     page = max(1, int(body.get("page") or 1)); page_size = min(100, max(1, int(body.get("page_size") or 25)))
+    requested_signal = str(body.get("signal") or "actionable")
+    if requested_signal not in {"actionable", "strong_sell", "sell", "near_sell", "all"}:
+        raise ValueError("Unsupported SELL recommendation signal filter.")
     if not symbols:
         return {"items": [], "total": 0, "page": page, "page_size": page_size, "pages": 0,
                 "persisted": True, "side": "sell", "trading_session": None,
@@ -259,10 +262,12 @@ async def query_sell_recommendations(session, body: Dict[str, Any], *, owner_id:
           FROM backtest_results r JOIN backtest_runs br ON br.run_id=r.run_id
           WHERE br.owner_id=:owner_id AND br.deleted_at IS NULL AND br.archived_at IS NULL
             AND r.symbol=ANY(CAST(:symbols AS TEXT[]))
+            AND ((r.total_trades>=16 AND r.win_rate_pct>=50)
+                 OR (r.total_trades>=9 AND r.win_rate_pct>=60))
             AND COALESCE(r.assumptions->>'sell_strategy_query','')<>''
         )
         SELECT result_id,run_id,symbol,preset_id,preset_name,category,robust_score,win_rate_pct,total_trades,
-               net_return_pct,max_drawdown_pct,average_holding_days,profit_factor,assumptions
+               net_return_pct,max_drawdown_pct,average_holding_days,profit_factor,technical_sell_score,assumptions
         FROM candidates WHERE candidate_rank<=20 ORDER BY symbol,candidate_rank
     """), {"owner_id": owner_id, "symbols": symbols}).mappings().all()
     history_rows = session.execute(text("""
@@ -284,12 +289,12 @@ async def query_sell_recommendations(session, body: Dict[str, Any], *, owner_id:
         item.update(indicators); item.update({"ltp": float(item.get("close") or 0), "date": item["session_date"]})
         histories.setdefault(str(item["symbol"]), []).append(item)
 
-    matches: List[Dict[str, Any]] = []
-    matched_symbols = set()
+    best_by_symbol: Dict[str, Dict[str, Any]] = {}
+    signal_priority = {"strong_sell": 3, "sell": 2, "near_sell": 1}
     search = str(body.get("search") or "").strip().lower()
     for source in candidates:
         item = dict(source); symbol = str(item["symbol"])
-        if symbol in matched_symbols or (search and search not in symbol.lower() and search not in str(item["preset_name"]).lower()):
+        if search and search not in symbol.lower() and search not in str(item["preset_name"]).lower():
             continue
         if float(item.get("win_rate_pct") or 0) < float(body.get("minimum_win_rate") or 0) or int(item.get("total_trades") or 0) < int(body.get("minimum_trades") or 0) or float(item.get("robust_score") or 0) < float(body.get("minimum_score") or 0):
             continue
@@ -301,16 +306,44 @@ async def query_sell_recommendations(session, body: Dict[str, Any], *, owner_id:
             evidence = evaluate_latest_completed_query(query, symbol, rows, strategy_name=f"{item['preset_name']} sell")
         except Exception:
             continue
-        if not evidence.get("active"):
+        active = bool(evidence.get("active"))
+        near_sell = bool(not active and evidence.get("near_trigger"))
+        if not active and not near_sell:
             continue
         latest = rows[-1]
+        latest_sell_score = float(latest.get("technical_sell_score") or item.get("technical_sell_score") or 0)
+        robust_score = float(item.get("robust_score") or 0)
+        status = (
+            "strong_sell" if active and robust_score >= 65 and latest_sell_score >= 60
+            else "sell" if active else "near_sell"
+        )
+        if requested_signal == "actionable" and status not in {"strong_sell", "sell"}:
+            continue
+        if requested_signal not in {"actionable", "all"} and status != requested_signal:
+            continue
         item.update({
-            "current_signal_status": "sell", "signal_date": latest["session_date"],
+            "current_signal_status": status, "signal_date": latest["session_date"],
             "recommendation_score": item.get("robust_score"), "holding_quantity": combined[symbol],
             "holding_accounts": holders.get(symbol, []), "ltp": latest.get("ltp"),
+            "technical_sell_score": latest_sell_score,
             "sell_strategy_query": query, "current_evidence": evidence,
+            "selected_sell_strategy": (item.get("assumptions") or {}).get("exit_rule_id"),
+            "selected_stop_strategy": (
+                ((item.get("assumptions") or {}).get("protection_optimization") or {})
+                .get("champion", {}).get("stop", {}).get("label")
+                or (item.get("assumptions") or {}).get("risk_strategy")
+            ),
         })
-        matches.append(item); matched_symbols.add(symbol)
+        existing = best_by_symbol.get(symbol)
+        candidate_key = (signal_priority[status], robust_score, int(item.get("total_trades") or 0))
+        existing_key = (
+            signal_priority.get(str(existing.get("current_signal_status")), 0),
+            float(existing.get("robust_score") or 0),
+            int(existing.get("total_trades") or 0),
+        ) if existing else (-1, -1.0, -1)
+        if candidate_key > existing_key:
+            best_by_symbol[symbol] = item
+    matches = list(best_by_symbol.values())
     requested_sort = str(body.get("sort_by") or "recommendation_score")
     if requested_sort not in SORT_FIELDS:
         raise ValueError("Unsupported recommendation sort field.")

@@ -10,8 +10,22 @@ from typing import Any, Dict, List
 def _preset(
     preset_id: str, name: str, category: str, condition: str, description: str,
     *, stop: float = 5, target: float = 10, holding: int = 20, research_basis: str = "",
+    exit_rule_id: str | None = None, exit_condition: str | None = None,
 ) -> Dict[str, Any]:
-    source_hash = hashlib.sha256(f"{condition}|{stop}|{target}|{holding}|every_match-v3".encode("utf-8")).hexdigest()
+    if not exit_rule_id or not exit_condition:
+        category_key = category.lower()
+        if "mean reversion" in category_key or category_key == "rsi":
+            exit_rule_id = "momentum_rollover_exit"
+            exit_condition = "technical_rsi_14 >= 65 AND technical_ppo_histogram < 0"
+        elif "volume" in category_key:
+            exit_rule_id = "flow_breakdown_exit"
+            exit_condition = "technical_cmf_20 < 0 AND technical_plus_di_14 < technical_minus_di_14"
+        else:
+            exit_rule_id = "trend_breakdown_exit"
+            exit_condition = 'ltp < technical_ema_20_value AND technical_macd = "Bearish"'
+    source_hash = hashlib.sha256(
+        f"{condition}|{exit_rule_id}|{exit_condition}|{stop}|{target}|{holding}|paired-every-match-v4".encode("utf-8")
+    ).hexdigest()
     return {
         "id": preset_id,
         "name": name,
@@ -20,7 +34,8 @@ def _preset(
         "description": description,
         "research_basis": research_basis,
         "family": preset_id.rsplit("_", 1)[0],
-        "version": "preset-v3", "source_hash": source_hash,
+        "version": "preset-v4", "source_hash": source_hash,
+        "exit_rule_id": exit_rule_id, "exit_condition": exit_condition,
         "defaults": {"stop_loss_pct": stop, "take_profit_pct": target, "max_holding_days": holding},
     }
 
@@ -248,6 +263,58 @@ def get_backtest_presets() -> List[Dict[str, Any]]:
             stop=stop, target=target, holding=holding, research_basis=research_basis,
         ))
 
+    # Structural entry hypotheses. The professional runner searches all
+    # approved SELL rules and stop methods per stock, so each entry condition
+    # appears once in the catalog and produces one selected champion.
+    paired_zone_and_band = (
+        ("sr_bounce_resistance_exit", "Support Zone Bounce · Adaptive Protection",
+         "technical_sr_support_bounce = 1 AND technical_sma_200 = \"above\"",
+         "Causal ATR-clustered multi-touch support bounce; exits on a confirmed resistance-zone rejection.",
+         6, 16, 35, "sr_resistance_rejection_exit", "technical_sr_resistance_rejection = 1"),
+        ("sr_breakout_participation", "Resistance Breakout Participation",
+         "technical_sr_resistance_breakout = 1 AND technical_adx_14 >= 20",
+         "Closes above a causal resistance zone with volume participation and trend strength.",
+         7, 20, 45, "trend_breakdown_exit", 'ltp < technical_ema_20_value AND technical_macd = "Bearish"'),
+        ("bollinger_lower_recovery_middle", "Bollinger Lower-Band Recovery · Adaptive Protection",
+         "technical_percent_b BETWEEN 0 AND 0.25 AND change_percent > 0 AND technical_rsi_14 BETWEEN 30 AND 50",
+         "Mean-reversion recovery inside the lower Bollinger quartile; exits at the rolling middle band.",
+         5, 12, 25, "bollinger_middle_exit", "ltp >= technical_bollinger_middle_20"),
+        ("bollinger_trend_pullback", "Bollinger Trend Pullback",
+         "technical_percent_b BETWEEN 0.10 AND 0.40 AND technical_supertrend = \"Bullish\" AND technical_cmf_20 > 0",
+         "Lower-band pullback restricted to bullish trend and positive money flow.",
+         5, 15, 30, "trend_breakdown_exit", 'ltp < technical_ema_20_value AND technical_macd = "Bearish"'),
+        ("bollinger_squeeze_paired_exit", "Bollinger Squeeze Breakout · Adaptive Protection",
+         "technical_squeeze = \"Released\" AND ltp > technical_bollinger_upper_20 AND technical_volume_ratio_20 >= 1.3",
+         "Volatility expansion with participation, paired with loss of the middle band.",
+         7, 20, 40, "bollinger_middle_break_exit", "ltp < technical_bollinger_middle_20"),
+        ("fibonacci_pullback_resistance", "Fibonacci Pullback · Adaptive Protection",
+         "technical_fib_pullback_entry = 1",
+         "Past-only 63-session 50–61.8% retracement recovery with a range-resistance exit.",
+         6, 18, 40, "fibonacci_resistance_exit", "technical_fib_resistance_exit = 1"),
+        ("fibonacci_volume_confirmation", "Fibonacci Pullback + Volume",
+         "technical_fib_pullback_entry = 1 AND technical_cmf_20 > 0 AND technical_volume_ratio_20 >= 1.1",
+         "Fibonacci retracement recovery confirmed by money flow and participation.",
+         6, 20, 45, "fibonacci_resistance_exit", "technical_fib_resistance_exit = 1"),
+        ("zone_bollinger_confluence", "Support Zone + Bollinger Confluence",
+         "technical_sr_support_bounce = 1 AND technical_percent_b <= 0.35 AND technical_cmf_20 > 0",
+         "Independent structural support, volatility-band location, and money-flow confirmation.",
+         5, 16, 35, "sr_resistance_rejection_exit", "technical_sr_resistance_rejection = 1"),
+        ("zone_momentum_quality", "Support Zone + Momentum Quality",
+         "technical_sr_support_bounce = 1 AND technical_ppo_histogram > 0 AND technical_adx_14 >= 18",
+         "Structural support bounce confirmed by improving momentum and trend strength.",
+         6, 18, 40, "dual_trend_exit", 'technical_supertrend = "Bearish" AND technical_psar = "Bearish"'),
+    )
+    for preset_id, name, condition, description, stop, target, holding, exit_rule_id, exit_condition in paired_zone_and_band:
+        presets.append(_preset(
+            preset_id, name, "Adaptive entry + sell/stop search", condition, description,
+            stop=stop, target=target, holding=holding,
+            exit_rule_id=exit_rule_id, exit_condition=exit_condition,
+            research_basis=(
+                "Causal daily hypothesis. Select the BUY/SELL pair by locked out-of-sample "
+                "profitability and false-breakout behavior, not in-sample win rate."
+            ),
+        ))
+
     supplied_nepse15 = (
         (1, "Trend Pullback + ADX + Volume", 6, 10, 20, None, "ATR distances are represented by conservative percentage risk controls in the current daily simulator."),
         (2, "20-Session High Breakout + Volume", 8, 12, 30, 8, "ATR distances are represented by conservative percentage risk controls in the current daily simulator."),
@@ -270,8 +337,8 @@ def get_backtest_presets() -> List[Dict[str, Any]]:
         for number, name, stop, target, holding, trailing, limitation in supplied_nepse15
     )
 
-    if len(presets) != 131:
-        raise RuntimeError(f"Expected 131 backtest presets, built {len(presets)}")
+    if len(presets) != 140:
+        raise RuntimeError(f"Expected 140 unique-entry backtest presets, built {len(presets)}")
     identities: Dict[str, str] = {}
     for preset in presets:
         prior = identities.setdefault(str(preset["source_hash"]), str(preset["id"]))

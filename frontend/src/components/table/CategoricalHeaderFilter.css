@@ -1,0 +1,18 @@
+.categorical-header-filter{position:relative;display:inline-flex;max-width:100%;text-transform:none;letter-spacing:normal}
+.categorical-header-trigger{display:inline-flex!important;align-items:center;gap:6px;max-width:100%;padding:3px 5px!important;border:0!important;border-radius:5px!important;background:transparent!important;color:inherit!important;font:inherit!important;font-weight:inherit!important;text-transform:inherit;letter-spacing:inherit;cursor:pointer}
+.categorical-header-trigger:hover,.categorical-header-trigger.active{background:rgba(15,118,110,.1)!important;color:#0f766e!important}
+.categorical-header-trigger.active:after{content:'';width:6px;height:6px;border-radius:50%;background:#0f766e}
+.categorical-header-trigger i{font-style:normal;font-size:10px}
+.categorical-header-menu{position:absolute;z-index:100;top:calc(100% + 7px);left:0;width:min(280px,80vw);padding:9px;border:1px solid #cad8e3;border-radius:10px;background:#fff;color:#29445b;text-align:left;text-transform:none;letter-spacing:normal;box-shadow:0 16px 42px rgba(15,35,52,.22)}
+.categorical-header-menu header{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:2px 3px 8px}
+.categorical-header-menu header b{overflow:hidden;text-overflow:ellipsis;font-size:12px}
+.categorical-header-menu header button{border:0!important;background:transparent!important;color:#0f766e!important;padding:3px!important;font-size:10px!important}
+.categorical-header-menu input{box-sizing:border-box;width:100%;margin:0 0 7px;padding:8px;border:1px solid #cedae4;border-radius:7px;background:#f8fafc;color:#243b53;font-size:11px;outline:none}
+.categorical-header-menu input:focus{border-color:#0f766e;box-shadow:0 0 0 2px rgba(15,118,110,.12)}
+.categorical-header-options{max-height:270px;overflow:auto}
+.categorical-header-options button{display:flex!important;align-items:center;justify-content:space-between;width:100%;gap:8px;padding:8px!important;border:0!important;border-radius:6px!important;background:#fff!important;color:#334e68!important;text-align:left;font-size:11px!important;font-weight:650!important}
+.categorical-header-options button:hover,.categorical-header-options button.selected{background:#eaf6f4!important;color:#0f6c64!important}
+.categorical-header-options button span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.categorical-header-options button small{margin-left:auto;color:#718096;font-size:9px}
+.categorical-header-options button i{font-style:normal}
+.categorical-header-options p{margin:5px;padding:8px;color:#718096;font-size:10px;text-align:center}

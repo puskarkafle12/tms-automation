@@ -103,7 +103,8 @@ const DashBoardPage: React.FC = () => {
 
     const currentPath = location.pathname.replace(/\/$/, '').toLowerCase();
     const targetPath = nextPath.replace(/\/$/, '').toLowerCase();
-    if (currentPath !== targetPath) {
+    const reopenBacktestLab = id === 'Backtest' && currentPath === targetPath && Boolean(location.search);
+    if (currentPath !== targetPath || reopenBacktestLab) {
       navigate(nextPath);
     }
     setActiveComponent(id);
@@ -120,7 +121,9 @@ const DashBoardPage: React.FC = () => {
       case 'StrategyDetails':
         return <StrategyDetails />;
       case 'Backtest':
-        return new URLSearchParams(window.location.search).get('legacy') === '1' ? <Backtest /> : <BacktestV2 />;
+        return new URLSearchParams(location.search).get('legacy') === '1'
+          ? <Backtest key={location.search} />
+          : <BacktestV2 key={location.search} />;
       case 'Recommendations':
         return <Recommendations />;
       case 'OrderStatus':

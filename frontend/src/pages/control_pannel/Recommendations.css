@@ -19,6 +19,7 @@
 .recommendation-table-wrap th { position: sticky; top: 0; z-index: 2; background: #eef4f7; color: #3e5268; padding: 10px; text-align: left; white-space: nowrap; border-bottom: 1px solid #d5e0e9; }
 .recommendation-table-wrap th.sortable { cursor: pointer; }
 .recommendation-table-wrap th.sortable:hover { background: #e1ebf1; color: #123e5d; }
+.recommendation-header-sort{display:inline-flex;align-items:center;gap:3px;padding:3px 5px;border:0;border-radius:5px;background:transparent;color:inherit;font:inherit;font-weight:inherit;cursor:pointer}.recommendation-header-sort:hover{background:rgba(18,110,117,.1);color:#126e75}
 .recommendation-table-wrap td { padding: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border-bottom: 1px solid #edf1f5; }
 .recommendation-table-wrap th{overflow:visible}.recommendation-column-resizer{position:absolute;top:0;right:-4px;width:9px;height:100%;z-index:6;cursor:col-resize;touch-action:none}.recommendation-column-resizer::after{content:"";position:absolute;top:22%;bottom:22%;left:4px;width:1px;background:#b6c7d4}.recommendation-column-resizer:hover::after{top:10%;bottom:10%;width:2px;background:#12757a}.recommendation-column-resizing,.recommendation-column-resizing *{cursor:col-resize!important;user-select:none!important}.recommendation-strategy-cell{color:#385268}
 .recommendation-table-wrap th:first-child,.recommendation-table-wrap td:first-child { position: sticky; left: 0; min-width: 112px; box-shadow: 3px 0 0 rgba(25,55,80,.08); }
@@ -31,6 +32,9 @@
 .recommendation-signal.strong_buy { background: #d8f7e8; color: #087044; }
 .recommendation-signal.buy { background: #e2f4ee; color: #137557; }
 .recommendation-signal.near_trigger { background: #fff2cc; color: #805a00; }
+.recommendation-signal.strong_sell { background: #ffe0e0; color: #9c2424; }
+.recommendation-signal.sell { background: #ffeded; color: #ae3838; }
+.recommendation-signal.near_sell { background: #fff2cc; color: #805a00; }
 .recommendation-range { display: inline-flex; padding: 5px 8px; border-radius: 7px; font-weight: 800; }
 .recommendation-range.buy { background: #e8f6ff; color: #145f91; }
 .recommendation-range.sell { background: #eaf8ef; color: #147247; }

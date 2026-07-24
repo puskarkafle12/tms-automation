@@ -6,6 +6,8 @@ from utils.backtesting.v2_query import (
     compile_result_sorts,
     compile_strong_buy_filters,
     compile_strong_buy_sorts,
+    latest_completed_market_session,
+    _strategy_planning_range,
 )
 
 
@@ -117,3 +119,42 @@ def test_recommendation_filters_reject_unsafe_or_invalid_conditions():
         compile_strong_buy_filters([
             {"field": "sector", "operator": "gte", "value": "Bank"},
         ], {}, "score_expression")
+
+
+def test_latest_market_session_uses_index_friendly_top_row_lookup():
+    class ScalarResult:
+        def scalar(self):
+            return "2026-07-24"
+
+    class Session:
+        def execute(self, statement):
+            sql = str(statement)
+            assert "ORDER BY session_date DESC" in sql
+            assert "LIMIT 1" in sql
+            assert "MAX(" not in sql
+            return ScalarResult()
+
+    assert latest_completed_market_session(Session()) == "2026-07-24"
+
+
+def test_planning_range_uses_selected_exit_level_and_atr_stop():
+    result = _strategy_planning_range({
+        "current_signal_status": "buy",
+        "ltp": 100,
+        "current_evidence": {"latest_values": {"technical_atr_percent": 4}},
+        "assumptions": {
+            "stop_loss_pct": 8,
+            "take_profit_pct": 15,
+            "atr_stop_multiple": 2,
+            "exit_rule_id": "sr_resistance_rejection_exit",
+            "protection_latest_values": {
+                "technical_atr_14": 3,
+                "technical_sr_resistance_lower": 110,
+                "technical_sr_resistance_upper": 112,
+            },
+        },
+    })
+    assert result["protective_stop"] == 94
+    assert result["sell_zone_low"] == 110
+    assert result["sell_zone_high"] == 112
+    assert result["planning_range_basis"]["sell_zone_basis"] == "Current causal resistance zone"

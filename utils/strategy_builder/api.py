@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
@@ -247,6 +247,57 @@ class FilteredRecommendationRefreshRequest(MarketRecommendationQuery):
     side: str = Field(default="buy", pattern="^(buy|sell)$")
 
 
+class TableColumnPreferenceRequest(BaseModel):
+    columns: List[str] = Field(default_factory=list, max_length=100)
+
+
+class TableFilterPreferenceRequest(BaseModel):
+    state: Dict[str, Any] = Field(default_factory=dict)
+
+
+def _read_table_columns(db: Session, *, owner_id: str, name: str) -> List[str]:
+    value = db.execute(text("""
+        SELECT columns FROM backtest_saved_views
+        WHERE owner_id=:owner_id AND name=:name
+    """), {"owner_id": owner_id, "name": name}).scalar()
+    return [str(item) for item in value] if isinstance(value, list) else []
+
+
+def _save_table_columns(db: Session, *, owner_id: str, name: str, columns: List[str]) -> Dict[str, Any]:
+    normalized = list(dict.fromkeys(
+        str(item).strip() for item in columns if str(item).strip()
+    ))[:100]
+    db.execute(text("""
+        INSERT INTO backtest_saved_views(owner_id,name,filters,columns,sort_config)
+        VALUES (:owner_id,:name,'{}'::jsonb,CAST(:columns AS JSONB),'{}'::jsonb)
+        ON CONFLICT (owner_id,name) DO UPDATE
+        SET columns=EXCLUDED.columns,updated_at=NOW()
+    """), {"owner_id": owner_id, "name": name, "columns": json.dumps(normalized)})
+    db.commit()
+    return {"columns": normalized}
+
+
+def _read_table_filter_state(db: Session, *, owner_id: str, name: str) -> Dict[str, Any]:
+    value = db.execute(text("""
+        SELECT filters FROM backtest_saved_views
+        WHERE owner_id=:owner_id AND name=:name
+    """), {"owner_id": owner_id, "name": name}).scalar()
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _save_table_filter_state(
+    db: Session, *, owner_id: str, name: str, state: Dict[str, Any],
+) -> Dict[str, Any]:
+    db.execute(text("""
+        INSERT INTO backtest_saved_views(owner_id,name,filters,columns,sort_config)
+        VALUES (:owner_id,:name,CAST(:filters AS JSONB),'[]'::jsonb,'{}'::jsonb)
+        ON CONFLICT (owner_id,name) DO UPDATE
+        SET filters=EXCLUDED.filters,updated_at=NOW()
+    """), {"owner_id": owner_id, "name": name, "filters": json.dumps(state)})
+    db.commit()
+    return {"state": state}
+
+
 def _append_ai_symbol_context(message: str, known_symbols: Optional[List[str]], form_symbol: Optional[str]) -> str:
     symbols: List[str] = []
     seen: set[str] = set()
@@ -447,6 +498,100 @@ async def clone_backtest_v2_run(run_id: str, body: BacktestV2CloneRequest, curre
 async def backtest_v2_result_fields():
     from utils.backtesting.v2_query import field_catalog
     return {"fields": field_catalog(), "ordinary_shares_default": True}
+
+
+@router.get("/backtests/v2/preferences/result-columns")
+async def read_backtest_result_columns(
+    db: Session = Depends(get_db),
+    current_user: FrontendUser = Depends(require_permission("backtest")),
+):
+    return {"columns": _read_table_columns(
+        db, owner_id=str(current_user.id), name="ui:backtest-lab:result-columns:v2",
+    )}
+
+
+@router.put("/backtests/v2/preferences/result-columns")
+async def save_backtest_result_columns(
+    body: TableColumnPreferenceRequest,
+    db: Session = Depends(get_db),
+    current_user: FrontendUser = Depends(require_permission("backtest")),
+):
+    return _save_table_columns(
+        db, owner_id=str(current_user.id), name="ui:backtest-lab:result-columns:v2",
+        columns=body.columns,
+    )
+
+
+@router.get("/backtests/v2/preferences/result-filters")
+async def read_backtest_result_filters(
+    db: Session = Depends(get_db),
+    current_user: FrontendUser = Depends(require_permission("backtest")),
+):
+    return {"state": _read_table_filter_state(
+        db, owner_id=str(current_user.id), name="ui:backtest-lab:result-filters:v2",
+    )}
+
+
+@router.put("/backtests/v2/preferences/result-filters")
+async def save_backtest_result_filters(
+    body: TableFilterPreferenceRequest,
+    db: Session = Depends(get_db),
+    current_user: FrontendUser = Depends(require_permission("backtest")),
+):
+    return _save_table_filter_state(
+        db, owner_id=str(current_user.id), name="ui:backtest-lab:result-filters:v2",
+        state=body.state,
+    )
+
+
+@router.get("/market-recommendations/preferences/{side}/columns")
+async def read_recommendation_columns(
+    side: str,
+    db: Session = Depends(get_db),
+    current_user: FrontendUser = Depends(require_permission("recommendations")),
+):
+    if side not in {"buy", "sell"}:
+        raise HTTPException(status_code=400, detail="Recommendation side must be buy or sell.")
+    return {"columns": _read_table_columns(
+        db, owner_id=str(current_user.id), name=f"ui:recommendations:{side}:columns:v2",
+    )}
+
+
+@router.put("/market-recommendations/preferences/{side}/columns")
+async def save_recommendation_columns(
+    side: str,
+    body: TableColumnPreferenceRequest,
+    db: Session = Depends(get_db),
+    current_user: FrontendUser = Depends(require_permission("recommendations")),
+):
+    if side not in {"buy", "sell"}:
+        raise HTTPException(status_code=400, detail="Recommendation side must be buy or sell.")
+    return _save_table_columns(
+        db, owner_id=str(current_user.id), name=f"ui:recommendations:{side}:columns:v2",
+        columns=body.columns,
+    )
+
+
+@router.get("/market-recommendations/preferences/filters")
+async def read_recommendation_filters(
+    db: Session = Depends(get_db),
+    current_user: FrontendUser = Depends(require_permission("recommendations")),
+):
+    return {"state": _read_table_filter_state(
+        db, owner_id=str(current_user.id), name="ui:recommendations:filters:v2",
+    )}
+
+
+@router.put("/market-recommendations/preferences/filters")
+async def save_recommendation_filters(
+    body: TableFilterPreferenceRequest,
+    db: Session = Depends(get_db),
+    current_user: FrontendUser = Depends(require_permission("recommendations")),
+):
+    return _save_table_filter_state(
+        db, owner_id=str(current_user.id), name="ui:recommendations:filters:v2",
+        state=body.state,
+    )
 
 
 @router.get("/backtests/v2/symbols")
@@ -892,6 +1037,7 @@ async def read_market_ohlcv(
 
 @router.get("/backtests/v2/results/{result_id}/chart")
 async def read_backtest_v2_result_chart(result_id: int, db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("backtest"))):
+    from utils.backtesting.support_resistance import chart_zone_history, current_zones
     from utils.backtesting.v2_query import ResultQueryError, result_detail, result_trades
     try:
         detail = result_detail(db, result_id, owner_id=str(current_user.id))
@@ -914,6 +1060,40 @@ async def read_backtest_v2_result_chart(result_id: int, db: Session = Depends(ge
             "label": "BUY NOW",
             "status": detail.get("current_signal_status") or "buy",
         })
+    projection = None
+    if detail.get("current_signal_active") and signal_date and detail.get("ltp"):
+        assumptions = detail.get("assumptions") or {}
+        hold_sessions = max(1, int(round(float(
+            detail.get("average_holding_days")
+            or assumptions.get("max_holding_days")
+            or 20
+        ))))
+        start_day = date.fromisoformat(signal_date)
+        projected_days = [start_day]
+        cursor = start_day
+        while len(projected_days) <= hold_sessions:
+            cursor += timedelta(days=1)
+            if cursor.isoweekday() != 6:
+                projected_days.append(cursor)
+        current_price = float(detail["ltp"])
+        target_price = current_price * (
+            1 + float(assumptions.get("take_profit_pct") or 10) / 100
+        )
+        points = []
+        for index in range(hold_sessions + 1):
+            if index in {0, hold_sessions} or index % max(1, hold_sessions // 5) == 0:
+                progress = index / hold_sessions
+                points.append({
+                    "date": projected_days[index].isoformat(),
+                    "value": round(current_price + (target_price - current_price) * progress, 2),
+                })
+        projection = {
+            "points": points,
+            "target_date": projected_days[-1].isoformat(),
+            "target_price": round(target_price, 2),
+            "label": f"ANTICIPATED SELL · {hold_sessions} sessions",
+            "disclaimer": "Scenario line based on the tested average/max holding period and take-profit setting; it is not a price prediction.",
+        }
     chart_end = max(str(period.get("end") or ""), signal_date) or None
     candles = _market_ohlcv_candles(
         db,
@@ -922,12 +1102,88 @@ async def read_backtest_v2_result_chart(result_id: int, db: Session = Depends(ge
         end_date=chart_end,
         limit=5000,
     )
+    assumptions = detail.get("assumptions") or {}
+    latest_price = float(candles[-1]["close"]) if candles else float(detail.get("ltp") or 0)
+    risk_levels = []
+    if latest_price > 0 and detail.get("current_signal_active") and signal_date:
+        stop_pct = float(assumptions.get("stop_loss_pct") or 5)
+        target_pct = float(assumptions.get("take_profit_pct") or 10)
+        trailing_pct = assumptions.get("trailing_stop_pct")
+        exit_rule_id = str(assumptions.get("exit_rule_id") or "")
+        protection_values = dict(assumptions.get("protection_latest_values") or {})
+        atr_multiple = assumptions.get("atr_stop_multiple")
+        atr_value = protection_values.get("technical_atr_14")
+        stop_level = latest_price * (1 - stop_pct / 100)
+        if atr_multiple is not None and atr_value is not None:
+            stop_level = latest_price - float(atr_value) * float(atr_multiple)
+        sell_level = None
+        sell_label = f"SELL ZONE · +{target_pct:g}%"
+        if exit_rule_id == "sr_resistance_rejection_exit":
+            lower = protection_values.get("technical_sr_resistance_lower")
+            upper = protection_values.get("technical_sr_resistance_upper")
+            if lower is not None and upper is not None:
+                sell_level = (float(lower) + float(upper)) / 2
+                sell_label = "SELL ZONE · RESISTANCE"
+        elif exit_rule_id == "bollinger_middle_exit":
+            sell_level = protection_values.get("technical_bollinger_middle_20")
+            sell_label = "SELL ZONE · BOLLINGER MID"
+        elif exit_rule_id == "bollinger_upper_rejection_exit":
+            sell_level = protection_values.get("technical_bollinger_upper_20")
+            sell_label = "SELL ZONE · BOLLINGER UPPER"
+        elif exit_rule_id == "fibonacci_resistance_exit":
+            sell_level = protection_values.get("technical_fib_range_high_63")
+            sell_label = "SELL ZONE · FIB RESISTANCE"
+        try:
+            sell_level = float(sell_level) if sell_level is not None else latest_price * (1 + target_pct / 100)
+        except (TypeError, ValueError):
+            sell_level = latest_price * (1 + target_pct / 100)
+        risk_start = signal_date
+        risk_end = str((projection or {}).get("target_date") or signal_date)
+        risk_levels.extend([
+            {
+                "kind": "buy_entry",
+                "value": round(latest_price, 2),
+                "label": "BUY SIGNAL",
+                "start_date": risk_start,
+                "end_date": risk_end,
+            },
+            {
+                "kind": "stop",
+                "value": round(stop_level, 2),
+                "label": (
+                    f"ATR STOP · {float(atr_multiple):g}×"
+                    if atr_multiple is not None else f"FIXED STOP · {stop_pct:g}%"
+                ),
+                "start_date": risk_start,
+                "end_date": risk_end,
+            },
+            {
+                "kind": "sell_target",
+                "value": round(sell_level, 2),
+                "label": sell_label,
+                "start_date": risk_start,
+                "end_date": risk_end,
+            },
+        ])
+        if trailing_pct is not None:
+            trailing_pct = float(trailing_pct)
+            risk_levels.append({
+                "kind": "trailing_stop",
+                "value": round(latest_price * (1 - trailing_pct / 100), 2),
+                "label": f"TRAILING STOP REFERENCE · {trailing_pct:g}%",
+                "start_date": risk_start,
+                "end_date": risk_end,
+            })
     return {
         "symbol": detail["symbol"],
         "equity_curve": curve,
         "candles": candles,
         "trades": trades,
         "signals": current_signals,
+        "projection": projection,
+        "zones": current_zones(candles),
+        "zone_history": chart_zone_history(candles),
+        "risk_levels": risk_levels,
     }
 
 
@@ -1025,7 +1281,8 @@ async def ask_backtest_v2_ai(run_id: str, body: BacktestV2AiQueryRequest, db: Se
                           max_listing_age_days=body.max_listing_age_days, min_volume=body.min_volume,
                           extra_filters=body.manual_filters)
         query = {"filters": {"join": "and", "conditions": plan["filters"]}, "include_non_equities": body.include_non_equities,
-                 "sort_by": plan["sort_by"], "sort_direction": plan["sort_direction"], "page": 1, "page_size": 10}
+                 "sort_by": plan["sort_by"], "sort_direction": plan["sort_direction"],
+                 "select_fields": plan["columns"], "page": 1, "page_size": 10}
         if run_id == "all":
             query["unique_by_symbol"] = True
         results = query_results(db, run_id, query, owner_id=str(current_user.id))
@@ -1048,8 +1305,9 @@ async def ask_backtest_v2_ai(run_id: str, body: BacktestV2AiQueryRequest, db: Se
         return {"generated_query": compile_display_query(plan), "validated_plan": audit, "explanation": plan["explanation"],
                 "recommendation_summary": f"Found {results['total']:,} exact matching simulations and ranked the best ten by {plan['sort_by'].replace('_', ' ')}. Review sample warnings and current signal state before scheduling.",
                 "items": items, "matches_returned": len(items), "total_matches": results["total"],
+                "selected_columns": plan["columns"],
                 "suggested_relaxations": [] if results["total"] else ["Reduce the minimum trade count or robust-score threshold.", "Broaden the selected sector or listing-age range."],
-                "note": "Explicit filters were preserved. No generated SQL was executed."}
+                "note": "The validated fields, filters, selected columns, and ordering were compiled into parameterized SQL. No free-form model SQL was executed."}
     except LlmChatError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except (ValueError, ResultQueryError) as exc:

@@ -26,7 +26,11 @@ def build_portfolios_for_run(session, run_id: str, configuration: Dict[str, Any]
     }
     initial = float(configuration.get("initial_capital") or 100000)
     presets = session.execute(text(
-        "SELECT DISTINCT preset_id,preset_name FROM backtest_results WHERE run_id=:run_id ORDER BY preset_id"
+        """SELECT DISTINCT preset_id,preset_name FROM backtest_results
+           WHERE run_id=:run_id
+             AND ((total_trades>=16 AND win_rate_pct>=50)
+                  OR (total_trades>=9 AND win_rate_pct>=60))
+           ORDER BY preset_id"""
     ), {"run_id": run_id}).mappings().all()
     session.execute(text("DELETE FROM backtest_portfolio_results WHERE run_id=:run_id"), {"run_id": run_id})
     for preset in presets:
@@ -35,6 +39,8 @@ def build_portfolios_for_run(session, run_id: str, configuration: Dict[str, Any]
                FROM backtest_trades t JOIN backtest_results r ON r.result_id=t.result_id
                JOIN backtest_run_symbols s ON s.run_id=r.run_id AND s.symbol=r.symbol
                WHERE r.run_id=:run_id AND r.preset_id=:preset_id
+                 AND ((r.total_trades>=16 AND r.win_rate_pct>=50)
+                      OR (r.total_trades>=9 AND r.win_rate_pct>=60))
                ORDER BY t.entry_date,r.robust_score DESC,r.symbol,t.sequence_no"""
         ), {"run_id": run_id, "preset_id": preset["preset_id"]}).mappings().all()]
         summary, curve = replay_shared_capital(trades, initial, allocation)

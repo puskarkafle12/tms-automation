@@ -78,8 +78,8 @@ def test_backtest_rejects_symbol_not_present_in_query():
 
 def test_all_presets_compile_for_nepse_symbol():
     presets = get_backtest_presets()
-    assert len(presets) == 104
-    assert len({preset["id"] for preset in presets}) == 104
+    assert len(presets) == 140
+    assert len({preset["id"] for preset in presets}) == 140
     for preset in presets:
         query = build_preset_query(preset, "NABIL")
         plan = parse_strategy_query(query)
@@ -88,6 +88,7 @@ def test_all_presets_compile_for_nepse_symbol():
         assert f'STOP_LOSS_PCT {preset["defaults"]["stop_loss_pct"]:g}' in query
         assert f'TAKE_PROFIT_PCT {preset["defaults"]["take_profit_pct"]:g}' in query
         assert f'MAX_HOLDING_DAYS {preset["defaults"]["max_holding_days"]}' in query
+        assert preset["exit_condition"]
 
 
 def test_preset_query_embeds_run_holding_and_cost_overrides_for_replay_and_promotion():

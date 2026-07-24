@@ -16,7 +16,7 @@ from ta.trend import AroonIndicator, MassIndex, PSARIndicator, TRIXIndicator, Vo
 from ta.volatility import KeltnerChannel, UlcerIndex
 from ta.volume import ForceIndexIndicator, VolumePriceTrendIndicator, VolumeWeightedAveragePrice
 
-ENGINE_VERSION = "ohlcv-ta-v4-ta-0.11.0"
+ENGINE_VERSION = "ohlcv-ta-v5-zones-ta-0.11.0"
 
 NUMERIC_FIELDS = (
     "technical_sma_10_value", "technical_sma_20_value", "technical_sma_50_value",
@@ -56,6 +56,16 @@ NUMERIC_FIELDS = (
     "technical_bullish_engulfing", "technical_hammer", "technical_inside_bar",
     "technical_outside_bar", "technical_bullish_marubozu",
     "technical_higher_high_3", "technical_higher_low_3",
+    "technical_sr_support_lower", "technical_sr_support_upper",
+    "technical_sr_support_confidence", "technical_sr_support_touches",
+    "technical_sr_resistance_lower", "technical_sr_resistance_upper",
+    "technical_sr_resistance_confidence", "technical_sr_resistance_touches",
+    "technical_sr_support_bounce", "technical_sr_resistance_breakout",
+    "technical_sr_resistance_rejection", "technical_sr_support_breakdown",
+    "technical_fib_range_high_63", "technical_fib_range_low_63",
+    "technical_fib_retracement_382", "technical_fib_retracement_500",
+    "technical_fib_retracement_618", "technical_fib_pullback_entry",
+    "technical_fib_resistance_exit",
     "technical_buy_score", "technical_sell_score", "technical_signal_score",
     *(f"technical_nepse15_entry_{index}" for index in range(1, 16)),
     *(f"technical_nepse15_exit_{index}" for index in range(1, 16)),
@@ -361,6 +371,100 @@ def calculate_indicator_rows(bars: Sequence[Any]) -> List[Dict[str, Any]]:
     ).astype(float)
     frame["technical_higher_high_3"] = (high > high.shift(1).rolling(2).max()).astype(float)
     frame["technical_higher_low_3"] = (low > low.shift(1).rolling(2).max()).astype(float)
+
+    # Causal multi-touch support/resistance zones. A pivot is not available
+    # until three later daily sessions confirm it, preventing retrospective
+    # swing placement in both current charts and historical backtests.
+    from utils.backtesting.support_resistance import calculate_zone_history
+    zone_history = calculate_zone_history(frame.to_dict("records"))
+    support_lower = pd.Series(
+        [item["support"]["lower"] if item["support"] else np.nan for item in zone_history],
+        index=frame.index,
+    )
+    support_upper = pd.Series(
+        [item["support"]["upper"] if item["support"] else np.nan for item in zone_history],
+        index=frame.index,
+    )
+    support_center = (support_lower + support_upper) / 2
+    resistance_lower = pd.Series(
+        [item["resistance"]["lower"] if item["resistance"] else np.nan for item in zone_history],
+        index=frame.index,
+    )
+    resistance_upper = pd.Series(
+        [item["resistance"]["upper"] if item["resistance"] else np.nan for item in zone_history],
+        index=frame.index,
+    )
+    resistance_center = (resistance_lower + resistance_upper) / 2
+    support_confidence = pd.Series([
+        item["support"]["confidence"] if item["support"] else np.nan for item in zone_history
+    ], index=frame.index)
+    support_touches = pd.Series([
+        item["support"]["touches"] if item["support"] else np.nan for item in zone_history
+    ], index=frame.index)
+    resistance_confidence = pd.Series([
+        item["resistance"]["confidence"] if item["resistance"] else np.nan for item in zone_history
+    ], index=frame.index)
+    resistance_touches = pd.Series([
+        item["resistance"]["touches"] if item["resistance"] else np.nan for item in zone_history
+    ], index=frame.index)
+    support_bounce = (
+        (low <= support_upper) & (close >= support_center) &
+        (frame["technical_close_location_value"] >= .60) &
+        (frame["technical_volume_ratio_20"] >= 1.0) &
+        (support_confidence >= 45)
+    ).astype(float)
+    resistance_breakout = (
+        (close > resistance_upper) & (close.shift(1) <= resistance_upper.shift(1)) &
+        (frame["technical_volume_ratio_20"] >= 1.25)
+    ).astype(float)
+    resistance_rejection = (
+        (high >= resistance_lower) & (close < resistance_center) &
+        (frame["technical_upper_wick_percent"] >= 25) &
+        (resistance_confidence >= 45)
+    ).astype(float)
+    support_breakdown = (
+        (close < support_lower) & (close.shift(1) >= support_lower.shift(1))
+    ).astype(float)
+
+    # Past-only 63-session Fibonacci retracement grid. The range excludes the
+    # current bar, so today's signal cannot change its own reference anchors.
+    fib_high = high.shift(1).rolling(63, min_periods=63).max()
+    fib_low = low.shift(1).rolling(63, min_periods=63).min()
+    fib_range = fib_high - fib_low
+    fib_382 = fib_high - fib_range * .382
+    fib_500 = fib_high - fib_range * .500
+    fib_618 = fib_high - fib_range * .618
+    fib_pullback_entry = (
+        (frame["technical_ema_50_value"] > frame["technical_ema_200_value"]) &
+        (low <= fib_500) & (close >= fib_618) & (close > open_price) &
+        frame["technical_rsi_14"].between(38, 58) &
+        (frame["technical_volume_ratio_20"] >= .9)
+    ).astype(float)
+    fib_resistance_exit = (
+        ((high >= fib_high * .995) & (close < fib_high)) |
+        ((close < fib_618) & (close.shift(1) >= fib_618.shift(1)))
+    ).astype(float)
+    frame = pd.concat([frame, pd.DataFrame({
+        "technical_sr_support_lower": support_lower,
+        "technical_sr_support_upper": support_upper,
+        "technical_sr_support_confidence": support_confidence,
+        "technical_sr_support_touches": support_touches,
+        "technical_sr_resistance_lower": resistance_lower,
+        "technical_sr_resistance_upper": resistance_upper,
+        "technical_sr_resistance_confidence": resistance_confidence,
+        "technical_sr_resistance_touches": resistance_touches,
+        "technical_sr_support_bounce": support_bounce,
+        "technical_sr_resistance_breakout": resistance_breakout,
+        "technical_sr_resistance_rejection": resistance_rejection,
+        "technical_sr_support_breakdown": support_breakdown,
+        "technical_fib_range_high_63": fib_high,
+        "technical_fib_range_low_63": fib_low,
+        "technical_fib_retracement_382": fib_382,
+        "technical_fib_retracement_500": fib_500,
+        "technical_fib_retracement_618": fib_618,
+        "technical_fib_pullback_entry": fib_pullback_entry,
+        "technical_fib_resistance_exit": fib_resistance_exit,
+    }, index=frame.index)], axis=1)
 
     # User-supplied NEPSE research set.  These setup/exit states are calculated
     # once from completed daily bars and are shared by backtests and live

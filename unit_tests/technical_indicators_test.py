@@ -30,7 +30,7 @@ def test_complete_indicator_contract_and_scores_are_bounded():
     closes = [100 + index * .4 + ((index % 7) - 3) for index in range(260)]
     row = calculate_indicator_rows(_bars(closes))[-1]
     assert set(row) == set(INDICATOR_FIELDS)
-    assert ENGINE_VERSION == "ohlcv-ta-v4-ta-0.11.0"
+    assert ENGINE_VERSION == "ohlcv-ta-v5-zones-ta-0.11.0"
     assert 0 <= row["technical_buy_score"] <= 100
     assert 0 <= row["technical_sell_score"] <= 100
     assert -100 <= row["technical_signal_score"] <= 100
@@ -54,3 +54,14 @@ def test_complete_indicator_contract_and_scores_are_bounded():
     assert row["technical_efficiency_ratio_20"] is not None
     assert row["technical_close_location_value"] is not None
     assert row["technical_prior_high_20"] is not None
+    assert row["technical_fib_retracement_618"] is not None
+    assert row["technical_sr_support_confidence"] is not None
+
+
+def test_support_resistance_and_fibonacci_fields_are_point_in_time():
+    closes = [100 + ((index % 18) - 9) * 1.2 + index * .08 for index in range(120)]
+    full = calculate_indicator_rows(_bars(closes))
+    prefix = calculate_indicator_rows(_bars(closes[:90]))
+    fields = [key for key in INDICATOR_FIELDS if key.startswith(("technical_sr_", "technical_fib_"))]
+    assert fields
+    assert {key: prefix[-1][key] for key in fields} == {key: full[89][key] for key in fields}

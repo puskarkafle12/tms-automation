@@ -130,7 +130,12 @@ def _run_symbol_task(task: Dict[str, Any]) -> Dict[str, Any]:
     results: List[Dict[str, Any]] = []
     errors: List[str] = []
     for preset in selected_presets:
-        defaults = preset["defaults"]
+        defaults = dict(preset["defaults"])
+        selected_exit_rule_id = preset.get("exit_rule_id")
+        selected_exit_condition = preset.get("exit_condition")
+        selected_atr_stop_multiple = None
+        selected_break_even_trigger_pct = None
+        protection_optimization: Optional[Dict[str, Any]] = None
         effective_trailing_stop_pct = (
             settings.get("trailing_stop_pct")
             if settings.get("trailing_stop_pct") is not None
@@ -169,7 +174,7 @@ def _run_symbol_task(task: Dict[str, Any]) -> Dict[str, Any]:
         try:
             entry_signals = None
             exit_signals = None
-            if professional and preset.get("component_ids"):
+            if preset.get("component_ids"):
                 from utils.backtesting.accelerated import compile_preset_signals
                 component_signals = [
                     compile_preset_signals(component_id, prepared_rows, trigger_on_cross=False)
@@ -181,7 +186,7 @@ def _run_symbol_task(task: Dict[str, Any]) -> Dict[str, Any]:
                     entry_signals[index] = combined_state[index] and not combined_state[index - 1]
                 from utils.backtesting.strategy_discovery import compile_discovery_exit_signals
                 exit_signals = compile_discovery_exit_signals(preset, prepared_rows)
-            elif professional and not custom_query_template:
+            elif not custom_query_template:
                 from utils.backtesting.accelerated import compile_preset_exit_signals, compile_preset_signals
                 entry_signals = compile_preset_signals(preset["id"], prepared_rows)
                 if preset.get("exit_condition"):
@@ -205,6 +210,141 @@ def _run_symbol_task(task: Dict[str, Any]) -> Dict[str, Any]:
                 entry_signals=entry_signals,
                 exit_signals=exit_signals,
             )
+            # For each stock + entry strategy, select one protection champion
+            # on the locked OOS segment. Losers remain embedded in the cached
+            # evidence rather than becoming noisy recommendation rows.
+            if (
+                professional
+                and not custom_query_template
+                and entry_signals is not None
+                and sum(bool(value) for value in entry_signals) >= 9
+                and len(bars) >= 40
+            ):
+                from utils.backtesting.protection_optimizer import choose_protection_champion
+                from utils.backtesting.strategy_discovery import EXIT_RULES, compile_discovery_exit_signals
+
+                split_for_selection = max(1, min(len(bars) - 2, int(len(bars) * .70)))
+                exit_signal_cache: Dict[str, List[bool]] = {}
+
+                def evaluate_protection(
+                    exit_rule_id: str, exit_condition: str, stop: Dict[str, Any],
+                ) -> Dict[str, Any]:
+                    candidate = {
+                        **preset,
+                        "exit_rule_id": exit_rule_id,
+                        "exit_condition": exit_condition,
+                        "defaults": {
+                            **defaults,
+                            "stop_loss_pct": stop["stop_loss_pct"],
+                            "trailing_stop_pct": stop["trailing_stop_pct"],
+                        },
+                    }
+                    candidate_query = build_preset_query(
+                        candidate, symbol,
+                        backtest_config={
+                            **settings,
+                            "stop_loss_pct": stop["stop_loss_pct"],
+                            "take_profit_pct": defaults["take_profit_pct"],
+                            "min_holding_days": effective_min_holding_days,
+                            "max_holding_days": effective_max_holding_days,
+                            "trailing_stop_pct": stop["trailing_stop_pct"],
+                            "data_source": source,
+                        },
+                    )
+                    candidate_exit = exit_signal_cache.setdefault(
+                        exit_rule_id,
+                        compile_discovery_exit_signals(
+                            {"exit_rule_id": exit_rule_id},
+                            prepared_rows,
+                        ),
+                    )
+                    candidate_output = run_backtest(
+                        symbol=symbol,
+                        query_text=candidate_query,
+                        start_date=date.fromisoformat(bars[split_for_selection].day),
+                        end_date=end_date,
+                        bars=bars[split_for_selection:],
+                        prepared_rows=prepared_rows[split_for_selection:],
+                        compact=True,
+                        include_trades=False,
+                        entry_signals=entry_signals[split_for_selection:],
+                        exit_signals=candidate_exit[split_for_selection:],
+                        initial_capital=settings["initial_capital"],
+                        fee_pct=settings["fee_pct"],
+                        fixed_fee=settings["fixed_fee"],
+                        slippage_pct=settings["slippage_pct"],
+                        charge_model=settings["charge_model"],
+                        investor_type=settings["investor_type"],
+                        apply_cgt=settings["apply_cgt"],
+                        dp_charge=settings["dp_charge"],
+                        position_size_pct=settings["position_size_pct"],
+                        trailing_stop_pct=stop["trailing_stop_pct"],
+                        atr_stop_multiple=stop["atr_stop_multiple"],
+                        break_even_trigger_pct=stop["break_even_trigger_pct"],
+                        max_volume_participation_pct=settings["max_volume_participation_pct"],
+                        risk_free_rate_pct=settings["risk_free_rate_pct"],
+                        stop_loss_pct=stop["stop_loss_pct"],
+                        take_profit_pct=defaults["take_profit_pct"],
+                        min_holding_days=effective_min_holding_days,
+                        max_holding_days=effective_max_holding_days,
+                    )
+                    return dict(candidate_output["summary"])
+
+                protection_optimization = choose_protection_champion(
+                    EXIT_RULES,
+                    evaluate_protection,
+                    finalist_exit_count=4,
+                )
+                champion = protection_optimization["champion"]
+                champion_stop = champion["stop"]
+                selected_exit_rule_id = champion["exit_rule_id"]
+                selected_exit_condition = champion["exit_condition"]
+                defaults["stop_loss_pct"] = float(champion_stop["stop_loss_pct"])
+                effective_trailing_stop_pct = champion_stop["trailing_stop_pct"]
+                selected_atr_stop_multiple = champion_stop["atr_stop_multiple"]
+                selected_break_even_trigger_pct = champion_stop["break_even_trigger_pct"]
+                selected_preset = {
+                    **preset,
+                    "exit_rule_id": selected_exit_rule_id,
+                    "exit_condition": selected_exit_condition,
+                    "defaults": {
+                        **defaults,
+                        "trailing_stop_pct": effective_trailing_stop_pct,
+                    },
+                }
+                executable_query = build_preset_query(
+                    selected_preset, symbol,
+                    backtest_config={
+                        **settings,
+                        "stop_loss_pct": defaults["stop_loss_pct"],
+                        "take_profit_pct": defaults["take_profit_pct"],
+                        "min_holding_days": effective_min_holding_days,
+                        "max_holding_days": effective_max_holding_days,
+                        "trailing_stop_pct": effective_trailing_stop_pct,
+                        "data_source": source,
+                    },
+                )
+                exit_signals = exit_signal_cache[selected_exit_rule_id]
+                output = run_backtest(
+                    symbol=symbol, query_text=executable_query,
+                    start_date=start_date, end_date=end_date, bars=bars,
+                    initial_capital=settings["initial_capital"], fee_pct=settings["fee_pct"],
+                    fixed_fee=settings["fixed_fee"], slippage_pct=settings["slippage_pct"],
+                    charge_model=settings["charge_model"], investor_type=settings["investor_type"],
+                    apply_cgt=settings["apply_cgt"], dp_charge=settings["dp_charge"],
+                    position_size_pct=settings["position_size_pct"],
+                    trailing_stop_pct=effective_trailing_stop_pct,
+                    atr_stop_multiple=selected_atr_stop_multiple,
+                    break_even_trigger_pct=selected_break_even_trigger_pct,
+                    max_volume_participation_pct=settings["max_volume_participation_pct"],
+                    risk_free_rate_pct=settings["risk_free_rate_pct"],
+                    stop_loss_pct=defaults["stop_loss_pct"],
+                    take_profit_pct=defaults["take_profit_pct"],
+                    min_holding_days=effective_min_holding_days,
+                    max_holding_days=effective_max_holding_days,
+                    prepared_rows=prepared_rows, compact=True, include_trades=professional,
+                    entry_signals=entry_signals, exit_signals=exit_signals,
+                )
         except Exception as exc:
             errors.append(f'{preset["id"]}: {exc}')
             continue
@@ -226,6 +366,8 @@ def _run_symbol_task(task: Dict[str, Any]) -> Dict[str, Any]:
                     apply_cgt=settings["apply_cgt"], dp_charge=settings["dp_charge"],
                     position_size_pct=settings["position_size_pct"],
                     trailing_stop_pct=effective_trailing_stop_pct,
+                    atr_stop_multiple=selected_atr_stop_multiple,
+                    break_even_trigger_pct=selected_break_even_trigger_pct,
                     max_volume_participation_pct=settings["max_volume_participation_pct"],
                     risk_free_rate_pct=settings["risk_free_rate_pct"],
                     stop_loss_pct=defaults["stop_loss_pct"], take_profit_pct=defaults["take_profit_pct"],
@@ -320,6 +462,8 @@ def _run_symbol_task(task: Dict[str, Any]) -> Dict[str, Any]:
                 **(output.get("assumptions") or {}), "initial_capital": summary.get("initial_capital"),
                 "stop_loss_pct": defaults["stop_loss_pct"], "take_profit_pct": defaults["take_profit_pct"],
                 "trailing_stop_pct": effective_trailing_stop_pct,
+                "atr_stop_multiple": selected_atr_stop_multiple,
+                "break_even_trigger_pct": selected_break_even_trigger_pct,
                 "min_holding_days": effective_min_holding_days,
                 "max_holding_days": effective_max_holding_days, "preset_version": preset.get("version"),
                 "preset_source_hash": preset.get("source_hash"), "period": output.get("period"),
@@ -327,15 +471,37 @@ def _run_symbol_task(task: Dict[str, Any]) -> Dict[str, Any]:
                 "strategy_mode": "custom" if custom_query_template else "preset",
                 "strategy_query": executable_query,
                 "strategy_query_template": custom_query_template,
-                "exit_rule_id": preset.get("exit_rule_id"),
-                "exit_condition": preset.get("exit_condition"),
+                "exit_rule_id": selected_exit_rule_id,
+                "exit_condition": selected_exit_condition,
+                "risk_strategy": (
+                    "atr_volatility" if selected_atr_stop_multiple is not None
+                    else "fixed_plus_break_even" if selected_break_even_trigger_pct is not None
+                    else "fixed_plus_trailing" if effective_trailing_stop_pct is not None
+                    else "fixed"
+                ),
+                "protection_optimization": protection_optimization,
+                "protection_latest_values": {
+                    key: prepared_rows[-1].get(key)
+                    for key in (
+                        "technical_sr_resistance_lower",
+                        "technical_sr_resistance_upper",
+                        "technical_bollinger_middle_20",
+                        "technical_bollinger_upper_20",
+                        "technical_fib_range_high_63",
+                        "technical_atr_14",
+                    )
+                },
             },
             "trades": output["trades"] if professional else [],
             **professional_fields, **current_fields,
         })
-        if preset.get("exit_condition"):
+        if selected_exit_condition:
             from utils.backtesting.strategy_discovery import build_discovery_sell_query
-            results[-1]["assumptions"]["sell_strategy_query"] = build_discovery_sell_query(preset, symbol)
+            results[-1]["assumptions"]["sell_strategy_query"] = build_discovery_sell_query({
+                **preset,
+                "exit_rule_id": selected_exit_rule_id,
+                "exit_condition": selected_exit_condition,
+            }, symbol)
     return {
         "symbol": symbol, "results": results,
         "market_profile": {

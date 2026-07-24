@@ -204,8 +204,89 @@
   .freshness-card { min-width: 0; }
   .strategy-price-plan > div { grid-template-columns: 1fr; }
 }
-.backtest-trade-chart{width:100%;height:560px}
-.backtest-trade-chart .trade-lwc-chart{height:100%;min-height:0}
-@media(max-width:800px){.backtest-trade-chart{height:440px}}
+.backtest-trade-chart{width:100%;height:600px}
+.backtest-trade-chart .trade-lwc-chart{height:560px;min-height:0}
+.backtest-chart-layer-controls{height:40px;display:flex;align-items:center;justify-content:space-between;gap:16px;padding:0 4px}
+.backtest-chart-layer-toggle{display:flex;align-items:center;gap:8px;color:#334155;font-size:13px;font-weight:700;cursor:pointer}
+.backtest-chart-layer-toggle input{accent-color:#0f766e}
+.backtest-chart-layer-toggle small{color:#7b8798;font-size:11px;font-weight:500}
+.backtest-chart-risk-legend{display:flex;align-items:center;gap:13px;color:#64748b;font-size:11px;font-weight:650}
+.backtest-chart-risk-legend span:before{content:'';display:inline-block;width:12px;height:2px;margin:0 5px 3px 0;background:#ef5350}
+.backtest-chart-risk-legend .buy:before{background:#22c55e}
+.backtest-chart-risk-legend .trailing:before{background:#a78bfa}
+.backtest-chart-risk-legend .target:before{background:#f59e0b}
+@media(max-width:800px){.backtest-trade-chart{height:480px}.backtest-trade-chart .trade-lwc-chart{height:440px}}
 .research-page.detail-page > :not(.strong-buy-overlay):not(.detail-loading) { display: none; }
+.strong-buy-drawer > .strategy-detail-header {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 24px 28px 22px;
+  color: #19324a;
+  background: #fff;
+  border-bottom: 1px solid #dfe8f0;
+}
+.strategy-detail-identity { min-width: 0; }
+.strategy-detail-back {
+  display: inline-flex;
+  align-items: center;
+  margin: 0 0 10px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #176da6;
+  font: 700 11px/1.2 inherit;
+  cursor: pointer;
+}
+.strategy-detail-back:hover, .strategy-detail-back:focus-visible { color: #0e537f; text-decoration: underline; outline: none; }
+.strategy-detail-kicker {
+  display: block;
+  color: #687a8d;
+  font-size: 10px;
+  font-weight: 850;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+.strategy-detail-title { display: flex; align-items: center; gap: 10px; margin-top: 4px; }
+.strategy-detail-title h1 { margin: 0; color: #153f67; font-size: 30px; line-height: 1.15; }
+.strategy-detail-name { max-width: 780px; margin: 8px 0 0; color: #344d65; font-size: 14px; font-weight: 650; line-height: 1.45; }
+.strategy-detail-session { margin: 6px 0 0; color: #718196; font-size: 12px; }
+.strong-buy-drawer > .strategy-detail-header .drawer-header-actions { margin: 0; }
+.strong-buy-drawer > .strategy-detail-header .drawer-nepse-chart {
+  margin: 0;
+  padding: 9px 12px;
+  border: 1px solid #a9c8dc;
+  border-radius: 8px;
+  background: #f4f9fd;
+  color: #176da6;
+  font-size: 12px;
+  font-weight: 800;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.detail-score-row { max-width: 1240px; margin: 0 auto; padding: 18px 28px 0; grid-template-columns: repeat(5,minmax(0,1fr)); }
+.detail-score-row article { border-color: #dbe5ee; box-shadow: 0 2px 7px rgba(22,56,84,.04); }
+.detail-score-row strong { color: #173b5d; font-size: 22px; }
+.protection-champion{border-color:#cbdfea!important;background:linear-gradient(180deg,#f8fcff 0%,#fff 100%)}
+.protection-champion-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:18px}
+.protection-champion-heading h3{margin-bottom:5px}
+.protection-champion-heading p{margin:0;color:#65758a}
+.protection-champion-heading>span{padding:5px 9px;border-radius:999px;background:#dff5ec;color:#116149;font-size:11px;font-weight:850;text-transform:uppercase}
+.protection-champion-cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:16px}
+.protection-champion-cards article{padding:13px;border:1px solid #dce7ef;border-radius:9px;background:#fff}
+.protection-champion-cards span{display:block;color:#718196;font-size:11px;font-weight:750;text-transform:uppercase}
+.protection-champion-cards strong{display:block;margin-top:5px;color:#173b5d;font-size:14px;line-height:1.35}
+.protection-champion details{margin-top:14px}.protection-champion summary{color:#176da6;font-size:12px;font-weight:800;cursor:pointer}
+.protection-champion .research-table-wrap{margin-top:10px;max-height:310px}
+.strong-buy-overlay.full-page .detail-section { max-width: 1184px; margin-right: auto; margin-left: auto; }
+@media(max-width:700px){
+  .strong-buy-drawer > .strategy-detail-header { align-items: stretch; flex-direction: column; padding: 18px 16px; gap: 14px; }
+  .strategy-detail-title h1 { font-size: 25px; }
+  .strong-buy-drawer > .strategy-detail-header .drawer-header-actions { align-self: flex-start; }
+  .detail-score-row { padding: 12px 16px 0; }
+  .protection-champion-cards{grid-template-columns:1fr 1fr}
+  .protection-champion-heading{flex-direction:column}
+}
 .run-control-feedback{display:inline-flex;align-items:center;gap:.4rem;margin-top:.55rem;padding:.42rem .65rem;border-radius:8px;background:#fff7df;color:#7a5800;font-size:.76rem;font-weight:750}.run-control-feedback:before{content:'';width:8px;height:8px;border-radius:50%;background:#e7a400;box-shadow:0 0 0 3px rgba(231,164,0,.14)}.run-control-feedback.confirmed{background:#eaf8f2;color:#17684f}.run-control-feedback.confirmed:before{background:#1a9b70}.research-controls button:disabled{opacity:.58;cursor:wait}

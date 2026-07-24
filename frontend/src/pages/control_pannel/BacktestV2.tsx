@@ -6,10 +6,18 @@ import { CanvasRenderer } from 'echarts/renderers';
 import { fetchJson, getApiUrl } from '../../utils/api';
 import NepseAlphaSymbolLink from '../../components/NepseAlphaSymbolLink';
 import ColumnPickerModal from '../../components/ColumnPickerModal';
+import CategoricalHeaderFilter, {
+  isCategoricalColumn,
+  uniqueCategoricalValues,
+} from '../../components/table/CategoricalHeaderFilter';
 import TradeLightweightChart, {
   type TradeChartCandle,
   type TradeChartSignal,
+  type TradeChartProjection,
   type TradeChartTrade,
+  type TradeChartZone,
+  type TradeChartZoneSnapshot,
+  type TradeChartRiskLevel,
 } from '../../components/TradeLightweightChart';
 import { nextBacktestSortRules } from './backtestSort';
 import './BacktestV2.css';
@@ -48,6 +56,10 @@ type ExecutionChartPayload = {
   candles: TradeChartCandle[];
   trades: TradeChartTrade[];
   signals: TradeChartSignal[];
+  projection?: TradeChartProjection | null;
+  zones?: TradeChartZone[];
+  zone_history?: TradeChartZoneSnapshot[];
+  risk_levels?: TradeChartRiskLevel[];
 };
 
 const today = new Date().toISOString().slice(0, 10);
@@ -102,8 +114,10 @@ const RESULT_COLUMNS: Array<{ key: string; label: string; locked?: boolean }> = 
   { key: 'recommendation_status', label: 'Status' },
 ];
 const columns = RESULT_COLUMNS;
-const DEFAULT_VISIBLE_RESULT_COLUMNS = RESULT_COLUMNS.map((column) => column.key);
-const BACKTEST_VISIBLE_COLUMNS_KEY = 'tms-backtest-v2-visible-columns-v1';
+const DEFAULT_VISIBLE_RESULT_COLUMNS = [
+  'symbol', 'win_rate_pct', 'current_signal_status', 'sector', 'total_trades', 'preset_name',
+];
+const BACKTEST_VISIBLE_COLUMNS_KEY = 'tms-backtest-v2-visible-columns-v2';
 const BACKTEST_FILTER_HISTORY_KEY = 'tms-backtest-v2-filter-history-v1';
 const resultColumnLabel = (key: string) => RESULT_COLUMNS.find((column) => column.key === key)?.label || key;
 const formatScanDuration = (totalSeconds: number) => {
@@ -142,7 +156,7 @@ const estimateScanRemaining = (run: Run | null) => {
   };
 };
 const normalizeVisibleResultColumns = (keys: string[]) => {
-  const known = new Set(DEFAULT_VISIBLE_RESULT_COLUMNS);
+  const known = new Set(RESULT_COLUMNS.map((column) => column.key));
   const ordered = keys.map(String).filter((key, index, all) => known.has(key) && all.indexOf(key) === index && key !== 'symbol');
   return ['symbol', ...ordered];
 };
@@ -270,9 +284,13 @@ const StrongBuyCharts: React.FC<{ trades: Array<Record<string, any>> }> = ({ tra
     const profits = trades.map((trade) => Number(trade.pnl || 0));
     const equity = trades.map((trade) => Number(trade.running_equity || 0));
     const drawdown = trades.map((trade) => -Number(trade.drawdown_after_trade_pct || 0));
-    chart.setOption({ animation: false, tooltip: { trigger: 'axis' }, legend: { data: ['Equity', 'Trade P/L', 'Drawdown %'] }, grid: { left: 58, right: 45, top: 45, bottom: 50 }, xAxis: { type: 'category', data: labels, axisLabel: { hideOverlap: true } }, yAxis: [{ type: 'value', name: 'NPR' }, { type: 'value', name: 'DD %' }], dataZoom: [{ type: 'inside' }, { type: 'slider', height: 18 }], series: [{ name: 'Equity', type: 'line', data: equity, showSymbol: false, lineStyle: { color: '#176da6', width: 2 } }, { name: 'Trade P/L', type: 'bar', data: profits, itemStyle: { color: (params: any) => Number(params.value) >= 0 ? '#1a9b5f' : '#d44848' } }, { name: 'Drawdown %', type: 'line', yAxisIndex: 1, data: drawdown, showSymbol: false, lineStyle: { color: '#e0932d' }, areaStyle: { color: 'rgba(224,147,45,.12)' } }] });
+    chart.setOption({ animation: false, tooltip: { trigger: 'axis' }, legend: { data: ['Equity', 'Trade P/L', 'Drawdown %'], selected: { 'Drawdown %': false } }, grid: { left: 58, right: 45, top: 45, bottom: 50 }, xAxis: { type: 'category', data: labels, axisLabel: { hideOverlap: true } }, yAxis: [{ type: 'value', name: 'NPR' }, { type: 'value', name: 'DD %', show: false }], dataZoom: [{ type: 'inside' }, { type: 'slider', height: 18 }], series: [{ name: 'Equity', type: 'line', data: equity, showSymbol: false, lineStyle: { color: '#176da6', width: 2 } }, { name: 'Trade P/L', type: 'bar', data: profits, itemStyle: { color: (params: any) => Number(params.value) >= 0 ? '#1a9b5f' : '#d44848' } }, { name: 'Drawdown %', type: 'line', yAxisIndex: 1, data: drawdown, showSymbol: false, lineStyle: { color: '#e0932d' }, areaStyle: { color: 'rgba(224,147,45,.12)' } }] });
+    const onLegendSelection = (event: any) => {
+      chart.setOption({ yAxis: [{}, { show: Boolean(event.selected?.['Drawdown %']) }] });
+    };
+    chart.on('legendselectchanged', onLegendSelection);
     const observer = new ResizeObserver(() => chart.resize()); observer.observe(ref.current);
-    return () => { observer.disconnect(); chart.dispose(); };
+    return () => { observer.disconnect(); chart.off('legendselectchanged', onLegendSelection); chart.dispose(); };
   }, [trades]);
   return <div className="strong-buy-chart" ref={ref} aria-label="Equity, trade profit and drawdown chart" />;
 };
@@ -284,6 +302,7 @@ const EMPTY_CHART_SIGNALS: TradeChartSignal[] = [];
 const TradeCandlestickChart: React.FC<{ resultId: number; symbol: string }> = ({ resultId, symbol }) => {
   const [payload, setPayload] = useState<ExecutionChartPayload | null>(null);
   const [chartError, setChartError] = useState('');
+  const [showZones, setShowZones] = useState(false);
   useEffect(() => {
     setPayload(null); setChartError('');
     void fetchJson<ExecutionChartPayload>(`/api/backtests/v2/results/${resultId}/chart`).then((response) => {
@@ -292,16 +311,37 @@ const TradeCandlestickChart: React.FC<{ resultId: number; symbol: string }> = ({
   }, [resultId]);
   return (
     <div className="backtest-trade-chart">
+      <div className="backtest-chart-layer-controls">
+        <label className="backtest-chart-layer-toggle">
+          <input type="checkbox" checked={showZones} onChange={(event) => setShowZones(event.target.checked)} />
+          <span>Support &amp; resistance zones</span>
+          <small>{payload?.zone_history?.some((snapshot) => snapshot.zones.length) ? 'One prominent support + resistance' : 'No confirmed zones'}</small>
+        </label>
+        {!!payload?.risk_levels?.length && (
+          <div className="backtest-chart-risk-legend" aria-label="Risk-level legend">
+            <span className="buy">Buy signal</span>
+            <span className="stop">Initial stop</span>
+            {payload.risk_levels.some((level) => level.kind === 'trailing_stop') && <span className="trailing">Trailing stop</span>}
+            <span className="target">Strategy sell zone</span>
+          </div>
+        )}
+      </div>
       <TradeLightweightChart
         symbol={symbol}
         candles={payload?.candles || EMPTY_CANDLES}
         trades={payload?.trades || EMPTY_CHART_TRADES}
         signals={payload?.signals || EMPTY_CHART_SIGNALS}
+        projection={payload?.projection}
+        zones={payload?.zones}
+        zoneHistory={payload?.zone_history}
+        showZones={showZones}
+        riskLevels={payload?.risk_levels}
         loading={!payload && !chartError}
         error={chartError}
         emptyMessage="No cached OHLCV candles are available for this result period."
         loadingMessage="Loading the exact daily price and trade history…"
       />
+      {payload?.projection?.disclaimer && <p className="chart-projection-disclaimer">{payload.projection.disclaimer}</p>}
     </div>
   );
 };
@@ -358,6 +398,7 @@ const BacktestV2: React.FC = () => {
       return [...DEFAULT_VISIBLE_RESULT_COLUMNS];
     }
   });
+  const [columnPreferenceLoaded, setColumnPreferenceLoaded] = useState(false);
   const activeResultColumns = useMemo(
     () => normalizeVisibleResultColumns(visibleResultColumns)
       .map((key) => RESULT_COLUMNS.find((column) => column.key === key))
@@ -367,8 +408,28 @@ const BacktestV2: React.FC = () => {
   useEffect(() => {
     localStorage.setItem(`${BACKTEST_VISIBLE_COLUMNS_KEY}:${preferenceUserId}`, JSON.stringify(visibleResultColumns));
   }, [preferenceUserId, visibleResultColumns]);
+  useEffect(() => {
+    void fetchJson<{ columns: string[] }>('/api/backtests/v2/preferences/result-columns').then((response) => {
+      if (response.ok && response.data.columns?.length) {
+        setVisibleResultColumns(normalizeVisibleResultColumns(response.data.columns));
+      }
+      setColumnPreferenceLoaded(true);
+    });
+  }, []);
+  useEffect(() => {
+    if (!columnPreferenceLoaded) return undefined;
+    const timer = window.setTimeout(() => {
+      void fetchJson('/api/backtests/v2/preferences/result-columns', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ columns: normalizeVisibleResultColumns(visibleResultColumns) }),
+      });
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [columnPreferenceLoaded, visibleResultColumns]);
   const [tab, setTab] = useState<'opportunities' | 'combinations' | 'portfolio' | 'ai' | 'quality'>('combinations');
   const [results, setResults] = useState<ResultPage>({ items: [], page: 1, page_size: 50, total: 0, pages: 0 });
+  const initialResultPageRef = useRef(Math.max(1, Number(savedResultFilterState.page || 1)));
   const [resultScope, setResultScope] = useState<'run' | 'all' | 'strategies' | 'holistic'>(() => {
     const requestedScope = params.get('scope');
     if (requestedScope === 'run' || requestedScope === 'all' || requestedScope === 'holistic') return requestedScope;
@@ -405,6 +466,7 @@ const BacktestV2: React.FC = () => {
   const [includeNonEquities, setIncludeNonEquities] = useState(Boolean(savedResultFilterState.includeNonEquities));
   const [resultsBusy, setResultsBusy] = useState(false);
   const [resultFilterStatus, setResultFilterStatus] = useState('');
+  const [resultHeaderCategoricalFilters, setResultHeaderCategoricalFilters] = useState<Record<string, string>>({});
   const resultRequestId = useRef(0);
   const resultAbortRef = useRef<AbortController | null>(null);
   const [portfolios, setPortfolios] = useState<Portfolio[]>([]);
@@ -430,7 +492,48 @@ const BacktestV2: React.FC = () => {
   });
   const [promotionBusy, setPromotionBusy] = useState(false);
   const [promotionMessage, setPromotionMessage] = useState('');
+  const [filterPreferenceLoaded, setFilterPreferenceLoaded] = useState(false);
   const fullPageDetail = params.get('detail') === 'full';
+
+  useEffect(() => {
+    void fetchJson<{ state: Record<string, any> }>('/api/backtests/v2/preferences/result-filters').then((response) => {
+      const state = response.ok ? response.data.state || {} : {};
+      if (Object.keys(state).length && !initialResultSymbol) {
+        const filters = Array.isArray(state.filters) ? state.filters : [];
+        if (filters.length) {
+          setResultFilterRows(filters);
+          setAppliedResultFilters(filters);
+          appliedResultFilterSignature.current = JSON.stringify(filters);
+          nextResultFilterId.current = Math.max(...filters.map((item: any) => Number(item.id) || 0), 0) + 1;
+        }
+        setResultFilterJoin(state.join === 'or' ? 'or' : 'and');
+        if (Array.isArray(state.resultSorts) && state.resultSorts.length) setResultSorts(state.resultSorts);
+        if (['run', 'all', 'strategies', 'holistic'].includes(state.resultScope)) {
+          setResultScope(state.resultScope);
+          setAllRunsSelected(state.resultScope !== 'run');
+        }
+        setIncludeNonEquities(Boolean(state.includeNonEquities));
+        initialResultPageRef.current = Math.max(1, Number(state.page || 1));
+        if ([25, 50, 100].includes(Number(state.pageSize))) {
+          setResults((current) => ({ ...current, page_size: Number(state.pageSize) }));
+        }
+        if (state.resultHeaderCategoricalFilters && typeof state.resultHeaderCategoricalFilters === 'object') {
+          setResultHeaderCategoricalFilters(state.resultHeaderCategoricalFilters);
+        }
+        if (state.opportunityFilters && typeof state.opportunityFilters === 'object') {
+          setOpportunityFilters({ ...defaultOpportunityFilters, ...state.opportunityFilters });
+        }
+        if (Array.isArray(state.opportunitySorts) && state.opportunitySorts.length) setOpportunitySorts(state.opportunitySorts);
+        if (Array.isArray(state.opportunityFilterRows)) {
+          setOpportunityFilterRows(state.opportunityFilterRows);
+          nextOpportunityFilterId.current = Math.max(...state.opportunityFilterRows.map((item: any) => Number(item.id) || 0), 0) + 1;
+        }
+        if (Array.isArray(state.appliedOpportunityFilters)) setAppliedOpportunityFilters(state.appliedOpportunityFilters);
+        if (['opportunities', 'combinations', 'portfolio', 'ai', 'quality'].includes(state.tab)) setTab(state.tab);
+      }
+      setFilterPreferenceLoaded(true);
+    });
+  }, [initialResultSymbol]);
 
   const loadRuns = async () => {
     const response = await fetchJson<{ items: Run[]; unique_configuration_total?: number }>('/api/backtests/v2/runs?page=1&page_size=50');
@@ -585,16 +688,39 @@ const BacktestV2: React.FC = () => {
       value: resultFilterFields.find((item) => item.field === field)?.type === 'number' ? Number(value) : value,
     })),
   }), [appliedResultFilters, resultFilterJoin]);
+  const visibleResultRows = useMemo(() => results.items.filter((row) => (
+    Object.entries(resultHeaderCategoricalFilters).every(([key, value]) => (
+      !value || String(row[key] ?? '') === value
+    ))
+  )), [resultHeaderCategoricalFilters, results.items]);
 
   useEffect(() => {
-    localStorage.setItem(`${BACKTEST_FILTER_HISTORY_KEY}:${preferenceUserId}`, JSON.stringify({
+    const state = {
       filters: appliedResultFilters,
       join: resultFilterJoin,
       resultSorts,
       resultScope,
       includeNonEquities,
-    }));
-  }, [appliedResultFilters, includeNonEquities, preferenceUserId, resultFilterJoin, resultScope, resultSorts]);
+      page: results.page,
+      pageSize: results.page_size,
+      opportunityFilters,
+      opportunitySorts,
+      opportunityFilterRows,
+      appliedOpportunityFilters,
+      resultHeaderCategoricalFilters,
+      tab,
+    };
+    localStorage.setItem(`${BACKTEST_FILTER_HISTORY_KEY}:${preferenceUserId}`, JSON.stringify(state));
+    if (!filterPreferenceLoaded || fullPageDetail) return undefined;
+    const timer = window.setTimeout(() => {
+      void fetchJson('/api/backtests/v2/preferences/result-filters', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ state }),
+      });
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [appliedOpportunityFilters, appliedResultFilters, filterPreferenceLoaded, fullPageDetail, includeNonEquities, opportunityFilterRows, opportunityFilters, opportunitySorts, preferenceUserId, resultFilterJoin, resultHeaderCategoricalFilters, resultScope, resultSorts, results.page, results.page_size, tab]);
 
   useEffect(() => {
     void fetchJson<{ sectors: string[] }>('/api/backtests/v2/filter-options').then((response) => {
@@ -691,7 +817,11 @@ const BacktestV2: React.FC = () => {
     }
   };
 
-  useEffect(() => { void loadResults(1); }, [activeRun?.run_id, filterAst, includeNonEquities, resultScope, resultSorts, results.page_size]);
+  useEffect(() => {
+    const page = initialResultPageRef.current;
+    initialResultPageRef.current = 1;
+    void loadResults(page);
+  }, [activeRun?.run_id, filterAst, includeNonEquities, resultScope, resultSorts, results.page_size]);
 
   useEffect(() => {
     if (!activeRun || tab !== 'portfolio') return;
@@ -746,6 +876,18 @@ const BacktestV2: React.FC = () => {
     if (detailResponse.ok && tradesResponse.ok) { setSelectedOpportunity(detailResponse.data); setDetailTrades(tradesResponse.data); }
     else setError((!detailResponse.ok && detailResponse.error) || (!tradesResponse.ok && tradesResponse.error) || 'Could not load recommendation details.');
   };
+  const openOpportunityPage = (row: Opportunity) => {
+    sessionStorage.setItem('backtest-lab-return-scroll', String(window.scrollY));
+    const runId = row.run_id || activeRun?.run_id || 'all';
+    window.location.assign(`/dashboard/backtest?run=${encodeURIComponent(runId)}&stock=${encodeURIComponent(row.symbol)}&result=${row.result_id}&detail=full&from=backtest-lab`);
+  };
+  useEffect(() => {
+    if (fullPageDetail || resultsBusy || results.items.length === 0) return;
+    const savedScroll = sessionStorage.getItem('backtest-lab-return-scroll');
+    if (savedScroll == null) return;
+    sessionStorage.removeItem('backtest-lab-return-scroll');
+    window.requestAnimationFrame(() => window.scrollTo({ top: Number(savedScroll) || 0 }));
+  }, [fullPageDetail, results.items.length, resultsBusy]);
 
   const linkedDetailOpened = useRef(false);
   useEffect(() => {
@@ -1128,7 +1270,7 @@ const BacktestV2: React.FC = () => {
               <div className="recommendation-sort-guide"><span><b>Dynamic sorting:</b> click a column to make it primary and toggle ↓/↑. Hold Shift while clicking to add or change secondary rules.</span><button type="button" onClick={() => setOpportunitySorts([{ field: 'recommendation_score', direction: 'desc' }])}>Reset to combined score</button></div>
             </details>
             <div className="research-table-summary"><b>{opportunities.total} fresh ranked stocks</b><span>All research merged · no duplicate stock rows · {opportunitySorts.map((item, index) => { const label = opportunityColumns.find((column) => column.sortKey === item.field)?.label || item.field; return `${index + 1}. ${label} ${item.direction === 'desc' ? '↓' : '↑'}`; }).join(' · ')}</span></div>
-            <div className="research-table-wrap strong-buy-table"><table><thead><tr>{opportunityColumns.map((column) => { const sortIndex = opportunitySorts.findIndex((item) => item.field === column.sortKey); const ariaSort = sortIndex === 0 ? (opportunitySorts[0].direction === 'desc' ? 'descending' : 'ascending') : undefined; return <th key={column.key} aria-sort={ariaSort}>{column.sortKey ? <button type="button" className={`recommendation-sort-button ${sortIndex >= 0 ? 'active' : ''}`} title="Click for primary sort; Shift-click to add a sorting rule" onClick={(event) => toggleOpportunitySort(column.sortKey!, event.shiftKey)}>{column.label}<span>{opportunitySortMarker(column.sortKey)}</span></button> : column.label}</th>; })}</tr></thead><tbody>{opportunities.items.map((row) => <tr key={row.result_id}><td>{row.rank}</td><td><div className="stock-chart-links"><button className="symbol-link" onClick={() => void openOpportunity(row)}>{row.symbol}</button><NepseAlphaSymbolLink symbol={row.symbol}>Chart ↗</NepseAlphaSymbolLink></div></td><td><span className={`signal-pill ${row.current_signal_status}`}>{signalLabel(row.current_signal_status)}</span></td><td>{row.preset_name}</td><td><b>{fmt(row.recommendation_score, 'score')}</b></td><td className="price-zone buy-zone">{row.buy_zone_low ? `NPR ${fmt(row.buy_zone_low, 'money')}–${fmt(row.buy_zone_high, 'money')}` : 'No current entry'}</td><td className="price-zone stop-zone">{row.protective_stop ? `NPR ${fmt(row.protective_stop, 'money')}` : '—'}</td><td className="price-zone sell-zone">{row.sell_zone_low ? `NPR ${fmt(row.sell_zone_low, 'money')}–${fmt(row.sell_zone_high, 'money')}` : '—'}</td><td>{fmt(row.ltp, 'ltp')}</td><td>{row.signal_date}</td><td><b>{fmt(row.win_rate_pct, 'percent')}%</b></td><td>{row.total_trades}</td><td>{fmt(row.average_holding_days, 'days')} days</td><td>{fmt(row.net_return_pct, 'percent')}%</td><td>{fmt(row.max_drawdown_pct, 'percent')}%</td><td>{fmt(row.average_volume_20, 'average_volume_20')}</td><td>{fmt(row.latest_volume, 'latest_volume')}</td><td><button className="view-evidence" onClick={() => void openOpportunity(row)}>Details</button></td></tr>)}</tbody></table>{opportunities.items.length === 0 && <div className="research-empty">No fresh ordinary-share recommendation matches these exact filters. The application does not substitute older trading sessions or silently weaken filters.</div>}</div>
+            <div className="research-table-wrap strong-buy-table"><table><thead><tr>{opportunityColumns.map((column) => { const sortIndex = opportunitySorts.findIndex((item) => item.field === column.sortKey); const ariaSort = sortIndex === 0 ? (opportunitySorts[0].direction === 'desc' ? 'descending' : 'ascending') : undefined; return <th key={column.key} aria-sort={ariaSort}>{column.sortKey ? <button type="button" className={`recommendation-sort-button ${sortIndex >= 0 ? 'active' : ''}`} title="Click for primary sort; Shift-click to add a sorting rule" onClick={(event) => toggleOpportunitySort(column.sortKey!, event.shiftKey)}>{column.label}<span>{opportunitySortMarker(column.sortKey)}</span></button> : column.label}</th>; })}</tr></thead><tbody>{opportunities.items.map((row) => <tr key={row.result_id}><td>{row.rank}</td><td><div className="stock-chart-links"><button className="symbol-link" onClick={() => openOpportunityPage(row)}>{row.symbol}</button><NepseAlphaSymbolLink symbol={row.symbol}>Chart ↗</NepseAlphaSymbolLink></div></td><td><span className={`signal-pill ${row.current_signal_status}`}>{signalLabel(row.current_signal_status)}</span></td><td><button type="button" className="result-detail-link" onClick={() => openOpportunityPage(row)}>{row.preset_name}</button></td><td><b>{fmt(row.recommendation_score, 'score')}</b></td><td className="price-zone buy-zone">{row.buy_zone_low ? `NPR ${fmt(row.buy_zone_low, 'money')}–${fmt(row.buy_zone_high, 'money')}` : 'No current entry'}</td><td className="price-zone stop-zone">{row.protective_stop ? `NPR ${fmt(row.protective_stop, 'money')}` : '—'}</td><td className="price-zone sell-zone">{row.sell_zone_low ? `NPR ${fmt(row.sell_zone_low, 'money')}–${fmt(row.sell_zone_high, 'money')}` : '—'}</td><td>{fmt(row.ltp, 'ltp')}</td><td>{row.signal_date}</td><td><b>{fmt(row.win_rate_pct, 'percent')}%</b></td><td>{row.total_trades}</td><td>{fmt(row.average_holding_days, 'days')} days</td><td>{fmt(row.net_return_pct, 'percent')}%</td><td>{fmt(row.max_drawdown_pct, 'percent')}%</td><td>{fmt(row.average_volume_20, 'average_volume_20')}</td><td>{fmt(row.latest_volume, 'latest_volume')}</td><td><button className="view-evidence" onClick={() => openOpportunityPage(row)}>Details</button></td></tr>)}</tbody></table>{opportunities.items.length === 0 && <div className="research-empty">No fresh ordinary-share recommendation matches these exact filters. The application does not substitute older trading sessions or silently weaken filters.</div>}</div>
             <div className="research-pagination"><button disabled={opportunities.page <= 1} onClick={() => void loadOpportunities(opportunities.page - 1)}>Previous</button><span>Page {opportunities.page} of {opportunities.pages || 1}</span><button disabled={opportunities.page >= opportunities.pages} onClick={() => void loadOpportunities(opportunities.page + 1)}>Next</button></div>
             <p className="strong-buy-disclaimer">Backtested historical performance does not guarantee future results. This is research, not financial advice, and never places a broker order.</p>
           </section>}
@@ -1154,13 +1296,13 @@ const BacktestV2: React.FC = () => {
             </section>
             <div className="recommendation-sort-guide"><span><b>Multi-column ranking:</b> click a heading to make it primary and toggle ↓/↑. Hold Shift while clicking to add or change a secondary rule.</span><button type="button" onClick={() => setResultSorts([{ field: 'win_rate_pct', direction: 'desc' }])}>Reset to win rate</button></div>
             <div className="research-table-summary"><div><b>{results.total.toLocaleString()} {resultScope === 'holistic' ? 'unique stocks across all runs' : resultScope === 'strategies' ? 'unique simulation configurations across all runs' : resultScope === 'all' ? 'historical results across all runs' : 'results from this run'}</b><span>{resultScope === 'holistic' ? 'Best validated result per stock · duplicate runs removed' : resultScope === 'strategies' ? 'Exact duplicates only: symbol + complete entry/exit strategy + holding/risk/cost/sizing settings + engine versions' : resultScope === 'all' ? 'Complete cached stock × strategy history across every run' : 'Every scanned stock × strategy combination in the selected workspace'} · {resultSorts.map((item, index) => `${index + 1}. ${resultColumnLabel(item.field)} ${item.direction === 'desc' ? '↓' : '↑'}`).join(' · ')}</span></div><div className="research-table-actions"><button type="button" className="research-columns-button" onClick={() => setColumnPickerOpen(true)}>Columns <b>{activeResultColumns.length}/{RESULT_COLUMNS.length}</b></button><div className="csv-export-control"><label><span>CSV dataset</span><select value={exportScope} onChange={(event) => setExportScope(event.target.value as 'run' | 'all')}><option value="run">This run · current filters</option><option value="all">All my cached backtests</option></select></label><button type="button" disabled={exporting} onClick={() => void downloadCsv(exportScope)}>{exporting ? 'Preparing download…' : '↓ Download CSV'}</button>{exportStatus && <small>{exportStatus}</small>}</div></div></div>
-            <div className={`research-table-wrap ${resultsBusy ? 'is-loading' : ''}`} aria-busy={resultsBusy}><table><thead><tr>{activeResultColumns.map(({ key, label }) => { const sortIndex = resultSorts.findIndex((item) => item.field === key); return <th key={key} aria-sort={sortIndex === 0 ? (resultSorts[0].direction === 'desc' ? 'descending' : 'ascending') : undefined}><button type="button" className={`recommendation-sort-button ${sortIndex >= 0 ? 'active' : ''}`} disabled={resultsBusy} title="Click for primary sort; Shift-click to add a sorting rule" onClick={(event) => toggleResultSort(key, event.shiftKey)}>{label}<span>{resultSortMarker(key)}</span></button></th>; })}</tr></thead><tbody>{results.items.map((row) => <tr key={row.result_id} className={row.recommendation_status === 'recommended' ? 'recommended' : ''}>{activeResultColumns.map(({ key }) => <td key={key}>{key === 'symbol' ? <div className="stock-chart-links"><button type="button" className="symbol-link" title={`View ${row.symbol} backtest details`} onClick={() => void openOpportunity(row as Opportunity)}>{row.symbol}</button><NepseAlphaSymbolLink symbol={row.symbol}>Chart ↗</NepseAlphaSymbolLink></div> : key === 'preset_name' ? <button type="button" className="result-detail-link" title={`View ${row.preset_name} details`} onClick={() => void openOpportunity(row as Opportunity)}>{row.preset_name}</button> : key === 'current_signal_status' ? <span className={`signal-pill ${row.current_signal_status}`}>{signalLabel(row.current_signal_status)}</span> : key === 'robust_score' ? <span className={`score score-${Math.floor(Number(row[key] || 0) / 20)}`}>{fmt(row[key], key)}</span> : fmt(row[key], key)}</td>)}</tr>)}</tbody></table>{resultsBusy && <div className="result-table-loading"><span className="filter-spinner" />Ranking exact matches…</div>}{!resultsBusy && results.items.length === 0 && <div className="research-empty">No result matches these exact filters. Filters were not silently weakened.</div>}</div>
+            <div className={`research-table-wrap ${resultsBusy ? 'is-loading' : ''}`} aria-busy={resultsBusy}><table><thead><tr>{activeResultColumns.map(({ key, label }) => { const sortIndex = resultSorts.findIndex((item) => item.field === key); const categorical = isCategoricalColumn(results.items, key); return <th key={key} aria-sort={!categorical && sortIndex === 0 ? (resultSorts[0].direction === 'desc' ? 'descending' : 'ascending') : undefined}>{categorical ? <CategoricalHeaderFilter label={label} values={uniqueCategoricalValues(results.items, key)} selectedValue={resultHeaderCategoricalFilters[key]} disabled={resultsBusy} onChange={(value) => setResultHeaderCategoricalFilters((current) => ({ ...current, [key]: value }))} /> : <button type="button" className={`recommendation-sort-button ${sortIndex >= 0 ? 'active' : ''}`} disabled={resultsBusy} title="Click for primary sort; Shift-click to add a sorting rule" onClick={(event) => toggleResultSort(key, event.shiftKey)}>{label}<span>{resultSortMarker(key)}</span></button>}</th>; })}</tr></thead><tbody>{visibleResultRows.map((row) => <tr key={row.result_id} className={row.recommendation_status === 'recommended' ? 'recommended' : ''}>{activeResultColumns.map(({ key }) => <td key={key}>{key === 'symbol' ? <div className="stock-chart-links"><button type="button" className="symbol-link" title={`View ${row.symbol} backtest details`} onClick={() => openOpportunityPage(row as Opportunity)}>{row.symbol}</button><NepseAlphaSymbolLink symbol={row.symbol}>Chart ↗</NepseAlphaSymbolLink></div> : key === 'preset_name' ? <button type="button" className="result-detail-link" title={`View ${row.preset_name} details`} onClick={() => openOpportunityPage(row as Opportunity)}>{row.preset_name}</button> : key === 'current_signal_status' ? <span className={`signal-pill ${row.current_signal_status}`}>{signalLabel(row.current_signal_status)}</span> : key === 'robust_score' ? <span className={`score score-${Math.floor(Number(row[key] || 0) / 20)}`}>{fmt(row[key], key)}</span> : fmt(row[key], key)}</td>)}</tr>)}</tbody></table>{resultsBusy && <div className="result-table-loading"><span className="filter-spinner" />Ranking exact matches…</div>}{!resultsBusy && visibleResultRows.length === 0 && <div className="research-empty">{results.items.length ? 'No rows on this page match the selected header values.' : 'No result matches these exact filters. Filters were not silently weakened.'}</div>}</div>
             <div className="research-pagination"><button disabled={resultsBusy || results.page <= 1} onClick={() => void loadResults(results.page - 1)}>Previous</button><span>{resultsBusy ? 'Loading exact page…' : `Page ${results.page} of ${results.pages || 1}`}</span><button disabled={resultsBusy || results.page >= results.pages} onClick={() => void loadResults(results.page + 1)}>Next</button></div>
           </section>}
 
           {tab === 'portfolio' && <section className="research-panel"><div className="research-panel-title"><div><h3>Shared-capital strategy leaderboard</h3><p>One cash balance · max 10 positions · 10% per stock · 30% per sector · 5% reserve.</p></div></div><div className="portfolio-grid">{portfolios.map((item) => <article key={item.preset_id}><span>{item.preset_name}</span><strong className={item.summary.net_return_pct >= 0 ? 'positive' : 'negative'}>{fmt(item.summary.net_return_pct, 'return')}%</strong><dl><div><dt>Final equity</dt><dd>NPR {fmt(item.summary.final_equity, 'money')}</dd></div><div><dt>Drawdown</dt><dd>{fmt(item.summary.max_drawdown_pct, 'percent')}%</dd></div><div><dt>Accepted</dt><dd>{item.summary.accepted_signals}</dd></div><div><dt>Rejected</dt><dd>{item.summary.rejected_signals}</dd></div></dl></article>)}</div>{portfolios.length === 0 && <div className="research-empty">Portfolio results are finalized after the stock scan completes.</div>}</section>}
 
-          {tab === 'ai' && <section className="research-panel"><div className="research-panel-title"><div><h3>Ask AI for the top 10</h3><p>Search every cached strategy result using a validated query plan. Generated SQL is never executed.</p></div><label>Search scope<select value={aiScope} onChange={(e) => setAiScope(e.target.value as 'all' | 'run')}><option value="all">All my backtest data</option><option value="run">Current run only</option></select></label></div><div className="ai-backtest-presets" aria-label="AI backtest prompt presets">{aiBacktestPresets.map((prompt, index) => <button type="button" key={prompt} onClick={() => setAiQuestion(prompt)}><b>Preset {index + 1}</b><span>{prompt}</span></button>)}</div><div className="ai-query"><textarea rows={4} value={aiQuestion} onChange={(e) => setAiQuestion(e.target.value)} placeholder="Describe the stocks, strategies, risk limits, and ranking you want…" /><button disabled={aiBusy} onClick={() => void askAi()}>{aiBusy ? 'Validating…' : 'Generate query + top 10'}</button></div>{aiAnswer && <><pre>{aiAnswer.generated_query}</pre><p>{aiAnswer.explanation}</p><p><b>{aiAnswer.recommendation_summary}</b></p>{aiAnswer.total_matches === 0 && <div className="research-alert">No exact matches. {aiAnswer.suggested_relaxations.join(' ')}</div>}<div className="research-table-wrap"><table><thead><tr>{columns.slice(0, 10).map(({ key, label }) => <th key={key}>{label}</th>)}<th>Why it matched</th></tr></thead><tbody>{aiAnswer.items.map((row: ResultRow) => <tr key={row.result_id}>{columns.slice(0, 10).map(({ key }) => <td key={key}>{fmt(row[key], key)}</td>)}<td>{(row.match_reasons || []).join(' · ')}</td></tr>)}</tbody></table></div></>}</section>}
+          {tab === 'ai' && <section className="research-panel"><div className="research-panel-title"><div><h3>Ask AI for the top 10</h3><p>Search every cached strategy result using a validated, column-selecting SQL query.</p></div><label>Search scope<select value={aiScope} onChange={(e) => setAiScope(e.target.value as 'all' | 'run')}><option value="all">All my backtest data</option><option value="run">Current run only</option></select></label></div><div className="ai-backtest-presets" aria-label="AI backtest prompt presets">{aiBacktestPresets.map((prompt, index) => <button type="button" key={prompt} onClick={() => setAiQuestion(prompt)}><b>Preset {index + 1}</b><span>{prompt}</span></button>)}</div><div className="ai-query"><textarea rows={4} value={aiQuestion} onChange={(e) => setAiQuestion(e.target.value)} placeholder="Describe the stocks, strategies, columns, risk limits, and ranking you want…" /><button disabled={aiBusy} onClick={() => void askAi()}>{aiBusy ? 'Validating…' : 'Run AI SQL + top 10'}</button></div>{aiAnswer && <><p>{aiAnswer.explanation}</p><p><b>{aiAnswer.recommendation_summary}</b></p>{aiAnswer.total_matches === 0 && <div className="research-alert">No exact matches. {aiAnswer.suggested_relaxations.join(' ')}</div>}<div className="research-table-wrap"><table><thead><tr>{(aiAnswer.selected_columns || []).map((key: string) => <th key={key}>{columns.find((item) => item.key === key)?.label || key.replaceAll('_', ' ')}</th>)}<th>Why it matched</th></tr></thead><tbody>{aiAnswer.items.map((row: ResultRow) => <tr key={row.result_id}>{(aiAnswer.selected_columns || []).map((key: string) => <td key={key}>{fmt(row[key], key)}</td>)}<td>{(row.match_reasons || []).join(' · ')}</td></tr>)}</tbody></table></div></>}</section>}
 
           {tab === 'quality' && <section className="research-panel quality-grid"><article><b>Universe snapshot</b><strong>{activeRun.symbols_total}</strong><p>Instrument membership is frozen when the run starts.</p></article><article><b>Completed symbols</b><strong>{activeRun.symbols_completed}</strong><p>Each completion is checkpointed for restart recovery.</p></article><article><b>Ordinary-share enforcement</b><strong>{activeRun.configuration.ordinary_shares_only ? 'On' : 'Explicitly off'}</strong><p>Non-equities stay excluded at the API unless explicitly requested.</p></article><article><b>Validation split</b><strong>70 / 30</strong><p>The newest 30% of sessions are locked for out-of-sample metrics.</p></article></section>}
         </>}
@@ -1168,16 +1310,17 @@ const BacktestV2: React.FC = () => {
     </section>
     {detailBusy && <div className="detail-loading">Loading complete signal and trade evidence…</div>}
     {selectedOpportunity && <div className={`strong-buy-overlay ${fullPageDetail ? 'full-page' : ''}`} role={fullPageDetail ? undefined : 'dialog'} aria-modal={fullPageDetail ? undefined : 'true'} aria-label="Backtest recommendation details"><div className="strong-buy-drawer">
-      <header><div><span className={`signal-pill ${selectedOpportunity.best.current_signal_status}`}>{fmt(selectedOpportunity.best.current_signal_status, 'status')}</span><h2>{selectedOpportunity.best.symbol} · {selectedOpportunity.best.preset_name}</h2><p>Signal {selectedOpportunity.best.current_signal_date} · calculated from the latest completed daily session</p><NepseAlphaSymbolLink symbol={selectedOpportunity.best.symbol} className="drawer-nepse-chart">Open {selectedOpportunity.best.symbol} chart on NEPSE Alpha ↗</NepseAlphaSymbolLink></div><div className="drawer-header-actions">{fullPageDetail ? <a href="/dashboard/backtest">← Back to Backtest Lab</a> : <a href={`/dashboard/backtest?run=${activeRun?.run_id || ''}&stock=${selectedOpportunity.best.symbol}&result=${selectedOpportunity.best.result_id}&detail=full`} target="_blank" rel="noreferrer">Open full page ↗</a>}{!fullPageDetail && <button type="button" aria-label="Close details" onClick={() => setSelectedOpportunity(null)}>×</button>}</div></header>
-      <section className="detail-score-row"><article><span>Reliability score</span><strong>{fmt(selectedOpportunity.best.reliability_score, 'score')}</strong></article><article><span>Current technical score</span><strong>{fmt(selectedOpportunity.best.current_technical_score, 'score')}</strong></article><article><span>Current LTP</span><strong>NPR {fmt(selectedOpportunity.best.ltp, 'ltp')}</strong></article><article><span>Latest volume</span><strong>{fmt(selectedOpportunity.best.latest_volume, 'latest_volume')}</strong></article></section>
+      <header className="strategy-detail-header"><div className="strategy-detail-identity">{fullPageDetail && <button type="button" className="strategy-detail-back" onClick={() => window.history.back()} aria-label="Return to Backtest Lab">‹ Backtest Lab</button>}<span className="strategy-detail-kicker">Backtest result</span><div className="strategy-detail-title"><h1>{selectedOpportunity.best.symbol}</h1><span className={`signal-pill ${selectedOpportunity.best.current_signal_status}`}>{fmt(selectedOpportunity.best.current_signal_status, 'status')}</span></div><p className="strategy-detail-name">{selectedOpportunity.best.preset_name}</p><p className="strategy-detail-session">Latest completed session: {selectedOpportunity.best.current_signal_date || 'not available'}</p></div><div className="drawer-header-actions"><NepseAlphaSymbolLink symbol={selectedOpportunity.best.symbol} className="drawer-nepse-chart">View chart on NEPSE Alpha ↗</NepseAlphaSymbolLink>{!fullPageDetail && <button type="button" aria-label="Close details" onClick={() => setSelectedOpportunity(null)}>×</button>}</div></header>
+      <section className="detail-score-row"><article><span>Reliability score</span><strong>{fmt(selectedOpportunity.best.reliability_score, 'score')}</strong></article><article><span>Strategy win rate</span><strong>{fmt(selectedOpportunity.best.win_rate_pct, 'percent')}%</strong></article><article><span>Current technical score</span><strong>{fmt(selectedOpportunity.best.current_technical_score, 'score')}</strong></article><article><span>Current LTP</span><strong>NPR {fmt(selectedOpportunity.best.ltp, 'ltp')}</strong></article><article><span>Latest volume</span><strong>{fmt(selectedOpportunity.best.latest_volume, 'latest_volume')}</strong></article></section>
       <section className="detail-section strategy-price-plan"><h3>Strategy planning prices</h3><p>These zones use the saved strategy’s stop, target, and ATR volatility. They are planning levels; the backtest still models entry at the next available open.</p><div><article><span>Buy zone</span><strong>{selectedOpportunity.best.buy_zone_low ? `NPR ${fmt(selectedOpportunity.best.buy_zone_low, 'money')}–${fmt(selectedOpportunity.best.buy_zone_high, 'money')}` : 'No current entry signal'}</strong></article><article><span>Protective stop</span><strong>{selectedOpportunity.best.protective_stop ? `NPR ${fmt(selectedOpportunity.best.protective_stop, 'money')}` : '—'}</strong></article><article><span>Strategy sell zone</span><strong>{selectedOpportunity.best.sell_zone_low ? `NPR ${fmt(selectedOpportunity.best.sell_zone_low, 'money')}–${fmt(selectedOpportunity.best.sell_zone_high, 'money')}` : '—'}</strong></article><article><span>20-day average volume</span><strong>{fmt(selectedOpportunity.best.average_volume_20, 'average_volume_20')}</strong></article></div></section>
+      <section className="detail-section protection-champion"><div className="protection-champion-heading"><div><h3>Selected sell and stop strategy</h3><p>One champion is selected for this stock + entry strategy from the locked out-of-sample period. Raw win rate is not the only selection criterion.</p></div>{selectedOpportunity.best.assumptions?.protection_optimization && <span>OOS selected</span>}</div><div className="protection-champion-cards"><article><span>Sell rule</span><strong>{fmt(selectedOpportunity.best.assumptions?.exit_rule_id || 'saved preset exit', 'exit_rule')}</strong></article><article><span>Stop method</span><strong>{fmt(selectedOpportunity.best.assumptions?.protection_optimization?.champion?.stop?.label || selectedOpportunity.best.assumptions?.risk_strategy || 'fixed', 'stop')}</strong></article><article><span>Sell-zone basis</span><strong>{selectedOpportunity.best.planning_range_basis?.sell_zone_basis || `Saved +${selectedOpportunity.best.assumptions?.take_profit_pct}% target`}</strong></article><article><span>Combinations evaluated</span><strong>{selectedOpportunity.best.assumptions?.protection_optimization?.total_evaluations || 1}</strong></article></div>{selectedOpportunity.best.assumptions?.protection_optimization?.leaderboard?.length > 0 && <details><summary>Compare leading sell/stop combinations</summary><div className="research-table-wrap"><table><thead><tr><th>Sell rule</th><th>Stop</th><th>OOS score</th><th>Trades</th><th>Win rate</th><th>Profit factor</th><th>Expectancy</th><th>Drawdown</th></tr></thead><tbody>{selectedOpportunity.best.assumptions.protection_optimization.leaderboard.map((candidate: any, index: number) => <tr key={`${candidate.exit_rule_id}-${candidate.stop?.id}`} className={index === 0 ? 'recommended' : ''}><td>{fmt(candidate.exit_rule_id, 'exit')}</td><td>{candidate.stop?.label}</td><td>{fmt(candidate.selection_score, 'score')}</td><td>{candidate.summary?.total_trades}</td><td>{fmt(candidate.summary?.win_rate_pct, 'percent')}%</td><td>{fmt(candidate.summary?.profit_factor, 'ratio')}</td><td>{fmt(candidate.summary?.expectancy_pct, 'percent')}%</td><td>{fmt(candidate.summary?.max_drawdown_pct, 'percent')}%</td></tr>)}</tbody></table></div></details>}</section>
       <section className="detail-section"><h3>Latest strategy signal evidence</h3><p className="evidence-reason">{selectedOpportunity.best.current_evidence?.reason}</p><code>{selectedOpportunity.best.current_evidence?.strategy_condition}</code>{selectedOpportunity.best.current_evidence?.conditions_total > 0 && <p><b>{selectedOpportunity.best.current_evidence.conditions_passed}/{selectedOpportunity.best.current_evidence.conditions_total}</b> entry conditions currently pass ({fmt(selectedOpportunity.best.current_evidence.condition_progress_pct, 'percent')}%). “Near trigger” is readiness evidence, not a forecast.</p>}<div className="latest-values">{Object.entries(selectedOpportunity.best.current_evidence?.latest_values || {}).map(([key, value]) => <div key={key}><span>{key.replaceAll('_', ' ')}</span><b>{fmt(value, key)}</b></div>)}</div><h4>Condition checks</h4><div className="condition-checks">{(selectedOpportunity.best.current_evidence?.conditions || []).map((condition: any, index: number) => <div className={condition.matched ? 'passed' : 'failed'} key={`${condition.expression}-${index}`}><b>{condition.matched ? 'Passed' : 'Failed'}</b><span>{condition.expression}</span>{condition.message && <small>{condition.message}</small>}</div>)}</div></section>
       <section className="detail-section"><h3>How reliability was calculated</h3><div className="score-breakdown">{Object.entries(selectedOpportunity.best.current_evidence?.reliability?.components || {}).map(([key, value]) => <div key={key}><span>{key.replaceAll('_', ' ')}</span><b>+{fmt(value, key)}</b></div>)}</div>{(selectedOpportunity.best.current_evidence?.reliability?.penalties || []).map((penalty: any) => <p className="score-penalty" key={penalty.code}>−{penalty.points} · {penalty.code.replaceAll('_', ' ')}</p>)}</section>
-      <section className="detail-section"><h3>Complete historical backtest summary</h3><div className="historical-summary">{Object.entries(selectedOpportunity.best.assumptions?.summary || {}).map(([key, value]) => <div key={key}><span>{key.replaceAll('_', ' ')}</span><b>{fmt(value, key)}</b></div>)}</div><div className="risk-config"><span>Stop loss {selectedOpportunity.best.assumptions?.stop_loss_pct}%</span><span>Take profit {selectedOpportunity.best.assumptions?.take_profit_pct}%</span><span>Min hold {selectedOpportunity.best.assumptions?.min_holding_days || 0} days</span><span>Max hold {selectedOpportunity.best.assumptions?.max_holding_days} days</span>{String(selectedOpportunity.best.assumptions?.charge_model || '').startsWith('nepse_equity') ? <><span>NEPSE tiered brokerage</span><span>SEBON 0.015% each side</span><span>DP NPR 25 per sale</span><span>CGT by holding period</span></> : <span>Legacy flat-fee result · rerun for official Nepal charges</span>}<span>Strategy {selectedOpportunity.best.assumptions?.preset_version}</span><span>{selectedOpportunity.best.assumptions?.period?.start} → {selectedOpportunity.best.assumptions?.period?.end}</span></div></section>
+      <section className="detail-section"><h3>Complete historical backtest summary</h3><div className="historical-summary">{Object.entries(selectedOpportunity.best.assumptions?.summary || {}).map(([key, value]) => <div key={key}><span>{key.replaceAll('_', ' ')}</span><b>{fmt(value, key)}</b></div>)}</div><div className="risk-config"><span>Protection {fmt(selectedOpportunity.best.assumptions?.risk_strategy || 'fixed', 'risk_strategy')}</span><span>Initial stop {selectedOpportunity.best.assumptions?.stop_loss_pct}%</span>{selectedOpportunity.best.assumptions?.trailing_stop_pct != null && <span>Trailing stop {selectedOpportunity.best.assumptions.trailing_stop_pct}%</span>}<span>Take profit {selectedOpportunity.best.assumptions?.take_profit_pct}%</span><span>Min hold {selectedOpportunity.best.assumptions?.min_holding_days || 0} days</span><span>Max hold {selectedOpportunity.best.assumptions?.max_holding_days} days</span>{String(selectedOpportunity.best.assumptions?.charge_model || '').startsWith('nepse_equity') ? <><span>NEPSE tiered brokerage</span><span>SEBON 0.015% each side</span><span>DP NPR 25 per sale</span><span>CGT by holding period</span></> : <span>Legacy flat-fee result · rerun for official Nepal charges</span>}<span>Strategy {selectedOpportunity.best.assumptions?.preset_version}</span><span>{selectedOpportunity.best.assumptions?.period?.start} → {selectedOpportunity.best.assumptions?.period?.end}</span></div></section>
       <section className="detail-section execution-promotion"><h3>Use the same query for trading</h3><p>The stored query—not a rewritten approximation—creates a paper draft first. Live scheduling remains a separate action with current account, balance, holdings, and risk checks.</p><div><label>TMS client ID<input value={paperClientId} onChange={(e) => setPaperClientId(e.target.value)} placeholder="Client ID" /></label><button disabled={promotionBusy || !paperClientId.trim()} onClick={() => void promoteToPaper()}>{promotionBusy ? 'Creating paper draft…' : 'Promote exact query to paper'}</button><a href="/dashboard/schedule-order">Open Schedule Order</a></div>{promotionMessage && <strong>{promotionMessage}</strong>}</section>
-      <section className="detail-section"><h3>Every simulated trade on the daily chart</h3><p>Green triangles are next-session simulated entries. Red diamonds are exits; each exit label shows the net NPR profit or loss after saved charges.</p><TradeCandlestickChart resultId={selectedOpportunity.best.result_id} symbol={selectedOpportunity.best.symbol} /></section>
+      <section className="detail-section"><h3>Every simulated trade on the daily chart</h3><p>Trade markers show the exact saved strategy entry and exit fills. Exit labels also show the net percentage after brokerage, SEBON fees, DP charge, CGT, and slippage.</p><TradeCandlestickChart resultId={selectedOpportunity.best.result_id} symbol={selectedOpportunity.best.symbol} /></section>
       <section className="detail-section"><h3>Equity, profit and drawdown</h3><StrongBuyCharts trades={detailTrades.items} /></section>
-      <section className="detail-section"><div className="trade-heading"><div><h3>Complete wins and losses</h3><p>{detailTrades.total} historical trades · net results include brokerage, SEBON, DP, CGT, and slippage</p></div><select value={tradeFilter} onChange={(e) => void filterDetailTrades(e.target.value)}><option value="all">All trades</option><option value="wins">Wins only</option><option value="losses">Losses only</option><option value="stop_loss">Stop-loss exits</option><option value="take_profit">Take-profit exits</option></select></div><div className="research-table-wrap detail-trades"><table><thead><tr>{['Result','Strategy','Signal','Entry date','Entry price','Exit date','Exit price','Qty','Held','Exit reason','Gross return','Net return','Brokerage','SEBON','DP','CGT','Total charges','P/L','Running equity','Drawdown'].map((item) => <th key={item}>{item}</th>)}</tr></thead><tbody>{detailTrades.items.map((trade) => <tr key={trade.trade_id}><td><span className={`trade-${trade.result}`}>{trade.result}</span></td><td>{selectedOpportunity.best.preset_name}</td><td>{trade.signal_date || '—'}</td><td>{trade.entry_date}</td><td>{fmt(trade.entry_price, 'money')}</td><td>{trade.exit_date}</td><td>{fmt(trade.exit_price, 'money')}</td><td>{trade.quantity}</td><td>{trade.holding_days}d</td><td>{fmt(trade.exit_reason, 'reason')}</td><td>{trade.gross_return_pct}%</td><td>{trade.net_return_pct}%</td><td>NPR {fmt(trade.broker_commission, 'money')}</td><td>NPR {fmt(trade.sebon_fee, 'money')}</td><td>NPR {fmt(trade.dp_charge, 'money')}</td><td>NPR {fmt(trade.capital_gains_tax, 'money')}<small>{fmt(trade.capital_gains_tax_rate_pct, 'percent')}%</small></td><td>NPR {fmt(trade.total_charges, 'money')}</td><td className={Number(trade.pnl || 0) >= 0 ? 'positive' : 'negative'}>NPR {fmt(trade.pnl, 'money')}</td><td>NPR {fmt(trade.running_equity, 'money')}</td><td>{trade.drawdown_after_trade_pct}%</td></tr>)}</tbody></table></div><div className="research-pagination"><button type="button" disabled={detailTrades.page <= 1} onClick={() => void loadDetailTradePage(detailTrades.page - 1)}>Previous 100 trades</button><span>Showing {detailTrades.total ? (detailTrades.page - 1) * detailTrades.page_size + 1 : 0}–{Math.min(detailTrades.page * detailTrades.page_size, detailTrades.total)} of {detailTrades.total} · page {detailTrades.page} of {detailTrades.pages || 1}</span><button type="button" disabled={detailTrades.page >= detailTrades.pages} onClick={() => void loadDetailTradePage(detailTrades.page + 1)}>Next 100 trades</button></div></section>
+      <section className="detail-section"><div className="trade-heading"><div><h3>Complete wins and losses</h3><p>{detailTrades.total} historical trades · net results include brokerage, SEBON, DP, CGT, and slippage</p></div><select value={tradeFilter} onChange={(e) => void filterDetailTrades(e.target.value)}><option value="all">All trades</option><option value="wins">Wins only</option><option value="losses">Losses only</option><option value="stop_loss">Stop-loss exits</option><option value="take_profit">Take-profit exits</option></select></div><div className="research-table-wrap detail-trades"><table><thead><tr>{['Result','Strategy','Signal','Entry date','Entry price','Exit date','Exit price','Qty','Held','Exit reason','Gross return','Net return','Brokerage','SEBON','DP','CGT','Total charges','P/L','Running equity','Drawdown'].map((item) => <th key={item}>{item}</th>)}</tr></thead><tbody>{detailTrades.items.map((trade) => <tr key={trade.trade_id}><td><span className={`trade-${trade.result}`}>{trade.result}</span></td><td>{selectedOpportunity.best.preset_name}</td><td>{trade.signal_date || '—'}</td><td>{trade.entry_date}</td><td>{fmt(trade.entry_price, 'money')}</td><td>{trade.exit_date}</td><td>{fmt(trade.exit_price, 'money')}</td><td>{trade.quantity}</td><td>{trade.holding_days}d</td><td>{fmt(trade.exit_reason, 'reason')}</td><td>{trade.gross_return_pct}%</td><td>{trade.return_pct}%</td><td>NPR {fmt(trade.broker_commission, 'money')}</td><td>NPR {fmt(trade.sebon_fee, 'money')}</td><td>NPR {fmt(trade.dp_charge, 'money')}</td><td>NPR {fmt(trade.capital_gains_tax, 'money')}<small>{fmt(trade.capital_gains_tax_rate_pct, 'percent')}%</small></td><td>NPR {fmt(trade.total_charges, 'money')}</td><td className={Number(trade.pnl || 0) >= 0 ? 'positive' : 'negative'}>NPR {fmt(trade.pnl, 'money')}</td><td>NPR {fmt(trade.running_equity, 'money')}</td><td>{trade.drawdown_after_trade_pct}%</td></tr>)}</tbody></table></div><div className="research-pagination"><button type="button" disabled={detailTrades.page <= 1} onClick={() => void loadDetailTradePage(detailTrades.page - 1)}>Previous 100 trades</button><span>Showing {detailTrades.total ? (detailTrades.page - 1) * detailTrades.page_size + 1 : 0}–{Math.min(detailTrades.page * detailTrades.page_size, detailTrades.total)} of {detailTrades.total} · page {detailTrades.page} of {detailTrades.pages || 1}</span><button type="button" disabled={detailTrades.page >= detailTrades.pages} onClick={() => void loadDetailTradePage(detailTrades.page + 1)}>Next 100 trades</button></div></section>
       <p className="strong-buy-disclaimer">Backtested historical performance does not guarantee future results. No broker order is placed or scheduled from this view.</p>
     </div></div>}
   </div>;

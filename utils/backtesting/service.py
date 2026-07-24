@@ -465,6 +465,7 @@ def run_backtest(
     max_holding_days: int = 90, fee_pct: float = 0.4,
     fixed_fee: float = 0, slippage_pct: float = 0.1, position_size_pct: float = 100,
     trailing_stop_pct: Optional[float] = None, max_volume_participation_pct: float = 10,
+    atr_stop_multiple: Optional[float] = None, break_even_trigger_pct: Optional[float] = None,
     risk_free_rate_pct: float = 4, data_source: str = "auto",
     charge_model: str = NEPSE_EQUITY_CHARGE_MODEL, investor_type: str = "individual",
     apply_cgt: bool = True, dp_charge: float = DEFAULT_DP_CHARGE,
@@ -498,6 +499,10 @@ def run_backtest(
         raise BacktestError("Position size must be between 0% and 100% of available cash.")
     if trailing_stop_pct is not None and not (0 < trailing_stop_pct <= 100):
         raise BacktestError("Trailing stop must be between 0% and 100%.")
+    if atr_stop_multiple is not None and not (0 < atr_stop_multiple <= 10):
+        raise BacktestError("ATR stop multiple must be between 0 and 10.")
+    if break_even_trigger_pct is not None and not (0 < break_even_trigger_pct <= 100):
+        raise BacktestError("Break-even trigger must be between 0% and 100%.")
     if not (0 < max_volume_participation_pct <= 100):
         raise BacktestError("Volume participation must be between 0% and 100%.")
     try:
@@ -648,6 +653,7 @@ def run_backtest(
                     "quantity": quantity, "entry_fee": entry_fee, "entry_cost": entry_cost,
                     "entry_charges": entry_charge_details, "rule_name": pending_signal["rule_name"],
                     "signal_date": pending_signal["signal_date"], "highest_price": bar.high,
+                    "entry_atr": float(row.get("technical_atr_14") or 0),
                 }
             else:
                 rejected_orders += 1
@@ -657,8 +663,19 @@ def run_backtest(
             exposure_bars += 1
             position["highest_price"] = max(position["highest_price"], bar.high)
             fixed_stop_price = position["entry_price"] * (1 - stop_loss_pct / 100)
+            atr_stop_price = (
+                position["entry_price"] - position["entry_atr"] * atr_stop_multiple
+                if atr_stop_multiple and position.get("entry_atr", 0) > 0 else 0
+            )
             trailing_price = position["highest_price"] * (1 - trailing_stop_pct / 100) if trailing_stop_pct else 0
-            stop_price = max(fixed_stop_price, trailing_price)
+            break_even_price = (
+                position["entry_price"]
+                if break_even_trigger_pct is not None
+                and position["highest_price"] >= position["entry_price"] * (1 + break_even_trigger_pct / 100)
+                else 0
+            )
+            initial_stop_price = atr_stop_price if atr_stop_price > 0 else fixed_stop_price
+            stop_price = max(initial_stop_price, trailing_price, break_even_price)
             target_price = position["entry_price"] * (1 + take_profit_pct / 100)
             held_days = index - position["entry_index"]
             exit_price: Optional[float] = None
@@ -667,7 +684,15 @@ def run_backtest(
                 raw_exit_price, exit_reason = bar.open, "condition_exit_next_open"
                 pending_exit = False
             elif held_days >= min_holding_days and bar.low <= stop_price:
-                raw_exit_price, exit_reason = min(bar.open, stop_price), "trailing_stop" if trailing_price >= fixed_stop_price and trailing_stop_pct else "stop_loss"
+                raw_exit_price = min(bar.open, stop_price)
+                if break_even_price >= max(initial_stop_price, trailing_price) and break_even_price > 0:
+                    exit_reason = "break_even_stop"
+                elif trailing_price >= initial_stop_price and trailing_stop_pct:
+                    exit_reason = "trailing_stop"
+                elif atr_stop_price > 0:
+                    exit_reason = "atr_stop"
+                else:
+                    exit_reason = "stop_loss"
             elif held_days >= min_holding_days and bar.high >= target_price:
                 raw_exit_price, exit_reason = max(bar.open, target_price), "take_profit"
             elif held_days >= max_holding_days:
@@ -829,6 +854,8 @@ def run_backtest(
             "slippage_pct_each_side": slippage_pct,
             "position_size_pct": position_size_pct,
             "trailing_stop_pct": trailing_stop_pct,
+            "atr_stop_multiple": atr_stop_multiple,
+            "break_even_trigger_pct": break_even_trigger_pct,
             "min_holding_days": min_holding_days,
             "max_holding_days": max_holding_days,
             "max_volume_participation_pct": max_volume_participation_pct,

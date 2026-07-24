@@ -24,17 +24,22 @@ TEXT_FIELDS = {
 }
 ALLOWED_FIELDS = NUMERIC_FIELDS | TEXT_FIELDS
 ALLOWED_OPERATORS = {"eq", "neq", "gt", "gte", "lt", "lte", "contains"}
+DEFAULT_OUTPUT_COLUMNS = [
+    "symbol", "preset_name", "current_signal_status", "robust_score",
+    "win_rate_pct", "total_trades", "net_return_pct", "max_drawdown_pct",
+]
 
 
 def build_plan_prompt(message: str, *, symbol: str | None = None) -> tuple[str, str]:
     system = f"""You translate a trader's question into a safe query plan over stored backtest rows.
 Return JSON only with this shape:
-{{"filters":[{{"field":"total_trades","operator":"gte","value":20}}],"sort_by":"confidence_score","sort_direction":"desc","explanation":"One concise explanation of why these filters and ranking answer the request."}}
+{{"filters":[{{"field":"total_trades","operator":"gte","value":20}}],"columns":["symbol","preset_name","total_trades","win_rate_pct"],"sort_by":"confidence_score","sort_direction":"desc","explanation":"One concise explanation of why these filters, selected columns, and ranking answer the request."}}
 Allowed numeric fields: {', '.join(sorted(NUMERIC_FIELDS))}.
 Allowed text fields: {', '.join(sorted(TEXT_FIELDS))}.
 Operators: eq, neq, gt, gte, lt, lte, contains. Sort direction: asc or desc.
 Use robust_score as the default ranking; do not rank by win rate alone unless explicitly requested.
 Choose practical thresholds likely to return results; preserve explicit numeric limits from the trader.
+Choose 3 to 10 output columns from the allowed fields. Include symbol and preset_name unless the trader explicitly asks otherwise.
 The server always limits output to 10 and validates every field. Do not include SQL or extra prose."""
     scoped = f" Analyze only symbol {symbol}." if symbol else ""
     return system, f"Trader request: {message.strip()}.{scoped}"
@@ -102,8 +107,16 @@ def parse_plan(
     if sort_by not in NUMERIC_FIELDS:
         sort_by = "robust_score"
     direction = "asc" if str(plan.get("sort_direction")).lower() == "asc" else "desc"
+    requested_columns = [
+        str(item) for item in (plan.get("columns") or [])
+        if str(item) in ALLOWED_FIELDS
+    ]
+    columns = list(dict.fromkeys(requested_columns))[:10] or list(DEFAULT_OUTPUT_COLUMNS)
+    if "symbol" not in columns:
+        columns.insert(0, "symbol")
     return {
         "filters": filters, "sort_by": sort_by, "sort_direction": direction,
+        "columns": columns[:10],
         "explanation": str(plan.get("explanation") or "Ranks the matching stored simulations by robust confidence."),
     }
 
@@ -143,4 +156,5 @@ def compile_display_query(plan: Dict[str, Any]) -> str:
         value = f"'{item['value']}'" if item["field"] in TEXT_FIELDS else f"{item['value']:g}"
         clauses.append(f"{item['field']} {operators[item['operator']]} {value}")
     where = " AND ".join(clauses) if clauses else "TRUE"
-    return f"SELECT * FROM saved_backtest_results\nWHERE {where}\nORDER BY {plan['sort_by']} {plan['sort_direction'].upper()}\nLIMIT 10;"
+    columns = ", ".join(plan.get("columns") or DEFAULT_OUTPUT_COLUMNS)
+    return f"SELECT {columns} FROM saved_backtest_results\nWHERE {where}\nORDER BY {plan['sort_by']} {plan['sort_direction'].upper()}\nLIMIT 10;"

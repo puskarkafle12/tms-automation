@@ -30,6 +30,12 @@ EXIT_RULES = (
     ("trend_breakdown_exit", 'ltp < technical_ema_20_value AND technical_macd = "Bearish"'),
     ("flow_breakdown_exit", "technical_cmf_20 < 0 AND technical_plus_di_14 < technical_minus_di_14"),
     ("dual_trend_exit", 'technical_supertrend = "Bearish" AND technical_psar = "Bearish"'),
+    ("bollinger_middle_exit", "ltp >= technical_bollinger_middle_20"),
+    ("bollinger_upper_rejection_exit", "high >= technical_bollinger_upper_20 AND ltp < technical_bollinger_upper_20"),
+    ("bollinger_middle_break_exit", "ltp < technical_bollinger_middle_20"),
+    ("fibonacci_resistance_exit", "technical_fib_resistance_exit = 1"),
+    ("sr_resistance_rejection_exit", "technical_sr_resistance_rejection = 1"),
+    ("sr_support_breakdown_exit", "technical_sr_support_breakdown = 1"),
 )
 
 
@@ -139,6 +145,12 @@ def compile_discovery_exit_signals(preset: Dict[str, Any], rows: Sequence[Dict[s
             "trend_breakdown_exit": number("ltp") < number("technical_ema_20_value") and text_value("technical_macd") == "bearish",
             "flow_breakdown_exit": number("technical_cmf_20") < 0 and number("technical_plus_di_14") < number("technical_minus_di_14"),
             "dual_trend_exit": text_value("technical_supertrend") == "bearish" and text_value("technical_psar") == "bearish",
+            "bollinger_middle_exit": number("ltp") >= number("technical_bollinger_middle_20"),
+            "bollinger_upper_rejection_exit": number("high") >= number("technical_bollinger_upper_20") and number("ltp") < number("technical_bollinger_upper_20"),
+            "bollinger_middle_break_exit": number("ltp") < number("technical_bollinger_middle_20"),
+            "fibonacci_resistance_exit": number("technical_fib_resistance_exit") == 1,
+            "sr_resistance_rejection_exit": number("technical_sr_resistance_rejection") == 1,
+            "sr_support_breakdown_exit": number("technical_sr_support_breakdown") == 1,
         }.get(rule, False)
         signals.append(bool(matched))
     return signals

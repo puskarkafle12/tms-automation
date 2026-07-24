@@ -4,10 +4,18 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
+import os
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from sqlalchemy import bindparam, text
+
+from utils.backtesting.result_retention import (
+    RETENTION_POLICY_VERSION,
+    is_revalidation_candidate,
+    is_retained_result,
+    retention_failure_reason,
+)
 
 
 HISTORY_SOURCE_BY_RUN_SOURCE = {
@@ -70,6 +78,57 @@ def artifact_key(
         "start_date": str(config.get("start_date")), "data_session": data_session.isoformat(),
         "data_hash": data_hash,
     })
+
+
+def rejection_key(
+    *, symbol: str, preset: Dict[str, Any], config: Dict[str, Any],
+    engine_version: str, indicator_version: str,
+) -> str:
+    """Identify a failed strategy independently of changing market-data sessions."""
+    return _digest({
+        "symbol": symbol.strip().upper(),
+        "strategy_hash": strategy_hash(preset),
+        "settings_hash": settings_hash(
+            config, preset, engine_version=engine_version, indicator_version=indicator_version,
+        ),
+        "engine_version": engine_version,
+        "indicator_version": indicator_version,
+    })
+
+
+def store_strategy_definitions(session, presets: Sequence[Dict[str, Any]]) -> int:
+    """Persist immutable strategy JSON once instead of once for every stock."""
+    unique = {strategy_hash(preset): preset for preset in presets}
+    if not unique:
+        return 0
+    existing = {
+        str(row["strategy_hash"])
+        for row in session.execute(text("""
+            SELECT strategy_hash FROM backtest_strategy_definitions
+            WHERE strategy_hash IN :hashes
+        """).bindparams(bindparam("hashes", expanding=True)), {
+            "hashes": list(unique),
+        }).mappings().all()
+    }
+    pending = []
+    for hashed, preset in unique.items():
+        if hashed in existing:
+            continue
+        pending.append({
+            "strategy_hash": hashed,
+            "strategy_id": str(preset.get("id") or hashed),
+            "strategy_name": str(preset.get("name") or preset.get("id") or hashed),
+            "definition": json.dumps(preset, default=str),
+        })
+    if not pending:
+        return 0
+    session.execute(text("""
+        INSERT INTO backtest_strategy_definitions
+            (strategy_hash,strategy_id,strategy_name,definition)
+        VALUES (:strategy_hash,:strategy_id,:strategy_name,CAST(:definition AS JSONB))
+        ON CONFLICT (strategy_hash) DO NOTHING
+    """), pending)
+    return len(pending)
 
 
 def cache_context(
@@ -229,14 +288,88 @@ def _market_context(session, *, symbol: str, data_session: date) -> Tuple[Dict[s
     return profile, technical
 
 
+def _rejected_preset_ids(
+    session, *, symbol: str, presets: Sequence[Dict[str, Any]], config: Dict[str, Any],
+    engine_version: str, indicator_version: str,
+    owner_id: Optional[str] = None, source_run_id: Optional[str] = None,
+) -> set[str]:
+    """Return still-disqualified identities under the current adaptive policy."""
+    identities = {
+        (
+            strategy_hash(preset),
+            settings_hash(
+                config, preset, engine_version=engine_version, indicator_version=indicator_version,
+            ),
+        ): preset
+        for preset in presets
+    }
+    if not identities:
+        return set()
+    rows = session.execute(text("""
+        SELECT rejection_key,strategy_hash,settings_hash,total_trades,win_rate_pct
+        FROM backtest_rejected_strategies
+        WHERE symbol=:symbol AND engine_version=:engine_version
+          AND indicator_engine_version=:indicator_version
+          AND (strategy_hash,settings_hash) IN :identities
+    """).bindparams(bindparam("identities", expanding=True)), {
+        "symbol": symbol, "engine_version": engine_version, "indicator_version": indicator_version,
+        "identities": list(identities),
+    }).mappings().all()
+    rejected_rows = [
+        row for row in rows
+        if (str(row["strategy_hash"]), str(row["settings_hash"])) in identities
+        and not is_retained_result(row)
+    ]
+    if rejected_rows:
+        store_strategy_definitions(session, [
+            identities[(str(row["strategy_hash"]), str(row["settings_hash"]))]
+            for row in rejected_rows
+        ])
+        session.execute(text("""
+            UPDATE backtest_rejected_strategies
+            SET skip_count=skip_count+1,last_seen_at=NOW(),
+                owner_id=COALESCE(owner_id,:owner_id),
+                source_run_id=COALESCE(source_run_id,:source_run_id),
+                last_tested_session=COALESCE(
+                    last_tested_session,
+                    (SELECT last_tested_session FROM backtest_run_symbols
+                     WHERE run_id=:source_run_id AND symbol=:symbol)
+                )
+            WHERE rejection_key=:key
+        """), [{
+            "key": str(row["rejection_key"]),
+            "symbol": symbol,
+            "owner_id": owner_id,
+            "source_run_id": source_run_id,
+        } for row in rejected_rows])
+    return {
+        str(identities[(str(row["strategy_hash"]), str(row["settings_hash"]))]["id"])
+        for row in rejected_rows
+    }
+
+
 def load_symbol_artifacts(
     session, *, symbol: str, presets: Sequence[Dict[str, Any]], config: Dict[str, Any],
     engine_version: str, indicator_version: str,
+    owner_id: Optional[str] = None, source_run_id: Optional[str] = None,
 ) -> Dict[str, Any]:
+    if not presets:
+        return {"results": [], "missing": [], "market_profile": {}, "technical_snapshot": {},
+                "hits": 0, "rejected_hits": 0}
+    rejected_ids = _rejected_preset_ids(
+        session, symbol=symbol, presets=presets, config=config,
+        engine_version=engine_version, indicator_version=indicator_version,
+        owner_id=owner_id, source_run_id=source_run_id,
+    )
     start = date.fromisoformat(str(config["start_date"])); end = date.fromisoformat(str(config["end_date"]))
     context = cache_context(session, symbol=symbol, start_date=start, end_date=end, data_source=str(config.get("data_source") or "merolagani"))
     if not context:
-        return {"results": [], "missing": list(presets), "market_profile": {}, "technical_snapshot": {}, "hits": 0}
+        return {
+            "results": [],
+            "missing": [preset for preset in presets if str(preset["id"]) not in rejected_ids],
+            "market_profile": {}, "technical_snapshot": {}, "hits": 0,
+            "rejected_hits": len(rejected_ids),
+        }
     data_session, data_hash = context
     keyed = {
         artifact_key(symbol=symbol, preset=preset, config=config, data_session=data_session, data_hash=data_hash,
@@ -252,9 +385,15 @@ def load_symbol_artifacts(
     for row in rows:
         preset = keyed[str(row["artifact_key"])]
         payload = row["result_payload"] if isinstance(row["result_payload"], dict) else json.loads(row["result_payload"])
+        if not is_retained_result(payload):
+            rejected_ids.add(str(preset["id"]))
+            continue
         found[str(preset["id"])] = dict(payload)
         profile = dict(row["market_profile"] or profile); technical = dict(row["technical_snapshot"] or technical)
-    missing = [preset for preset in presets if str(preset["id"]) not in found]
+    missing = [
+        preset for preset in presets
+        if str(preset["id"]) not in found and str(preset["id"]) not in rejected_ids
+    ]
     legacy = _legacy_artifacts(
         session, symbol=symbol, missing=missing, config=config, data_session=data_session, data_hash=data_hash,
         engine_version=engine_version, indicator_version=indicator_version,
@@ -270,6 +409,9 @@ def load_symbol_artifacts(
             result = legacy.get(str(preset["id"]))
             if not result:
                 continue
+            if not is_retained_result(result):
+                rejected_ids.add(str(preset["id"]))
+                continue
             key = artifact_key(symbol=symbol, preset=preset, config=config, data_session=data_session, data_hash=data_hash,
                                engine_version=engine_version, indicator_version=indicator_version)
             _upsert_artifact(
@@ -278,7 +420,10 @@ def load_symbol_artifacts(
                 result=result, market_profile=profile, technical_snapshot=technical,
             )
             found[str(preset["id"])] = result
-        missing = [preset for preset in presets if str(preset["id"]) not in found]
+        missing = [
+            preset for preset in presets
+            if str(preset["id"]) not in found and str(preset["id"]) not in rejected_ids
+        ]
     used_keys = [key for key, preset in keyed.items() if str(preset["id"]) in found]
     if used_keys:
         session.execute(text("""
@@ -288,31 +433,112 @@ def load_symbol_artifacts(
     return {
         "results": [found[str(preset["id"])] for preset in presets if str(preset["id"]) in found],
         "missing": missing, "market_profile": profile, "technical_snapshot": technical,
-        "hits": len(found), "data_session": data_session, "data_hash": data_hash,
+        "hits": len(found), "rejected_hits": len(rejected_ids),
+        "data_session": data_session, "data_hash": data_hash,
     }
 
 
 def store_symbol_artifacts(
     session, *, output: Dict[str, Any], presets: Sequence[Dict[str, Any]], config: Dict[str, Any],
     engine_version: str, indicator_version: str,
+    owner_id: Optional[str] = None, source_run_id: Optional[str] = None,
 ) -> int:
     symbol = str(output.get("symbol") or "").strip().upper()
+    if not symbol:
+        return 0
+    by_id = {str(item["id"]): item for item in presets}
+    rejected: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
+    retained: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
+    for raw in output.get("results") or []:
+        result = dict(raw)
+        preset = by_id.get(str(result.get("preset_id")))
+        if not preset:
+            continue
+        (retained if is_retained_result(result) else rejected).append((result, preset))
+    if rejected:
+        store_strategy_definitions(session, [preset for _, preset in rejected])
+        profile = dict(output.get("market_profile") or {})
+        stock_name = str(profile.get("company_name") or profile.get("name") or "").strip()
+        if not stock_name:
+            stock_name = str(session.execute(text("""
+                SELECT COALESCE(
+                    combined_data->>'company_name',combined_data->>'name',
+                    combined_data->>'companyName',:symbol
+                )
+                FROM market_screener_cache WHERE symbol=:symbol
+            """), {"symbol": symbol}).scalar() or symbol)
+        try:
+            recheck_days = max(1, int(os.getenv("BACKTEST_REVALIDATION_INTERVAL_DAYS", "30")))
+        except ValueError:
+            recheck_days = 30
+        technical = dict(output.get("technical_snapshot") or {})
+        session.execute(text("""
+            INSERT INTO backtest_rejected_strategies (
+                rejection_key,symbol,stock_name,strategy_id,strategy_name,strategy_hash,
+                settings_hash,engine_version,indicator_engine_version,total_trades,win_rate_pct,
+                rejection_reason,policy_version,strategy_definition,owner_id,source_run_id,
+                last_tested_session,next_recheck_at,revalidation_state
+            ) VALUES (
+                :key,:symbol,:stock_name,:strategy_id,:strategy_name,:strategy_hash,
+                :settings_hash,:engine_version,:indicator_version,:total_trades,:win_rate_pct,
+                :rejection_reason,:policy_version,CAST(:strategy_definition AS JSONB),:owner_id,
+                :source_run_id,:last_tested_session,:next_recheck_at,:revalidation_state
+            ) ON CONFLICT (
+                symbol,strategy_hash,settings_hash,engine_version,indicator_engine_version
+            ) DO UPDATE SET
+                stock_name=EXCLUDED.stock_name,strategy_name=EXCLUDED.strategy_name,
+                total_trades=EXCLUDED.total_trades,win_rate_pct=EXCLUDED.win_rate_pct,
+                rejection_reason=EXCLUDED.rejection_reason,policy_version=EXCLUDED.policy_version,
+                strategy_definition=CASE
+                    WHEN backtest_rejected_strategies.strategy_definition='{}'::jsonb
+                    THEN EXCLUDED.strategy_definition
+                    ELSE backtest_rejected_strategies.strategy_definition
+                END,
+                owner_id=COALESCE(EXCLUDED.owner_id,backtest_rejected_strategies.owner_id),
+                source_run_id=COALESCE(EXCLUDED.source_run_id,backtest_rejected_strategies.source_run_id),
+                last_tested_session=COALESCE(EXCLUDED.last_tested_session,backtest_rejected_strategies.last_tested_session),
+                next_recheck_at=EXCLUDED.next_recheck_at,
+                revalidation_state=EXCLUDED.revalidation_state,last_seen_at=NOW(),
+                last_recheck_error=NULL
+        """), [{
+            "key": rejection_key(
+                symbol=symbol, preset=preset, config=config,
+                engine_version=engine_version, indicator_version=indicator_version,
+            ),
+            "symbol": symbol, "stock_name": stock_name,
+            "strategy_id": preset.get("id"),
+            "strategy_name": result.get("preset_name") or preset.get("name") or preset.get("id"),
+            "strategy_hash": strategy_hash(preset),
+            "settings_hash": settings_hash(
+                config, preset, engine_version=engine_version, indicator_version=indicator_version,
+            ),
+            "engine_version": engine_version, "indicator_version": indicator_version,
+            "total_trades": int(result.get("total_trades") or 0),
+            "win_rate_pct": float(result.get("win_rate_pct") or 0),
+            "rejection_reason": retention_failure_reason(result),
+            "policy_version": RETENTION_POLICY_VERSION,
+            "strategy_definition": "{}",
+            "owner_id": owner_id, "source_run_id": source_run_id,
+            "last_tested_session": technical.get("as_of_date"),
+            "next_recheck_at": (
+                datetime.now(timezone.utc) + timedelta(days=recheck_days)
+                if is_revalidation_candidate(result) else None
+            ),
+            "revalidation_state": "frozen" if is_revalidation_candidate(result) else "ineligible",
+        } for result, preset in rejected])
     technical = dict(output.get("technical_snapshot") or {})
-    if not symbol or not technical.get("as_of_date"):
+    if not retained or not technical.get("as_of_date"):
         return 0
     context = cache_context(
         session, symbol=symbol, start_date=date.fromisoformat(str(config["start_date"])),
-        end_date=date.fromisoformat(str(config["end_date"])), data_source=str(config.get("data_source") or "merolagani"),
+        end_date=date.fromisoformat(str(config["end_date"])),
+        data_source=str(config.get("data_source") or "merolagani"),
     )
     if not context:
         return 0
     data_session, data_hash = context
-    by_id = {str(item["id"]): item for item in presets}
     stored = 0
-    for raw in output.get("results") or []:
-        result = dict(raw); preset = by_id.get(str(result.get("preset_id")))
-        if not preset:
-            continue
+    for result, preset in retained:
         key = artifact_key(symbol=symbol, preset=preset, config=config, data_session=data_session, data_hash=data_hash,
                            engine_version=engine_version, indicator_version=indicator_version)
         _upsert_artifact(
@@ -321,4 +547,21 @@ def store_symbol_artifacts(
             result=result, market_profile=dict(output.get("market_profile") or {}), technical_snapshot=technical,
         )
         stored += 1
+        session.execute(text("""
+            UPDATE backtest_rejected_strategies
+            SET total_trades=:total_trades,win_rate_pct=:win_rate_pct,
+                revalidation_state='promoted',promoted_at=NOW(),next_recheck_at=NULL,
+                last_seen_at=NOW()
+            WHERE symbol=:symbol AND strategy_hash=:strategy_hash
+              AND settings_hash=:settings_hash AND engine_version=:engine_version
+              AND indicator_engine_version=:indicator_version
+        """), {
+            "symbol": symbol, "strategy_hash": strategy_hash(preset),
+            "settings_hash": settings_hash(
+                config, preset, engine_version=engine_version, indicator_version=indicator_version,
+            ),
+            "engine_version": engine_version, "indicator_version": indicator_version,
+            "total_trades": int(result.get("total_trades") or 0),
+            "win_rate_pct": float(result.get("win_rate_pct") or 0),
+        })
     return stored

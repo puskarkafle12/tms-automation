@@ -1,8 +1,12 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { fetchJson } from "../../utils/api";
 import NepseAlphaSymbolLink from "../../components/NepseAlphaSymbolLink";
 import ColumnPickerModal from "../../components/ColumnPickerModal";
+import CategoricalHeaderFilter, {
+  isCategoricalColumn,
+  uniqueCategoricalValues,
+} from "../../components/table/CategoricalHeaderFilter";
 import "./Recommendations.css";
 
 type Row = Record<string, any>;
@@ -21,6 +25,7 @@ type AiAnswer = {
   total_matches: number;
   items: Row[];
   suggested_relaxations: string[];
+  selected_columns: string[];
 };
 const recommendationPrompts = [
   "Show the top 10 fresh buy signals with at least 10 trades, win rate above 55%, and controlled drawdown.",
@@ -28,11 +33,11 @@ const recommendationPrompts = [
   "Show low-risk recommendations ranked by robust score with drawdown below 25%.",
 ];
 const RECOMMENDATION_COLUMN_WIDTHS_KEY = "tms-recommendation-column-widths-v1";
-const RECOMMENDATION_VISIBLE_COLUMNS_KEY = "tms-recommendation-visible-columns-v2";
+const RECOMMENDATION_VISIBLE_COLUMNS_KEY = "tms-recommendation-visible-columns-v3";
 const RECOMMENDATION_FILTER_HISTORY_KEY = "tms-recommendation-filter-history-v1";
 const DEFAULT_VISIBLE_COLUMNS: Record<"buy" | "sell", string[]> = {
-  buy: ["symbol", "current_signal_status", "recommendation_score", "current_ltp", "buy_range", "sell_range", "current_ltp_estimated_profit_pct", "current_ltp_estimated_loss_pct", "preset_name", "win_rate_pct", "total_trades", "average_holding_days"],
-  sell: ["symbol", "current_signal_status", "recommendation_score", "ltp", "holding_quantity", "preset_name", "win_rate_pct", "total_trades", "net_return_pct", "average_holding_days"],
+  buy: ["symbol", "current_signal_status", "recommendation_score", "current_ltp", "win_rate_pct", "buy_range", "sell_range", "current_ltp_estimated_profit_pct", "current_ltp_estimated_loss_pct", "preset_name", "total_trades", "average_holding_days", "average_volume_20"],
+  sell: ["symbol", "current_signal_status", "recommendation_score", "ltp", "holding_quantity", "selected_sell_strategy", "selected_stop_strategy", "preset_name", "win_rate_pct", "total_trades", "net_return_pct", "average_holding_days"],
 };
 const normalizeRecommendationColumns = (keys: string[], availableKeys: string[]) => {
   const known = new Set(availableKeys);
@@ -52,6 +57,8 @@ const DEFAULT_COLUMN_WIDTHS: Record<string, number> = {
   buy_range: 150,
   protective_stop: 120,
   sell_range: 150,
+  selected_sell_strategy: 180,
+  selected_stop_strategy: 170,
   estimated_profit_pct: 105,
   estimated_loss_pct: 100,
   current_ltp_estimated_profit_pct: 105,
@@ -82,6 +89,7 @@ const Recommendations: React.FC = () => {
       return {};
     }
   });
+  const initialLoadPageRef = useRef(Math.max(1, Number(savedFilterState.page || 1)));
   const [data, setData] = useState<Page>({
     items: [],
     total: 0,
@@ -108,6 +116,15 @@ const Recommendations: React.FC = () => {
     field: String(savedFilterState.sort?.field || "recommendation_score"),
     direction: savedFilterState.sort?.direction === "asc" ? "asc" : "desc",
   });
+  const [headerCategoricalFilters, setHeaderCategoricalFilters] = useState<Record<"buy" | "sell", Record<string, string>>>({
+    buy: {},
+    sell: {},
+  });
+  const changeRecommendationSide = (side: "buy" | "sell") => {
+    setRecommendationSide(side);
+    setSignal("actionable");
+    setAppliedRules((current) => ({ ...current, signal: "actionable" }));
+  };
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [scheduleBusyResultId, setScheduleBusyResultId] = useState<number | null>(null);
@@ -125,23 +142,98 @@ const Recommendations: React.FC = () => {
       try {
         const saved = JSON.parse(localStorage.getItem(`${RECOMMENDATION_VISIBLE_COLUMNS_KEY}:${preferenceUserId}:${side}`) || "[]");
         if (Array.isArray(saved) && saved.length) return saved.map(String);
-        const legacy = JSON.parse(localStorage.getItem(`tms-recommendation-visible-columns-v1:${preferenceUserId}:${side}`) || "[]");
-        return Array.isArray(legacy) && legacy.length ? legacy.map(String) : DEFAULT_VISIBLE_COLUMNS[side];
+        return DEFAULT_VISIBLE_COLUMNS[side];
       } catch {
         return DEFAULT_VISIBLE_COLUMNS[side];
       }
     };
     return { buy: read("buy"), sell: read("sell") };
   });
+  const [columnPreferencesLoaded, setColumnPreferencesLoaded] = useState(false);
+  const [filterPreferencesLoaded, setFilterPreferencesLoaded] = useState(false);
   useEffect(() => {
     localStorage.setItem(`${RECOMMENDATION_VISIBLE_COLUMNS_KEY}:${preferenceUserId}:${recommendationSide}`, JSON.stringify(visibleColumns[recommendationSide]));
   }, [preferenceUserId, recommendationSide, visibleColumns]);
   useEffect(() => {
-    localStorage.setItem(`${RECOMMENDATION_FILTER_HISTORY_KEY}:${preferenceUserId}`, JSON.stringify({
+    void Promise.all((["buy", "sell"] as const).map(async (side) => {
+      const response = await fetchJson<{ columns: string[] }>(`/api/market-recommendations/preferences/${side}/columns`);
+      return { side, response };
+    })).then((responses) => {
+      setVisibleColumns((current) => {
+        const next = { ...current };
+        responses.forEach(({ side, response }) => {
+          if (response.ok && response.data.columns?.length) next[side] = response.data.columns;
+        });
+        return next;
+      });
+      setColumnPreferencesLoaded(true);
+    });
+  }, []);
+  useEffect(() => {
+    if (!columnPreferencesLoaded) return undefined;
+    const side = recommendationSide;
+    const timer = window.setTimeout(() => {
+      void fetchJson(`/api/market-recommendations/preferences/${side}/columns`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ columns: visibleColumns[side] }),
+      });
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [columnPreferencesLoaded, recommendationSide, visibleColumns]);
+  useEffect(() => {
+    const state = {
       recommendationSide, signal, search, minimumWin, minimumTrades, minimumScore,
-      appliedRules, sort,
-    }));
-  }, [appliedRules, minimumScore, minimumTrades, minimumWin, preferenceUserId, recommendationSide, search, signal, sort]);
+      appliedRules, sort, page: data.page, headerCategoricalFilters,
+    };
+    localStorage.setItem(`${RECOMMENDATION_FILTER_HISTORY_KEY}:${preferenceUserId}`, JSON.stringify(state));
+    if (!filterPreferencesLoaded) return undefined;
+    const timer = window.setTimeout(() => {
+      void fetchJson("/api/market-recommendations/preferences/filters", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ state }),
+      });
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [appliedRules, data.page, filterPreferencesLoaded, headerCategoricalFilters, minimumScore, minimumTrades, minimumWin, preferenceUserId, recommendationSide, search, signal, sort]);
+  useEffect(() => {
+    void fetchJson<{ state: Record<string, any> }>("/api/market-recommendations/preferences/filters").then((response) => {
+      const state = response.ok ? response.data.state || {} : {};
+      if (Object.keys(state).length) {
+        const side = state.recommendationSide === "sell" ? "sell" : "buy";
+        setRecommendationSide(side);
+        setSignal(String(state.signal || "actionable"));
+        setSearch(String(state.search || ""));
+        setMinimumWin(String(state.minimumWin ?? ""));
+        setMinimumTrades(String(state.minimumTrades ?? "5"));
+        setMinimumScore(String(state.minimumScore ?? ""));
+        if (state.appliedRules && typeof state.appliedRules === "object") {
+          setAppliedRules({
+            signal: String(state.appliedRules.signal || "actionable"),
+            search: String(state.appliedRules.search || ""),
+            minimumWin: Number(state.appliedRules.minimumWin || 0),
+            minimumTrades: Number(state.appliedRules.minimumTrades ?? 5),
+            minimumScore: Number(state.appliedRules.minimumScore || 0),
+          });
+        }
+        if (state.sort && typeof state.sort === "object") {
+          setSort({
+            field: String(state.sort.field || "recommendation_score"),
+            direction: state.sort.direction === "asc" ? "asc" : "desc",
+          });
+        }
+        if (state.headerCategoricalFilters && typeof state.headerCategoricalFilters === "object") {
+          setHeaderCategoricalFilters({
+            buy: state.headerCategoricalFilters.buy || {},
+            sell: state.headerCategoricalFilters.sell || {},
+          });
+        }
+        initialLoadPageRef.current = Math.max(1, Number(state.page || 1));
+      }
+      setFilterPreferencesLoaded(true);
+    });
+  }, []);
   useEffect(() => {
     if (!tableHelpOpen && !selectedStockDetail && !columnPickerOpen) return undefined;
     const close = (event: KeyboardEvent) => {
@@ -221,8 +313,17 @@ const Recommendations: React.FC = () => {
     [appliedRules, recommendationSide, sort],
   );
   useEffect(() => {
-    void load(1);
+    const page = initialLoadPageRef.current;
+    initialLoadPageRef.current = 1;
+    void load(page);
   }, [load]);
+  useEffect(() => {
+    if (busy || data.items.length === 0) return;
+    const savedScroll = sessionStorage.getItem("recommendations-return-scroll");
+    if (savedScroll == null) return;
+    sessionStorage.removeItem("recommendations-return-scroll");
+    window.requestAnimationFrame(() => window.scrollTo({ top: Number(savedScroll) || 0 }));
+  }, [busy, data.items.length]);
   const refreshRecommendations = async () => {
     setRefreshBusy(true);
     setRefreshMessage("Refreshing from cached strategies and the latest market data…");
@@ -421,6 +522,8 @@ const Recommendations: React.FC = () => {
     { key: "current_ltp", label: "Current LTP", sortKey: "current_ltp" },
     { key: "buy_range", label: "Buy range", sortKey: "buy_range" },
     { key: "sell_range", label: "Sell range", sortKey: "sell_range" },
+    { key: "selected_sell_strategy", label: "Selected sell rule" },
+    { key: "selected_stop_strategy", label: "Selected stop method" },
     { key: "current_ltp_estimated_profit_pct", label: "LTP upside", sortKey: "current_ltp_estimated_profit_pct" },
     { key: "current_ltp_estimated_loss_pct", label: "LTP risk", sortKey: "current_ltp_estimated_loss_pct" },
     { key: "preset_name", label: "Strategy", sortKey: "preset_name" },
@@ -449,6 +552,8 @@ const Recommendations: React.FC = () => {
           },
           { key: "ltp", label: "Latest close", sortKey: "ltp" },
           { key: "holding_quantity", label: "Combined holding", sortKey: "holding_quantity" },
+          { key: "selected_sell_strategy", label: "Selected sell rule" },
+          { key: "selected_stop_strategy", label: "Selected stop method" },
           { key: "preset_name", label: "Tested exit strategy", sortKey: "preset_name" },
           {
             key: "win_rate_pct",
@@ -485,6 +590,16 @@ const Recommendations: React.FC = () => {
     const byKey = new Map(availableColumns.map((column) => [column.key, column]));
     return orderedVisibleKeys.map((key) => byKey.get(key)).filter(Boolean) as typeof availableColumns;
   }, [availableColumns, orderedVisibleKeys]);
+  const activeHeaderFilters = headerCategoricalFilters[recommendationSide];
+  const filteredRecommendationItems = useMemo(() => data.items.filter((row) => (
+    Object.entries(activeHeaderFilters).every(([key, value]) => !value || String(row[key] ?? '') === value)
+  )), [activeHeaderFilters, data.items]);
+  const setHeaderFilter = (key: string, value: string) => {
+    setHeaderCategoricalFilters((current) => ({
+      ...current,
+      [recommendationSide]: { ...current[recommendationSide], [key]: value },
+    }));
+  };
   const setSideColumns = (keys: string[]) => {
     setVisibleColumns((current) => ({
       ...current,
@@ -494,15 +609,17 @@ const Recommendations: React.FC = () => {
       ),
     }));
   };
+  const openFullBacktest = (row: Row) => {
+    sessionStorage.setItem("recommendations-return-scroll", String(window.scrollY));
+    navigate(`/dashboard/backtest?run=${row.run_id}&stock=${row.symbol}&result=${row.result_id}&detail=full&from=recommendations`);
+  };
   const renderCell = (row: Row, key: string) => {
     if (key === "symbol")
       return (
         <div className="recommendation-symbol">
           <button
             type="button"
-            onClick={() =>
-              setSelectedStockDetail(row)
-            }
+            onClick={() => openFullBacktest(row)}
           >
             {row.symbol}
           </button>
@@ -517,7 +634,7 @@ const Recommendations: React.FC = () => {
           {String(row[key] || "—").replaceAll("_", " ")}
         </span>
       );
-    if (key === "preset_name") return String(row[key] || "—");
+    if (key === "preset_name") return <button type="button" className="result-detail-link" onClick={() => openFullBacktest(row)}>{String(row[key] || "—")}</button>;
     if (key === "signal_date") return String(row[key] || "—");
     if (key === "current_ltp") return money(row[key]);
     if (key === "current_ltp_position") {
@@ -574,24 +691,30 @@ const Recommendations: React.FC = () => {
         </div>
       </header>
       <nav className="recommendation-side-tabs" aria-label="Recommendation side">
-        <button type="button" className={recommendationSide === "buy" ? "active buy" : ""} onClick={() => setRecommendationSide("buy")}>
+        <button type="button" className={recommendationSide === "buy" ? "active buy" : ""} onClick={() => changeRecommendationSide("buy")}>
           <b>Buy recommendations</b><span>Fresh entry signals across ordinary shares</span>
         </button>
-        <button type="button" className={recommendationSide === "sell" ? "active sell" : ""} onClick={() => setRecommendationSide("sell")}>
+        <button type="button" className={recommendationSide === "sell" ? "active sell" : ""} onClick={() => changeRecommendationSide("sell")}>
           <b>Sell recommendations</b><span>Tested exit signals from combined holdings</span>
         </button>
       </nav>
       <section className="recommendation-controls">
-        {recommendationSide === "buy" && <label>
+        <label>
           Signal
           <select value={signal} onChange={(e) => setSignal(e.target.value)}>
-            <option value="actionable">Strong Buy + Buy today</option>
-            <option value="strong_buy">Strong Buy only</option>
-            <option value="buy">Buy only</option>
-            <option value="near_trigger">Near trigger</option>
+            <option value="actionable">{recommendationSide === "buy" ? "Strong Buy + Buy today" : "Strong Sell + Sell today"}</option>
+            {recommendationSide === "buy" ? <>
+              <option value="strong_buy">Strong Buy only</option>
+              <option value="buy">Buy only</option>
+              <option value="near_trigger">Near Buy trigger</option>
+            </> : <>
+              <option value="strong_sell">Strong Sell only</option>
+              <option value="sell">Sell only</option>
+              <option value="near_sell">Near Sell trigger</option>
+            </>}
             <option value="all">All recommendation states</option>
           </select>
-        </label>}
+        </label>
         <label>
           Stock or strategy
           <input
@@ -691,7 +814,6 @@ const Recommendations: React.FC = () => {
         )}
         {aiAnswer && (
           <div className="recommendation-ai-answer">
-            <code>{aiAnswer.generated_query}</code>
             <p>{aiAnswer.explanation}</p>
             <strong>{aiAnswer.recommendation_summary}</strong>
             {aiAnswer.total_matches === 0 ? (
@@ -699,26 +821,9 @@ const Recommendations: React.FC = () => {
                 No exact matches. {aiAnswer.suggested_relaxations.join(" ")}
               </p>
             ) : (
-              <div className="recommendation-ai-results">
-                {aiAnswer.items.map((row) => (
-                  <button
-                    type="button"
-                    key={row.result_id}
-                    onClick={() =>
-                      navigate(
-                        `/dashboard/backtest?run=${row.run_id}&stock=${row.symbol}&result=${row.result_id}`,
-                      )
-                    }
-                  >
-                    <b>{row.symbol}</b>
-                    <span>{row.preset_name}</span>
-                    <small>
-                      {number(row.robust_score)} robust ·{" "}
-                      {number(row.win_rate_pct)}% wins ·{" "}
-                      {number(row.total_trades)} trades
-                    </small>
-                  </button>
-                ))}
+              <div className="recommendation-table-wrap">
+                <table><thead><tr>{aiAnswer.selected_columns.map((key) => <th key={key}>{availableColumns.find((item) => item.key === key)?.label || key.replaceAll("_", " ")}</th>)}</tr></thead>
+                <tbody>{aiAnswer.items.map((row) => <tr key={row.result_id} onClick={() => openFullBacktest(row)}>{aiAnswer.selected_columns.map((key) => <td key={key}>{renderCell(row, key)}</td>)}</tr>)}</tbody></table>
               </div>
             )}
           </div>
@@ -756,19 +861,28 @@ const Recommendations: React.FC = () => {
           </colgroup>
           <thead>
             <tr>
-              {activeColumns.map((column) => (
-                <th
-                  key={column.key}
-                  className={column.sortKey ? "sortable" : ""}
-                  title={column.sortKey ? `Sort by ${column.label} · drag the right edge to resize` : `Drag the right edge to resize ${column.label}`}
-                  onClick={() => column.sortKey && sortBy(column.sortKey)}
-                >
-                  {column.label}
-                  {column.sortKey && sort.field === column.sortKey
-                    ? sort.direction === "desc"
-                      ? " ↓"
-                      : " ↑"
-                    : ""}
+              {activeColumns.map((column) => {
+                const categorical = isCategoricalColumn(data.items, column.key);
+                return (
+                <th key={column.key} className={!categorical && column.sortKey ? "sortable" : ""}>
+                  {categorical ? (
+                    <CategoricalHeaderFilter
+                      label={column.label}
+                      values={uniqueCategoricalValues(data.items, column.key)}
+                      selectedValue={activeHeaderFilters[column.key]}
+                      onChange={(value) => setHeaderFilter(column.key, value)}
+                    />
+                  ) : (
+                    <button
+                      type="button"
+                      className="recommendation-header-sort"
+                      title={column.sortKey ? `Sort by ${column.label}` : column.label}
+                      onClick={() => column.sortKey && sortBy(column.sortKey)}
+                    >
+                      {column.label}
+                      {column.sortKey && sort.field === column.sortKey ? (sort.direction === "desc" ? " ↓" : " ↑") : ""}
+                    </button>
+                  )}
                   <span
                     className="recommendation-column-resizer"
                     role="separator"
@@ -787,7 +901,8 @@ const Recommendations: React.FC = () => {
                     onPointerDown={(event) => startColumnResize(event, column.key)}
                   />
                 </th>
-              ))}
+                );
+              })}
               <th>
                 Action
                 <span
@@ -807,7 +922,7 @@ const Recommendations: React.FC = () => {
             </tr>
           </thead>
           <tbody>
-            {data.items.map((row) => (
+            {filteredRecommendationItems.map((row) => (
               <tr key={row.result_id}>
                 {activeColumns.map((column) => (
                   <td
@@ -864,7 +979,7 @@ const Recommendations: React.FC = () => {
             </div>
             <footer>
               <NepseAlphaSymbolLink symbol={selectedStockDetail.symbol}>Open NEPSE Alpha ↗</NepseAlphaSymbolLink>
-              <button type="button" onClick={() => navigate(`/dashboard/backtest?run=${selectedStockDetail.run_id}&stock=${selectedStockDetail.symbol}&result=${selectedStockDetail.result_id}`)}>Open full backtest</button>
+              <button type="button" onClick={() => openFullBacktest(selectedStockDetail)}>Open full backtest</button>
               <button type="button" className="primary" onClick={() => void openSchedule(selectedStockDetail)}>Schedule {recommendationSide}</button>
             </footer>
           </aside>

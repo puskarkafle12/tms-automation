@@ -1,4 +1,8 @@
 import React, { useState } from 'react';
+import CategoricalHeaderFilter, {
+  isCategoricalColumn,
+  uniqueCategoricalValues,
+} from './CategoricalHeaderFilter';
 import './Table.css';
 
 interface TableRow {
@@ -82,11 +86,18 @@ const CommonTable: React.FC<CommonTableProps> = ({
   onToggleAll,
 }) => {
   const [sortConfig, setSortConfig] = useState<{ key: string; direction: 'asc' | 'desc' } | null>(null);
+  const [categoricalFilters, setCategoricalFilters] = useState<Record<string, string>>({});
+
+  const filteredData = React.useMemo(() => data.filter((row) => (
+    Object.entries(categoricalFilters).every(([key, selected]) => (
+      !selected || String(row[key] ?? '') === selected
+    ))
+  )), [categoricalFilters, data]);
 
   // Sort data based on the sort configuration
   const sortedData = React.useMemo(() => {
-    if (!sortConfig) return data;
-    const sortedArray = [...data].sort((a, b) => {
+    if (!sortConfig) return filteredData;
+    const sortedArray = [...filteredData].sort((a, b) => {
       const aValue = a.sortValues?.[sortConfig.key] ?? a[sortConfig.key];
       const bValue = b.sortValues?.[sortConfig.key] ?? b[sortConfig.key];
       const left = normalizeSortValue(aValue);
@@ -96,7 +107,7 @@ const CommonTable: React.FC<CommonTableProps> = ({
       return 0;
     });
     return sortedArray;
-  }, [data, sortConfig]);
+  }, [filteredData, sortConfig]);
 
   // Function to handle header click for sorting
   const handleSort = (key: string) => {
@@ -201,14 +212,29 @@ const CommonTable: React.FC<CommonTableProps> = ({
                   />
                 </th>
               ) : null}
-              {columnsToRender.map((column, index) => (
-                <th key={index} onClick={() => handleSort(column)}>
-                  {formatColumnLabel(column, columnLabels)}
-                  {sortConfig && sortConfig.key === column ? (
-                    <span className="common-table-sort">{sortConfig.direction === 'asc' ? ' ↑' : ' ↓'}</span>
-                  ) : null}
-                </th>
-              ))}
+              {columnsToRender.map((column, index) => {
+                const label = formatColumnLabel(column, columnLabels);
+                const categorical = isCategoricalColumn(data, column);
+                return (
+                  <th key={index}>
+                    {categorical ? (
+                      <CategoricalHeaderFilter
+                        label={label}
+                        values={uniqueCategoricalValues(data, column)}
+                        selectedValue={categoricalFilters[column]}
+                        onChange={(value) => setCategoricalFilters((current) => ({ ...current, [column]: value }))}
+                      />
+                    ) : (
+                      <button type="button" className="common-table-sort-trigger" onClick={() => handleSort(column)}>
+                        {label}
+                        {sortConfig && sortConfig.key === column ? (
+                          <span className="common-table-sort">{sortConfig.direction === 'asc' ? ' ↑' : ' ↓'}</span>
+                        ) : null}
+                      </button>
+                    )}
+                  </th>
+                );
+              })}
               {onAction && <th>Action</th>}
             </tr>
           </thead>

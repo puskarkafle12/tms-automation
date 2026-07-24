@@ -606,6 +606,16 @@ def ensure_performance_indexes():
         "CREATE INDEX IF NOT EXISTS ix_backtest_results_symbol ON backtest_results (run_id, symbol, robust_score DESC)",
         "CREATE INDEX IF NOT EXISTS ix_backtest_results_preset ON backtest_results (run_id, preset_id, robust_score DESC)",
         "CREATE INDEX IF NOT EXISTS ix_backtest_results_configuration ON backtest_results (configuration_hash)",
+        "DROP INDEX IF EXISTS ix_backtest_results_retained_run_rank",
+        "DROP INDEX IF EXISTS ix_backtest_results_retained_configuration",
+        """CREATE INDEX IF NOT EXISTS ix_backtest_results_retained_run_rank_v2
+           ON backtest_results (run_id,robust_score DESC,total_trades DESC,result_id)
+           WHERE (total_trades>=16 AND win_rate_pct>=50)
+              OR (total_trades>=9 AND win_rate_pct>=60)""",
+        """CREATE INDEX IF NOT EXISTS ix_backtest_results_retained_configuration_v2
+           ON backtest_results (configuration_hash,result_id)
+           WHERE (total_trades>=16 AND win_rate_pct>=50)
+              OR (total_trades>=9 AND win_rate_pct>=60)""",
         "CREATE INDEX IF NOT EXISTS ix_backtest_runs_owner_active ON backtest_runs (owner_id, run_id) WHERE deleted_at IS NULL AND archived_at IS NULL",
         """CREATE TABLE IF NOT EXISTS backtest_canonical_results (
             owner_id VARCHAR(100) NOT NULL,
@@ -640,6 +650,8 @@ def ensure_performance_indexes():
                FROM backtest_results r
                JOIN backtest_runs br ON br.run_id=r.run_id
                WHERE r.result_id=canonical.result_id AND br.deleted_at IS NULL AND br.archived_at IS NULL
+                 AND ((r.total_trades>=16 AND r.win_rate_pct>=50)
+                      OR (r.total_trades>=9 AND r.win_rate_pct>=60))
            )""",
         """INSERT INTO backtest_canonical_results
                (owner_id,configuration_hash,result_id,run_id,symbol,security_type,data_session,updated_at)
@@ -650,6 +662,8 @@ def ensure_performance_indexes():
            JOIN backtest_runs br ON br.run_id=r.run_id
            JOIN backtest_run_symbols s ON s.run_id=r.run_id AND s.symbol=r.symbol
            WHERE br.deleted_at IS NULL AND br.archived_at IS NULL AND r.configuration_hash IS NOT NULL
+             AND ((r.total_trades>=16 AND r.win_rate_pct>=50)
+                  OR (r.total_trades>=9 AND r.win_rate_pct>=60))
            ORDER BY br.owner_id,r.configuration_hash,r.current_signal_date DESC NULLS LAST,r.result_id DESC
            ON CONFLICT (owner_id,configuration_hash) DO UPDATE SET
              result_id=EXCLUDED.result_id,run_id=EXCLUDED.run_id,symbol=EXCLUDED.symbol,
@@ -695,6 +709,116 @@ def ensure_performance_indexes():
         "CREATE INDEX IF NOT EXISTS ix_backtest_artifacts_symbol_strategy ON backtest_result_artifacts (symbol, strategy_hash, settings_hash, data_session DESC)",
         "CREATE INDEX IF NOT EXISTS ix_backtest_artifacts_strategy_session ON backtest_result_artifacts (strategy_id, data_session DESC)",
         "CREATE INDEX IF NOT EXISTS ix_backtest_artifacts_last_used ON backtest_result_artifacts (last_used_at DESC)",
+        """CREATE TABLE IF NOT EXISTS backtest_strategy_definitions (
+            strategy_hash VARCHAR(64) PRIMARY KEY,
+            strategy_id VARCHAR(120) NOT NULL,
+            strategy_name VARCHAR(200) NOT NULL,
+            definition JSONB NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )""",
+        "CREATE INDEX IF NOT EXISTS ix_backtest_strategy_definitions_id ON backtest_strategy_definitions (strategy_id,strategy_hash)",
+        """CREATE TABLE IF NOT EXISTS backtest_rejected_strategies (
+            rejection_key VARCHAR(64) PRIMARY KEY,
+            symbol VARCHAR(30) NOT NULL,
+            stock_name VARCHAR(200) NOT NULL,
+            strategy_id VARCHAR(120) NOT NULL,
+            strategy_name VARCHAR(200) NOT NULL,
+            strategy_hash VARCHAR(64) NOT NULL,
+            settings_hash VARCHAR(64) NOT NULL,
+            engine_version VARCHAR(40) NOT NULL,
+            indicator_engine_version VARCHAR(40) NOT NULL,
+            total_trades INTEGER NOT NULL DEFAULT 0,
+            win_rate_pct DOUBLE PRECISION NOT NULL DEFAULT 0,
+            rejection_reason VARCHAR(60) NOT NULL,
+            policy_version VARCHAR(60) NOT NULL,
+            strategy_definition JSONB NOT NULL DEFAULT '{}'::jsonb,
+            owner_id VARCHAR(100),
+            source_run_id VARCHAR(64),
+            last_tested_session DATE,
+            next_recheck_at TIMESTAMPTZ,
+            revalidation_state VARCHAR(30) NOT NULL DEFAULT 'frozen',
+            recheck_count INTEGER NOT NULL DEFAULT 0,
+            last_revalidated_at TIMESTAMPTZ,
+            promoted_at TIMESTAMPTZ,
+            last_recheck_error TEXT,
+            last_recheck_duration_seconds DOUBLE PRECISION,
+            latest_signal_status VARCHAR(30),
+            latest_signal_date DATE,
+            latest_signal_evidence JSONB NOT NULL DEFAULT '{}'::jsonb,
+            lease_owner VARCHAR(100),
+            lease_expires_at TIMESTAMPTZ,
+            first_rejected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            skip_count BIGINT NOT NULL DEFAULT 0
+        )""",
+        "ALTER TABLE backtest_rejected_strategies ADD COLUMN IF NOT EXISTS stock_name VARCHAR(200)",
+        "ALTER TABLE backtest_rejected_strategies ADD COLUMN IF NOT EXISTS strategy_name VARCHAR(200)",
+        "ALTER TABLE backtest_rejected_strategies ADD COLUMN IF NOT EXISTS rejection_reason VARCHAR(60)",
+        "ALTER TABLE backtest_rejected_strategies ADD COLUMN IF NOT EXISTS policy_version VARCHAR(60)",
+        "ALTER TABLE backtest_rejected_strategies ADD COLUMN IF NOT EXISTS strategy_definition JSONB NOT NULL DEFAULT '{}'::jsonb",
+        "ALTER TABLE backtest_rejected_strategies ADD COLUMN IF NOT EXISTS owner_id VARCHAR(100)",
+        "ALTER TABLE backtest_rejected_strategies ADD COLUMN IF NOT EXISTS source_run_id VARCHAR(64)",
+        "ALTER TABLE backtest_rejected_strategies ADD COLUMN IF NOT EXISTS last_tested_session DATE",
+        "ALTER TABLE backtest_rejected_strategies ADD COLUMN IF NOT EXISTS next_recheck_at TIMESTAMPTZ",
+        "ALTER TABLE backtest_rejected_strategies ADD COLUMN IF NOT EXISTS revalidation_state VARCHAR(30) NOT NULL DEFAULT 'frozen'",
+        "ALTER TABLE backtest_rejected_strategies ADD COLUMN IF NOT EXISTS recheck_count INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE backtest_rejected_strategies ADD COLUMN IF NOT EXISTS last_revalidated_at TIMESTAMPTZ",
+        "ALTER TABLE backtest_rejected_strategies ADD COLUMN IF NOT EXISTS promoted_at TIMESTAMPTZ",
+        "ALTER TABLE backtest_rejected_strategies ADD COLUMN IF NOT EXISTS last_recheck_error TEXT",
+        "ALTER TABLE backtest_rejected_strategies ADD COLUMN IF NOT EXISTS last_recheck_duration_seconds DOUBLE PRECISION",
+        "ALTER TABLE backtest_rejected_strategies ADD COLUMN IF NOT EXISTS latest_signal_status VARCHAR(30)",
+        "ALTER TABLE backtest_rejected_strategies ADD COLUMN IF NOT EXISTS latest_signal_date DATE",
+        "ALTER TABLE backtest_rejected_strategies ADD COLUMN IF NOT EXISTS latest_signal_evidence JSONB NOT NULL DEFAULT '{}'::jsonb",
+        "ALTER TABLE backtest_rejected_strategies ADD COLUMN IF NOT EXISTS lease_owner VARCHAR(100)",
+        "ALTER TABLE backtest_rejected_strategies ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ",
+        """CREATE INDEX IF NOT EXISTS ix_backtest_rejected_policy_v2_pending
+           ON backtest_rejected_strategies (rejection_key)
+           WHERE policy_version IS NULL
+              OR policy_version<>'trades-16-win-50-or-trades-9-win-60-v2'""",
+        """DO $retention_policy$
+           BEGIN
+             IF EXISTS (
+                 SELECT 1 FROM backtest_rejected_strategies
+                 WHERE policy_version IS NULL
+                    OR policy_version<>'trades-16-win-50-or-trades-9-win-60-v2'
+                 LIMIT 1
+             ) THEN
+               UPDATE backtest_rejected_strategies
+               SET stock_name=COALESCE(stock_name,symbol),
+                   strategy_name=COALESCE(strategy_name,strategy_id),
+                   rejection_reason=COALESCE(rejection_reason,'legacy_rejection'),
+                   policy_version='trades-16-win-50-or-trades-9-win-60-v2',
+                   revalidation_state=CASE
+                     WHEN (total_trades>=16 AND win_rate_pct>=50)
+                       OR (total_trades>=9 AND win_rate_pct>=60) THEN 'promoted'
+                     WHEN total_trades>=9 AND win_rate_pct>=35 THEN 'frozen'
+                     ELSE 'ineligible'
+                   END,
+                   next_recheck_at=CASE
+                     WHEN NOT ((total_trades>=16 AND win_rate_pct>=50)
+                               OR (total_trades>=9 AND win_rate_pct>=60))
+                      AND total_trades>=9 AND win_rate_pct>=35
+                     THEN COALESCE(next_recheck_at,last_seen_at+INTERVAL '30 days')
+                     ELSE NULL
+                   END
+               WHERE policy_version IS NULL
+                  OR policy_version<>'trades-16-win-50-or-trades-9-win-60-v2';
+             END IF;
+           END
+           $retention_policy$""",
+        "ALTER TABLE backtest_rejected_strategies ALTER COLUMN stock_name SET NOT NULL",
+        "ALTER TABLE backtest_rejected_strategies ALTER COLUMN strategy_name SET NOT NULL",
+        "ALTER TABLE backtest_rejected_strategies ALTER COLUMN rejection_reason SET NOT NULL",
+        "ALTER TABLE backtest_rejected_strategies ALTER COLUMN policy_version SET NOT NULL",
+        """CREATE UNIQUE INDEX IF NOT EXISTS ix_backtest_rejected_identity
+           ON backtest_rejected_strategies
+           (symbol,strategy_hash,settings_hash,engine_version,indicator_engine_version)""",
+        """CREATE INDEX IF NOT EXISTS ix_backtest_rejected_due
+           ON backtest_rejected_strategies
+           (next_recheck_at,win_rate_pct DESC,total_trades DESC,rejection_key)
+           WHERE revalidation_state='frozen' AND next_recheck_at IS NOT NULL""",
+        "CREATE INDEX IF NOT EXISTS ix_backtest_rejected_source_run ON backtest_rejected_strategies (source_run_id,strategy_id,symbol)",
         """UPDATE backtest_run_symbols s SET last_tested_session=(
                SELECT MAX(r.current_signal_date) FROM backtest_results r
                WHERE r.run_id=s.run_id AND r.symbol=s.symbol
@@ -783,6 +907,12 @@ def ensure_performance_indexes():
             PRIMARY KEY (owner_id, symbol)
         )""",
         "CREATE INDEX IF NOT EXISTS ix_market_backtest_recommendations_rank ON market_backtest_recommendations (owner_id, signal_date DESC, recommendation_score DESC)",
+        "DROP INDEX IF EXISTS ix_market_backtest_recommendations_retained",
+        """CREATE INDEX IF NOT EXISTS ix_market_backtest_recommendations_retained_v2
+           ON market_backtest_recommendations
+           (owner_id,signal_date DESC,signal_status,recommendation_score DESC,symbol)
+           WHERE (total_trades>=16 AND win_rate_pct>=50)
+              OR (total_trades>=9 AND win_rate_pct>=60)""",
         """UPDATE market_backtest_recommendations SET owner_id=(SELECT id::text FROM frontend_users WHERE username=:seed_username)
            WHERE owner_id='local' AND EXISTS (SELECT 1 FROM frontend_users WHERE username=:seed_username)""",
         """CREATE TABLE IF NOT EXISTS backtest_ai_audits (

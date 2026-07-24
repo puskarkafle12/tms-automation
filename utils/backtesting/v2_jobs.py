@@ -27,6 +27,11 @@ from utils.backtesting.jobs import _symbol_metadata
 from utils.backtesting.presets import get_backtest_presets
 from utils.backtesting.professional import ROBUST_SCORE_VERSION, assign_robust_scores
 from utils.backtesting.result_artifacts import load_symbol_artifacts, store_symbol_artifacts
+from utils.backtesting.result_retention import (
+    MIN_REVALIDATION_TRADES,
+    MIN_REVALIDATION_WIN_RATE_PCT,
+    is_retained_result,
+)
 from utils.backtesting.strategy_discovery import discovery_space_size, generate_discovery_presets
 from utils.technical_indicators import ENGINE_VERSION
 from utils.strategy_builder.strategy_parser import (
@@ -37,7 +42,7 @@ from utils.strategy_builder.strategy_parser import (
 )
 
 
-BACKTEST_ENGINE_VERSION = "nepse-daily-v2"
+BACKTEST_ENGINE_VERSION = "nepse-daily-v3-protection-champion"
 ACTIVE_RUN_SQL = "deleted_at IS NULL AND archived_at IS NULL"
 ARCHIVE_RETENTION_DAYS = 30
 _WORKER_LOCK = threading.Lock()
@@ -51,6 +56,7 @@ RECOMMENDATION_REFRESH_SLOTS = ((10, 0), (12, 30), (15, 0), (16, 0))
 _LAST_DAILY_REFRESH_SLOT: Optional[str] = None
 _LAST_RECOMMENDATION_REFRESH_SLOT: Optional[str] = None
 _LAST_ARCHIVE_PURGE_AT: Optional[float] = None
+_LAST_REVALIDATION_ATTEMPT_AT: Optional[float] = None
 
 
 def _scan_key(config: Dict[str, Any], universe: List[str], selected: List[Dict[str, Any]]) -> str:
@@ -140,7 +146,9 @@ def _result_configuration_hash(symbol: str, row: Dict[str, Any]) -> str:
         "preset_source_hash", "preset_version", "strategy_query", "sell_strategy_query",
         "strategy_query_template", "strategy_mode", "entry", "intraday_priority",
         "exit_rule_id", "exit_condition", "min_holding_days", "max_holding_days",
-        "stop_loss_pct", "take_profit_pct", "trailing_stop_pct", "charge_model",
+        "risk_strategy",
+        "stop_loss_pct", "take_profit_pct", "trailing_stop_pct",
+        "atr_stop_multiple", "break_even_trigger_pct", "charge_model",
         "investor_type", "capital_gains_tax_enabled", "fee_pct_each_side",
         "fixed_fee_each_order", "dp_charge_each_sell", "slippage_pct_each_side",
         "position_size_pct", "max_volume_participation_pct", "initial_capital",
@@ -199,7 +207,9 @@ def _reuse_completed_shared_run(
     columns_sql = ",".join(result_columns)
     session.execute(text(
         f"INSERT INTO backtest_results (run_id,{columns_sql}) "
-        f"SELECT :new_run,{columns_sql} FROM backtest_results WHERE run_id=:source_run"
+        f"SELECT :new_run,{columns_sql} FROM backtest_results "
+        f"WHERE run_id=:source_run AND ((total_trades>=16 AND win_rate_pct>=50) "
+        f"OR (total_trades>=9 AND win_rate_pct>=60))"
     ), {"new_run": run_id, "source_run": source_run_id})
     trade_columns = [str(column) for column in session.execute(text("""
         SELECT column_name FROM information_schema.columns
@@ -229,6 +239,8 @@ def _reuse_completed_shared_run(
         FROM backtest_results r
         JOIN backtest_run_symbols s ON s.run_id=r.run_id AND s.symbol=r.symbol
         WHERE r.run_id=:run_id AND r.configuration_hash IS NOT NULL
+          AND ((r.total_trades>=16 AND r.win_rate_pct>=50)
+               OR (r.total_trades>=9 AND r.win_rate_pct>=60))
         ON CONFLICT (owner_id,configuration_hash) DO UPDATE SET
             result_id=EXCLUDED.result_id,
             run_id=EXCLUDED.run_id,
@@ -555,18 +567,15 @@ def _claim_next_run(*, refresh_only: bool = False) -> Optional[str]:
     try:
         refresh_filter = (
             "AND COALESCE((configuration->>'incremental_refresh_active')::boolean,FALSE)=TRUE"
-            if refresh_only else ""
+            if refresh_only
+            else "AND COALESCE((configuration->>'incremental_refresh_active')::boolean,FALSE)=FALSE"
         )
         row = session.execute(text(
             f"""SELECT run_id FROM backtest_runs
                WHERE deleted_at IS NULL AND archived_at IS NULL AND cancel_requested = FALSE AND pause_requested = FALSE
                  AND (status = 'queued' OR (status = 'running' AND lease_expires_at < NOW()))
                  {refresh_filter}
-               ORDER BY CASE
-                          WHEN COALESCE((configuration->>'refresh_discover_new_data')::boolean,FALSE)
-                          THEN 0 ELSE 1
-                        END,
-                        created_at
+               ORDER BY COALESCE(heartbeat_at,created_at),created_at
                FOR UPDATE SKIP LOCKED LIMIT 1"""
         )).scalar()
         if not row:
@@ -620,8 +629,9 @@ def _persist_symbol_output(
             store_symbol_artifacts(
                 session, output={**output, "results": partial_rows}, presets=presets,
                 config=config, engine_version=BACKTEST_ENGINE_VERSION,
-                indicator_version=ENGINE_VERSION,
+                indicator_version=ENGINE_VERSION, owner_id=owner_id, source_run_id=run_id,
             )
+        partial_rows = [row for row in partial_rows if is_retained_result(row)]
         for row in partial_rows:
             trades = list(row.pop("trades", []) or [])
             result_id = session.execute(text(
@@ -732,7 +742,7 @@ def _persist_symbol_output(
                       average_turnover_20=:average_turnover_20,last_tested_session=:last_tested_session
                WHERE run_id=:run_id AND symbol=:symbol"""
         ), {"status": status, "bars": int((output.get("technical_snapshot") or {}).get("bars_count") or 0),
-            "count": len(output.get("results") or []), "error": output.get("error"),
+            "count": len(partial_rows), "error": output.get("error"),
             "ltp": profile.get("ltp"), "latest_volume": profile.get("latest_volume"),
             "average_volume_20": profile.get("average_volume_20"),
             "median_volume_20": profile.get("median_volume_20"),
@@ -916,14 +926,22 @@ def _finalize_scores(run_id: str) -> None:
 def run_claimed_run(run_id: str) -> None:
     session = _session()
     try:
-        row = session.execute(text("SELECT configuration FROM backtest_runs WHERE run_id=:run_id"), {"run_id": run_id}).mappings().one()
+        row = session.execute(text(
+            "SELECT configuration,owner_id FROM backtest_runs WHERE run_id=:run_id"
+        ), {"run_id": run_id}).mappings().one()
         config = dict(row["configuration"] or {})
+        owner_id = str(row["owner_id"])
         symbol_rows = session.execute(text(
             """SELECT symbol,last_tested_session
                FROM backtest_run_symbols
-               WHERE run_id=:run_id AND status NOT IN ('completed')
+               WHERE run_id=:run_id AND status='queued'
                ORDER BY symbol"""
         ), {"run_id": run_id}).mappings().all()
+        try:
+            turn_size = max(1, min(4, int(os.getenv("BACKTEST_ROUND_ROBIN_STOCKS_PER_TURN", "1"))))
+        except ValueError:
+            turn_size = 1
+        symbol_rows = symbol_rows[:turn_size]
         symbols = [str(item["symbol"]) for item in symbol_rows]
         last_tested_by_symbol = {
             str(item["symbol"]): item["last_tested_session"] for item in symbol_rows
@@ -1048,6 +1066,7 @@ def run_claimed_run(run_id: str) -> None:
             cached = load_symbol_artifacts(
                 cache_session, symbol=str(symbol), presets=target_presets, config=config,
                 engine_version=BACKTEST_ENGINE_VERSION, indicator_version=ENGINE_VERSION,
+                owner_id=owner_id, source_run_id=run_id,
             )
             cached_by_symbol[str(symbol)] = cached
             missing = list(cached["missing"])
@@ -1193,14 +1212,28 @@ def run_claimed_run(run_id: str) -> None:
         control = _control_state(run_id)
         session = _session()
         try:
+            config["round_robin_results_changed"] = bool(
+                config.get("round_robin_results_changed") or results_changed
+            )
+            config["round_robin_signals_changed"] = bool(
+                config.get("round_robin_signals_changed") or signals_changed
+            )
+            remaining = int(session.execute(text("""
+                SELECT COUNT(*) FROM backtest_run_symbols
+                WHERE run_id=:run_id AND status='queued'
+            """), {"run_id": run_id}).scalar() or 0)
             if control["cancel"]:
                 status = "cancelled"
             elif control["pause"]:
                 status = "paused"
+            elif remaining:
+                # Release the lease after a small stock quantum. Ordering by the
+                # prior heartbeat gives every queued workspace a round-robin turn.
+                status = "queued"
             else:
-                if not incremental_refresh or results_changed:
+                if not incremental_refresh or config["round_robin_results_changed"]:
                     _finalize_scores(run_id)
-                elif signals_changed:
+                elif config["round_robin_signals_changed"]:
                     from utils.backtesting.recommendations import materialize_recommendations
                     refresh_results_session = _session()
                     try:
@@ -1218,9 +1251,13 @@ def run_claimed_run(run_id: str) -> None:
                 config.pop("refresh_window_sessions", None)
                 config.pop("refresh_symbols", None)
                 config.pop("refresh_strategies", None)
+            if status == "completed":
+                config.pop("round_robin_results_changed", None)
+                config.pop("round_robin_signals_changed", None)
             session.execute(text(
                 """UPDATE backtest_runs SET status=:status,progress_pct=CASE WHEN :status='completed' THEN 100 ELSE progress_pct END,
-                          current_symbol=NULL,finished_at=CASE WHEN :status IN ('completed','cancelled') THEN NOW() ELSE finished_at END,
+                          current_symbol=CASE WHEN :status='queued' THEN current_symbol ELSE NULL END,
+                          finished_at=CASE WHEN :status IN ('completed','cancelled') THEN NOW() ELSE finished_at END,
                           last_refresh_at=CASE WHEN :status='completed' THEN NOW() ELSE last_refresh_at END,
                           configuration=CAST(:configuration AS JSONB),
                           lease_owner=NULL,lease_expires_at=NULL,updated_at=NOW()
@@ -1523,7 +1560,8 @@ def _queue_scheduled_refreshes() -> int:
     queued = 0
     try:
         rows = session.execute(text(
-            """SELECT DISTINCT ON (COALESCE(scan_key,run_id)) run_id,configuration,status
+            """SELECT DISTINCT ON (COALESCE(scan_key,run_id))
+                      run_id,owner_id,COALESCE(scan_key,run_id) AS scan_group,configuration,status
                FROM backtest_runs
                WHERE deleted_at IS NULL AND archived_at IS NULL AND COALESCE((configuration->>'auto_refresh')::boolean,TRUE)=TRUE
                ORDER BY COALESCE(scan_key,run_id),updated_at DESC"""
@@ -1535,10 +1573,26 @@ def _queue_scheduled_refreshes() -> int:
             config = dict(row["configuration"] or {})
             if config.get("last_refresh_slot") == slot:
                 continue
+            retained_rows = session.execute(text("""
+                SELECT canonical.symbol,r.preset_id
+                FROM backtest_canonical_results canonical
+                JOIN backtest_results r ON r.result_id=canonical.result_id
+                JOIN backtest_runs source_run ON source_run.run_id=canonical.run_id
+                WHERE canonical.owner_id=:owner_id
+                  AND COALESCE(source_run.scan_key,source_run.run_id)=:scan_group
+            """), {
+                "owner_id": str(row["owner_id"]),
+                "scan_group": str(row["scan_group"]),
+            }).mappings().all()
+            retained_strategies: Dict[str, List[str]] = {}
+            for retained in retained_rows:
+                retained_strategies.setdefault(str(retained["symbol"]), []).append(str(retained["preset_id"]))
+            if not retained_strategies:
+                continue
             metadata_updates = [
                 {"run_id": row["run_id"], "symbol": symbol, "ltp": item.get("ltp"),
                  "latest_volume": item.get("latest_volume")}
-                for symbol, item in metadata.items()
+                for symbol, item in metadata.items() if symbol in retained_strategies
             ]
             if metadata_updates:
                 session.execute(text(
@@ -1552,6 +1606,7 @@ def _queue_scheduled_refreshes() -> int:
                 run_id=str(row["run_id"]),
                 config=config,
                 refresh_slot=slot,
+                strategies=retained_strategies,
             )
             queued += 1
         session.commit()
@@ -1599,7 +1654,269 @@ def _refresh_scheduled_recommendations() -> int:
         session.close()
 
 
+def _revalidation_enabled_now() -> bool:
+    if os.getenv("BACKTEST_REVALIDATION_ENABLED", "true").strip().lower() not in {"1", "true", "yes", "on"}:
+        return False
+    now = datetime.now(NEPAL_TZ)
+    try:
+        start_hour = max(0, min(23, int(os.getenv("BACKTEST_REVALIDATION_START_HOUR_NEPAL", "0"))))
+        end_hour = max(1, min(24, int(os.getenv("BACKTEST_REVALIDATION_END_HOUR_NEPAL", "24"))))
+        max_load_ratio = max(.1, float(os.getenv("BACKTEST_REVALIDATION_MAX_LOAD_RATIO", ".75")))
+    except ValueError:
+        start_hour, end_hour, max_load_ratio = 0, 24, .75
+    if not start_hour <= now.hour < end_hour:
+        return False
+    try:
+        if os.getloadavg()[0] / max(1, os.cpu_count() or 1) > max_load_ratio:
+            return False
+    except (AttributeError, OSError):
+        pass
+    return True
+
+
+def _claim_due_revalidation() -> Optional[Dict[str, Any]]:
+    """Lease one due borderline strategy only while all normal queues are idle."""
+    if not _revalidation_enabled_now():
+        return None
+    try:
+        minimum_new_sessions = max(1, int(os.getenv("BACKTEST_REVALIDATION_MIN_NEW_SESSIONS", "10")))
+        lease_minutes = max(5, int(os.getenv("BACKTEST_REVALIDATION_LEASE_MINUTES", "30")))
+        daily_limit = max(1, int(os.getenv("BACKTEST_REVALIDATION_DAILY_LIMIT", "3")))
+    except ValueError:
+        minimum_new_sessions, lease_minutes, daily_limit = 10, 30, 3
+    session = _session()
+    try:
+        session.execute(text("""
+            UPDATE backtest_rejected_strategies
+            SET revalidation_state='frozen',lease_owner=NULL,lease_expires_at=NULL,
+                last_recheck_error=COALESCE(last_recheck_error,'Expired revalidation lease recovered.')
+            WHERE revalidation_state='leased' AND lease_expires_at<NOW()
+        """))
+        busy = session.execute(text("""
+            SELECT EXISTS (
+                SELECT 1 FROM backtest_runs
+                WHERE deleted_at IS NULL AND archived_at IS NULL
+                  AND status IN ('queued','running')
+            )
+        """)).scalar()
+        if busy:
+            session.rollback()
+            return None
+        revalidated_today = int(session.execute(text("""
+            SELECT COUNT(*)
+            FROM backtest_rejected_strategies
+            WHERE last_revalidated_at >= (
+                date_trunc('day',NOW() AT TIME ZONE 'Asia/Kathmandu')
+                AT TIME ZONE 'Asia/Kathmandu'
+            )
+        """)).scalar() or 0)
+        if revalidated_today >= daily_limit:
+            session.rollback()
+            return None
+        row = session.execute(text("""
+            WITH due AS (
+                SELECT rejection_key,symbol,last_tested_session
+                FROM backtest_rejected_strategies
+                WHERE revalidation_state='frozen' AND next_recheck_at<=NOW()
+                  AND total_trades>=:min_trades AND win_rate_pct>=:min_win
+                  AND source_run_id IS NOT NULL AND owner_id IS NOT NULL
+                  AND (lease_expires_at IS NULL OR lease_expires_at<NOW())
+                ORDER BY win_rate_pct DESC,total_trades DESC,last_seen_at,rejection_key
+                FOR UPDATE SKIP LOCKED
+                LIMIT 25
+            ), eligible AS (
+                SELECT due.rejection_key
+                FROM due
+                WHERE (
+                    SELECT COUNT(DISTINCT d.session_date)
+                    FROM market_ohlcv_daily d
+                    WHERE d.symbol=due.symbol AND d.adjusted=TRUE
+                      AND (due.last_tested_session IS NULL OR d.session_date>due.last_tested_session)
+                      AND d.session_date<=CURRENT_DATE
+                )>=:minimum_new_sessions
+                LIMIT 1
+            )
+            UPDATE backtest_rejected_strategies rejected
+            SET revalidation_state='leased',lease_owner=:owner,
+                lease_expires_at=NOW()+(:lease_minutes*INTERVAL '1 minute'),
+                last_recheck_error=NULL
+            FROM eligible
+            WHERE rejected.rejection_key=eligible.rejection_key
+            RETURNING rejected.*
+        """), {
+            "min_trades": MIN_REVALIDATION_TRADES,
+            "min_win": MIN_REVALIDATION_WIN_RATE_PCT,
+            "minimum_new_sessions": minimum_new_sessions,
+            "lease_minutes": lease_minutes,
+            "owner": _WORKER_ID,
+        }).mappings().first()
+        session.commit()
+        return dict(row) if row else None
+    except Exception:
+        session.rollback()
+        return None
+    finally:
+        session.close()
+
+
+def _revalidation_preset(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    strategy_id = str(row.get("strategy_id") or "")
+    catalog = {str(item["id"]): dict(item) for item in get_backtest_presets()}
+    if strategy_id in catalog:
+        return catalog[strategy_id]
+    definition = row.get("strategy_definition") or {}
+    if isinstance(definition, str):
+        definition = json.loads(definition)
+    if not definition:
+        session = _session()
+        try:
+            definition = session.execute(text("""
+                SELECT definition FROM backtest_strategy_definitions
+                WHERE strategy_hash=:strategy_hash
+            """), {"strategy_hash": str(row.get("strategy_hash") or "")}).scalar() or {}
+        finally:
+            session.close()
+        if isinstance(definition, str):
+            definition = json.loads(definition)
+    if isinstance(definition, dict) and definition.get("id"):
+        return dict(definition)
+    return None
+
+
+def _existing_symbol_results(session, run_id: str, symbol: str) -> List[Dict[str, Any]]:
+    rows = session.execute(text("""
+        SELECT r.* FROM backtest_results r
+        WHERE r.run_id=:run_id AND r.symbol=:symbol
+        ORDER BY r.result_id
+    """), {"run_id": run_id, "symbol": symbol}).mappings().all()
+    results: List[Dict[str, Any]] = []
+    for mapped in rows:
+        result = dict(mapped)
+        trades = session.execute(text(
+            "SELECT * FROM backtest_trades WHERE result_id=:result_id ORDER BY sequence_no"
+        ), {"result_id": result["result_id"]}).mappings().all()
+        for key in (
+            "result_id", "run_id", "evaluation_split", "created_at",
+            "configuration_hash", "configuration_identity_version",
+        ):
+            result.pop(key, None)
+        technical = result.pop("technical_snapshot", None) or {}
+        if isinstance(technical, str):
+            technical = json.loads(technical)
+        if isinstance(technical, dict):
+            result.update(technical)
+        result["trades"] = [
+            {key: value for key, value in dict(trade).items() if key not in {"trade_id", "result_id"}}
+            for trade in trades
+        ]
+        results.append(result)
+    return results
+
+
+def _finish_revalidation(
+    rejection_key: str, *, signal: Optional[Dict[str, Any]], error: Optional[str],
+    duration_seconds: float,
+) -> None:
+    try:
+        interval_days = max(1, int(os.getenv("BACKTEST_REVALIDATION_INTERVAL_DAYS", "30")))
+    except ValueError:
+        interval_days = 30
+    session = _session()
+    try:
+        session.execute(text("""
+            UPDATE backtest_rejected_strategies
+            SET revalidation_state='frozen',recheck_count=recheck_count+1,
+                last_revalidated_at=NOW(),
+                next_recheck_at=NOW()+(:interval_days*INTERVAL '1 day'),
+                latest_signal_status=COALESCE(:signal_status,latest_signal_status),
+                latest_signal_date=COALESCE(:signal_date,latest_signal_date),
+                latest_signal_evidence=CASE WHEN :signal_evidence IS NULL
+                    THEN latest_signal_evidence ELSE CAST(:signal_evidence AS JSONB) END,
+                last_tested_session=COALESCE(:signal_date,last_tested_session),
+                last_recheck_error=:error,last_recheck_duration_seconds=:duration,
+                lease_owner=NULL,lease_expires_at=NULL,last_seen_at=NOW()
+            WHERE rejection_key=:key AND lease_owner=:owner
+        """), {
+            "key": rejection_key, "owner": _WORKER_ID,
+            "interval_days": interval_days, "error": str(error)[:2000] if error else None,
+            "duration": duration_seconds,
+            "signal_status": signal.get("current_signal_status") if signal else None,
+            "signal_date": signal.get("current_signal_date") if signal else None,
+            "signal_evidence": json.dumps(signal.get("current_evidence") or {}, default=str) if signal else None,
+        })
+        session.commit()
+    finally:
+        session.close()
+
+
+def _run_one_due_revalidation() -> bool:
+    row = _claim_due_revalidation()
+    if not row:
+        return False
+    started = time.monotonic()
+    signal: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    try:
+        preset = _revalidation_preset(row)
+        if not preset:
+            raise ValueError("Saved strategy definition is not executable.")
+        run_id = str(row["source_run_id"])
+        symbol = str(row["symbol"])
+        session = _session()
+        try:
+            run = session.execute(text("""
+                SELECT configuration FROM backtest_runs
+                WHERE run_id=:run_id AND owner_id=:owner_id
+                  AND deleted_at IS NULL AND archived_at IS NULL
+            """), {"run_id": run_id, "owner_id": str(row["owner_id"])}).mappings().first()
+            if not run:
+                raise ValueError("Source backtest workspace is unavailable.")
+            config = dict(run["configuration"] or {})
+        finally:
+            session.close()
+        end_date = datetime.now(NEPAL_TZ).date()
+        from utils.backtesting.service import fetch_historical_bars
+        if str(config.get("data_source") or "merolagani") == "merolagani":
+            fetch_historical_bars(
+                symbol, date.fromisoformat(str(config["start_date"])), end_date,
+                force_tail_refresh=True,
+            )
+        # Monthly checks only evaluate unseen BUY-signal sessions. Every third
+        # check expands the recent window to roughly one quarter, but never
+        # replays the original historical trade simulation.
+        quarterly = (int(row.get("recheck_count") or 0) + 1) % 3 == 0
+        output = _refresh_symbol_signals_task({
+            "symbol": symbol, "start_date": date.fromisoformat(str(config["start_date"])),
+            "end_date": end_date, "data_source": config.get("data_source") or "merolagani",
+            "presets": [preset],
+            "baselines": [{
+                "preset_id": str(row["strategy_id"]),
+                "total_trades": int(row.get("total_trades") or 0),
+                "win_rate_pct": float(row.get("win_rate_pct") or 0),
+                "confidence_score": 0,
+                "liquidity_score": 0,
+            }],
+            "refresh_window_sessions": 65 if quarterly else 10,
+        })
+        if output.get("error") and not output.get("results"):
+            raise ValueError(str(output["error"]))
+        signal = next(
+            (dict(item) for item in output.get("results") or [] if str(item.get("preset_id")) == str(row["strategy_id"])),
+            None,
+        )
+        if signal is None:
+            raise ValueError("Incremental validation produced no matching signal result.")
+    except Exception as exc:
+        error = str(exc)
+    _finish_revalidation(
+        str(row["rejection_key"]), signal=signal, error=error,
+        duration_seconds=max(0, time.monotonic() - started),
+    )
+    return True
+
+
 def worker_loop(*, refresh_only: bool = False) -> None:
+    global _LAST_REVALIDATION_ATTEMPT_AT
     while True:
         if not refresh_only:
             purge_expired_archives()
@@ -1609,7 +1926,15 @@ def worker_loop(*, refresh_only: bool = False) -> None:
         if run_id:
             run_claimed_run(run_id)
         else:
-            time.sleep(2)
+            ran_revalidation = False
+            now = time.monotonic()
+            if (
+                not refresh_only
+                and (_LAST_REVALIDATION_ATTEMPT_AT is None or now - _LAST_REVALIDATION_ATTEMPT_AT >= 10)
+            ):
+                _LAST_REVALIDATION_ATTEMPT_AT = now
+                ran_revalidation = _run_one_due_revalidation()
+            time.sleep(10 if ran_revalidation else 2)
 
 
 def start_worker() -> bool:
@@ -1665,6 +1990,8 @@ def _rebuild_canonical_for_owner(session, owner_id: str) -> None:
               JOIN backtest_runs br ON br.run_id=r.run_id
               WHERE r.result_id=canonical.result_id
                 AND br.deleted_at IS NULL AND br.archived_at IS NULL
+                AND ((r.total_trades>=16 AND r.win_rate_pct>=50)
+                     OR (r.total_trades>=9 AND r.win_rate_pct>=60))
           )
     """), {"owner_id": owner_id})
     session.execute(text("""
@@ -1678,6 +2005,8 @@ def _rebuild_canonical_for_owner(session, owner_id: str) -> None:
         JOIN backtest_run_symbols s ON s.run_id=r.run_id AND s.symbol=r.symbol
         WHERE br.owner_id=:owner_id AND br.deleted_at IS NULL AND br.archived_at IS NULL
           AND r.configuration_hash IS NOT NULL
+          AND ((r.total_trades>=16 AND r.win_rate_pct>=50)
+               OR (r.total_trades>=9 AND r.win_rate_pct>=60))
         ORDER BY br.owner_id,r.configuration_hash,r.current_signal_date DESC NULLS LAST,r.result_id DESC
         ON CONFLICT (owner_id,configuration_hash) DO UPDATE SET
             result_id=EXCLUDED.result_id,run_id=EXCLUDED.run_id,symbol=EXCLUDED.symbol,

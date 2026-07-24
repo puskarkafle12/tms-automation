@@ -10,6 +10,9 @@ from typing import Any, Dict, Iterable, List, Tuple
 
 from sqlalchemy import text
 
+from utils.backtesting.result_retention import (
+    RETAINED_RESULT_SQL,
+)
 from utils.market_status import MARKET_HOURS_LABEL, get_market_hours_status, get_nepal_now
 
 
@@ -75,6 +78,18 @@ OPERATORS = {"eq": "=", "neq": "<>", "gt": ">", "gte": ">=", "lt": "<", "lte": "
 
 class ResultQueryError(ValueError):
     pass
+
+
+def latest_completed_market_session(session):
+    """Fetch the latest non-Saturday session through the date index."""
+    return session.execute(text("""
+        SELECT session_date
+        FROM market_ohlcv_daily
+        WHERE adjusted=TRUE AND session_date<=CURRENT_DATE
+          AND EXTRACT(ISODOW FROM session_date)<>6
+        ORDER BY session_date DESC
+        LIMIT 1
+    """)).scalar()
 
 
 STRONG_BUY_SORT_FIELDS = {
@@ -268,11 +283,17 @@ def query_results(session, run_id: str, body: Dict[str, Any], *, owner_id: str =
     page_size = min(100, max(1, int(body.get("page_size") or 100)))
     inner_order, outer_order, sorts = compile_result_sorts(body)
     where, params = compile_filters(body.get("filters"), include_non_equities=bool(body.get("include_non_equities")))
+    where = f"({where}) AND {RETAINED_RESULT_SQL}"
     params.update({"run_id": run_id, "owner_id": owner_id, "limit": page_size, "offset": (page - 1) * page_size})
     ownership = "br.owner_id=:owner_id AND br.deleted_at IS NULL AND br.archived_at IS NULL"
     scope = "(:run_id='all' OR r.run_id=:run_id)"
     base = "FROM backtest_results r JOIN backtest_run_symbols s ON s.run_id=r.run_id AND s.symbol=r.symbol JOIN backtest_runs br ON br.run_id=r.run_id"
-    select = ",".join(f"{column} AS {key}" for key, column in RESULT_FIELDS.items())
+    requested_fields = [
+        str(field) for field in body.get("select_fields") or []
+        if str(field) in RESULT_FIELDS
+    ]
+    selected_keys = list(dict.fromkeys(["result_id", "run_id", *requested_fields])) if requested_fields else list(RESULT_FIELDS)
+    select = ",".join(f"{RESULT_FIELDS[key]} AS {key}" for key in selected_keys)
     unique_by_symbol = bool(body.get("unique_by_symbol"))
     unique_by_strategy = bool(body.get("unique_by_strategy"))
     if unique_by_symbol:
@@ -292,9 +313,7 @@ def query_results(session, run_id: str, body: Dict[str, Any], *, owner_id: str =
             canonical_security = "TRUE" if body.get("include_non_equities") else "canonical.security_type='ordinary_share'"
             total = int(session.execute(text(
                 "SELECT COUNT(*) FROM backtest_canonical_results canonical "
-                "JOIN backtest_runs br ON br.run_id=canonical.run_id "
                 "WHERE canonical.owner_id=:owner_id AND (:run_id='all' OR canonical.run_id=:run_id) "
-                "AND br.deleted_at IS NULL AND br.archived_at IS NULL "
                 f"AND {canonical_security}"
             ), params).scalar() or 0)
         else:
@@ -316,7 +335,7 @@ def query_results(session, run_id: str, body: Dict[str, Any], *, owner_id: str =
         item = dict(row)
         item["warning_codes"] = list(item.get("warning_codes") or [])
         items.append(item)
-    return {"items": items, "page": page, "page_size": page_size, "total": total, "pages": ceil(total / page_size) if total else 0, "sorts": sorts, "sort_by": sorts[0]["field"], "sort_direction": sorts[0]["direction"], "unique_by_symbol": unique_by_symbol, "unique_by_strategy": unique_by_strategy}
+    return {"items": items, "page": page, "page_size": page_size, "total": total, "pages": ceil(total / page_size) if total else 0, "sorts": sorts, "sort_by": sorts[0]["field"], "sort_direction": sorts[0]["direction"], "unique_by_symbol": unique_by_symbol, "unique_by_strategy": unique_by_strategy, "selected_columns": selected_keys}
 
 
 def query_result_selections(
@@ -326,6 +345,7 @@ def query_result_selections(
     where, params = compile_filters(
         body.get("filters"), include_non_equities=bool(body.get("include_non_equities")),
     )
+    where = f"({where}) AND {RETAINED_RESULT_SQL}"
     params.update({"run_id": run_id, "owner_id": owner_id})
     ownership = "br.owner_id=:owner_id AND br.deleted_at IS NULL AND br.archived_at IS NULL"
     scope = "(:run_id='all' OR r.run_id=:run_id)"
@@ -364,6 +384,7 @@ def stream_results_csv(session_factory, run_id: str, body: Dict[str, Any], *, ow
     """Stream every matching normalized result without loading the export into memory."""
     inner_order, _, _ = compile_result_sorts(body)
     where, params = compile_filters(body.get("filters"), include_non_equities=bool(body.get("include_non_equities")))
+    where = f"({where}) AND {RETAINED_RESULT_SQL}"
     params.update({"run_id": run_id, "owner_id": owner_id})
     ownership = "br.owner_id=:owner_id AND br.deleted_at IS NULL AND br.archived_at IS NULL"
     base = "FROM backtest_results r JOIN backtest_run_symbols s ON s.run_id=r.run_id AND s.symbol=r.symbol JOIN backtest_runs br ON br.run_id=r.run_id"
@@ -397,7 +418,8 @@ def result_detail(session, result_id: int, *, owner_id: str = "local") -> Dict[s
     row = session.execute(text(
         f"SELECT {select},r.assumptions,r.technical_snapshot FROM backtest_results r "
         "JOIN backtest_runs br ON br.run_id=r.run_id JOIN backtest_run_symbols s ON s.run_id=r.run_id AND s.symbol=r.symbol "
-        "WHERE r.result_id=:result_id AND br.owner_id=:owner_id AND br.deleted_at IS NULL AND br.archived_at IS NULL"
+        f"WHERE r.result_id=:result_id AND br.owner_id=:owner_id AND br.deleted_at IS NULL "
+        f"AND br.archived_at IS NULL AND {RETAINED_RESULT_SQL}"
     ), {"result_id": result_id, "owner_id": owner_id}).mappings().first()
     if not row:
         raise ResultQueryError("Backtest result was not found.")
@@ -410,7 +432,7 @@ def result_trades(session, result_id: int, *, owner_id: str = "local") -> List[D
     rows = session.execute(text(
         "SELECT t.* FROM backtest_trades t JOIN backtest_results r ON r.result_id=t.result_id "
         "JOIN backtest_runs br ON br.run_id=r.run_id WHERE t.result_id=:result_id AND br.owner_id=:owner_id "
-        "ORDER BY t.sequence_no"
+        f"AND {RETAINED_RESULT_SQL} ORDER BY t.sequence_no"
     ), {"result_id": result_id, "owner_id": owner_id}).mappings().all()
     return [{**dict(row), "signal_date": row["signal_date"].isoformat() if row["signal_date"] else None,
              "entry_date": row["entry_date"].isoformat(), "exit_date": row["exit_date"].isoformat()} for row in rows]
@@ -420,22 +442,12 @@ def query_strong_buys(session, run_id: str, body: Dict[str, Any], *, owner_id: s
     page = max(1, int(body.get("page") or 1))
     page_size = min(100, max(1, int(body.get("page_size") or 25)))
     order_sql, normalized_sorts = compile_strong_buy_sorts(body)
-    fresh_session = session.execute(text(
-        """SELECT MAX(CASE WHEN source_timestamp IS NOT NULL
-                       THEN (to_timestamp(source_timestamp) AT TIME ZONE 'UTC')::date
-                       ELSE session_date END)
-           FROM market_ohlcv_daily
-           WHERE adjusted=TRUE
-             AND (CASE WHEN source_timestamp IS NOT NULL
-                       THEN (to_timestamp(source_timestamp) AT TIME ZONE 'UTC')::date
-                       ELSE session_date END)<=CURRENT_DATE
-             AND EXTRACT(ISODOW FROM (CASE WHEN source_timestamp IS NOT NULL
-                       THEN (to_timestamp(source_timestamp) AT TIME ZONE 'UTC')::date
-                       ELSE session_date END)) <> 6"""
-    )).scalar()
+    fresh_session = latest_completed_market_session(session)
     params = {
-        "run_id": run_id, "owner_id": owner_id, "min_trades": int(body.get("minimum_trades", 5)),
-        "min_win": float(body.get("minimum_win_rate", 0)), "min_confidence": float(body.get("minimum_confidence", 0)),
+        "run_id": run_id, "owner_id": owner_id,
+        "min_trades": max(0, int(body.get("minimum_trades", 0))),
+        "min_win": max(0, float(body.get("minimum_win_rate", 0))),
+        "min_confidence": float(body.get("minimum_confidence", 0)),
         "min_sharpe": float(body.get("minimum_sharpe", -999)), "min_pf": float(body.get("minimum_profit_factor", 0)),
         "max_dd": float(body.get("maximum_drawdown", 100)), "min_return": float(body.get("minimum_return", 0)),
         "min_volume": float(body.get("minimum_volume") or 0), "category": str(body.get("category") or ""),
@@ -467,6 +479,7 @@ def query_strong_buys(session, run_id: str, body: Dict[str, Any], *, owner_id: s
     )::numeric,2)::double precision"""
     advanced_where, normalized_filters = compile_strong_buy_filters(body.get("filters"), params, recommendation_score)
     requirements = f"""{signal_requirements[signal_mode]}
+        AND {RETAINED_RESULT_SQL}
         AND r.total_trades>=:min_trades AND r.win_rate_pct>=:min_win AND r.confidence_score>=:min_confidence
         AND r.net_return_pct>=:min_return AND (r.profit_factor IS NULL OR r.profit_factor>=:min_pf)
         AND COALESCE(r.sharpe_ratio,-999)>=:min_sharpe AND r.max_drawdown_pct<=:max_dd
@@ -540,8 +553,11 @@ def _strategy_planning_range(item: Dict[str, Any]) -> Dict[str, Any]:
         return {"buy_zone_low": None, "buy_zone_high": None, "protective_stop": None,
                 "sell_zone_low": None, "sell_zone_high": None, "planning_range_basis": None}
     evidence = dict(item.get("current_evidence") or {})
-    latest = dict(evidence.get("latest_values") or {})
     assumptions = dict(item.get("assumptions") or {})
+    latest = {
+        **dict(assumptions.get("protection_latest_values") or {}),
+        **dict(evidence.get("latest_values") or {}),
+    }
     try:
         atr_pct = float(latest.get("technical_atr_percent") or 2)
     except (TypeError, ValueError):
@@ -552,18 +568,54 @@ def _strategy_planning_range(item: Dict[str, Any]) -> Dict[str, Any]:
     except (TypeError, ValueError):
         stop_pct, target_pct = 5, 10
     entry_buffer_pct = max(.4, min(2.5, atr_pct * .25))
+    exit_rule_id = str(assumptions.get("exit_rule_id") or "")
+    sell_basis = f"Fixed +{target_pct:g}% take-profit"
+    sell_low = sell_high = None
+    if exit_rule_id == "sr_resistance_rejection_exit":
+        sell_low = latest.get("technical_sr_resistance_lower")
+        sell_high = latest.get("technical_sr_resistance_upper")
+        sell_basis = "Current causal resistance zone"
+    elif exit_rule_id == "bollinger_middle_exit":
+        sell_low = sell_high = latest.get("technical_bollinger_middle_20")
+        sell_basis = "Current Bollinger middle band"
+    elif exit_rule_id == "bollinger_upper_rejection_exit":
+        sell_low = sell_high = latest.get("technical_bollinger_upper_20")
+        sell_basis = "Current Bollinger upper band"
+    elif exit_rule_id == "fibonacci_resistance_exit":
+        sell_low = sell_high = latest.get("technical_fib_range_high_63")
+        sell_basis = "Current past-only Fibonacci range resistance"
+    try:
+        sell_low = float(sell_low) if sell_low is not None else None
+        sell_high = float(sell_high) if sell_high is not None else None
+    except (TypeError, ValueError):
+        sell_low = sell_high = None
     target_price = price * (1 + target_pct / 100)
     target_buffer_pct = entry_buffer_pct * .5
+    if not sell_low or not sell_high:
+        sell_low = target_price * (1 - target_buffer_pct / 100)
+        sell_high = target_price * (1 + target_buffer_pct / 100)
+    protective_stop = price * (1 - stop_pct / 100)
+    try:
+        atr_multiple = float(assumptions.get("atr_stop_multiple")) if assumptions.get("atr_stop_multiple") is not None else None
+        atr_value = float(latest.get("technical_atr_14")) if latest.get("technical_atr_14") is not None else None
+        if atr_multiple and atr_value and atr_value > 0:
+            protective_stop = price - atr_value * atr_multiple
+    except (TypeError, ValueError):
+        pass
     return {
         "buy_zone_low": round(price * (1 - entry_buffer_pct / 100), 2),
         "buy_zone_high": round(price * (1 + entry_buffer_pct / 100), 2),
-        "protective_stop": round(price * (1 - stop_pct / 100), 2),
-        "sell_zone_low": round(target_price * (1 - target_buffer_pct / 100), 2),
-        "sell_zone_high": round(target_price * (1 + target_buffer_pct / 100), 2),
+        "protective_stop": round(protective_stop, 2),
+        "sell_zone_low": round(min(sell_low, sell_high), 2),
+        "sell_zone_high": round(max(sell_low, sell_high), 2),
         "planning_range_basis": {
             "reference_price": round(price, 2), "atr_percent": round(atr_pct, 2),
             "entry_buffer_percent": round(entry_buffer_pct, 2), "stop_loss_percent": stop_pct,
             "take_profit_percent": target_pct,
-            "description": "ATR-sized planning zone using the saved strategy stop and target; actual next-open fills can differ.",
+            "atr_stop_multiple": assumptions.get("atr_stop_multiple"),
+            "break_even_trigger_percent": assumptions.get("break_even_trigger_pct"),
+            "chosen_sell_rule": exit_rule_id,
+            "sell_zone_basis": sell_basis,
+            "description": "Planning zone from the selected OOS sell rule when it has a price level; otherwise the saved take-profit target is used. Actual next-open fills can differ.",
         },
     }

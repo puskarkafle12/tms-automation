@@ -68,6 +68,7 @@ def compile_preset_signals(
     """
     count = len(rows)
     close = _numbers(rows, "ltp")
+    high = _numbers(rows, "high")
     low = _numbers(rows, "low")
     change = _numbers(rows, "change_percent")
     volume = _numbers(rows, "volume")
@@ -124,6 +125,11 @@ def compile_preset_signals(
     bullish_marubozu = _numbers(rows, "technical_bullish_marubozu")
     higher_high = _numbers(rows, "technical_higher_high_3")
     higher_low = _numbers(rows, "technical_higher_low_3")
+    percent_b = _numbers(rows, "technical_percent_b")
+    bollinger_upper = _numbers(rows, "technical_bollinger_upper_20")
+    sr_support_bounce = _numbers(rows, "technical_sr_support_bounce")
+    sr_resistance_breakout = _numbers(rows, "technical_sr_resistance_breakout")
+    fib_pullback_entry = _numbers(rows, "technical_fib_pullback_entry")
     positive = change > 0
     signal = np.zeros(count, dtype=bool)
 
@@ -297,6 +303,30 @@ def compile_preset_signals(
     elif preset_id == "nonlinear_momentum_regime":
         momentum_63 = _change_percent(close, 63)
         signal = (momentum_63 >= 5) & (momentum_63 <= 25) & (_change_percent(close, 126) >= 10) & (historical_volatility <= 45) & (adx >= 20) & _text_is(rows, "technical_sma_200", "above")
+    elif preset_id.startswith("sr_bounce_"):
+        signal = (sr_support_bounce == 1) & _text_is(rows, "technical_sma_200", "above")
+    elif preset_id == "sr_breakout_participation":
+        signal = (sr_resistance_breakout == 1) & (adx >= 20)
+    elif preset_id in {
+        "bollinger_lower_recovery_middle", "bollinger_lower_recovery_upper",
+        "bollinger_pullback_fixed_4", "bollinger_pullback_trailing_5",
+    }:
+        signal = (percent_b >= 0) & (percent_b <= .25) & positive & (rsi >= 30) & (rsi <= 50)
+    elif preset_id == "bollinger_trend_pullback":
+        signal = (percent_b >= .10) & (percent_b <= .40) & _text_is(rows, "technical_supertrend", "bullish") & (cmf > 0)
+    elif preset_id == "bollinger_squeeze_paired_exit":
+        signal = _text_is(rows, "technical_squeeze", "released") & (close > bollinger_upper) & (volume_ratio >= 1.3)
+    elif preset_id in {
+        "fibonacci_pullback_resistance", "fibonacci_pullback_trend",
+        "fibonacci_pullback_trailing_6",
+    }:
+        signal = fib_pullback_entry == 1
+    elif preset_id == "fibonacci_volume_confirmation":
+        signal = (fib_pullback_entry == 1) & (cmf > 0) & (volume_ratio >= 1.1)
+    elif preset_id == "zone_bollinger_confluence":
+        signal = (sr_support_bounce == 1) & (percent_b <= .35) & (cmf > 0)
+    elif preset_id == "zone_momentum_quality":
+        signal = (sr_support_bounce == 1) & (ppo_histogram > 0) & (adx >= 18)
     elif preset_id.startswith("nepse15_"):
         number = int(preset_id.rsplit("_", 1)[1])
         signal = _numbers(rows, f"technical_nepse15_entry_{number}") == 1
@@ -318,4 +348,9 @@ def compile_preset_exit_signals(preset_id: str, rows: Sequence[Dict[str, Any]]) 
     if preset_id.startswith("nepse15_"):
         number = int(preset_id.rsplit("_", 1)[1])
         return [bool(value) for value in (_numbers(rows, f"technical_nepse15_exit_{number}") == 1)]
-    return [False] * len(rows)
+    from utils.backtesting.presets import get_backtest_presets
+    from utils.backtesting.strategy_discovery import compile_discovery_exit_signals
+    preset = next((item for item in get_backtest_presets() if item["id"] == preset_id), None)
+    if not preset or not preset.get("exit_rule_id"):
+        return [False] * len(rows)
+    return compile_discovery_exit_signals(preset, rows)
