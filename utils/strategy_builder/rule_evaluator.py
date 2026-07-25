@@ -358,26 +358,31 @@ def _evaluate_node(
             return ConditionResult(expression=f"CROSSES_BELOW({field_name}, {threshold})", matched=matched, actual_value=current)
         if name == "REMAINS_ABOVE":
             threshold = float(_resolve_value(args.get("threshold") or args.get("value"), flat, history))
-            scans = int(args.get("scans") or args.get("count") or 2)
+            scans_key = "scans" if "scans" in args else "count"
+            scans = int(_numeric_arg(args, scans_key, 2, flat, history))
             matched = remains_above(field_name, history, threshold, scans)
             return ConditionResult(expression=f"REMAINS_ABOVE({field_name}, {threshold}, {scans})", matched=matched)
         if name == "REMAINS_BELOW":
             threshold = float(_resolve_value(args.get("threshold") or args.get("value"), flat, history))
-            scans = int(args.get("scans") or args.get("count") or 2)
+            scans_key = "scans" if "scans" in args else "count"
+            scans = int(_numeric_arg(args, scans_key, 2, flat, history))
             matched = remains_below(field_name, history, threshold, scans)
             return ConditionResult(expression=f"REMAINS_BELOW({field_name}, {threshold}, {scans})", matched=matched)
         if name == "PREVIOUS":
-            scans_back = int(args.get("offset") or args.get("scans_back") or args.get("count") or 1)
+            scans_key = next((key for key in ("offset", "scans_back", "count") if key in args), "offset")
+            scans_back = int(_numeric_arg(args, scans_key, 1, flat, history))
             value = previous_value(field_name, history, scans_back)
             return ConditionResult(expression=f"PREVIOUS({field_name}, {scans_back})", matched=value is not None, actual_value=value)
         if name == "CHANGE":
-            scans_back = int(args.get("scans_back") or args.get("count") or 1)
+            scans_key = "scans_back" if "scans_back" in args else "count"
+            scans_back = int(_numeric_arg(args, scans_key, 1, flat, history))
             current = flat.get(field_name)
             previous = previous_value(field_name, history, scans_back)
             value = None if current is None or previous is None else current - previous
             return ConditionResult(expression=f"CHANGE({field_name}, {scans_back})", matched=value is not None, actual_value=value)
         if name == "CHANGE_PERCENT":
-            scans_back = int(args.get("scans_back") or args.get("count") or 1)
+            scans_key = "scans_back" if "scans_back" in args else "count"
+            scans_back = int(_numeric_arg(args, scans_key, 1, flat, history))
             value = change_percent(field_name, history, scans_back)
             return ConditionResult(expression=f"CHANGE_PERCENT({field_name}, {scans_back})", matched=value is not None, actual_value=value)
         if name == "CHANGED_TO":

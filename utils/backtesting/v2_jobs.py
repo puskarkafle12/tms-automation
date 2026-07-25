@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import math
 import multiprocessing
 import os
 import socket
@@ -20,13 +21,16 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import text
 
 from utils.backtesting.batch import (
-    _refresh_symbol_signals_task, _run_symbol_task, background_worker_limit, get_backtest_universe,
-    initialize_background_worker,
+    _refresh_symbol_signals_task, _run_symbol_task, background_turn_size,
+    background_worker_limit, get_backtest_universe, initialize_background_worker,
+    market_research_is_constrained,
 )
 from utils.backtesting.jobs import _symbol_metadata
 from utils.backtesting.presets import get_backtest_presets
 from utils.backtesting.professional import ROBUST_SCORE_VERSION, assign_robust_scores
-from utils.backtesting.result_artifacts import load_symbol_artifacts, store_symbol_artifacts
+from utils.backtesting.result_artifacts import (
+    load_symbol_artifacts, settings_hash, store_symbol_artifacts, strategy_hash,
+)
 from utils.backtesting.result_retention import (
     MIN_REVALIDATION_TRADES,
     MIN_REVALIDATION_WIN_RATE_PCT,
@@ -58,6 +62,39 @@ _LAST_RECOMMENDATION_REFRESH_SLOT: Optional[str] = None
 _LAST_ARCHIVE_PURGE_AT: Optional[float] = None
 _LAST_REVALIDATION_ATTEMPT_AT: Optional[float] = None
 
+IPO_WORKSPACE_TRADABILITY_GATE = (
+    "PREVIOUS(field=ltp, offset=2) - PREVIOUS(field=ltp, offset=1) >= 1 "
+    "AND change_percent > 0 AND volume >= 8000"
+)
+
+
+def _apply_ipo_workspace_gate(
+    presets: List[Dict[str, Any]], config: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """Apply the executable Nepal IPO entry constraint to every selected preset."""
+    if (
+        str(config.get("run_type") or "") != "ipo_research"
+        or not bool(config.get("apply_ipo_tradability_gate", True))
+    ):
+        return presets
+    gated = []
+    for source in presets:
+        preset = dict(source)
+        condition = str(preset.get("condition") or "")
+        if IPO_WORKSPACE_TRADABILITY_GATE not in condition:
+            preset["condition"] = f"({condition}) AND {IPO_WORKSPACE_TRADABILITY_GATE}"
+            preset["description"] = (
+                f"{preset.get('description') or ''} IPO workspace execution also requires "
+                "a prior-session decline of at least NPR 1, a positive recovery close, "
+                "and at least 8,000 shares of volume."
+            ).strip()
+            preset["source_hash"] = hashlib.sha256(
+                f"{preset.get('source_hash')}|ipo-workspace-gate-v1".encode("utf-8")
+            ).hexdigest()
+            preset["version"] = f"{preset.get('version') or 'preset'}+ipo-gate-v1"
+        gated.append(preset)
+    return gated
+
 
 def _scan_key(config: Dict[str, Any], universe: List[str], selected: List[Dict[str, Any]]) -> str:
     """Stable identity for a continuing scan; its end date and display name may advance."""
@@ -70,6 +107,8 @@ def _scan_key(config: Dict[str, Any], universe: List[str], selected: List[Dict[s
         # listed. Explicit single/multi-symbol scans remain scoped to those symbols.
         "symbols": requested_symbols or "all_matching_universe",
         "ordinary_shares_only": bool(config.get("ordinary_shares_only", True)),
+        "max_listing_age_days": config.get("max_listing_age_days"),
+        "min_volume": config.get("min_volume"),
         "strategy_mode": config.get("strategy_mode") or "presets",
         "strategies": sorted((item.get("id"), item.get("source_hash")) for item in selected),
         "data_source": config.get("data_source") or "merolagani",
@@ -79,7 +118,7 @@ def _scan_key(config: Dict[str, Any], universe: List[str], selected: List[Dict[s
         )},
         "risk": {key: config.get(key) for key in (
             "min_holding_days", "max_holding_days", "trailing_stop_pct",
-            "max_volume_participation_pct", "risk_free_rate_pct",
+            "max_volume_participation_pct", "risk_free_rate_pct", "use_preset_holding_days",
         )},
     }
     encoded = json.dumps(identity, sort_keys=True, separators=(",", ":"), default=str)
@@ -295,9 +334,9 @@ def create_run(configuration: Dict[str, Any], *, owner_id: str = "local") -> Dic
         config["strategy_mode"] = "presets"
         config["preset_ids"] = [item["id"] for item in selected]
     config.setdefault("ordinary_shares_only", True)
-    # Ask for spare-core parallelism; background_worker_limit() still caps to
-    # BACKTEST_MAX_WORKERS and always reserves CPU for API/dashboard traffic.
-    config.setdefault("max_workers", 3)
+    # Adaptive mode protects live trading and uses spare cores after hours.
+    config.setdefault("worker_policy", "adaptive_market_hours")
+    config.setdefault("max_workers", 0)
     config.setdefault("data_source", "merolagani")
     config.setdefault("initial_capital", 100000)
     config.setdefault("charge_model", "nepse_equity")
@@ -316,6 +355,9 @@ def create_run(configuration: Dict[str, Any], *, owner_id: str = "local") -> Dic
     config.setdefault("auto_refresh", True)
     config.setdefault("refresh_times_nepal", ["10:00", "11:00"])
     config.setdefault("refresh_mode", "incremental_market_data_full_metric_replay")
+    if str(config.get("run_type") or "") == "ipo_research":
+        config.setdefault("apply_ipo_tradability_gate", True)
+        selected = _apply_ipo_workspace_gate(selected, config)
     if config["max_holding_days"] is not None and int(config["min_holding_days"]) > int(config["max_holding_days"]):
         raise ValueError("Minimum holding days cannot exceed maximum holding days.")
     config.setdefault("portfolio", {
@@ -523,6 +565,430 @@ def get_run(run_id: str, *, owner_id: str = "local") -> Dict[str, Any]:
         session.close()
 
 
+def get_ipo_strategy_summary(run_id: str, *, owner_id: str = "local") -> Dict[str, Any]:
+    """Rank sparse IPO strategies using pooled evidence across newly listed stocks."""
+    session = _session()
+    try:
+        run = session.execute(text(
+            """SELECT configuration,symbols_total FROM backtest_runs
+               WHERE run_id=:run_id AND owner_id=:owner_id
+                 AND deleted_at IS NULL AND archived_at IS NULL"""
+        ), {"run_id": run_id, "owner_id": owner_id}).mappings().first()
+        if not run:
+            raise ValueError("Backtest run was not found.")
+        config = dict(run["configuration"] or {})
+        presets = {str(item["id"]): item for item in get_backtest_presets()}
+        selected_presets = {
+            strategy_id: presets[strategy_id]
+            for strategy_id in (config.get("preset_ids") or [])
+            if strategy_id in presets
+        }
+        selected_presets = {
+            str(preset["id"]): preset
+            for preset in _apply_ipo_workspace_gate(
+                list(selected_presets.values()), config,
+            )
+        }
+        desired_identities = {
+            (
+                strategy_hash(preset),
+                settings_hash(
+                    config, preset, engine_version=BACKTEST_ENGINE_VERSION,
+                    indicator_version=ENGINE_VERSION,
+                ),
+            )
+            for preset in selected_presets.values()
+        }
+        candidate_rows = session.execute(text("""
+            WITH candidates AS (
+                SELECT r.symbol,r.preset_id AS strategy_id,r.preset_name AS strategy_name,
+                       r.total_trades,r.wins,r.win_rate_pct,
+                       COALESCE((
+                           SELECT jsonb_agg(jsonb_build_object(
+                               'signal_date',t.signal_date,'entry_date',t.entry_date,
+                               'exit_date',t.exit_date,'holding_days',t.holding_days,
+                               'exit_reason',t.exit_reason,'return_pct',t.return_pct,'pnl',t.pnl
+                           ) ORDER BY t.sequence_no)
+                           FROM backtest_trades t WHERE t.result_id=r.result_id
+                       ),'[]'::jsonb) AS trade_samples
+                       ,NULL::TEXT AS strategy_hash,NULL::TEXT AS settings_hash
+                FROM backtest_results r
+                WHERE r.run_id=:run_id
+                UNION ALL
+                SELECT rejected.symbol,rejected.strategy_id,rejected.strategy_name,
+                       rejected.total_trades,
+                       ROUND(rejected.total_trades*rejected.win_rate_pct/100.0)::INTEGER AS wins,
+                       rejected.win_rate_pct,rejected.trade_samples,
+                       rejected.strategy_hash,rejected.settings_hash
+                FROM backtest_rejected_strategies rejected
+                WHERE (rejected.owner_id=:owner_id OR rejected.owner_id IS NULL)
+                  AND rejected.strategy_id=ANY(CAST(:preset_ids AS TEXT[]))
+                  AND EXISTS (
+                      SELECT 1 FROM backtest_run_symbols current_symbol
+                      WHERE current_symbol.run_id=:run_id
+                        AND current_symbol.symbol=rejected.symbol
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM backtest_results kept
+                      WHERE kept.run_id=:run_id AND kept.symbol=rejected.symbol
+                        AND kept.preset_id=rejected.strategy_id
+                  )
+            )
+            SELECT * FROM candidates
+        """), {
+            "run_id": run_id, "owner_id": owner_id,
+            "preset_ids": list(selected_presets),
+        }).mappings().all()
+        rows = [
+            dict(row) for row in candidate_rows
+            if not row.get("strategy_hash")
+            or (str(row["strategy_hash"]), str(row["settings_hash"])) in desired_identities
+        ]
+        symbols = [
+            str(symbol) for symbol in session.execute(text("""
+                SELECT symbol FROM backtest_run_symbols
+                WHERE run_id=:run_id ORDER BY symbol
+            """), {"run_id": run_id}).scalars().all()
+        ]
+        listing_dates = {}
+        if symbols:
+            listing_dates = {
+                str(row["symbol"]): row["listing_date"]
+                for row in session.execute(text("""
+                    SELECT symbol,MIN(session_date) AS listing_date
+                    FROM market_ohlcv_daily
+                    WHERE adjusted=TRUE AND symbol=ANY(CAST(:symbols AS TEXT[]))
+                    GROUP BY symbol
+                """), {"symbols": symbols}).mappings().all()
+            }
+        trade_dates = sorted({
+            date.fromisoformat(str(trade.get("signal_date") or trade.get("entry_date"))[:10])
+            for row in rows for trade in list(row.get("trade_samples") or [])
+            if trade.get("signal_date") or trade.get("entry_date")
+        })
+        proxy_regime: Dict[date, str] = {}
+        if trade_dates:
+            proxy_rows = session.execute(text("""
+                WITH prices AS (
+                    SELECT symbol,session_date,close_price,
+                           LAG(close_price) OVER (PARTITION BY symbol ORDER BY session_date) AS prior_close
+                    FROM market_ohlcv_daily
+                    WHERE adjusted=TRUE
+                      AND session_date BETWEEN :start_date AND :end_date
+                )
+                SELECT session_date,
+                       AVG((close_price/NULLIF(prior_close,0)-1)*100.0) AS equal_weight_return
+                FROM prices WHERE prior_close IS NOT NULL
+                GROUP BY session_date ORDER BY session_date
+            """), {
+                "start_date": min(trade_dates) - timedelta(days=60),
+                "end_date": max(trade_dates),
+            }).mappings().all()
+            rolling_returns: List[float] = []
+            for proxy_row in proxy_rows:
+                daily_return = float(proxy_row["equal_weight_return"] or 0)
+                rolling_returns.append(daily_return)
+                momentum = sum(rolling_returns[-20:])
+                proxy_regime[proxy_row["session_date"]] = (
+                    "bullish" if momentum > 0 else "bearish" if momentum < 0 else "neutral"
+                )
+        minimum_stock_coverage = max(
+            3, min(5, math.ceil(int(run["symbols_total"] or 0) * .10)),
+        )
+        grouped: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            strategy_id = str(row["strategy_id"])
+            item = grouped.setdefault(strategy_id, {
+                "strategy_id": strategy_id, "strategy_name": row["strategy_name"],
+                "stocks_tested": 0, "stocks_with_trades": 0, "profitable_stocks": 0,
+                "pooled_trades": 0, "pooled_wins": 0, "trade_samples": [],
+            })
+            item["stocks_tested"] += 1
+            trades = int(row.get("total_trades") or 0)
+            wins = int(row.get("wins") or 0)
+            item["pooled_trades"] += trades
+            item["pooled_wins"] += wins
+            if trades >= 1:
+                item["stocks_with_trades"] += 1
+                if float(row.get("win_rate_pct") or 0) >= 50:
+                    item["profitable_stocks"] += 1
+            ordered_trades = sorted(
+                list(row.get("trade_samples") or []),
+                key=lambda trade: str(trade.get("signal_date") or trade.get("entry_date") or ""),
+            )
+            for trade_number, trade in enumerate(ordered_trades, start=1):
+                item["trade_samples"].append({
+                    **dict(trade), "symbol": str(row["symbol"]), "trade_number": trade_number,
+                })
+        for strategy_id in config.get("preset_ids") or []:
+            preset = presets.get(str(strategy_id)) or {}
+            grouped.setdefault(str(strategy_id), {
+                "strategy_id": str(strategy_id),
+                "strategy_name": preset.get("name") or str(strategy_id),
+                "stocks_tested": int(run["symbols_total"] or 0),
+                "stocks_with_trades": 0,
+                "profitable_stocks": 0,
+                "pooled_trades": 0,
+                "pooled_wins": 0,
+                "trade_samples": [],
+            })
+        items = []
+        for source in grouped.values():
+            pooled_trades = int(source["pooled_trades"] or 0)
+            pooled_wins = int(source["pooled_wins"] or 0)
+            stocks_with_trades = int(source["stocks_with_trades"] or 0)
+            pooled_win_rate = 100.0 * pooled_wins / pooled_trades if pooled_trades else 0.0
+            preset = presets.get(str(source["strategy_id"])) or {}
+            defaults = dict(preset.get("defaults") or {})
+            tested_max_hold = (
+                defaults.get("max_holding_days")
+                if config.get("use_preset_holding_days")
+                else config.get("max_holding_days") or defaults.get("max_holding_days")
+            )
+            qualified = (
+                stocks_with_trades >= minimum_stock_coverage
+                and pooled_trades >= minimum_stock_coverage
+                and pooled_win_rate >= 50
+            )
+            regime_stats = {
+                key: {"trades": 0, "wins": 0, "win_rate_pct": 0.0}
+                for key in ("bullish", "bearish", "neutral")
+            }
+            lifecycle_windows = {
+                key: {"trades": 0, "wins": 0, "win_rate_pct": 0.0}
+                for key in ("0_30", "31_60", "61_90", "91_180", "181_365")
+            }
+            entry_occurrences = {
+                key: {"trades": 0, "wins": 0, "win_rate_pct": 0.0}
+                for key in ("first", "second", "third")
+            }
+            holding_days = []
+            exit_reasons: Dict[str, Dict[str, int]] = {}
+            for trade in source.pop("trade_samples", []):
+                signal_value = trade.get("signal_date") or trade.get("entry_date")
+                signal_date = date.fromisoformat(str(signal_value)[:10]) if signal_value else None
+                won = float(trade.get("return_pct") or 0) > 0
+                regime = proxy_regime.get(signal_date, "neutral") if signal_date else "neutral"
+                regime_stats[regime]["trades"] += 1
+                regime_stats[regime]["wins"] += int(won)
+                listing_date = listing_dates.get(str(trade["symbol"]))
+                if signal_date and listing_date:
+                    listing_age = (signal_date - listing_date).days
+                    lifecycle_key = None if listing_age < 0 else (
+                        "0_30" if listing_age <= 30 else
+                        "31_60" if listing_age <= 60 else
+                        "61_90" if listing_age <= 90 else
+                        "91_180" if listing_age <= 180 else
+                        "181_365" if listing_age <= 365 else None
+                    )
+                    if lifecycle_key:
+                        lifecycle_windows[lifecycle_key]["trades"] += 1
+                        lifecycle_windows[lifecycle_key]["wins"] += int(won)
+                if trade.get("holding_days") is not None:
+                    holding_days.append(int(trade["holding_days"]))
+                occurrence_key = {1: "first", 2: "second", 3: "third"}.get(
+                    int(trade.get("trade_number") or 0),
+                )
+                if occurrence_key:
+                    entry_occurrences[occurrence_key]["trades"] += 1
+                    entry_occurrences[occurrence_key]["wins"] += int(won)
+                reason = str(trade.get("exit_reason") or "unknown")
+                reason_stats = exit_reasons.setdefault(reason, {"trades": 0, "wins": 0})
+                reason_stats["trades"] += 1
+                reason_stats["wins"] += int(won)
+            for stats in [
+                *regime_stats.values(), *lifecycle_windows.values(),
+                *entry_occurrences.values(),
+            ]:
+                stats["win_rate_pct"] = round(
+                    100.0 * stats["wins"] / stats["trades"], 2,
+                ) if stats["trades"] else 0.0
+            def _wilson_lower_bound(stats: Dict[str, Any]) -> float:
+                count = int(stats["trades"])
+                if not count:
+                    return 0.0
+                rate = float(stats["wins"]) / count
+                z = 1.96
+                denominator = 1 + z * z / count
+                centre = rate + z * z / (2 * count)
+                spread = z * math.sqrt((rate * (1 - rate) + z * z / (4 * count)) / count)
+                return (centre - spread) / denominator
+
+            best_lifecycle_window = max(
+                lifecycle_windows,
+                key=lambda key: (
+                    _wilson_lower_bound(lifecycle_windows[key]),
+                    lifecycle_windows[key]["trades"],
+                ),
+            ) if any(item["trades"] for item in lifecycle_windows.values()) else None
+            confidence_lower_bound_pct = round(
+                100 * _wilson_lower_bound({
+                    "trades": pooled_trades, "wins": pooled_wins,
+                }),
+                2,
+            )
+            evidence_score = round(
+                confidence_lower_bound_pct * .75
+                + min(100.0, stocks_with_trades / 10 * 100) * .25,
+                2,
+            )
+            confidence_tier = (
+                "high"
+                if pooled_trades >= 15 and stocks_with_trades >= 10
+                and confidence_lower_bound_pct >= 60
+                else "moderate"
+                if pooled_trades >= 8 and stocks_with_trades >= 5
+                else "preliminary"
+            )
+            items.append({
+                "strategy_id": source["strategy_id"],
+                "strategy_name": source["strategy_name"],
+                "stocks_tested": int(source["stocks_tested"] or 0),
+                "stocks_with_trades": stocks_with_trades,
+                "profitable_stocks": int(source["profitable_stocks"] or 0),
+                "pooled_trades": pooled_trades,
+                "pooled_wins": pooled_wins,
+                "pooled_win_rate_pct": round(pooled_win_rate, 2),
+                "confidence_lower_bound_pct": confidence_lower_bound_pct,
+                "evidence_score": evidence_score,
+                "confidence_tier": confidence_tier,
+                "tested_max_holding_days": int(tested_max_hold) if tested_max_hold else None,
+                "average_holding_days": round(sum(holding_days) / len(holding_days), 2) if holding_days else None,
+                "market_proxy_regimes": regime_stats,
+                "first_30_days": lifecycle_windows["0_30"],
+                "lifecycle_windows": lifecycle_windows,
+                "best_lifecycle_window": best_lifecycle_window,
+                "entry_occurrences": entry_occurrences,
+                "exit_rule_id": preset.get("exit_rule_id"),
+                "stop_loss_pct": defaults.get("stop_loss_pct"),
+                "take_profit_pct": defaults.get("take_profit_pct"),
+                "trailing_stop_pct": defaults.get("trailing_stop_pct"),
+                "exit_reasons": exit_reasons,
+                "cross_stock_qualified": qualified,
+            })
+        items.sort(key=lambda item: (
+            not item["cross_stock_qualified"], -item["evidence_score"],
+            -item["confidence_lower_bound_pct"], -item["pooled_win_rate_pct"],
+            -item["stocks_with_trades"], -item["pooled_trades"],
+        ))
+        price_paths: List[Dict[str, Any]] = []
+        common_by_session: Dict[int, List[float]] = {}
+        if symbols:
+            path_rows = session.execute(text("""
+                WITH latest AS (
+                    SELECT DISTINCT ON (symbol,session_date)
+                           symbol,session_date,close_price
+                    FROM market_ohlcv_daily
+                    WHERE adjusted=TRUE
+                      AND symbol=ANY(CAST(:symbols AS TEXT[]))
+                      AND session_date BETWEEN :start_date AND :end_date
+                    ORDER BY symbol,session_date,fetched_at DESC
+                ),
+                numbered AS (
+                    SELECT symbol,session_date,close_price,
+                           ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY session_date)-1 AS session_number,
+                           MIN(session_date) OVER (PARTITION BY symbol) AS listing_date,
+                           FIRST_VALUE(close_price) OVER (
+                               PARTITION BY symbol ORDER BY session_date
+                               ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+                           ) AS first_close
+                    FROM latest WHERE close_price>0
+                )
+                SELECT symbol,session_date,session_number,listing_date,
+                       100.0*close_price/NULLIF(first_close,0) AS normalized_close
+                FROM numbered
+                WHERE session_number<=260
+                ORDER BY symbol,session_number
+            """), {
+                "symbols": symbols,
+                "start_date": config["start_date"],
+                "end_date": config["end_date"],
+            }).mappings().all()
+            grouped_paths: Dict[str, List[Dict[str, Any]]] = {}
+            for path_row in path_rows:
+                session_number = int(path_row["session_number"])
+                normalized = round(float(path_row["normalized_close"]), 2)
+                grouped_paths.setdefault(str(path_row["symbol"]), []).append({
+                    "session": session_number,
+                    "date": path_row["session_date"].isoformat(),
+                    "listing_age_days": int(
+                        (path_row["session_date"] - path_row["listing_date"]).days
+                    ),
+                    "normalized_close": normalized,
+                })
+                common_by_session.setdefault(session_number, []).append(normalized)
+            for symbol, points in sorted(grouped_paths.items()):
+                values = [float(point["normalized_close"]) for point in points]
+                peak_index = max(range(len(values)), key=values.__getitem__)
+                trough_index = peak_index + min(
+                    range(len(values) - peak_index),
+                    key=lambda offset: values[peak_index + offset],
+                )
+                peak_value = values[peak_index]
+                trough_value = values[trough_index]
+                latest_value = values[-1]
+                drawdown = 100 * (trough_value / peak_value - 1) if peak_value else 0
+                current_from_peak = 100 * (latest_value / peak_value - 1) if peak_value else 0
+                recovery = 100 * (latest_value / trough_value - 1) if trough_value else 0
+                stage = (
+                    "markup"
+                    if peak_index == len(values) - 1 or drawdown > -5
+                    else "recovered"
+                    if current_from_peak >= -5
+                    else "base_or_recovery"
+                    if recovery >= 8
+                    else "selloff"
+                )
+                price_paths.append({
+                    "symbol": symbol,
+                    "points": points,
+                    "stage": stage,
+                    "peak_session": int(points[peak_index]["session"]),
+                    "peak_date": points[peak_index]["date"],
+                    "peak_normalized": round(peak_value, 2),
+                    "trough_session": int(points[trough_index]["session"]),
+                    "trough_date": points[trough_index]["date"],
+                    "trough_normalized": round(trough_value, 2),
+                    "peak_to_trough_drawdown_pct": round(drawdown, 2),
+                    "recovery_from_trough_pct": round(recovery, 2),
+                    "current_from_peak_pct": round(current_from_peak, 2),
+                    "latest_normalized": round(latest_value, 2),
+                })
+
+        def _percentile(values: List[float], fraction: float) -> float:
+            ordered = sorted(values)
+            if not ordered:
+                return 0.0
+            position = (len(ordered) - 1) * fraction
+            lower = math.floor(position)
+            upper = math.ceil(position)
+            if lower == upper:
+                return ordered[lower]
+            return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
+
+        common_pattern = [{
+            "session": session_number,
+            "median": round(_percentile(values, .5), 2),
+            "p25": round(_percentile(values, .25), 2),
+            "p75": round(_percentile(values, .75), 2),
+            "stocks": len(values),
+        } for session_number, values in sorted(common_by_session.items())]
+        return {
+            "items": items,
+            "ipo_price_paths": price_paths,
+            "common_pattern": common_pattern,
+            "minimum_stock_coverage": minimum_stock_coverage,
+            "candidate_rule": "A stock with one trade contributes to pooled IPO evidence.",
+            "regime_method": "Causal 20-session momentum of an equal-weight proxy built from available adjusted NEPSE-listed share closes; not the official capitalization-weighted NEPSE index.",
+            "qualification_rule": (
+                f"At least {minimum_stock_coverage} IPO stocks with trades, at least "
+                f"{minimum_stock_coverage} pooled trades, and pooled win rate of 50% or more."
+            ),
+        }
+    finally:
+        session.close()
+
+
 def list_runs(*, owner_id: str = "local", page: int = 1, page_size: int = 25) -> Dict[str, Any]:
     session = _session()
     try:
@@ -532,6 +998,7 @@ def list_runs(*, owner_id: str = "local", page: int = 1, page_size: int = 25) ->
                         updated_at DESC,created_at DESC"""
         ), {"owner_id": owner_id}).mappings().all()
         unique: List[Dict[str, Any]] = []
+        ipo_unique: List[Dict[str, Any]] = []
         seen = set()
         for mapped in rows:
             row = dict(mapped)
@@ -545,17 +1012,25 @@ def list_runs(*, owner_id: str = "local", page: int = 1, page_size: int = 25) ->
             if display_key in seen:
                 continue
             seen.add(display_key)
-            unique.append(_public_run(row))
+            preset_ids = [str(value) for value in config.get("preset_ids") or []]
+            is_ipo_research = (
+                str(row.get("run_type") or "") == "ipo_research"
+                or bool(preset_ids) and all(value.startswith("ipo_") for value in preset_ids)
+            )
+            (ipo_unique if is_ipo_research else unique).append(_public_run(row))
         total = len(unique)
         offset = (page - 1) * page_size
         canonical_total = int(session.execute(text(
             """SELECT COUNT(*) FROM backtest_canonical_results canonical
                JOIN backtest_runs br ON br.run_id=canonical.run_id
-               WHERE canonical.owner_id=:owner_id AND br.deleted_at IS NULL AND br.archived_at IS NULL"""
+               WHERE canonical.owner_id=:owner_id AND br.deleted_at IS NULL
+                 AND br.archived_at IS NULL AND br.run_type<>'ipo_research'"""
         ), {"owner_id": owner_id}).scalar() or 0)
         return {
             "items": unique[offset:offset + page_size], "page": page,
             "page_size": page_size, "total": total,
+            "ipo_items": ipo_unique,
+            "ipo_total": len(ipo_unique),
             "unique_configuration_total": canonical_total,
         }
     finally:
@@ -895,11 +1370,12 @@ def _finalize_scores(run_id: str) -> None:
                FROM backtest_results WHERE run_id=:run_id"""
         ), {"run_id": run_id}).mappings().all()]
         assign_robust_scores(rows)
-        session.execute(text(
-            """UPDATE backtest_results SET robust_score=:robust_score,fdr_q_value=:fdr_q_value,
-                      warning_codes=CAST(:warning_codes AS JSONB) WHERE result_id=:result_id"""
-        ), [{"result_id": row["result_id"], "robust_score": row["robust_score"],
-             "fdr_q_value": row["fdr_q_value"], "warning_codes": json.dumps(row["warning_codes"])} for row in rows])
+        if rows:
+            session.execute(text(
+                """UPDATE backtest_results SET robust_score=:robust_score,fdr_q_value=:fdr_q_value,
+                          warning_codes=CAST(:warning_codes AS JSONB) WHERE result_id=:result_id"""
+            ), [{"result_id": row["result_id"], "robust_score": row["robust_score"],
+                 "fdr_q_value": row["fdr_q_value"], "warning_codes": json.dumps(row["warning_codes"])} for row in rows])
         session.execute(text(
             """WITH latest AS (SELECT MAX(current_signal_date) AS max_date FROM backtest_results WHERE run_id=:run_id)
                UPDATE backtest_results r SET strong_buy_qualified=FALSE,current_signal_status='stale',
@@ -931,16 +1407,23 @@ def run_claimed_run(run_id: str) -> None:
         ), {"run_id": run_id}).mappings().one()
         config = dict(row["configuration"] or {})
         owner_id = str(row["owner_id"])
+        market_constrained = market_research_is_constrained()
+        adaptive_workers = background_worker_limit(None, market_constrained=market_constrained)
+        if str(config.get("worker_policy") or "adaptive_market_hours") == "fixed":
+            adaptive_workers = background_worker_limit(
+                int(config.get("max_workers") or 1),
+                market_constrained=market_constrained,
+            )
+        turn_size = background_turn_size(
+            adaptive_workers,
+            market_constrained=market_constrained,
+        )
         symbol_rows = session.execute(text(
             """SELECT symbol,last_tested_session
                FROM backtest_run_symbols
                WHERE run_id=:run_id AND status='queued'
                ORDER BY symbol"""
         ), {"run_id": run_id}).mappings().all()
-        try:
-            turn_size = max(1, min(4, int(os.getenv("BACKTEST_ROUND_ROBIN_STOCKS_PER_TURN", "1"))))
-        except ValueError:
-            turn_size = 1
         symbol_rows = symbol_rows[:turn_size]
         symbols = [str(item["symbol"]) for item in symbol_rows]
         last_tested_by_symbol = {
@@ -971,8 +1454,10 @@ def run_claimed_run(run_id: str) -> None:
                      AND combinations_completed < :expected"""
             ), {"run_id": run_id, "expected": len(presets)})
             symbols = repair_session.execute(text(
-                "SELECT symbol FROM backtest_run_symbols WHERE run_id=:run_id AND status NOT IN ('completed') ORDER BY symbol"
-            ), {"run_id": run_id}).scalars().all()
+                """SELECT symbol FROM backtest_run_symbols
+                   WHERE run_id=:run_id AND status='queued'
+                   ORDER BY symbol LIMIT :turn_size"""
+            ), {"run_id": run_id, "turn_size": turn_size}).scalars().all()
             repair_session.commit()
         except Exception:
             repair_session.rollback()
@@ -981,6 +1466,7 @@ def run_claimed_run(run_id: str) -> None:
             repair_session.close()
     else:
         presets = [item for item in get_backtest_presets() if item["id"] in set(config.get("preset_ids") or [])]
+    presets = _apply_ipo_workspace_gate(presets, config)
     incremental_refresh = bool(
         config.get("incremental_refresh_active")
         or config.get("refresh_window_sessions")
@@ -1051,6 +1537,7 @@ def run_claimed_run(run_id: str) -> None:
         "trailing_stop_pct": config.get("trailing_stop_pct"),
         "max_volume_participation_pct": float(config.get("max_volume_participation_pct") or 10),
         "risk_free_rate_pct": float(config.get("risk_free_rate_pct") or 4), "professional": True,
+        "use_preset_holding_days": bool(config.get("use_preset_holding_days")),
     }
     tasks: List[Dict[str, Any]] = []
     cached_by_symbol: Dict[str, Dict[str, Any]] = {}
@@ -1111,11 +1598,9 @@ def run_claimed_run(run_id: str) -> None:
         raise
     finally:
         cache_session.close()
-    # Always allow the current deployment worker cap, even when an older run
-    # stored max_workers=1. Reserved CPUs still protect API/dashboard traffic.
     workers = (
         1 if incremental_refresh
-        else background_worker_limit(max(int(config.get("max_workers") or 1), 3))
+        else adaptive_workers
     )
     signal_refresh_symbols = {
         str(task["symbol"]) for task in tasks if task.get("signal_refresh")
@@ -2165,7 +2650,8 @@ def set_run_control(run_id: str, action: str, *, owner_id: str = "local") -> Dic
                              AND status IN ('queued','running','paused')"""
         elif action == "pause":
             statement = """UPDATE backtest_runs
-                           SET pause_requested=TRUE,status='paused',updated_at=NOW()
+                           SET pause_requested=TRUE,status='paused',current_symbol=NULL,
+                               lease_owner=NULL,lease_expires_at=NULL,updated_at=NOW()
                            WHERE run_id=:run_id AND owner_id=:owner_id
                              AND status IN ('queued','running')"""
         else:
@@ -2199,7 +2685,18 @@ def retry_failed_symbols(run_id: str, *, owner_id: str = "local") -> Dict[str, A
             raise ValueError("This run has no failed symbols to retry.")
         session.execute(text(
             """UPDATE backtest_runs SET status='queued',cancel_requested=FALSE,pause_requested=FALSE,
-                      error_summary=NULL,finished_at=NULL,updated_at=NOW() WHERE run_id=:run_id AND owner_id=:owner_id"""
+                      symbols_completed=(
+                          SELECT COUNT(*) FROM backtest_run_symbols
+                          WHERE run_id=:run_id AND status IN ('completed','failed')
+                      ),
+                      progress_pct=ROUND((
+                          100.0*(SELECT COUNT(*) FROM backtest_run_symbols
+                                 WHERE run_id=:run_id AND status IN ('completed','failed'))
+                          / NULLIF(symbols_total,0)
+                      )::numeric,1)::double precision,
+                      current_symbol=NULL,lease_owner=NULL,lease_expires_at=NULL,
+                      error_summary=NULL,finished_at=NULL,updated_at=NOW()
+               WHERE run_id=:run_id AND owner_id=:owner_id"""
         ), {"run_id": run_id, "owner_id": owner_id})
         session.commit()
     except Exception:

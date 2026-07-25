@@ -30,16 +30,46 @@ echarts.use([BarChart, CandlestickChart, LineChart, ScatterChart, AxisPointerCom
 
 type Preset = { id: string; name: string; category: string; family: string; description: string };
 type Run = {
-  run_id: string; name: string; status: string; progress_pct: number; symbols_completed: number;
+  run_id: string; name: string; run_type?: string; status: string; progress_pct: number; symbols_completed: number;
   symbols_total: number; combinations_completed: number; current_symbol?: string; created_at?: string;
   started_at?: string | null;
-  configuration: { start_date: string; end_date: string; preset_ids: string[]; ordinary_shares_only: boolean; history_mode?: 'all_available' | 'custom'; strategy_mode?: 'presets' | 'custom' | 'discovery'; custom_query_text?: string };
+  configuration: {
+    start_date: string; end_date: string; preset_ids: string[]; ordinary_shares_only: boolean;
+    history_mode?: 'all_available' | 'custom'; strategy_mode?: 'presets' | 'custom' | 'discovery';
+    custom_query_text?: string; discovery_budget?: number; max_listing_age_days?: number | null;
+  };
   error_summary?: string;
   pause_requested?: boolean;
   cancel_requested?: boolean;
   archived_at?: string | null;
   archive_expires_at?: string | null;
   archive_days_remaining?: number;
+};
+type IpoStrategySummary = {
+  items: Array<{
+    strategy_id: string; strategy_name: string; stocks_tested: number; stocks_with_trades: number;
+    profitable_stocks: number; pooled_trades: number; pooled_wins: number; pooled_win_rate_pct: number;
+    confidence_lower_bound_pct: number; evidence_score: number; confidence_tier: 'high' | 'moderate' | 'preliminary';
+    tested_max_holding_days?: number | null; average_holding_days?: number | null;
+    market_proxy_regimes: Record<'bullish' | 'bearish' | 'neutral', { trades: number; wins: number; win_rate_pct: number }>;
+    first_30_days: { trades: number; wins: number; win_rate_pct: number };
+    lifecycle_windows: Record<'0_30' | '31_60' | '61_90' | '91_180' | '181_365', { trades: number; wins: number; win_rate_pct: number }>;
+    best_lifecycle_window?: '0_30' | '31_60' | '61_90' | '91_180' | '181_365' | null;
+    entry_occurrences: Record<'first' | 'second' | 'third', { trades: number; wins: number; win_rate_pct: number }>;
+    exit_rule_id?: string | null; stop_loss_pct?: number | null; take_profit_pct?: number | null;
+    trailing_stop_pct?: number | null; exit_reasons: Record<string, { trades: number; wins: number }>;
+    cross_stock_qualified: boolean;
+  }>;
+  ipo_price_paths: Array<{
+    symbol: string; stage: 'markup' | 'selloff' | 'base_or_recovery' | 'recovered';
+    peak_session: number; peak_date: string; peak_normalized: number;
+    trough_session: number; trough_date: string; trough_normalized: number;
+    peak_to_trough_drawdown_pct: number; recovery_from_trough_pct: number;
+    current_from_peak_pct: number; latest_normalized: number;
+    points: Array<{ session: number; date: string; listing_age_days: number; normalized_close: number }>;
+  }>;
+  common_pattern: Array<{ session: number; median: number; p25: number; p75: number; stocks: number }>;
+  minimum_stock_coverage: number; candidate_rule: string; qualification_rule: string; regime_method: string;
 };
 type ResultRow = Record<string, any> & { result_id: number; symbol: string; preset_name: string };
 type ResultPage = { items: ResultRow[]; page: number; page_size: number; total: number; pages: number };
@@ -262,6 +292,22 @@ const aiBacktestPresets = [
 const defaultOpportunityFilterOperator = (field: typeof opportunityFilterFields[number]) => field.defaultOperator || (field.type === 'number' ? 'gte' : 'contains');
 const defaultOpportunityFilters = { minimum_trades: '5', minimum_win_rate: '', minimum_confidence: '', minimum_sharpe: '', minimum_profit_factor: '', maximum_drawdown: '', minimum_return: '', minimum_volume: '', category: '', current_signal: 'buy' };
 const optionalNumber = (value: string) => value.trim() === '' ? null : Number(value);
+const runStrategyCount = (run: Run) => {
+  const mode = run.configuration?.strategy_mode || 'presets';
+  if (mode === 'custom') return 1;
+  if (mode === 'discovery') return Number(run.configuration?.discovery_budget || 0);
+  return Array.isArray(run.configuration?.preset_ids) ? run.configuration.preset_ids.length : 0;
+};
+const runScansDone = (run: Run) => Math.max(
+  Number(run.combinations_completed || 0),
+  Number(run.symbols_completed || 0) * runStrategyCount(run),
+);
+const isIpoRun = (run: Run | null) => Boolean(
+  run && (
+    run.run_type === 'ipo_research'
+    || (run.configuration?.preset_ids?.length && run.configuration.preset_ids.every((id) => id.startsWith('ipo_')))
+  ),
+);
 const fmt = (value: unknown, key: string) => {
   if (value == null || value === '') return '—';
   if (typeof value === 'number') {
@@ -293,6 +339,132 @@ const StrongBuyCharts: React.FC<{ trades: Array<Record<string, any>> }> = ({ tra
     return () => { observer.disconnect(); chart.off('legendselectchanged', onLegendSelection); chart.dispose(); };
   }, [trades]);
   return <div className="strong-buy-chart" ref={ref} aria-label="Equity, trade profit and drawdown chart" />;
+};
+
+const IpoResearchCharts: React.FC<{ summary: IpoStrategySummary }> = ({ summary }) => {
+  const patternRef = useRef<HTMLDivElement | null>(null);
+  const strategyRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!patternRef.current) return undefined;
+    const chart = echarts.init(patternRef.current);
+    const common = summary.common_pattern || [];
+    chart.setOption({
+      animation: false,
+      tooltip: { trigger: 'axis' },
+      legend: { data: ['Cross-stock median', '25th percentile', '75th percentile'], top: 4 },
+      grid: { left: 55, right: 24, top: 48, bottom: 52 },
+      xAxis: { type: 'value', name: 'Trading sessions since first data', min: 0 },
+      yAxis: { type: 'value', name: 'Normalized price', axisLabel: { formatter: '{value}' } },
+      dataZoom: [{ type: 'inside' }, { type: 'slider', height: 18 }],
+      series: [
+        ...(summary.ipo_price_paths || []).map((path) => ({
+          name: path.symbol, type: 'line', data: path.points.map((point) => [point.session, point.normalized_close]),
+          showSymbol: false, silent: true, lineStyle: { width: 1, opacity: .16, color: '#6f88a1' },
+          emphasis: { disabled: true },
+        })),
+        { name: '25th percentile', type: 'line', data: common.map((point) => [point.session, point.p25]), showSymbol: false, lineStyle: { color: '#d18b3d', type: 'dashed', width: 1.5 } },
+        { name: '75th percentile', type: 'line', data: common.map((point) => [point.session, point.p75]), showSymbol: false, lineStyle: { color: '#d18b3d', type: 'dashed', width: 1.5 } },
+        { name: 'Cross-stock median', type: 'line', data: common.map((point) => [point.session, point.median]), showSymbol: false, lineStyle: { color: '#087f6b', width: 3 }, z: 5 },
+      ],
+    });
+    const observer = new ResizeObserver(() => chart.resize()); observer.observe(patternRef.current);
+    return () => { observer.disconnect(); chart.dispose(); };
+  }, [summary.common_pattern, summary.ipo_price_paths]);
+  useEffect(() => {
+    if (!strategyRef.current) return undefined;
+    const chart = echarts.init(strategyRef.current);
+    const ranked = [...(summary.items || [])].sort((a, b) => b.pooled_win_rate_pct - a.pooled_win_rate_pct || b.pooled_trades - a.pooled_trades);
+    chart.setOption({
+      animation: false,
+      tooltip: { trigger: 'axis' },
+      legend: { data: ['Pooled win rate', 'Trades', '80% research target'], top: 4 },
+      grid: { left: 55, right: 55, top: 48, bottom: 150 },
+      xAxis: { type: 'category', data: ranked.map((item) => item.strategy_name), axisLabel: { interval: 0, rotate: 48, fontSize: 9 } },
+      yAxis: [{ type: 'value', name: 'Win %', min: 0, max: 100 }, { type: 'value', name: 'Trades', min: 0 }],
+      dataZoom: [{ type: 'inside' }, { type: 'slider', height: 18, bottom: 8 }],
+      series: [
+        { name: 'Pooled win rate', type: 'bar', data: ranked.map((item) => ({ value: item.pooled_win_rate_pct, itemStyle: { color: item.cross_stock_qualified ? '#16866f' : '#91a5b7' } })) },
+        { name: 'Trades', type: 'line', yAxisIndex: 1, data: ranked.map((item) => item.pooled_trades), showSymbol: true, lineStyle: { color: '#345f8c' } },
+        { name: '80% research target', type: 'line', data: ranked.map(() => 80), showSymbol: false, silent: true, lineStyle: { color: '#d45454', type: 'dashed', width: 1.5 } },
+      ],
+    });
+    const observer = new ResizeObserver(() => chart.resize()); observer.observe(strategyRef.current);
+    return () => { observer.disconnect(); chart.dispose(); };
+  }, [summary.items]);
+  return <div className="ipo-research-charts">
+    <article><h3>All IPO price paths</h3><p>Each stock starts at 100. Thin lines are individual IPOs; the bold line is their median.</p><div ref={patternRef} aria-label="Normalized price paths for every IPO stock" /></article>
+    <article><h3>Strategy evidence graph</h3><p>Win rate is shown with its pooled trade count. The 80% line is a research target, not a pass created by weakening sample requirements.</p><div ref={strategyRef} aria-label="IPO strategy win rates and pooled trade counts" /></article>
+  </div>;
+};
+
+const IpoStockPathGrid: React.FC<{ paths: IpoStrategySummary['ipo_price_paths'] }> = ({ paths }) => {
+  const [stage, setStage] = useState<'all' | IpoStrategySummary['ipo_price_paths'][number]['stage']>('all');
+  const visible = stage === 'all' ? paths : paths.filter((path) => path.stage === stage);
+  const stageLabel = (value: string) => ({
+    markup: 'Markup / new high', selloff: 'Near post-peak low',
+    base_or_recovery: 'Base / recovery', recovered: 'Recovered near peak',
+  }[value] || value);
+  return <section className="research-panel ipo-stock-paths">
+    <div className="ipo-stock-path-heading"><div><h3>Every IPO lifecycle chart</h3><p>Price is normalized to 100 at the first stored session. Peak and post-peak trough are marked without using future data in any trade signal.</p></div><label>Lifecycle now<select value={stage} onChange={(event) => setStage(event.target.value as typeof stage)}><option value="all">All stages</option><option value="markup">Markup / new high</option><option value="selloff">Near post-peak low</option><option value="base_or_recovery">Base / recovery</option><option value="recovered">Recovered near peak</option></select></label></div>
+    <div className="ipo-stock-path-grid">{visible.map((path) => {
+      const width = 260; const height = 92; const pad = 7;
+      const values = path.points.map((point) => point.normalized_close);
+      const min = Math.min(...values); const max = Math.max(...values);
+      const x = (session: number) => pad + session / Math.max(1, path.points[path.points.length - 1].session) * (width - pad * 2);
+      const y = (value: number) => height - pad - (value - min) / Math.max(1, max - min) * (height - pad * 2);
+      const polyline = path.points.map((point) => `${x(point.session).toFixed(1)},${y(point.normalized_close).toFixed(1)}`).join(' ');
+      return <article key={path.symbol}>
+        <header><b>{path.symbol}</b><span className={`ipo-stage ${path.stage}`}>{stageLabel(path.stage)}</span></header>
+        <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${path.symbol} normalized IPO lifecycle`}>
+          <line x1={pad} x2={width - pad} y1={y(100)} y2={y(100)} className="ipo-baseline" />
+          <polyline points={polyline} className="ipo-path-line" />
+          <circle cx={x(path.peak_session)} cy={y(path.peak_normalized)} r="3" className="ipo-peak-point"><title>Peak {path.peak_date}</title></circle>
+          <circle cx={x(path.trough_session)} cy={y(path.trough_normalized)} r="3" className="ipo-trough-point"><title>Post-peak trough {path.trough_date}</title></circle>
+        </svg>
+        <dl><div><dt>Peak → trough</dt><dd>{path.peak_to_trough_drawdown_pct.toFixed(2)}%</dd></div><div><dt>Trough recovery</dt><dd>+{path.recovery_from_trough_pct.toFixed(2)}%</dd></div><div><dt>Current vs peak</dt><dd>{path.current_from_peak_pct.toFixed(2)}%</dd></div></dl>
+      </article>;
+    })}</div>
+    {visible.length === 0 && <div className="research-empty">No IPO currently matches this lifecycle stage.</div>}
+  </section>;
+};
+
+const IpoStrategyCards: React.FC<{ summary: IpoStrategySummary }> = ({ summary }) => {
+  const lifecycleLabels = { '0_30': '0–30d', '31_60': '31–60d', '61_90': '61–90d', '91_180': '91–180d', '181_365': '181–365d' };
+  const leaders = summary.items.filter((item) => item.cross_stock_qualified).slice(0, 3);
+  return <section className="research-panel ipo-strategy-summary">
+    <div><h3>Common cross-stock strategy ranking</h3><p>{summary.candidate_rule} {summary.qualification_rule}</p><small>{summary.regime_method}</small></div>
+    <div className="ipo-evidence-leaders">{leaders.map((item, index) => <article key={item.strategy_id}><span>#{index + 1} confidence-adjusted</span><b>{item.strategy_name}</b><strong>{item.evidence_score.toFixed(2)}</strong><small>{item.confidence_tier} evidence · {item.confidence_lower_bound_pct.toFixed(2)}% conservative win-rate floor · {item.pooled_trades} trades</small></article>)}</div>
+    <div className="ipo-strategy-summary-grid">{summary.items.map((item) => {
+      const bullish = item.market_proxy_regimes?.bullish;
+      const bearish = item.market_proxy_regimes?.bearish;
+      const exitParts = [
+        item.exit_rule_id ? item.exit_rule_id.replaceAll('_', ' ') : null,
+        item.stop_loss_pct != null ? `${item.stop_loss_pct}% stop` : null,
+        item.take_profit_pct != null ? `${item.take_profit_pct}% target` : null,
+        item.trailing_stop_pct != null ? `${item.trailing_stop_pct}% trail` : null,
+      ].filter(Boolean);
+      return <article key={item.strategy_id} className={item.cross_stock_qualified ? 'qualified' : ''}>
+        <span>{item.cross_stock_qualified ? 'Cross-stock qualified' : 'Candidate evidence'}</span><b>{item.strategy_name}</b>
+        <dl>
+          <div><dt>Evidence confidence</dt><dd>{item.evidence_score.toFixed(2)} · {item.confidence_tier}</dd></div>
+          <div><dt>Conservative win floor</dt><dd>{item.confidence_lower_bound_pct.toFixed(2)}%</dd></div>
+          <div><dt>Pooled win rate</dt><dd>{item.pooled_win_rate_pct.toFixed(2)}%</dd></div>
+          <div><dt>Wins / trades</dt><dd>{item.pooled_wins}/{item.pooled_trades}</dd></div>
+          <div><dt>Stock coverage</dt><dd>{item.stocks_with_trades}/{item.stocks_tested}</dd></div>
+          {(['first', 'second', 'third'] as const).map((occurrence, index) => {
+            const stats = item.entry_occurrences?.[occurrence];
+            return <div key={occurrence}><dt>{index + 1}{index === 0 ? 'st' : index === 1 ? 'nd' : 'rd'} eligible trade</dt><dd>{stats?.trades ? `${stats.win_rate_pct.toFixed(2)}% · ${stats.trades}` : 'No trades'}</dd></div>;
+          })}
+          <div><dt>Most repeatable listing age</dt><dd>{item.best_lifecycle_window ? lifecycleLabels[item.best_lifecycle_window] : 'No trades'}</dd></div>
+          {Object.entries(item.lifecycle_windows || {}).map(([window, stats]) => <div key={window}><dt>Listed {lifecycleLabels[window as keyof typeof lifecycleLabels]}</dt><dd>{stats.trades ? `${stats.win_rate_pct.toFixed(2)}% · ${stats.trades}` : 'No trades'}</dd></div>)}
+          <div><dt>Bull market proxy</dt><dd>{bullish?.trades ? `${bullish.win_rate_pct.toFixed(2)}% · ${bullish.trades}` : 'No trades'}</dd></div>
+          <div><dt>Bear market proxy</dt><dd>{bearish?.trades ? `${bearish.win_rate_pct.toFixed(2)}% · ${bearish.trades}` : 'No trades'}</dd></div>
+          <div><dt>Hold observed / tested</dt><dd>{item.average_holding_days != null ? `${item.average_holding_days}d` : '—'} / {item.tested_max_holding_days ? `${item.tested_max_holding_days}d` : '—'}</dd></div>
+          <div><dt>Sell protection</dt><dd>{exitParts.join(' · ') || 'Saved strategy exit'}</dd></div>
+        </dl>
+      </article>;
+    })}</div>
+  </section>;
 };
 
 const EMPTY_CANDLES: TradeChartCandle[] = [];
@@ -351,14 +523,18 @@ const BacktestV2: React.FC = () => {
   const [presets, setPresets] = useState<Preset[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [runs, setRuns] = useState<Run[]>([]);
+  const [ipoRuns, setIpoRuns] = useState<Run[]>([]);
+  const [ipoStrategySummary, setIpoStrategySummary] = useState<IpoStrategySummary | null>(null);
   const [activeRun, setActiveRun] = useState<Run | null>(null);
   const [name, setName] = useState('Full NEPSE robustness scan');
   const [historyMode, setHistoryMode] = useState<'all_available' | 'custom'>('all_available');
   const [startDate, setStartDate] = useState(defaultStart);
   const [endDate, setEndDate] = useState(today);
   const [ordinaryOnly, setOrdinaryOnly] = useState(true);
+  const [maxListingAgeDays, setMaxListingAgeDays] = useState('');
   const [minHoldingDays, setMinHoldingDays] = useState('5');
   const [maxHoldingDays, setMaxHoldingDays] = useState('90');
+  const [ipoResearchMode, setIpoResearchMode] = useState(false);
   const [strategyMode, setStrategyMode] = useState<'presets' | 'custom' | 'discovery'>('presets');
   const [discoveryBudget, setDiscoveryBudget] = useState('1000');
   const [customQuery, setCustomQuery] = useState(defaultCustomQuery);
@@ -427,7 +603,7 @@ const BacktestV2: React.FC = () => {
     }, 350);
     return () => window.clearTimeout(timer);
   }, [columnPreferenceLoaded, visibleResultColumns]);
-  const [tab, setTab] = useState<'opportunities' | 'combinations' | 'portfolio' | 'ai' | 'quality'>('combinations');
+  const [tab, setTab] = useState<'opportunities' | 'combinations' | 'portfolio' | 'ai' | 'quality' | 'ipo'>('combinations');
   const [results, setResults] = useState<ResultPage>({ items: [], page: 1, page_size: 50, total: 0, pages: 0 });
   const initialResultPageRef = useRef(Math.max(1, Number(savedResultFilterState.page || 1)));
   const [resultScope, setResultScope] = useState<'run' | 'all' | 'strategies' | 'holistic'>(() => {
@@ -529,16 +705,17 @@ const BacktestV2: React.FC = () => {
           nextOpportunityFilterId.current = Math.max(...state.opportunityFilterRows.map((item: any) => Number(item.id) || 0), 0) + 1;
         }
         if (Array.isArray(state.appliedOpportunityFilters)) setAppliedOpportunityFilters(state.appliedOpportunityFilters);
-        if (['opportunities', 'combinations', 'portfolio', 'ai', 'quality'].includes(state.tab)) setTab(state.tab);
+        if (['opportunities', 'combinations', 'portfolio', 'ai', 'quality', 'ipo'].includes(state.tab)) setTab(state.tab);
       }
       setFilterPreferenceLoaded(true);
     });
   }, [initialResultSymbol]);
 
   const loadRuns = async () => {
-    const response = await fetchJson<{ items: Run[]; unique_configuration_total?: number }>('/api/backtests/v2/runs?page=1&page_size=50');
+    const response = await fetchJson<{ items: Run[]; ipo_items?: Run[]; unique_configuration_total?: number }>('/api/backtests/v2/runs?page=1&page_size=50');
     if (!response.ok) return;
     setRuns(response.data.items);
+    setIpoRuns(response.data.ipo_items || []);
     setUniqueConfigurationTotal(Number(response.data.unique_configuration_total || 0));
     void fetchJson<{ items: Run[]; retention_days?: number }>('/api/backtests/v2/runs/archived').then((archived) => {
       if (!archived.ok) return;
@@ -550,6 +727,16 @@ const BacktestV2: React.FC = () => {
       ? response.data.items.find((item) => item.run_id === current.run_id) || current
       : response.data.items.find((item) => item.run_id === requested) || response.data.items[0] || null);
   };
+
+  useEffect(() => {
+    if (!activeRun || !isIpoRun(activeRun)) {
+      setIpoStrategySummary(null);
+      return;
+    }
+    void fetchJson<IpoStrategySummary>(`/api/backtests/v2/runs/${activeRun.run_id}/ipo-strategy-summary`).then((response) => {
+      setIpoStrategySummary(response.ok ? response.data : null);
+    });
+  }, [activeRun?.run_id, activeRun?.status, activeRun?.combinations_completed]);
 
   const refreshActiveWorkspace = async () => {
     if (!activeRun) { await loadRuns(); return; }
@@ -917,8 +1104,11 @@ const BacktestV2: React.FC = () => {
     event.preventDefault(); setCreating(true); setError('');
     const parsedMinHold = optionalNumber(minHoldingDays) ?? 5;
     const parsedMaxHold = optionalNumber(maxHoldingDays) ?? 90;
+    const parsedMaxListingAge = optionalNumber(maxListingAgeDays);
     if (!Number.isInteger(parsedMinHold) || parsedMinHold < 0 || parsedMinHold > 365) { setCreating(false); setError('Minimum holding days must be a whole number from 0 to 365.'); return; }
     if (!Number.isInteger(parsedMaxHold) || parsedMaxHold < 1 || parsedMaxHold > 365) { setCreating(false); setError('Maximum holding days must be a whole number from 1 to 365. A blank field uses the 90-day default.'); return; }
+    if (parsedMaxListingAge != null && (!Number.isInteger(parsedMaxListingAge) || parsedMaxListingAge < 1 || parsedMaxListingAge > 36500)) { setCreating(false); setError('Maximum listing age must be a whole number from 1 to 36,500 days.'); return; }
+    if (ipoResearchMode && parsedMaxListingAge == null) { setCreating(false); setError('Choose a listing-age limit for the separate IPO research workspace.'); return; }
     if (runScope === 'single' && !selectedStock) { setCreating(false); setError('Choose one stock from the symbol suggestions before running.'); return; }
     if (strategyMode === 'custom' && customQuery.trim().length < 20) { setCreating(false); setError('Enter a complete Strategy Language query.'); return; }
     if (strategyMode === 'presets' && selected.size === 0) { setCreating(false); setError('Select at least one strategy preset.'); return; }
@@ -927,7 +1117,7 @@ const BacktestV2: React.FC = () => {
     if (parsedMaxHold != null && parsedMinHold > parsedMaxHold) { setCreating(false); setError('Minimum holding days cannot exceed maximum holding days.'); return; }
     const response = await fetchJson<Run>('/api/backtests/v2/runs', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, history_mode: historyMode, start_date: historyMode === 'all_available' ? allHistoryStart : startDate, end_date: historyMode === 'all_available' ? today : endDate, strategy_mode: strategyMode, custom_query_text: strategyMode === 'custom' ? customQuery : null, preset_ids: strategyMode === 'presets' ? Array.from(selected) : [], discovery_budget: strategyMode === 'discovery' ? parsedDiscoveryBudget : 1000, discovery_seed: 20260718, discovery_base_ids: strategyMode === 'discovery' ? Array.from(selected) : [], symbols: runScope === 'single' && selectedStock ? [selectedStock.symbol] : null, ordinary_shares_only: ordinaryOnly, min_holding_days: parsedMinHold, max_holding_days: parsedMaxHold, data_source: 'merolagani', max_workers: 2, run_type: runScope === 'single' ? 'single_stock' : 'market_scan' }),
+      body: JSON.stringify({ name, history_mode: historyMode, start_date: historyMode === 'all_available' ? allHistoryStart : startDate, end_date: historyMode === 'all_available' ? today : endDate, strategy_mode: strategyMode, custom_query_text: strategyMode === 'custom' ? customQuery : null, preset_ids: strategyMode === 'presets' ? Array.from(selected) : [], discovery_budget: strategyMode === 'discovery' ? parsedDiscoveryBudget : 1000, discovery_seed: 20260718, discovery_base_ids: strategyMode === 'discovery' ? Array.from(selected) : [], symbols: runScope === 'single' && selectedStock ? [selectedStock.symbol] : null, ordinary_shares_only: ordinaryOnly, max_listing_age_days: parsedMaxListingAge, min_holding_days: parsedMinHold, max_holding_days: parsedMaxHold, use_preset_holding_days: ipoResearchMode, data_source: 'merolagani', max_workers: 2, run_type: ipoResearchMode ? 'ipo_research' : runScope === 'single' ? 'single_stock' : 'market_scan' }),
     }, 120000);
     setCreating(false);
     if (!response.ok) { setError(response.error || 'Could not queue the research run.'); return; }
@@ -1027,6 +1217,32 @@ const BacktestV2: React.FC = () => {
   const grouped = useMemo(() => Object.entries(presets.reduce<Record<string, Preset[]>>((all, preset) => {
     (all[preset.category] ||= []).push(preset); return all;
   }, {})), [presets]);
+  const newIpoPresetIds = useMemo(
+    () => presets.filter((preset) => preset.category === 'New IPO aftermarket research').map((preset) => preset.id),
+    [presets],
+  );
+  const totalRunStrategySelections = useMemo(
+    () => runs.reduce((total, run) => total + runStrategyCount(run), 0),
+    [runs],
+  );
+  const totalScansDone = useMemo(
+    () => runs.reduce((total, run) => total + runScansDone(run), 0),
+    [runs],
+  );
+  const useNewIpoResearchSetup = () => {
+    setIpoResearchMode(true);
+    setName('New IPO aftermarket strategy scan');
+    setHistoryMode('all_available');
+    setOrdinaryOnly(true);
+    setMaxListingAgeDays('365');
+    setRunScope('all');
+    setSelectedStock(null);
+    setStockSearch('');
+    setStrategyMode('presets');
+    setSelected(new Set(newIpoPresetIds));
+    setMinHoldingDays('3');
+    setMaxHoldingDays('45');
+  };
 
   const toggleResultSort = (field: string, additive: boolean) => setResultSorts((current) => (
     nextBacktestSortRules(current, field, additive)
@@ -1186,15 +1402,32 @@ const BacktestV2: React.FC = () => {
 
     <section className="research-run-library" aria-label="Saved backtest runs">
       <div className="research-run-library-head"><span><small>Continuous research</small><h2>Scan workspaces</h2><p>Identical stock and strategy scans update one workspace. Refresh checks only missing market-data tails and reuses unchanged results.</p></span><div><strong>{runs.length}</strong><span>unique</span><button type="button" className="research-archive-button" onClick={() => void openArchiveModal()} title="Open archived workspaces"><span aria-hidden="true">🗄</span> Archive{archivedRuns.length ? ` (${archivedRuns.length})` : ''}</button><button disabled={workspaceRefreshBusy} onClick={() => void refreshActiveWorkspace()}>{workspaceRefreshBusy ? 'Checking…' : 'Refresh new data'}</button></div></div>
-      <div className="research-run-strip">{runs.length > 0 && <button className={`all-runs-card ${allRunsSelected ? 'active' : ''}`} onClick={() => { setAllRunsSelected(true); setResultScope('strategies'); setTab('combinations'); }}><span className="research-run-card-top"><b>All runs</b><em>combined</em></span><span className="research-run-card-metrics"><small><strong>{runs.length}</strong> workspaces</small><small><strong>{uniqueConfigurationTotal.toLocaleString()}</strong> unique configurations</small></span><span className="research-run-card-progress"><i style={{ width: '100%' }} /></span></button>}{runs.length === 0 ? <p>No v2 research runs yet.</p> : runs.map((run) => <div key={run.run_id} className={`research-run-card-wrap ${!allRunsSelected && activeRun?.run_id === run.run_id ? 'active' : ''}`}><button type="button" className={!allRunsSelected && activeRun?.run_id === run.run_id ? 'active' : ''} onClick={() => { setAllRunsSelected(false); setResultScope('run'); setActiveRun(run); }}><span className="research-run-card-top"><b>{run.name}</b><em className={`run-${run.status}`}>{run.status}</em></span><span className="research-run-card-metrics"><small><strong>{run.symbols_completed}/{run.symbols_total}</strong> stocks</small><small><strong>{run.combinations_completed.toLocaleString()}</strong> results</small></span><span className="research-run-card-progress"><i style={{ width: `${Math.max(0, Math.min(100, run.progress_pct || 0))}%` }} /></span></button></div>)}</div>
+      <div className="research-run-strip">{runs.length > 0 && <button className={`all-runs-card ${allRunsSelected ? 'active' : ''}`} onClick={() => { setAllRunsSelected(true); setResultScope('strategies'); setTab('combinations'); }}><span className="research-run-card-top"><b>All runs</b><em>combined</em></span><span className="research-run-card-metrics"><small><strong>{runs.length}</strong> workspaces</small><small><strong>{uniqueConfigurationTotal.toLocaleString()}</strong> eligible · {totalScansDone.toLocaleString()} scans done · {totalRunStrategySelections.toLocaleString()} strategies</small></span><span className="research-run-card-progress"><i style={{ width: '100%' }} /></span></button>}{runs.length === 0 ? <p>No v2 research runs yet.</p> : runs.map((run) => <div key={run.run_id} className={`research-run-card-wrap ${!allRunsSelected && activeRun?.run_id === run.run_id ? 'active' : ''}`}><button type="button" className={!allRunsSelected && activeRun?.run_id === run.run_id ? 'active' : ''} onClick={() => { setAllRunsSelected(false); setResultScope('run'); setActiveRun(run); }}><span className="research-run-card-top"><b>{run.name}</b><em className={`run-${run.status}`}>{run.status}</em></span><span className="research-run-card-metrics"><small><strong>{run.symbols_completed}/{run.symbols_total}</strong> stocks</small><small><strong>{run.combinations_completed.toLocaleString()}</strong> eligible · {runScansDone(run).toLocaleString()} scans done · {runStrategyCount(run).toLocaleString()} strategies</small></span><span className="research-run-card-progress"><i style={{ width: `${Math.max(0, Math.min(100, run.progress_pct || 0))}%` }} /></span></button></div>)}</div>
     </section>
+    {ipoRuns.length > 0 && <section className="research-run-library ipo-run-library" aria-label="New IPO research runs">
+      <div className="research-run-library-head"><span><small>Separate sparse-history research</small><h2>New IPO strategy testing</h2><p>Excluded from All runs and normal recommendations. One-trade outcomes contribute only to pooled cross-stock validation.</p></span><div><strong>{ipoRuns.length}</strong><span>IPO workspaces</span></div></div>
+      <div className="research-run-strip">{ipoRuns.map((run) => <div key={run.run_id} className={`research-run-card-wrap ${!allRunsSelected && activeRun?.run_id === run.run_id ? 'active' : ''}`}><button type="button" className={!allRunsSelected && activeRun?.run_id === run.run_id ? 'active' : ''} onClick={() => { setAllRunsSelected(false); setResultScope('run'); setActiveRun(run); setTab('ipo'); }}><span className="research-run-card-top"><b>{run.name}</b><em className={`run-${run.status}`}>{run.status}</em></span><span className="research-run-card-metrics"><small><strong>{run.symbols_completed}/{run.symbols_total}</strong> IPO stocks</small><small><strong>{runScansDone(run).toLocaleString()}</strong> scans · {runStrategyCount(run)} strategies</small></span><span className="research-run-card-progress"><i style={{ width: `${Math.max(0, Math.min(100, run.progress_pct || 0))}%` }} /></span></button></div>)}</div>
+    </section>}
 
     <section className="research-layout">
       <main className="research-main">
         <details className="research-new-run" open={!activeRun}>
           <summary><span><b>New research run</b><small>Name it, select the universe and strategies, then leave it running safely in the background.</small></span><strong>Configure</strong></summary>
           <form onSubmit={startRun}>
-            <div className="research-form-grid"><label>Run name<input value={name} onChange={(e) => setName(e.target.value)} required /></label><label>History<select value={historyMode} onChange={(e) => setHistoryMode(e.target.value as 'all_available' | 'custom')}><option value="all_available">All available history (default)</option><option value="custom">Custom date range</option></select><small>{historyMode === 'all_available' ? 'Uses up to 20 years and each stock’s earliest available session.' : 'Use only when comparing an exact market period.'}</small></label>{historyMode === 'custom' && <><label>Start<input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} required /></label><label>End<input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} required /></label></>}<label>Universe<select value={ordinaryOnly ? 'ordinary' : 'all'} onChange={(e) => setOrdinaryOnly(e.target.value === 'ordinary')}><option value="ordinary">Ordinary shares only</option><option value="all">All instrument classes</option></select></label><label>Stocks to test<select value={runScope} onChange={(e) => { setRunScope(e.target.value as 'all' | 'single'); setSelectedStock(null); setStockSearch(''); }}><option value="all">All stocks in universe</option><option value="single">One particular stock</option></select></label><label>Strategy source<select value={strategyMode} onChange={(e) => setStrategyMode(e.target.value as 'presets' | 'custom' | 'discovery')}><option value="presets">Professional presets</option><option value="discovery">Adaptive combination discovery</option><option value="custom">One custom query</option></select></label>{strategyMode === 'discovery' && <label>Candidate budget<input type="number" min="10" max="10000" step="1" value={discoveryBudget} onChange={(e) => setDiscoveryBudget(e.target.value)} /><small>Reproducible sample from a 50M+ search space.</small></label>}<label>Minimum hold (days)<input type="number" min="0" max="365" step="1" value={minHoldingDays} onChange={(e) => setMinHoldingDays(e.target.value)} /><small>Default 5 days; type another value to override it for this run.</small></label><label>Maximum hold (days)<input type="number" min="1" max="365" step="1" value={maxHoldingDays} onChange={(e) => setMaxHoldingDays(e.target.value)} /><small>Default 90 days; you can change it.</small></label></div>
+            <div className="research-form-grid"><label>Run name<input value={name} onChange={(e) => setName(e.target.value)} required /></label><label>History<select value={historyMode} onChange={(e) => setHistoryMode(e.target.value as 'all_available' | 'custom')}><option value="all_available">All available history (default)</option><option value="custom">Custom date range</option></select><small>{historyMode === 'all_available' ? 'Uses up to 20 years and each stock’s earliest available session.' : 'Use only when comparing an exact market period.'}</small></label>{historyMode === 'custom' && <><label>Start<input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} required /></label><label>End<input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} required /></label></>}<label>Universe<select value={ordinaryOnly ? 'ordinary' : 'all'} onChange={(e) => setOrdinaryOnly(e.target.value === 'ordinary')}><option value="ordinary">Ordinary shares only</option><option value="all">All instrument classes</option></select></label><label>Listing age<select value={maxListingAgeDays} onChange={(e) => { setMaxListingAgeDays(e.target.value); if (e.target.value) setOrdinaryOnly(true); }}><option value="">All listing ages</option><option value="90">Newly listed · up to 90 days</option><option value="180">Early aftermarket · up to 180 days</option><option value="365">Recent IPO · up to 1 year</option><option value="730">Young listing · up to 2 years</option></select><small>Uses the current listing age from the New IPO data.</small></label><label>Stocks to test<select value={runScope} onChange={(e) => { setRunScope(e.target.value as 'all' | 'single'); setSelectedStock(null); setStockSearch(''); }}><option value="all">All stocks in universe</option><option value="single">One particular stock</option></select></label><label>Strategy source<select value={strategyMode} onChange={(e) => setStrategyMode(e.target.value as 'presets' | 'custom' | 'discovery')}><option value="presets">Professional presets</option><option value="discovery">Adaptive combination discovery</option><option value="custom">One custom query</option></select></label>{strategyMode === 'discovery' && <label>Candidate budget<input type="number" min="10" max="10000" step="1" value={discoveryBudget} onChange={(e) => setDiscoveryBudget(e.target.value)} /><small>Reproducible sample from a 50M+ search space.</small></label>}<label>Minimum hold (days)<input type="number" min="0" max="365" step="1" value={minHoldingDays} onChange={(e) => setMinHoldingDays(e.target.value)} /><small>Default 5 days; type another value to override it for this run.</small></label><label>Maximum hold (days)<input type="number" min="1" max="365" step="1" value={maxHoldingDays} onChange={(e) => setMaxHoldingDays(e.target.value)} /><small>Default 90 days; you can change it.</small></label></div>
+            <div className={`ipo-research-setup ${ipoResearchMode ? 'active' : ''}`}>
+              <span>
+                <b>New IPO aftermarket research {ipoResearchMode ? '· separate workspace active' : ''}</b>
+                <small>Runs outside All Runs and normal recommendations. Use the ten IPO presets, or keep this mode active and select any other professional strategies to compare them on young listings. Sparse one-trade outcomes are ranked only through pooled cross-stock evidence.</small>
+              </span>
+              <div>
+                <button type="button" className={ipoResearchMode ? 'active' : ''} onClick={() => {
+                  setIpoResearchMode((current) => !current);
+                  if (!ipoResearchMode && !maxListingAgeDays) { setMaxListingAgeDays('365'); setOrdinaryOnly(true); }
+                }}>{ipoResearchMode ? 'Use standard workspace' : 'Use separate IPO workspace'}</button>
+                <button type="button" disabled={newIpoPresetIds.length === 0} onClick={useNewIpoResearchSetup}>Load IPO setup · {newIpoPresetIds.length}</button>
+              </div>
+            </div>
             {runScope === 'single' && <div className="stock-picker"><label>Find stock by symbol or company name<input value={stockSearch} onChange={(e) => { setStockSearch(e.target.value.toUpperCase()); setSelectedStock(null); }} placeholder="Type NABIL or Nabil Bank…" autoComplete="off" required /></label>{selectedStock && <div className="selected-stock"><b>{selectedStock.symbol}</b><span>{selectedStock.company_name}</span><em>{selectedStock.sector || 'Sector unavailable'}</em></div>}{stockSuggestions.length > 0 && <div className="stock-suggestions" role="listbox">{stockSuggestions.map((item) => <button type="button" role="option" aria-selected={selectedStock?.symbol === item.symbol} key={item.symbol} onClick={() => { setSelectedStock(item); setStockSearch(item.symbol); setStockSuggestions([]); setName(`${item.symbol} strategy research`); }}><b>{item.symbol}</b><span>{item.company_name}</span><em>{item.sector || ''}</em></button>)}</div>}<small>All selected presets will run only on the chosen stock. This does not affect saved all-market runs.</small></div>}
             {strategyMode !== 'custom' ? <><div className="research-preset-head"><span><b>{strategyMode === 'discovery' ? 'Base signal catalog' : 'Preset catalog'}</b><small>{selected.size}/{presets.length} selected · grouped by family</small></span><div><button type="button" onClick={() => setSelected(new Set(presets.map((item) => item.id)))}>All {presets.length}</button><button type="button" onClick={() => setSelected(new Set())}>Clear</button></div></div>{strategyMode === 'discovery' && <div className="research-alert">Combines two or three selected signals and searches stop, target, minimum-hold, and maximum-hold settings. Stable hashes prevent duplicate testing.</div>}<div className="research-preset-groups">{grouped.map(([category, items]) => <details key={category}><summary>{category}<span>{items.filter((item) => selected.has(item.id)).length}/{items.length}</span></summary><div>{items.map((preset) => <label key={preset.id} title={preset.description}><input type="checkbox" checked={selected.has(preset.id)} onChange={() => setSelected((current) => { const next = new Set(current); next.has(preset.id) ? next.delete(preset.id) : next.add(preset.id); return next; })} /><span>{preset.name}</span></label>)}</div></details>)}</div></> : <div className="research-custom-query"><div><span><b>Custom Strategy Language</b><small>The symbol in this query is a template. For an all-stock run, the server safely retargets only the symbol and keeps every condition, risk setting, charge, and order-sizing rule unchanged.</small></span><button type="button" onClick={() => void copyGptPrompt()}>Copy prompt for GPT</button>{copyStatus && <em>{copyStatus}</em>}</div><textarea value={customQuery} onChange={(e) => setCustomQuery(e.target.value)} rows={20} spellCheck={false} /></div>}
             <div className="research-submit"><p>History is cached per stock. Scans use a low-priority background worker so normal trading and dashboard requests stay responsive. The exact versioned query is stored with every result and can be promoted to paper, then separately confirmed for live scheduling.</p><button disabled={creating || (strategyMode === 'custom' ? customQuery.trim().length < 20 : selected.size === 0)}>{creating ? 'Queuing…' : strategyMode === 'custom' ? `Queue query on ${runScope === 'all' ? 'all stocks' : selectedStock?.symbol || 'one stock'}` : strategyMode === 'discovery' ? `Discover ${Number(discoveryBudget || 0).toLocaleString()} combinations` : `Queue ${selected.size} strategies`}</button></div>
@@ -1202,7 +1435,7 @@ const BacktestV2: React.FC = () => {
         </details>
 
         {activeRun && <>
-          <section className="research-run-head"><div><span className={allRunsSelected ? 'run-completed' : `run-${activeRun.status}`}>{allRunsSelected ? 'combined research' : activeRun.cancel_requested ? 'cancelling' : activeRun.pause_requested ? 'pausing' : activeRun.status}</span><h2>{allRunsSelected ? 'All runs · unique simulation configurations' : activeRun.name}</h2><p>{allRunsSelected ? 'Every workspace combined · only exact symbol, strategy, risk, holding, cost, sizing, and engine configurations are merged' : `${activeRun.configuration.start_date} → ${activeRun.configuration.end_date} · ordinary shares ${activeRun.configuration.ordinary_shares_only ? 'default' : 'not restricted'}`}</p>{!allRunsSelected && runControlMessage && <span role="status" aria-live="polite" className={`run-control-feedback ${activeRun.status === 'paused' || activeRun.status === 'cancelled' ? 'confirmed' : ''}`}>{runControlMessage}</span>}</div>{!allRunsSelected && <div className="research-controls">{activeRun.status === 'running' && <button disabled={Boolean(runControlBusy || activeRun.pause_requested || activeRun.cancel_requested)} onClick={() => void control('pause')}>{runControlBusy === 'pause' || activeRun.pause_requested ? 'Pausing…' : 'Pause'}</button>}{activeRun.status === 'paused' && <button disabled={Boolean(runControlBusy || activeRun.cancel_requested)} onClick={() => void control('resume')}>{runControlBusy === 'resume' ? 'Resuming…' : 'Resume'}</button>}{activeRun.status === 'failed' && <button disabled={Boolean(runControlBusy)} onClick={() => void control('retry')}>{runControlBusy === 'retry' ? 'Retrying…' : 'Retry failed'}</button>}{['queued', 'running', 'paused'].includes(activeRun.status) && <button disabled={Boolean(runControlBusy || activeRun.cancel_requested)} className="danger" onClick={() => void control('cancel')}>{runControlBusy === 'cancel' || activeRun.cancel_requested ? 'Cancelling…' : 'Cancel'}</button>}</div>}</section>
+          <section className="research-run-head"><div><span className={allRunsSelected ? 'run-completed' : `run-${activeRun.status}`}>{allRunsSelected ? 'combined research' : activeRun.cancel_requested ? 'cancelling' : activeRun.pause_requested ? 'pausing' : activeRun.status}</span><h2>{allRunsSelected ? 'All runs · unique simulation configurations' : activeRun.name}</h2><p>{allRunsSelected ? 'Every workspace combined · only exact symbol, strategy, risk, holding, cost, sizing, and engine configurations are merged' : `${activeRun.configuration.start_date} → ${activeRun.configuration.end_date} · ordinary shares ${activeRun.configuration.ordinary_shares_only ? 'default' : 'not restricted'}${activeRun.configuration.max_listing_age_days ? ` · listing age ≤${activeRun.configuration.max_listing_age_days} days` : ''}`}</p>{!allRunsSelected && runControlMessage && <span role="status" aria-live="polite" className={`run-control-feedback ${activeRun.status === 'paused' || activeRun.status === 'cancelled' ? 'confirmed' : ''}`}>{runControlMessage}</span>}</div>{!allRunsSelected && <div className="research-controls">{activeRun.status === 'running' && <button disabled={Boolean(runControlBusy || activeRun.pause_requested || activeRun.cancel_requested)} onClick={() => void control('pause')}>{runControlBusy === 'pause' || activeRun.pause_requested ? 'Pausing…' : 'Pause'}</button>}{activeRun.status === 'paused' && <button disabled={Boolean(runControlBusy || activeRun.cancel_requested)} onClick={() => void control('resume')}>{runControlBusy === 'resume' ? 'Resuming…' : 'Resume'}</button>}{activeRun.status === 'failed' && <button disabled={Boolean(runControlBusy)} onClick={() => void control('retry')}>{runControlBusy === 'retry' ? 'Retrying…' : 'Retry failed'}</button>}{['queued', 'running', 'paused'].includes(activeRun.status) && <button disabled={Boolean(runControlBusy || activeRun.cancel_requested)} className="danger" onClick={() => void control('cancel')}>{runControlBusy === 'cancel' || activeRun.cancel_requested ? 'Cancelling…' : 'Cancel'}</button>}</div>}</section>
           {!allRunsSelected && activeRun && <section className={`research-progress ${['running', 'queued'].includes(activeRun.status) ? 'is-active' : ''}`}>
             <div className="research-progress-meta">
               <b>{Number(activeRun.progress_pct || 0).toFixed(1)}%</b>
@@ -1226,7 +1459,11 @@ const BacktestV2: React.FC = () => {
             </div>
             <small>Scan progress updates in the background. Estimated time updates as each stock finishes. The result table stays stable while you analyse it; use Refresh new scan results when you want the latest checkpoint.</small>
           </section>}
-          <nav className="research-tabs">{([['combinations', 'All results'], ['portfolio', 'Portfolio'], ['ai', 'Ask AI'], ['quality', 'Data quality']] as const).map(([key, label]) => <button key={key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}>{label}</button>)}<a href="/dashboard/recommendations">Open live recommendations ↗</a></nav>
+          <nav className="research-tabs">{([
+            ['combinations', 'All results'],
+            ...(isIpoRun(activeRun) ? [['ipo', 'IPO testing']] : []),
+            ['portfolio', 'Portfolio'], ['ai', 'Ask AI'], ['quality', 'Data quality'],
+          ] as Array<[typeof tab, string]>).map(([key, label]) => <button key={key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}>{label}</button>)}<a href="/dashboard/recommendations">Open live recommendations ↗</a></nav>
 
           {tab === 'opportunities' && <section className="research-panel strong-buy-panel">
             <div className="research-panel-title recommendation-title"><div><span className="current-session-badge">Fresh, deduplicated market view</span><h3>Best stock recommendations across all research</h3><p>One best strategy per stock across every compatible run. Duplicate stock/strategy results are merged and older trading sessions are excluded.</p></div><div className="freshness-card"><small>Latest completed trading session</small><strong>{opportunities.freshness?.latest_completed_session || 'Checking…'}</strong><span>Refreshes at 10:00 and 11:00 Nepal time</span></div></div>
@@ -1304,7 +1541,25 @@ const BacktestV2: React.FC = () => {
 
           {tab === 'ai' && <section className="research-panel"><div className="research-panel-title"><div><h3>Ask AI for the top 10</h3><p>Search every cached strategy result using a validated, column-selecting SQL query.</p></div><label>Search scope<select value={aiScope} onChange={(e) => setAiScope(e.target.value as 'all' | 'run')}><option value="all">All my backtest data</option><option value="run">Current run only</option></select></label></div><div className="ai-backtest-presets" aria-label="AI backtest prompt presets">{aiBacktestPresets.map((prompt, index) => <button type="button" key={prompt} onClick={() => setAiQuestion(prompt)}><b>Preset {index + 1}</b><span>{prompt}</span></button>)}</div><div className="ai-query"><textarea rows={4} value={aiQuestion} onChange={(e) => setAiQuestion(e.target.value)} placeholder="Describe the stocks, strategies, columns, risk limits, and ranking you want…" /><button disabled={aiBusy} onClick={() => void askAi()}>{aiBusy ? 'Validating…' : 'Run AI SQL + top 10'}</button></div>{aiAnswer && <><p>{aiAnswer.explanation}</p><p><b>{aiAnswer.recommendation_summary}</b></p>{aiAnswer.total_matches === 0 && <div className="research-alert">No exact matches. {aiAnswer.suggested_relaxations.join(' ')}</div>}<div className="research-table-wrap"><table><thead><tr>{(aiAnswer.selected_columns || []).map((key: string) => <th key={key}>{columns.find((item) => item.key === key)?.label || key.replaceAll('_', ' ')}</th>)}<th>Why it matched</th></tr></thead><tbody>{aiAnswer.items.map((row: ResultRow) => <tr key={row.result_id}>{(aiAnswer.selected_columns || []).map((key: string) => <td key={key}>{fmt(row[key], key)}</td>)}<td>{(row.match_reasons || []).join(' · ')}</td></tr>)}</tbody></table></div></>}</section>}
 
-          {tab === 'quality' && <section className="research-panel quality-grid"><article><b>Universe snapshot</b><strong>{activeRun.symbols_total}</strong><p>Instrument membership is frozen when the run starts.</p></article><article><b>Completed symbols</b><strong>{activeRun.symbols_completed}</strong><p>Each completion is checkpointed for restart recovery.</p></article><article><b>Ordinary-share enforcement</b><strong>{activeRun.configuration.ordinary_shares_only ? 'On' : 'Explicitly off'}</strong><p>Non-equities stay excluded at the API unless explicitly requested.</p></article><article><b>Validation split</b><strong>70 / 30</strong><p>The newest 30% of sessions are locked for out-of-sample metrics.</p></article></section>}
+          {tab === 'ipo' && <section className="ipo-testing-tab">
+            <header className="ipo-testing-header"><div><span>Separate IPO research workspace</span><h2>New IPO common-pattern laboratory</h2><p>Compare every young listing on one normalized graph, then require a strategy to repeat across stocks, lifecycle stages, and its first three eligible entries.</p></div><strong>{ipoStrategySummary?.ipo_price_paths?.length || activeRun.symbols_total}<small> IPO paths</small></strong></header>
+            {ipoStrategySummary ? <><IpoResearchCharts summary={ipoStrategySummary} /><IpoStockPathGrid paths={ipoStrategySummary.ipo_price_paths} /><IpoStrategyCards summary={ipoStrategySummary} /></> : <div className="research-empty">IPO charts and pooled rankings appear as the separate scan checkpoints its trade evidence.</div>}
+            <p className="strong-buy-disclaimer">Common historical behavior is probabilistic evidence, not a prediction or guaranteed profit. Never promote an IPO strategy using win rate alone; review stock coverage, trade count, costs, drawdown, and regime stability.</p>
+          </section>}
+
+          {tab === 'quality' && <><section className="research-panel quality-grid"><article><b>Universe snapshot</b><strong>{activeRun.symbols_total}</strong><p>Instrument membership is frozen when the run starts.</p></article><article><b>Completed symbols</b><strong>{activeRun.symbols_completed}</strong><p>Each completion is checkpointed for restart recovery.</p></article><article><b>Ordinary-share enforcement</b><strong>{activeRun.configuration.ordinary_shares_only ? 'On' : 'Explicitly off'}</strong><p>Non-equities stay excluded at the API unless explicitly requested.</p></article><article><b>Validation split</b><strong>70 / 30</strong><p>The newest 30% of sessions are locked for out-of-sample metrics.</p></article></section>{isIpoRun(activeRun) && ipoStrategySummary && <section className="research-panel ipo-strategy-summary"><div><h3>Cross-stock IPO strategy ranking</h3><p>{ipoStrategySummary.candidate_rule} {ipoStrategySummary.qualification_rule}</p><small>{ipoStrategySummary.regime_method}</small></div><div className="ipo-strategy-summary-grid">{ipoStrategySummary.items.map((item) => {
+            const bullish = item.market_proxy_regimes?.bullish;
+            const bearish = item.market_proxy_regimes?.bearish;
+            const exitParts = [
+              item.exit_rule_id ? item.exit_rule_id.replaceAll('_', ' ') : null,
+              item.stop_loss_pct != null ? `${item.stop_loss_pct}% stop` : null,
+              item.take_profit_pct != null ? `${item.take_profit_pct}% target` : null,
+              item.trailing_stop_pct != null ? `${item.trailing_stop_pct}% trail` : null,
+            ].filter(Boolean);
+            const lifecycleLabels = { '0_30': '0–30d', '31_60': '31–60d', '61_90': '61–90d', '91_180': '91–180d', '181_365': '181–365d' };
+            const lifecycle = item.lifecycle_windows || {};
+            return <article key={item.strategy_id} className={item.cross_stock_qualified ? 'qualified' : ''}><span>{item.cross_stock_qualified ? 'Cross-stock qualified' : 'Candidate evidence'}</span><b>{item.strategy_name}</b><dl><div><dt>Pooled win rate</dt><dd>{item.pooled_win_rate_pct.toFixed(2)}%</dd></div><div><dt>Trades</dt><dd>{item.pooled_wins}/{item.pooled_trades} wins</dd></div><div><dt>Stock coverage</dt><dd>{item.stocks_with_trades}/{item.stocks_tested}</dd></div><div><dt>Most repeatable listing age</dt><dd>{item.best_lifecycle_window ? lifecycleLabels[item.best_lifecycle_window] : 'No trades'}</dd></div>{Object.entries(lifecycle).map(([window, stats]) => <div key={window}><dt>Listed {lifecycleLabels[window as keyof typeof lifecycleLabels]}</dt><dd>{stats.trades ? `${stats.win_rate_pct.toFixed(2)}% · ${stats.trades}` : 'No trades'}</dd></div>)}<div><dt>Bull market proxy</dt><dd>{bullish?.trades ? `${bullish.win_rate_pct.toFixed(2)}% · ${bullish.trades}` : 'No trades'}</dd></div><div><dt>Bear market proxy</dt><dd>{bearish?.trades ? `${bearish.win_rate_pct.toFixed(2)}% · ${bearish.trades}` : 'No trades'}</dd></div><div><dt>Hold observed / tested</dt><dd>{item.average_holding_days != null ? `${item.average_holding_days}d` : '—'} / {item.tested_max_holding_days ? `${item.tested_max_holding_days}d` : '—'}</dd></div><div><dt>Sell protection</dt><dd>{exitParts.join(' · ') || 'Saved strategy exit'}</dd></div></dl></article>;
+          })}</div></section>}</>}
         </>}
       </main>
     </section>
@@ -1312,15 +1567,15 @@ const BacktestV2: React.FC = () => {
     {selectedOpportunity && <div className={`strong-buy-overlay ${fullPageDetail ? 'full-page' : ''}`} role={fullPageDetail ? undefined : 'dialog'} aria-modal={fullPageDetail ? undefined : 'true'} aria-label="Backtest recommendation details"><div className="strong-buy-drawer">
       <header className="strategy-detail-header"><div className="strategy-detail-identity">{fullPageDetail && <button type="button" className="strategy-detail-back" onClick={() => window.history.back()} aria-label="Return to Backtest Lab">‹ Backtest Lab</button>}<span className="strategy-detail-kicker">Backtest result</span><div className="strategy-detail-title"><h1>{selectedOpportunity.best.symbol}</h1><span className={`signal-pill ${selectedOpportunity.best.current_signal_status}`}>{fmt(selectedOpportunity.best.current_signal_status, 'status')}</span></div><p className="strategy-detail-name">{selectedOpportunity.best.preset_name}</p><p className="strategy-detail-session">Latest completed session: {selectedOpportunity.best.current_signal_date || 'not available'}</p></div><div className="drawer-header-actions"><NepseAlphaSymbolLink symbol={selectedOpportunity.best.symbol} className="drawer-nepse-chart">View chart on NEPSE Alpha ↗</NepseAlphaSymbolLink>{!fullPageDetail && <button type="button" aria-label="Close details" onClick={() => setSelectedOpportunity(null)}>×</button>}</div></header>
       <section className="detail-score-row"><article><span>Reliability score</span><strong>{fmt(selectedOpportunity.best.reliability_score, 'score')}</strong></article><article><span>Strategy win rate</span><strong>{fmt(selectedOpportunity.best.win_rate_pct, 'percent')}%</strong></article><article><span>Current technical score</span><strong>{fmt(selectedOpportunity.best.current_technical_score, 'score')}</strong></article><article><span>Current LTP</span><strong>NPR {fmt(selectedOpportunity.best.ltp, 'ltp')}</strong></article><article><span>Latest volume</span><strong>{fmt(selectedOpportunity.best.latest_volume, 'latest_volume')}</strong></article></section>
+      <section className="detail-section"><h3>Strategy price, entry and exit chart</h3><p>See the recommended buy range, exact stop level, anticipated sell timing and price zone, plus every saved historical entry and exit. Trade returns include brokerage, SEBON fees, DP charge, CGT, and slippage.</p><TradeCandlestickChart resultId={selectedOpportunity.best.result_id} symbol={selectedOpportunity.best.symbol} /></section>
+      <section className="detail-section"><h3>Equity, profit and drawdown</h3><StrongBuyCharts trades={detailTrades.items} /></section>
+      <section className="detail-section"><div className="trade-heading"><div><h3>Complete wins and losses</h3><p>{detailTrades.total} historical trades · net results include brokerage, SEBON, DP, CGT, and slippage</p></div><select value={tradeFilter} onChange={(e) => void filterDetailTrades(e.target.value)}><option value="all">All trades</option><option value="wins">Wins only</option><option value="losses">Losses only</option><option value="stop_loss">Stop-loss exits</option><option value="take_profit">Take-profit exits</option></select></div><div className="research-table-wrap detail-trades"><table><thead><tr>{['Result','Strategy','Signal','Entry date','Entry price','Exit date','Exit price','Qty','Held','Exit reason','Gross return','Net return','Brokerage','SEBON','DP','CGT','Total charges','P/L','Running equity','Drawdown'].map((item) => <th key={item}>{item}</th>)}</tr></thead><tbody>{detailTrades.items.map((trade) => <tr key={trade.trade_id}><td><span className={`trade-${trade.result}`}>{trade.result}</span></td><td>{selectedOpportunity.best.preset_name}</td><td>{trade.signal_date || '—'}</td><td>{trade.entry_date}</td><td>{fmt(trade.entry_price, 'money')}</td><td>{trade.exit_date}</td><td>{fmt(trade.exit_price, 'money')}</td><td>{trade.quantity}</td><td>{trade.holding_days}d</td><td>{fmt(trade.exit_reason, 'reason')}</td><td>{trade.gross_return_pct}%</td><td>{trade.return_pct}%</td><td>NPR {fmt(trade.broker_commission, 'money')}</td><td>NPR {fmt(trade.sebon_fee, 'money')}</td><td>NPR {fmt(trade.dp_charge, 'money')}</td><td>NPR {fmt(trade.capital_gains_tax, 'money')}<small>{fmt(trade.capital_gains_tax_rate_pct, 'percent')}%</small></td><td>NPR {fmt(trade.total_charges, 'money')}</td><td className={Number(trade.pnl || 0) >= 0 ? 'positive' : 'negative'}>NPR {fmt(trade.pnl, 'money')}</td><td>NPR {fmt(trade.running_equity, 'money')}</td><td>{trade.drawdown_after_trade_pct}%</td></tr>)}</tbody></table></div><div className="research-pagination"><button type="button" disabled={detailTrades.page <= 1} onClick={() => void loadDetailTradePage(detailTrades.page - 1)}>Previous 100 trades</button><span>Showing {detailTrades.total ? (detailTrades.page - 1) * detailTrades.page_size + 1 : 0}–{Math.min(detailTrades.page * detailTrades.page_size, detailTrades.total)} of {detailTrades.total} · page {detailTrades.page} of {detailTrades.pages || 1}</span><button type="button" disabled={detailTrades.page >= detailTrades.pages} onClick={() => void loadDetailTradePage(detailTrades.page + 1)}>Next 100 trades</button></div></section>
       <section className="detail-section strategy-price-plan"><h3>Strategy planning prices</h3><p>These zones use the saved strategy’s stop, target, and ATR volatility. They are planning levels; the backtest still models entry at the next available open.</p><div><article><span>Buy zone</span><strong>{selectedOpportunity.best.buy_zone_low ? `NPR ${fmt(selectedOpportunity.best.buy_zone_low, 'money')}–${fmt(selectedOpportunity.best.buy_zone_high, 'money')}` : 'No current entry signal'}</strong></article><article><span>Protective stop</span><strong>{selectedOpportunity.best.protective_stop ? `NPR ${fmt(selectedOpportunity.best.protective_stop, 'money')}` : '—'}</strong></article><article><span>Strategy sell zone</span><strong>{selectedOpportunity.best.sell_zone_low ? `NPR ${fmt(selectedOpportunity.best.sell_zone_low, 'money')}–${fmt(selectedOpportunity.best.sell_zone_high, 'money')}` : '—'}</strong></article><article><span>20-day average volume</span><strong>{fmt(selectedOpportunity.best.average_volume_20, 'average_volume_20')}</strong></article></div></section>
       <section className="detail-section protection-champion"><div className="protection-champion-heading"><div><h3>Selected sell and stop strategy</h3><p>One champion is selected for this stock + entry strategy from the locked out-of-sample period. Raw win rate is not the only selection criterion.</p></div>{selectedOpportunity.best.assumptions?.protection_optimization && <span>OOS selected</span>}</div><div className="protection-champion-cards"><article><span>Sell rule</span><strong>{fmt(selectedOpportunity.best.assumptions?.exit_rule_id || 'saved preset exit', 'exit_rule')}</strong></article><article><span>Stop method</span><strong>{fmt(selectedOpportunity.best.assumptions?.protection_optimization?.champion?.stop?.label || selectedOpportunity.best.assumptions?.risk_strategy || 'fixed', 'stop')}</strong></article><article><span>Sell-zone basis</span><strong>{selectedOpportunity.best.planning_range_basis?.sell_zone_basis || `Saved +${selectedOpportunity.best.assumptions?.take_profit_pct}% target`}</strong></article><article><span>Combinations evaluated</span><strong>{selectedOpportunity.best.assumptions?.protection_optimization?.total_evaluations || 1}</strong></article></div>{selectedOpportunity.best.assumptions?.protection_optimization?.leaderboard?.length > 0 && <details><summary>Compare leading sell/stop combinations</summary><div className="research-table-wrap"><table><thead><tr><th>Sell rule</th><th>Stop</th><th>OOS score</th><th>Trades</th><th>Win rate</th><th>Profit factor</th><th>Expectancy</th><th>Drawdown</th></tr></thead><tbody>{selectedOpportunity.best.assumptions.protection_optimization.leaderboard.map((candidate: any, index: number) => <tr key={`${candidate.exit_rule_id}-${candidate.stop?.id}`} className={index === 0 ? 'recommended' : ''}><td>{fmt(candidate.exit_rule_id, 'exit')}</td><td>{candidate.stop?.label}</td><td>{fmt(candidate.selection_score, 'score')}</td><td>{candidate.summary?.total_trades}</td><td>{fmt(candidate.summary?.win_rate_pct, 'percent')}%</td><td>{fmt(candidate.summary?.profit_factor, 'ratio')}</td><td>{fmt(candidate.summary?.expectancy_pct, 'percent')}%</td><td>{fmt(candidate.summary?.max_drawdown_pct, 'percent')}%</td></tr>)}</tbody></table></div></details>}</section>
       <section className="detail-section"><h3>Latest strategy signal evidence</h3><p className="evidence-reason">{selectedOpportunity.best.current_evidence?.reason}</p><code>{selectedOpportunity.best.current_evidence?.strategy_condition}</code>{selectedOpportunity.best.current_evidence?.conditions_total > 0 && <p><b>{selectedOpportunity.best.current_evidence.conditions_passed}/{selectedOpportunity.best.current_evidence.conditions_total}</b> entry conditions currently pass ({fmt(selectedOpportunity.best.current_evidence.condition_progress_pct, 'percent')}%). “Near trigger” is readiness evidence, not a forecast.</p>}<div className="latest-values">{Object.entries(selectedOpportunity.best.current_evidence?.latest_values || {}).map(([key, value]) => <div key={key}><span>{key.replaceAll('_', ' ')}</span><b>{fmt(value, key)}</b></div>)}</div><h4>Condition checks</h4><div className="condition-checks">{(selectedOpportunity.best.current_evidence?.conditions || []).map((condition: any, index: number) => <div className={condition.matched ? 'passed' : 'failed'} key={`${condition.expression}-${index}`}><b>{condition.matched ? 'Passed' : 'Failed'}</b><span>{condition.expression}</span>{condition.message && <small>{condition.message}</small>}</div>)}</div></section>
       <section className="detail-section"><h3>How reliability was calculated</h3><div className="score-breakdown">{Object.entries(selectedOpportunity.best.current_evidence?.reliability?.components || {}).map(([key, value]) => <div key={key}><span>{key.replaceAll('_', ' ')}</span><b>+{fmt(value, key)}</b></div>)}</div>{(selectedOpportunity.best.current_evidence?.reliability?.penalties || []).map((penalty: any) => <p className="score-penalty" key={penalty.code}>−{penalty.points} · {penalty.code.replaceAll('_', ' ')}</p>)}</section>
       <section className="detail-section"><h3>Complete historical backtest summary</h3><div className="historical-summary">{Object.entries(selectedOpportunity.best.assumptions?.summary || {}).map(([key, value]) => <div key={key}><span>{key.replaceAll('_', ' ')}</span><b>{fmt(value, key)}</b></div>)}</div><div className="risk-config"><span>Protection {fmt(selectedOpportunity.best.assumptions?.risk_strategy || 'fixed', 'risk_strategy')}</span><span>Initial stop {selectedOpportunity.best.assumptions?.stop_loss_pct}%</span>{selectedOpportunity.best.assumptions?.trailing_stop_pct != null && <span>Trailing stop {selectedOpportunity.best.assumptions.trailing_stop_pct}%</span>}<span>Take profit {selectedOpportunity.best.assumptions?.take_profit_pct}%</span><span>Min hold {selectedOpportunity.best.assumptions?.min_holding_days || 0} days</span><span>Max hold {selectedOpportunity.best.assumptions?.max_holding_days} days</span>{String(selectedOpportunity.best.assumptions?.charge_model || '').startsWith('nepse_equity') ? <><span>NEPSE tiered brokerage</span><span>SEBON 0.015% each side</span><span>DP NPR 25 per sale</span><span>CGT by holding period</span></> : <span>Legacy flat-fee result · rerun for official Nepal charges</span>}<span>Strategy {selectedOpportunity.best.assumptions?.preset_version}</span><span>{selectedOpportunity.best.assumptions?.period?.start} → {selectedOpportunity.best.assumptions?.period?.end}</span></div></section>
       <section className="detail-section execution-promotion"><h3>Use the same query for trading</h3><p>The stored query—not a rewritten approximation—creates a paper draft first. Live scheduling remains a separate action with current account, balance, holdings, and risk checks.</p><div><label>TMS client ID<input value={paperClientId} onChange={(e) => setPaperClientId(e.target.value)} placeholder="Client ID" /></label><button disabled={promotionBusy || !paperClientId.trim()} onClick={() => void promoteToPaper()}>{promotionBusy ? 'Creating paper draft…' : 'Promote exact query to paper'}</button><a href="/dashboard/schedule-order">Open Schedule Order</a></div>{promotionMessage && <strong>{promotionMessage}</strong>}</section>
-      <section className="detail-section"><h3>Every simulated trade on the daily chart</h3><p>Trade markers show the exact saved strategy entry and exit fills. Exit labels also show the net percentage after brokerage, SEBON fees, DP charge, CGT, and slippage.</p><TradeCandlestickChart resultId={selectedOpportunity.best.result_id} symbol={selectedOpportunity.best.symbol} /></section>
-      <section className="detail-section"><h3>Equity, profit and drawdown</h3><StrongBuyCharts trades={detailTrades.items} /></section>
-      <section className="detail-section"><div className="trade-heading"><div><h3>Complete wins and losses</h3><p>{detailTrades.total} historical trades · net results include brokerage, SEBON, DP, CGT, and slippage</p></div><select value={tradeFilter} onChange={(e) => void filterDetailTrades(e.target.value)}><option value="all">All trades</option><option value="wins">Wins only</option><option value="losses">Losses only</option><option value="stop_loss">Stop-loss exits</option><option value="take_profit">Take-profit exits</option></select></div><div className="research-table-wrap detail-trades"><table><thead><tr>{['Result','Strategy','Signal','Entry date','Entry price','Exit date','Exit price','Qty','Held','Exit reason','Gross return','Net return','Brokerage','SEBON','DP','CGT','Total charges','P/L','Running equity','Drawdown'].map((item) => <th key={item}>{item}</th>)}</tr></thead><tbody>{detailTrades.items.map((trade) => <tr key={trade.trade_id}><td><span className={`trade-${trade.result}`}>{trade.result}</span></td><td>{selectedOpportunity.best.preset_name}</td><td>{trade.signal_date || '—'}</td><td>{trade.entry_date}</td><td>{fmt(trade.entry_price, 'money')}</td><td>{trade.exit_date}</td><td>{fmt(trade.exit_price, 'money')}</td><td>{trade.quantity}</td><td>{trade.holding_days}d</td><td>{fmt(trade.exit_reason, 'reason')}</td><td>{trade.gross_return_pct}%</td><td>{trade.return_pct}%</td><td>NPR {fmt(trade.broker_commission, 'money')}</td><td>NPR {fmt(trade.sebon_fee, 'money')}</td><td>NPR {fmt(trade.dp_charge, 'money')}</td><td>NPR {fmt(trade.capital_gains_tax, 'money')}<small>{fmt(trade.capital_gains_tax_rate_pct, 'percent')}%</small></td><td>NPR {fmt(trade.total_charges, 'money')}</td><td className={Number(trade.pnl || 0) >= 0 ? 'positive' : 'negative'}>NPR {fmt(trade.pnl, 'money')}</td><td>NPR {fmt(trade.running_equity, 'money')}</td><td>{trade.drawdown_after_trade_pct}%</td></tr>)}</tbody></table></div><div className="research-pagination"><button type="button" disabled={detailTrades.page <= 1} onClick={() => void loadDetailTradePage(detailTrades.page - 1)}>Previous 100 trades</button><span>Showing {detailTrades.total ? (detailTrades.page - 1) * detailTrades.page_size + 1 : 0}–{Math.min(detailTrades.page * detailTrades.page_size, detailTrades.total)} of {detailTrades.total} · page {detailTrades.page} of {detailTrades.pages || 1}</span><button type="button" disabled={detailTrades.page >= detailTrades.pages} onClick={() => void loadDetailTradePage(detailTrades.page + 1)}>Next 100 trades</button></div></section>
       <p className="strong-buy-disclaimer">Backtested historical performance does not guarantee future results. No broker order is placed or scheduled from this view.</p>
     </div></div>}
   </div>;

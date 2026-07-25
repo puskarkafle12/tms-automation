@@ -480,6 +480,15 @@ def ensure_performance_indexes():
         "CREATE INDEX IF NOT EXISTS ix_backtest_runs_owner_created ON backtest_runs (owner_id, created_at DESC) WHERE deleted_at IS NULL AND archived_at IS NULL",
         "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS scan_key VARCHAR(64)",
         "ALTER TABLE backtest_runs ADD COLUMN IF NOT EXISTS last_refresh_at TIMESTAMPTZ",
+        """UPDATE backtest_runs
+           SET run_type='ipo_research'
+           WHERE run_type<>'ipo_research'
+             AND jsonb_typeof(configuration->'preset_ids')='array'
+             AND jsonb_array_length(configuration->'preset_ids')>0
+             AND NOT EXISTS (
+                 SELECT 1 FROM jsonb_array_elements_text(configuration->'preset_ids') preset_id
+                 WHERE preset_id NOT LIKE 'ipo_%'
+             )""",
         "DROP INDEX IF EXISTS uq_backtest_runs_owner_scan_key",
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_backtest_runs_owner_scan_key ON backtest_runs (owner_id, scan_key) WHERE deleted_at IS NULL AND archived_at IS NULL AND scan_key IS NOT NULL",
         "CREATE INDEX IF NOT EXISTS ix_backtest_runs_queue ON backtest_runs (status, created_at) WHERE deleted_at IS NULL AND archived_at IS NULL",
@@ -770,6 +779,7 @@ def ensure_performance_indexes():
         "ALTER TABLE backtest_rejected_strategies ADD COLUMN IF NOT EXISTS latest_signal_status VARCHAR(30)",
         "ALTER TABLE backtest_rejected_strategies ADD COLUMN IF NOT EXISTS latest_signal_date DATE",
         "ALTER TABLE backtest_rejected_strategies ADD COLUMN IF NOT EXISTS latest_signal_evidence JSONB NOT NULL DEFAULT '{}'::jsonb",
+        "ALTER TABLE backtest_rejected_strategies ADD COLUMN IF NOT EXISTS trade_samples JSONB NOT NULL DEFAULT '[]'::jsonb",
         "ALTER TABLE backtest_rejected_strategies ADD COLUMN IF NOT EXISTS lease_owner VARCHAR(100)",
         "ALTER TABLE backtest_rejected_strategies ADD COLUMN IF NOT EXISTS lease_expires_at TIMESTAMPTZ",
         """CREATE INDEX IF NOT EXISTS ix_backtest_rejected_policy_v2_pending

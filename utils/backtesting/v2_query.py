@@ -287,6 +287,7 @@ def query_results(session, run_id: str, body: Dict[str, Any], *, owner_id: str =
     params.update({"run_id": run_id, "owner_id": owner_id, "limit": page_size, "offset": (page - 1) * page_size})
     ownership = "br.owner_id=:owner_id AND br.deleted_at IS NULL AND br.archived_at IS NULL"
     scope = "(:run_id='all' OR r.run_id=:run_id)"
+    normal_all_runs = "(:run_id<>'all' OR br.run_type<>'ipo_research')"
     base = "FROM backtest_results r JOIN backtest_run_symbols s ON s.run_id=r.run_id AND s.symbol=r.symbol JOIN backtest_runs br ON br.run_id=r.run_id"
     requested_fields = [
         str(field) for field in body.get("select_fields") or []
@@ -297,11 +298,11 @@ def query_results(session, run_id: str, body: Dict[str, Any], *, owner_id: str =
     unique_by_symbol = bool(body.get("unique_by_symbol"))
     unique_by_strategy = bool(body.get("unique_by_strategy"))
     if unique_by_symbol:
-        total = int(session.execute(text(f"SELECT COUNT(DISTINCT r.symbol) {base} WHERE {scope} AND {ownership} AND {where}"), params).scalar() or 0)
+        total = int(session.execute(text(f"SELECT COUNT(DISTINCT r.symbol) {base} WHERE {scope} AND {normal_all_runs} AND {ownership} AND {where}"), params).scalar() or 0)
         rows = session.execute(text(
             f"WITH ranked_ids AS (SELECT r.result_id,ROW_NUMBER() OVER (PARTITION BY r.symbol "
             f"ORDER BY {inner_order}) AS selected_rank "
-            f"{base} WHERE {scope} AND {ownership} AND {where}) "
+            f"{base} WHERE {scope} AND {normal_all_runs} AND {ownership} AND {where}) "
             f"SELECT {select} {base} JOIN ranked_ids selected ON selected.result_id=r.result_id "
             f"WHERE selected.selected_rank=1 "
             f"ORDER BY {outer_order} LIMIT :limit OFFSET :offset"
@@ -313,21 +314,23 @@ def query_results(session, run_id: str, body: Dict[str, Any], *, owner_id: str =
             canonical_security = "TRUE" if body.get("include_non_equities") else "canonical.security_type='ordinary_share'"
             total = int(session.execute(text(
                 "SELECT COUNT(*) FROM backtest_canonical_results canonical "
+                "JOIN backtest_runs br ON br.run_id=canonical.run_id "
                 "WHERE canonical.owner_id=:owner_id AND (:run_id='all' OR canonical.run_id=:run_id) "
+                f"AND {normal_all_runs} "
                 f"AND {canonical_security}"
             ), params).scalar() or 0)
         else:
             total = int(session.execute(text(
-                f"SELECT COUNT(*) {canonical_base} WHERE {scope} AND {ownership} AND {where}"
+                f"SELECT COUNT(*) {canonical_base} WHERE {scope} AND {normal_all_runs} AND {ownership} AND {where}"
             ), params).scalar() or 0)
         rows = session.execute(text(
-            f"SELECT {select} {canonical_base} WHERE {scope} AND {ownership} AND {where} "
+            f"SELECT {select} {canonical_base} WHERE {scope} AND {normal_all_runs} AND {ownership} AND {where} "
             f"ORDER BY {outer_order} LIMIT :limit OFFSET :offset"
         ), params).mappings().all()
     else:
-        total = int(session.execute(text(f"SELECT COUNT(*) {base} WHERE {scope} AND {ownership} AND {where}"), params).scalar() or 0)
+        total = int(session.execute(text(f"SELECT COUNT(*) {base} WHERE {scope} AND {normal_all_runs} AND {ownership} AND {where}"), params).scalar() or 0)
         rows = session.execute(text(
-            f"SELECT {select} {base} WHERE {scope} AND {ownership} AND {where} "
+            f"SELECT {select} {base} WHERE {scope} AND {normal_all_runs} AND {ownership} AND {where} "
             f"ORDER BY {inner_order} LIMIT :limit OFFSET :offset"
         ), params).mappings().all()
     items = []
@@ -349,24 +352,25 @@ def query_result_selections(
     params.update({"run_id": run_id, "owner_id": owner_id})
     ownership = "br.owner_id=:owner_id AND br.deleted_at IS NULL AND br.archived_at IS NULL"
     scope = "(:run_id='all' OR r.run_id=:run_id)"
+    normal_all_runs = "(:run_id<>'all' OR br.run_type<>'ipo_research')"
     base = "FROM backtest_results r JOIN backtest_run_symbols s ON s.run_id=r.run_id AND s.symbol=r.symbol JOIN backtest_runs br ON br.run_id=r.run_id"
     if body.get("unique_by_symbol"):
         inner_order, _, _ = compile_result_sorts(body)
         statement = text(
             f"WITH ranked AS (SELECT r.run_id,r.symbol,r.preset_id,ROW_NUMBER() OVER (PARTITION BY r.symbol ORDER BY {inner_order}) AS selected_rank "
-            f"{base} WHERE {scope} AND {ownership} AND {where}) "
+            f"{base} WHERE {scope} AND {normal_all_runs} AND {ownership} AND {where}) "
             "SELECT run_id,symbol,preset_id FROM ranked WHERE selected_rank=1 ORDER BY run_id,symbol,preset_id"
         )
     elif body.get("unique_by_strategy"):
         statement = text(
             f"SELECT DISTINCT r.run_id,r.symbol,r.preset_id {base} "
             "JOIN backtest_canonical_results canonical ON canonical.result_id=r.result_id AND canonical.owner_id=:owner_id "
-            f"WHERE {scope} AND {ownership} AND {where} ORDER BY r.run_id,r.symbol,r.preset_id"
+            f"WHERE {scope} AND {normal_all_runs} AND {ownership} AND {where} ORDER BY r.run_id,r.symbol,r.preset_id"
         )
     else:
         statement = text(
             f"SELECT DISTINCT r.run_id,r.symbol,r.preset_id {base} "
-            f"WHERE {scope} AND {ownership} AND {where} ORDER BY r.run_id,r.symbol,r.preset_id"
+            f"WHERE {scope} AND {normal_all_runs} AND {ownership} AND {where} ORDER BY r.run_id,r.symbol,r.preset_id"
         )
     return [
         {"run_id": str(row["run_id"]), "symbol": str(row["symbol"]), "preset_id": str(row["preset_id"])}
@@ -508,6 +512,7 @@ def query_strong_buys(session, run_id: str, body: Dict[str, Any], *, owner_id: s
         JOIN backtest_run_symbols s ON s.run_id=r.run_id AND s.symbol=r.symbol
         LEFT JOIN market_screener_cache c ON c.symbol=r.symbol
         WHERE (:run_id='all' OR r.run_id=:run_id) AND br.owner_id=:owner_id
+          AND (:run_id<>'all' OR br.run_type<>'ipo_research')
           AND br.deleted_at IS NULL AND br.archived_at IS NULL AND {universe} AND {requirements}"""
     cte = f"""WITH candidates AS (SELECT {columns},{recommendation_score} AS recommendation_score,
         ROW_NUMBER() OVER(PARTITION BY r.symbol ORDER BY {recommendation_score} DESC,

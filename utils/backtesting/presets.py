@@ -11,6 +11,7 @@ def _preset(
     preset_id: str, name: str, category: str, condition: str, description: str,
     *, stop: float = 5, target: float = 10, holding: int = 20, research_basis: str = "",
     exit_rule_id: str | None = None, exit_condition: str | None = None,
+    trailing: float | None = None,
 ) -> Dict[str, Any]:
     if not exit_rule_id or not exit_condition:
         category_key = category.lower()
@@ -23,10 +24,11 @@ def _preset(
         else:
             exit_rule_id = "trend_breakdown_exit"
             exit_condition = 'ltp < technical_ema_20_value AND technical_macd = "Bearish"'
+    trailing_identity = f"|trailing:{trailing}" if trailing is not None else ""
     source_hash = hashlib.sha256(
-        f"{condition}|{exit_rule_id}|{exit_condition}|{stop}|{target}|{holding}|paired-every-match-v4".encode("utf-8")
+        f"{condition}|{exit_rule_id}|{exit_condition}|{stop}|{target}|{holding}{trailing_identity}|paired-every-match-v4".encode("utf-8")
     ).hexdigest()
-    return {
+    preset = {
         "id": preset_id,
         "name": name,
         "category": category,
@@ -38,6 +40,9 @@ def _preset(
         "exit_rule_id": exit_rule_id, "exit_condition": exit_condition,
         "defaults": {"stop_loss_pct": stop, "take_profit_pct": target, "max_holding_days": holding},
     }
+    if trailing is not None:
+        preset["defaults"]["trailing_stop_pct"] = trailing
+    return preset
 
 
 def _supplied_nepse15_preset(
@@ -244,6 +249,262 @@ def get_backtest_presets() -> List[Dict[str, Any]]:
             stop=stop, target=target, holding=holding, research_basis=research_basis,
         ))
 
+    new_ipo_aftermarket = (
+        (
+            "ipo_price_discovery_breakout", "IPO Price-Discovery Breakout",
+            "technical_breakout_20 = 1 AND technical_volume_ratio_20 >= 1.5 AND technical_close_location_value >= 0.7 AND technical_atr_percent <= 12",
+            9, 24, 40, "trend_breakdown_exit",
+            'ltp < technical_ema_20_value AND technical_ppo_histogram < 0',
+            "Nepal IPO studies document strong but heterogeneous short-run underpricing. This hypothesis requires a causal 20-session high, participation, and a non-extreme ATR before following price discovery.",
+        ),
+        (
+            "ipo_controlled_momentum", "IPO Controlled 20-Session Momentum",
+            "CHANGE_PERCENT(field=ltp, scans_back=20) BETWEEN 5 AND 35 AND technical_ema_10_value > technical_ema_20_value AND technical_ppo_histogram > 0 AND technical_volume_ratio_20 >= 1.1 AND technical_atr_percent <= 10",
+            8, 20, 35, "ipo_momentum_rollover_exit",
+            "technical_ppo_histogram < 0 AND ltp < technical_ema_10_value",
+            "Tests continuation without blindly chasing the largest initial-return names; international aftermarket evidence links extreme initial returns and volatility with weaker later performance.",
+        ),
+        (
+            "ipo_first_base_vwap_reclaim", "IPO First-Base VWAP Reclaim",
+            "ltp > technical_vwap_20 AND technical_price_zscore_20 BETWEEN -0.5 AND 1.25 AND technical_cmf_20 > 0 AND change_percent > 0",
+            7, 18, 30, "ipo_vwap_flow_exit",
+            "ltp < technical_vwap_20 AND technical_cmf_20 < 0",
+            "A first-base hypothesis for limited-history stocks: price reclaims its causal 20-session volume-weighted value while money flow turns positive.",
+        ),
+        (
+            "ipo_dryup_pullback", "IPO Volume Dry-Up Pullback",
+            "ltp <= technical_ema_10_value AND ltp > technical_ema_20_value AND technical_ema_10_value > technical_ema_20_value AND technical_volume_ratio_20 <= 0.8 AND technical_rsi_14 BETWEEN 40 AND 60 AND change_percent > 0",
+            7, 17, 30, "ipo_base_failure_exit",
+            "ltp < technical_ema_20_value AND technical_cmf_20 < 0",
+            "Tests whether a low-participation pause after initial price discovery offers a safer entry than buying the first high-volatility advance.",
+        ),
+        (
+            "ipo_contraction_release", "IPO Volatility-Contraction Release",
+            'technical_squeeze = "Released" AND technical_breakout_20 = 1 AND technical_volume_ratio_20 >= 1.3 AND technical_atr_percent <= 10',
+            8, 22, 40, "bollinger_middle_break_exit",
+            "ltp < technical_bollinger_middle_20",
+            "New listings often begin with unstable price discovery. This setup waits for a causal contraction and a volume-confirmed release instead of trading the listing-day move.",
+        ),
+        (
+            "ipo_structure_continuation", "IPO Higher-High / Higher-Low Participation",
+            "technical_higher_high_3 = 1 AND technical_higher_low_3 = 1 AND technical_close_location_value >= 0.65 AND technical_volume_ratio_20 >= 1.1 AND technical_atr_percent <= 10",
+            8, 20, 35, "ipo_structure_break_exit",
+            "technical_higher_low_3 = 0 AND ltp < technical_ema_10_value",
+            "A short-history trend-structure hypothesis confirmed by participation and controlled volatility.",
+        ),
+        (
+            "ipo_support_reaccumulation", "IPO Support Reaccumulation",
+            "technical_sr_support_bounce = 1 AND technical_rsi_14 BETWEEN 35 AND 60 AND technical_cmf_20 > 0 AND technical_volume_ratio_20 >= 1",
+            7, 19, 35, "sr_resistance_rejection_exit",
+            "technical_sr_resistance_rejection = 1",
+            "Uses only causal, multi-touch support formed after listing and requires positive money flow; the paired exit is the next confirmed resistance rejection.",
+        ),
+        (
+            "ipo_low_vol_trend_emergence", "IPO Low-Volatility Trend Emergence",
+            'technical_historical_volatility_20 <= 60 AND technical_atr_percent <= 7 AND ltp > technical_kama_10 AND technical_efficiency_ratio_20 >= 0.3 AND technical_ppo_histogram > 0 AND technical_cmf_20 > 0',
+            7, 18, 35, "dual_trend_exit",
+            'technical_supertrend = "Bearish" AND technical_psar = "Bearish"',
+            "International aftermarket evidence associates early return volatility with weaker long-run performance; this hypothesis waits for a more efficient, lower-volatility trend with accumulation.",
+        ),
+    )
+    ipo_tradability_gate = (
+        "PREVIOUS(field=ltp, offset=2) - PREVIOUS(field=ltp, offset=1) >= 1 "
+        "AND change_percent > 0 AND volume >= 8000"
+    )
+    for preset_id, name, condition, stop, target, holding, exit_rule_id, exit_condition, research_basis in new_ipo_aftermarket:
+        preset = _preset(
+            preset_id, name, "New IPO aftermarket research",
+            f"({condition}) AND {ipo_tradability_gate}",
+            "Limited-history, completed-session IPO aftermarket hypothesis. Entry becomes eligible only after a prior session fell by at least NPR 1, the current recovery session is positive, and at least 8,000 shares traded.",
+            stop=stop, target=target, holding=holding,
+            exit_rule_id=exit_rule_id, exit_condition=exit_condition,
+            research_basis=research_basis,
+        )
+        preset["family"] = "new_ipo_aftermarket"
+        presets.append(preset)
+
+    ipo_lifecycle = (
+        (
+            "ipo_markup_peak_protection", "IPO Markup + Peak Protection",
+            "technical_breakout_20 = 1 AND CHANGE_PERCENT(field=ltp, scans_back=20) BETWEEN 10 AND 45 AND technical_volume_ratio_20 >= 1.4 AND technical_cmf_20 > 0 AND technical_atr_percent <= 15",
+            9, 35, 45, 7, "ipo_distribution_rollover_exit",
+            "technical_rsi_14 >= 70 AND technical_close_location_value <= 0.35 AND technical_ppo_histogram < 0",
+            "Participates only after a completed-session, volume-confirmed markup. A seven-percent trailing stop and distribution-rollover exit protect gains without pretending the future peak is knowable.",
+        ),
+        (
+            "ipo_post_spike_recovery", "IPO Post-Spike Washout Recovery",
+            "CHANGE_PERCENT(field=ltp, scans_back=40) >= 15 AND CHANGE_PERCENT(field=ltp, scans_back=10) BETWEEN -25 AND -8 AND change_percent > 0 AND technical_rsi_14 BETWEEN 35 AND 55 AND technical_close_location_value >= 0.65 AND technical_volume_ratio_20 >= 1.1",
+            7, 16, 30, 5, "ipo_second_spike_rollover_exit",
+            "technical_rsi_14 >= 65 AND technical_ppo_histogram < 0",
+            "Models the IPO rise, sharp pullback, then recovery described by traders: the 40-session trend must remain positive, the last 10 sessions must show a material washout, and entry waits for a strong positive recovery close. The second target is deliberately below the first markup target.",
+        ),
+    )
+    for preset_id, name, condition, stop, target, holding, trailing, exit_rule_id, exit_condition, research_basis in ipo_lifecycle:
+        preset = _preset(
+            preset_id, name, "New IPO aftermarket research",
+            f"({condition}) AND {ipo_tradability_gate}",
+            "Causal IPO lifecycle hypothesis with an NPR 1 prior-session pullback gate, 8,000-share liquidity floor, profit-locking trailing stop, and explicit momentum exit.",
+            stop=stop, target=target, holding=holding, trailing=trailing,
+            exit_rule_id=exit_rule_id, exit_condition=exit_condition,
+            research_basis=research_basis,
+        )
+        preset["family"] = "new_ipo_aftermarket"
+        presets.append(preset)
+
+    ipo_cross_stock_hypotheses = (
+        (
+            "ipo_quality_structure_25", "IPO Quality Structure · 25 Sessions",
+            "technical_higher_high_3 = 1 AND technical_higher_low_3 = 1 AND technical_close_location_value >= 0.75 AND technical_volume_ratio_20 >= 1.3 AND technical_cmf_20 > 0 AND technical_atr_percent <= 8",
+            7, 16, 25, None, "ipo_structure_break_exit",
+            "technical_higher_low_3 = 0 AND ltp < technical_ema_10_value",
+            "A stricter, shorter-hold variant of the cross-stock structure leader. It requires accumulation, stronger participation, and lower volatility.",
+        ),
+        (
+            "ipo_quality_structure_trail", "IPO Quality Structure + 5% Trail",
+            "technical_higher_high_3 = 1 AND technical_higher_low_3 = 1 AND technical_close_location_value >= 0.7 AND technical_volume_ratio_20 >= 1.2 AND technical_cmf_20 > 0 AND technical_atr_percent <= 9",
+            8, 24, 40, 5, "ipo_distribution_rollover_exit",
+            "technical_close_location_value <= 0.35 AND technical_ppo_histogram < 0",
+            "Tests whether the common higher-high/higher-low phase benefits from a tighter trailing profit lock and distribution exit.",
+        ),
+        (
+            "ipo_efficient_trend_participation", "IPO Efficient Trend Participation",
+            "technical_efficiency_ratio_20 >= 0.35 AND technical_choppiness_14 < 50 AND ltp > technical_kama_10 AND technical_ppo_histogram > 0 AND technical_volume_ratio_20 >= 1.15 AND technical_atr_percent <= 9",
+            7, 18, 30, None, "dual_trend_exit",
+            'technical_supertrend = "Bearish" AND technical_psar = "Bearish"',
+            "Filters noisy price discovery and enters only when path efficiency, adaptive trend, momentum, and participation agree.",
+        ),
+        (
+            "ipo_vwap_structure_reclaim", "IPO VWAP + Structure Reclaim",
+            "ltp > technical_vwap_20 AND technical_higher_low_3 = 1 AND technical_close_location_value >= 0.65 AND technical_cmf_20 > 0 AND technical_volume_ratio_20 >= 1.1 AND technical_rsi_14 BETWEEN 40 AND 68",
+            7, 17, 30, None, "ipo_vwap_flow_exit",
+            "ltp < technical_vwap_20 AND technical_cmf_20 < 0",
+            "Combines the first-base fair-value reclaim with an already improving higher-low structure.",
+        ),
+        (
+            "ipo_obv_accumulation_breakout", "IPO OBV Accumulation Breakout",
+            "technical_breakout_20 = 1 AND technical_obv > AVERAGE(field=technical_obv, window=20) AND technical_cmf_20 > 0 AND technical_volume_ratio_20 >= 1.25 AND technical_close_location_value >= 0.7",
+            8, 21, 35, 6, "ipo_distribution_rollover_exit",
+            "technical_close_location_value <= 0.35 AND technical_cmf_20 < 0",
+            "Requires price, OBV, money flow, and participation to confirm the same causal range escape.",
+        ),
+        (
+            "ipo_cmf_low_chop_breakout", "IPO CMF Low-Chop Breakout",
+            "technical_breakout_20 = 1 AND technical_cmf_20 >= 0.1 AND technical_choppiness_14 < 45 AND technical_volume_ratio_20 >= 1.25 AND technical_atr_percent <= 10",
+            8, 20, 35, 6, "trend_breakdown_exit",
+            "ltp < technical_ema_20_value AND technical_ppo_histogram < 0",
+            "A participation breakout that rejects choppy or extremely volatile early price discovery.",
+        ),
+        (
+            "ipo_controlled_momentum_structure", "IPO Controlled Momentum + Structure",
+            "CHANGE_PERCENT(field=ltp, scans_back=20) BETWEEN 5 AND 30 AND technical_higher_low_3 = 1 AND technical_ema_10_value > technical_ema_20_value AND technical_ppo_histogram > 0 AND technical_atr_percent <= 9",
+            7, 18, 30, 5, "ipo_momentum_rollover_exit",
+            "technical_ppo_histogram < 0 AND ltp < technical_ema_10_value",
+            "Avoids the most extended markup moves and requires an intact higher low before participating.",
+        ),
+        (
+            "ipo_ema_rsi_recovery", "IPO EMA–RSI Recovery",
+            "ltp > technical_ema_10_value AND technical_ema_10_value > technical_ema_20_value AND technical_rsi_14 BETWEEN 45 AND 65 AND technical_ppo_histogram > 0 AND technical_close_location_value >= 0.65 AND technical_volume_ratio_20 >= 1.1",
+            7, 16, 25, None, "ipo_momentum_rollover_exit",
+            "technical_rsi_14 < 45 AND ltp < technical_ema_10_value",
+            "Tests an orderly recovery phase after an eligible decline without buying an overbought IPO session.",
+        ),
+        (
+            "ipo_bollinger_mid_reclaim", "IPO Bollinger Midline Reclaim",
+            "ltp > technical_bollinger_middle_20 AND PREVIOUS(field=ltp, offset=1) <= PREVIOUS(field=technical_bollinger_middle_20, offset=1) AND technical_cmf_20 > 0 AND technical_volume_ratio_20 >= 1.1 AND technical_rsi_14 BETWEEN 40 AND 65",
+            7, 16, 25, None, "bollinger_middle_break_exit",
+            "ltp < technical_bollinger_middle_20",
+            "A causal mean-recovery setup that exits if the reclaimed 20-session centre fails.",
+        ),
+        (
+            "ipo_donchian_flow_breakout", "IPO Donchian Flow Breakout",
+            "ltp >= technical_donchian_upper_20 AND technical_cmf_20 > 0 AND technical_volume_ratio_20 >= 1.3 AND technical_historical_volatility_20 <= 70 AND technical_atr_percent <= 10",
+            8, 20, 35, 6, "trend_breakdown_exit",
+            "ltp < technical_ema_20_value AND technical_ppo_histogram < 0",
+            "Tests a liquid range escape while excluding the most unstable early aftermarket paths.",
+        ),
+        (
+            "ipo_washout_reversal_flow", "IPO Washout Reversal + Flow",
+            "CHANGE_PERCENT(field=ltp, scans_back=10) BETWEEN -22 AND -6 AND technical_rsi_14 BETWEEN 32 AND 52 AND technical_close_location_value >= 0.7 AND technical_cmf_20 > 0 AND technical_volume_ratio_20 >= 1.2",
+            7, 15, 25, 5, "ipo_second_spike_rollover_exit",
+            "technical_rsi_14 >= 65 AND technical_ppo_histogram < 0",
+            "Models the sharp post-markup decline and first accumulation-backed recovery without assuming the old high will be revisited.",
+        ),
+        (
+            "ipo_nonextended_markup", "IPO Non-Extended Markup",
+            "CHANGE_PERCENT(field=ltp, scans_back=20) BETWEEN 6 AND 28 AND technical_rsi_14 BETWEEN 50 AND 68 AND technical_close_location_value >= 0.7 AND technical_cmf_20 > 0 AND technical_volume_ratio_20 >= 1.2 AND technical_atr_percent <= 10",
+            8, 19, 30, 5, "ipo_distribution_rollover_exit",
+            "technical_close_location_value <= 0.35 AND technical_ppo_histogram < 0",
+            "Participates in a confirmed but not yet extreme markup, then exits on a completed-session distribution rollover.",
+        ),
+        (
+            "ipo_post_peak_10_20_reclaim", "IPO Post-Peak 10–20% Reclaim",
+            "distance_from_52_week_high_percent BETWEEN 10 AND 20 AND technical_higher_low_3 = 1 AND ltp > technical_ema_10_value AND technical_rsi_14 BETWEEN 38 AND 58 AND technical_cmf_20 > 0",
+            6, 14, 25, 5, "ipo_momentum_rollover_exit",
+            "technical_ppo_histogram < 0 AND ltp < technical_ema_10_value",
+            "Tests the first controlled recovery after a 10–20% decline from the causal listing-history high.",
+        ),
+        (
+            "ipo_post_peak_15_30_structure", "IPO Post-Peak 15–30% Structure Recovery",
+            "distance_from_52_week_high_percent BETWEEN 15 AND 30 AND technical_higher_high_3 = 1 AND technical_higher_low_3 = 1 AND technical_close_location_value >= 0.65 AND technical_volume_ratio_20 >= 1.1",
+            7, 17, 30, 5, "ipo_structure_break_exit",
+            "technical_higher_low_3 = 0 AND ltp < technical_ema_10_value",
+            "Waits for a new higher-high/higher-low sequence after a material post-markup decline.",
+        ),
+        (
+            "ipo_post_peak_20_40_capitulation", "IPO Post-Peak 20–40% Capitulation Recovery",
+            "distance_from_52_week_high_percent BETWEEN 20 AND 40 AND technical_rsi_14 BETWEEN 28 AND 48 AND technical_close_location_value >= 0.7 AND technical_volume_ratio_20 >= 1.3 AND technical_cmf_20 > 0",
+            7, 16, 30, 5, "ipo_second_spike_rollover_exit",
+            "technical_rsi_14 >= 65 AND technical_ppo_histogram < 0",
+            "Requires a strong, liquid accumulation close after a deep decline; it does not buy the falling candle itself.",
+        ),
+        (
+            "ipo_post_peak_support_bounce", "IPO Post-Peak Support Bounce",
+            "distance_from_52_week_high_percent BETWEEN 10 AND 35 AND technical_sr_support_bounce = 1 AND technical_rsi_14 BETWEEN 32 AND 55 AND technical_cmf_20 > 0 AND technical_volume_ratio_20 >= 1",
+            6, 16, 30, None, "sr_resistance_rejection_exit",
+            "technical_sr_resistance_rejection = 1",
+            "Uses a causal multi-touch support bounce only after the IPO has declined materially from its prior high.",
+        ),
+        (
+            "ipo_post_peak_vwap_recovery", "IPO Post-Peak VWAP Recovery",
+            "distance_from_52_week_high_percent BETWEEN 10 AND 30 AND ltp > technical_vwap_20 AND technical_price_zscore_20 BETWEEN -0.25 AND 1.25 AND technical_cmf_20 > 0 AND technical_volume_ratio_20 >= 1.1",
+            6, 15, 25, None, "ipo_vwap_flow_exit",
+            "ltp < technical_vwap_20 AND technical_cmf_20 < 0",
+            "Tests recovery through the causal 20-session volume-weighted price after a post-peak decline.",
+        ),
+        (
+            "ipo_post_peak_bollinger_recovery", "IPO Post-Peak Bollinger Recovery",
+            "distance_from_52_week_high_percent BETWEEN 12 AND 35 AND ltp > technical_bollinger_middle_20 AND technical_rsi_14 BETWEEN 35 AND 58 AND technical_cmf_20 > 0 AND technical_volume_ratio_20 >= 1",
+            6, 15, 25, None, "bollinger_middle_break_exit",
+            "ltp < technical_bollinger_middle_20",
+            "Requires the first close back above the volatility centre after a meaningful IPO drawdown.",
+        ),
+        (
+            "ipo_post_peak_dry_base", "IPO Post-Peak Dry-Volume Base",
+            "distance_from_52_week_high_percent BETWEEN 15 AND 35 AND technical_volume_ratio_20 BETWEEN 0.5 AND 0.9 AND technical_rsi_14 BETWEEN 35 AND 52 AND technical_higher_low_3 = 1 AND ltp > technical_ema_10_value",
+            6, 14, 25, None, "ipo_base_failure_exit",
+            "ltp < technical_ema_20_value AND technical_cmf_20 < 0",
+            "Tests whether selling pressure has dried up and a higher low has formed after a 15–35% decline.",
+        ),
+        (
+            "ipo_post_peak_reversal_candle", "IPO Post-Peak Reversal Candle",
+            "distance_from_52_week_high_percent BETWEEN 15 AND 35 AND (technical_bullish_engulfing = 1 OR technical_hammer = 1) AND technical_close_location_value >= 0.65 AND technical_volume_ratio_20 >= 1.1 AND technical_rsi_14 BETWEEN 30 AND 55",
+            6, 14, 20, 5, "ipo_momentum_rollover_exit",
+            "technical_ppo_histogram < 0 AND ltp < technical_ema_10_value",
+            "A completed-session reversal candle is accepted only after a material post-peak decline and renewed participation.",
+        ),
+    )
+    for preset_id, name, condition, stop, target, holding, trailing, exit_rule_id, exit_condition, research_basis in ipo_cross_stock_hypotheses:
+        preset = _preset(
+            preset_id, name, "New IPO aftermarket research",
+            f"({condition}) AND {ipo_tradability_gate}",
+            "Cross-stock Nepal IPO hypothesis. Entry requires the shared NPR 1 decline, positive recovery, and 8,000-share tradability gate; ranking uses pooled multi-IPO evidence.",
+            stop=stop, target=target, holding=holding, trailing=trailing,
+            exit_rule_id=exit_rule_id, exit_condition=exit_condition,
+            research_basis=research_basis,
+        )
+        preset["family"] = "new_ipo_aftermarket"
+        presets.append(preset)
+
     adaptive_regime = (
         ("ichimoku_cloud_adx", "Ichimoku Cloud + ADX", 'ltp > technical_ichimoku_span_a_26 AND ltp > technical_ichimoku_span_b_52 AND technical_ichimoku_conversion_9 > technical_ichimoku_base_26 AND technical_adx_14 >= 20', 7, 20, 45, "Multi-horizon trend state with independent trend-strength confirmation."),
         ("kama_adaptive_momentum", "KAMA Adaptive Momentum", 'ltp > technical_kama_10 AND SLOPE(field=technical_kama_10, window=5, operator="gt", threshold=0) AND technical_ppo_histogram > 0 AND technical_efficiency_ratio_20 >= 0.3', 6, 17, 35, "Adaptive trend filter with path-efficiency and momentum confirmation."),
@@ -337,8 +598,8 @@ def get_backtest_presets() -> List[Dict[str, Any]]:
         for number, name, stop, target, holding, trailing, limitation in supplied_nepse15
     )
 
-    if len(presets) != 140:
-        raise RuntimeError(f"Expected 140 unique-entry backtest presets, built {len(presets)}")
+    if len(presets) != 170:
+        raise RuntimeError(f"Expected 170 unique-entry backtest presets, built {len(presets)}")
     identities: Dict[str, str] = {}
     for preset in presets:
         prior = identities.setdefault(str(preset["source_hash"]), str(preset["id"]))

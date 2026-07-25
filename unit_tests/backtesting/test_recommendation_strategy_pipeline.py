@@ -1,8 +1,12 @@
 """Recommendation queries must survive backtest -> schedule -> monitor compilation unchanged."""
 
 from utils.backtesting.presets import build_preset_query, get_backtest_presets
+from utils.backtesting.accelerated import compile_preset_exit_signals, compile_preset_signals
 from utils.backtesting.recommendations import _trade_range_estimates
 from utils.backtesting.strategy_discovery import build_discovery_sell_query, generate_discovery_presets
+from utils.backtesting.v2_jobs import IPO_WORKSPACE_TRADABILITY_GATE, _apply_ipo_workspace_gate
+from utils.strategy_builder.history_service import TargetHistory, append_observation
+from utils.strategy_builder.rule_evaluator import evaluate_rule
 from utils.strategy_builder.strategy_parser import format_strategy_query, parse_strategy_query, retarget_strategy_query
 
 
@@ -31,6 +35,81 @@ def test_every_professional_preset_compiles_for_the_live_monitor_contract():
     compiled = [_round_trip(build_preset_query(preset, "NABIL"), "NABIL", "BUY") for preset in presets]
     assert len(compiled) == len(presets)
     assert all(plan["rules"][0]["when"] for plan in compiled)
+
+
+def test_new_ipo_presets_are_distinct_limited_history_hypotheses():
+    presets = [
+        preset for preset in get_backtest_presets()
+        if preset["category"] == "New IPO aftermarket research"
+    ]
+    assert len(presets) == 30
+    assert {preset["family"] for preset in presets} == {"new_ipo_aftermarket"}
+    assert all("technical_sma_200" not in preset["condition"] for preset in presets)
+    assert all(preset["exit_rule_id"] and preset["exit_condition"] for preset in presets)
+    assert all("PREVIOUS(field=ltp, offset=2) - PREVIOUS(field=ltp, offset=1) >= 1" in preset["condition"] for preset in presets)
+    assert all("volume >= 8000" in preset["condition"] for preset in presets)
+    lifecycle = {preset["id"]: preset for preset in presets}
+    assert lifecycle["ipo_markup_peak_protection"]["defaults"]["trailing_stop_pct"] == 7
+    assert lifecycle["ipo_post_spike_recovery"]["defaults"]["take_profit_pct"] == 16
+    assert lifecycle["ipo_post_spike_recovery"]["defaults"]["trailing_stop_pct"] == 5
+
+
+def test_new_ipo_tradability_gate_rejects_unfillable_listing_rises():
+    query = '''STRATEGY_VERSION 1
+SIDE BUY
+RULE "IPO tradability gate" FOR SYMBOL "IPO" {
+  WHEN PREVIOUS(field=ltp, offset=2) - PREVIOUS(field=ltp, offset=1) >= 1 AND change_percent > 0 AND volume >= 8000
+  ORDER PERCENT_OF_AVAILABLE_CASH 100
+}'''
+    rule = parse_strategy_query(query).rules[0]
+
+    def matches(prior_prices, *, volume=8000, change_percent=1):
+        history = TargetHistory()
+        current_price = prior_prices[-1] + 1
+        for index, price in enumerate([*prior_prices, current_price]):
+            append_observation(
+                history, "ltp", price, source_timestamp=f"2026-01-{index + 1:02d}",
+                policy="count_only_new_trade",
+            )
+        result = evaluate_rule(
+            rule, "IPO",
+            {"ltp": current_price, "change_percent": change_percent, "volume": volume},
+            history, trigger_on_cross=False,
+        )
+        return result.final_result
+
+    assert matches([100, 99]) is True
+    assert matches([100, 101]) is False
+    assert matches([100, 99.5]) is False
+    assert matches([100, 99], volume=7999) is False
+    assert matches([100, 99], change_percent=0) is False
+
+
+def test_new_ipo_presets_use_generic_causal_compiler_fallback():
+    rows = [
+        {"session_date": "2026-01-01", "ltp": 100, "volume": 1000, "change_percent": 0},
+        {"session_date": "2026-01-02", "ltp": 99, "volume": 9000, "change_percent": -1},
+        {
+            "session_date": "2026-01-03", "ltp": 100, "volume": 8000, "change_percent": 1,
+            "technical_vwap_20": 95, "technical_price_zscore_20": 0,
+            "technical_cmf_20": .1,
+        },
+    ]
+    assert compile_preset_signals("ipo_first_base_vwap_reclaim", rows) == [False, False, True]
+    assert len(compile_preset_exit_signals("ipo_post_spike_recovery", rows)) == len(rows)
+
+
+def test_ipo_workspace_applies_tradability_gate_to_every_catalog_strategy():
+    presets = get_backtest_presets()
+    normal = next(item for item in presets if item["id"] == "consecutive_rises_5")
+    dedicated = next(item for item in presets if item["id"] == "ipo_nonextended_markup")
+    gated_normal, gated_dedicated = _apply_ipo_workspace_gate(
+        [normal, dedicated],
+        {"run_type": "ipo_research", "apply_ipo_tradability_gate": True},
+    )
+    assert IPO_WORKSPACE_TRADABILITY_GATE in gated_normal["condition"]
+    assert gated_normal["source_hash"] != normal["source_hash"]
+    assert gated_dedicated["condition"].count(IPO_WORKSPACE_TRADABILITY_GATE) == 1
 
 
 def test_combined_buy_and_sell_queries_share_the_schedule_monitor_contract():

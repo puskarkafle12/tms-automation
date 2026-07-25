@@ -26,29 +26,64 @@ from utils.technical_indicators import ENGINE_VERSION
 ProgressCallback = Callable[[int, int, str, int, Optional[Dict[str, Any]]], None]
 
 
-def background_worker_limit(requested_workers: Optional[int]) -> int:
-    """Reserve CPU for HTTP, database, and market-data work during scans.
+def market_research_is_constrained() -> bool:
+    """Protect interactive trading during NEPSE pre-open and continuous hours."""
+    from utils.market_status import get_market_hours_status, get_nepal_now
 
-    Whole-market backtests stay below the interactive reserve. When
-    BACKTEST_MAX_WORKERS is unset, spare cores are used automatically (up to 3)
-    so scans finish faster on multi-core hosts without starving the API.
+    status = get_market_hours_status(get_nepal_now())
+    return bool(status["is_pre_open"] or status["market_hours_open"])
+
+
+def _positive_env_int(name: str, fallback: int) -> int:
+    try:
+        return max(1, int(os.getenv(name, str(fallback))))
+    except ValueError:
+        return fallback
+
+
+def background_worker_limit(
+    requested_workers: Optional[int],
+    *,
+    market_constrained: Optional[bool] = None,
+) -> int:
+    """Choose a bounded CPU process count without starving interactive traffic.
+
+    During NEPSE pre-open/live hours research defaults to one process. Outside
+    that window it uses every spare CPU after the interactive reserve, up to the
+    off-hours safety cap. Child processes retain a low OS priority and one BLAS
+    thread, so API/database work can pre-empt research under load.
     """
-    try:
-        reserved_cpus = max(1, int(os.getenv("BACKTEST_RESERVED_CPUS", "1")))
-    except ValueError:
-        reserved_cpus = 1
+    reserved_cpus = _positive_env_int("BACKTEST_RESERVED_CPUS", 1)
     available_cpus = max(1, (os.cpu_count() or 2) - reserved_cpus)
-    raw_limit = os.getenv("BACKTEST_MAX_WORKERS", "").strip()
-    try:
-        if raw_limit:
-            configured_limit = max(1, int(raw_limit))
-        else:
-            # Adaptive default: use spare cores, never more than 3 unless configured.
-            configured_limit = min(3, available_cpus)
-    except ValueError:
-        configured_limit = min(3, available_cpus)
+    constrained = market_research_is_constrained() if market_constrained is None else market_constrained
+    if constrained:
+        phase_limit = _positive_env_int("BACKTEST_MARKET_MAX_WORKERS", 1)
+    else:
+        phase_limit = _positive_env_int(
+            "BACKTEST_OFF_HOURS_MAX_WORKERS",
+            min(available_cpus, 8),
+        )
+    raw_global_limit = os.getenv("BACKTEST_MAX_WORKERS", "").strip()
+    global_limit = _positive_env_int("BACKTEST_MAX_WORKERS", 12) if raw_global_limit else 12
+    configured_limit = min(phase_limit, global_limit)
     requested = max(1, int(requested_workers or configured_limit))
     return min(requested, configured_limit, available_cpus, 12)
+
+
+def background_turn_size(
+    workers: int,
+    *,
+    market_constrained: Optional[bool] = None,
+) -> int:
+    """Return a fair stock quantum large enough to keep the process pool busy."""
+    explicit = os.getenv("BACKTEST_ROUND_ROBIN_STOCKS_PER_TURN", "").strip()
+    if explicit:
+        return min(24, _positive_env_int("BACKTEST_ROUND_ROBIN_STOCKS_PER_TURN", 1))
+    constrained = market_research_is_constrained() if market_constrained is None else market_constrained
+    if constrained:
+        return 1
+    cap = _positive_env_int("BACKTEST_OFF_HOURS_STOCKS_PER_TURN", 12)
+    return max(1, min(24, cap, max(1, int(workers)) * 2))
 
 
 def initialize_background_worker() -> None:
@@ -141,7 +176,11 @@ def _run_symbol_task(task: Dict[str, Any]) -> Dict[str, Any]:
             if settings.get("trailing_stop_pct") is not None
             else defaults.get("trailing_stop_pct")
         )
-        if preset.get("component_ids") or preset.get("enforce_preset_holding"):
+        if (
+            preset.get("component_ids")
+            or preset.get("enforce_preset_holding")
+            or settings.get("use_preset_holding_days")
+        ):
             effective_min_holding_days = max(
                 int(settings.get("min_holding_days") if settings.get("min_holding_days") is not None else 0),
                 int(defaults.get("min_holding_days") or 0),

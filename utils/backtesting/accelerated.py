@@ -53,6 +53,41 @@ def _positive_slope(values: np.ndarray, window: int) -> np.ndarray:
     return result
 
 
+def compile_condition_signals(
+    condition: str,
+    rows: Sequence[Dict[str, Any]],
+    *,
+    trigger_on_cross: bool = True,
+) -> List[bool]:
+    """Evaluate a causal strategy condition when no vectorized specialization exists."""
+    from utils.strategy_builder.history_service import TargetHistory
+    from utils.strategy_builder.rule_evaluator import evaluate_rule, update_history_from_snapshot
+    from utils.strategy_builder.strategy_parser import parse_strategy_query
+
+    plan = parse_strategy_query(
+        'STRATEGY_VERSION 1\nSIDE BUY\nRULE "Generic accelerated fallback" FOR SYMBOL "GENERIC" {\n'
+        f"  WHEN {condition}\n"
+        "  ORDER PERCENT_OF_AVAILABLE_CASH 100\n"
+        "}"
+    )
+    rule = plan.rules[0]
+    history = TargetHistory()
+    signals: List[bool] = []
+    for index, source_row in enumerate(rows):
+        row = dict(source_row)
+        session_marker = str(
+            row.get("session_date") or row.get("date") or row.get("source_timestamp") or index
+        )
+        row.setdefault("last_traded_at", session_marker)
+        row.setdefault("received_at", session_marker)
+        update_history_from_snapshot(history, row)
+        result = evaluate_rule(
+            rule, "GENERIC", row, history, trigger_on_cross=trigger_on_cross,
+        )
+        signals.append(bool(result.final_result))
+    return signals
+
+
 def compile_preset_signals(
     preset_id: str,
     rows: Sequence[Dict[str, Any]],
@@ -331,7 +366,14 @@ def compile_preset_signals(
         number = int(preset_id.rsplit("_", 1)[1])
         signal = _numbers(rows, f"technical_nepse15_entry_{number}") == 1
     else:
-        raise ValueError(f"Preset {preset_id} is not supported by the accelerated compiler.")
+        from utils.backtesting.presets import get_backtest_presets
+        preset = next((item for item in get_backtest_presets() if item["id"] == preset_id), None)
+        if not preset or not preset.get("condition"):
+            raise ValueError(f"Preset {preset_id} is not supported by the accelerated compiler.")
+        signal = np.asarray(
+            compile_condition_signals(str(preset["condition"]), rows, trigger_on_cross=False),
+            dtype=bool,
+        )
     raw = np.nan_to_num(signal, nan=False).astype(bool)
     if not trigger_on_cross:
         return [bool(value) for value in raw]
@@ -353,4 +395,8 @@ def compile_preset_exit_signals(preset_id: str, rows: Sequence[Dict[str, Any]]) 
     preset = next((item for item in get_backtest_presets() if item["id"] == preset_id), None)
     if not preset or not preset.get("exit_rule_id"):
         return [False] * len(rows)
+    if preset.get("family") == "new_ipo_aftermarket" and preset.get("exit_condition"):
+        return compile_condition_signals(
+            str(preset["exit_condition"]), rows, trigger_on_cross=False,
+        )
     return compile_discovery_exit_signals(preset, rows)

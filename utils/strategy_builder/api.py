@@ -140,6 +140,7 @@ class BacktestBatchRequest(BaseModel):
     ordinary_shares_only: bool = True
     max_listing_age_days: Optional[int] = Field(default=None, ge=1, le=36500)
     min_volume: Optional[float] = Field(default=None, ge=0)
+    use_preset_holding_days: bool = False
 
 
 class BacktestAnalysisAskRequest(BaseModel):
@@ -154,7 +155,7 @@ class BacktestAnalysisAskRequest(BaseModel):
 class BacktestV2RunRequest(BacktestBatchRequest):
     name: str = Field(default="NEPSE market research", min_length=2, max_length=200)
     notes: Optional[str] = Field(default=None, max_length=4000)
-    run_type: str = Field(default="market_scan", pattern="^(single_stock|market_scan|portfolio)$")
+    run_type: str = Field(default="market_scan", pattern="^(single_stock|market_scan|portfolio|ipo_research)$")
     history_mode: str = Field(default="all_available", pattern="^(all_available|custom)$")
     portfolio: Dict[str, Any] = Field(default_factory=dict)
     strategy_mode: str = Field(default="presets", pattern="^(presets|custom|discovery)$")
@@ -387,6 +388,17 @@ async def read_backtest_v2_run(run_id: str, current_user: FrontendUser = Depends
     from utils.backtesting.v2_jobs import get_run
     try:
         return await run_in_threadpool(get_run, run_id, owner_id=str(current_user.id))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/backtests/v2/runs/{run_id}/ipo-strategy-summary")
+async def read_backtest_v2_ipo_strategy_summary(run_id: str, current_user: FrontendUser = Depends(require_permission("backtest"))):
+    from utils.backtesting.v2_jobs import get_ipo_strategy_summary
+    try:
+        return await run_in_threadpool(
+            get_ipo_strategy_summary, run_id, owner_id=str(current_user.id),
+        )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -1038,7 +1050,10 @@ async def read_market_ohlcv(
 @router.get("/backtests/v2/results/{result_id}/chart")
 async def read_backtest_v2_result_chart(result_id: int, db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("backtest"))):
     from utils.backtesting.support_resistance import chart_zone_history, current_zones
-    from utils.backtesting.v2_query import ResultQueryError, result_detail, result_trades
+    from utils.backtesting.v2_query import (
+        ResultQueryError, _strategy_planning_range, result_detail, result_trades,
+    )
+    from utils.market_status import TRADING_WEEKDAYS
     try:
         detail = result_detail(db, result_id, owner_id=str(current_user.id))
     except ResultQueryError as exc:
@@ -1060,9 +1075,20 @@ async def read_backtest_v2_result_chart(result_id: int, db: Session = Depends(ge
             "label": "BUY NOW",
             "status": detail.get("current_signal_status") or "buy",
         })
+    assumptions = detail.get("assumptions") or {}
+    planning = _strategy_planning_range(detail)
+    planning_basis = dict(planning.get("planning_range_basis") or {})
+    reference_price = float(
+        planning_basis.get("reference_price")
+        or detail.get("ltp")
+        or 0
+    )
+    buy_low = float(planning.get("buy_zone_low") or reference_price or 0)
+    buy_high = float(planning.get("buy_zone_high") or reference_price or 0)
+    sell_low = float(planning.get("sell_zone_low") or 0)
+    sell_high = float(planning.get("sell_zone_high") or 0)
     projection = None
-    if detail.get("current_signal_active") and signal_date and detail.get("ltp"):
-        assumptions = detail.get("assumptions") or {}
+    if detail.get("current_signal_active") and signal_date and reference_price > 0:
         hold_sessions = max(1, int(round(float(
             detail.get("average_holding_days")
             or assumptions.get("max_holding_days")
@@ -1073,12 +1099,15 @@ async def read_backtest_v2_result_chart(result_id: int, db: Session = Depends(ge
         cursor = start_day
         while len(projected_days) <= hold_sessions:
             cursor += timedelta(days=1)
-            if cursor.isoweekday() != 6:
+            if cursor.weekday() in TRADING_WEEKDAYS:
                 projected_days.append(cursor)
-        current_price = float(detail["ltp"])
-        target_price = current_price * (
-            1 + float(assumptions.get("take_profit_pct") or 10) / 100
+        current_price = reference_price
+        target_price = (
+            (sell_low + sell_high) / 2
+            if sell_low > 0 and sell_high > 0
+            else current_price * (1 + float(assumptions.get("take_profit_pct") or 10) / 100)
         )
+        calendar_days = (projected_days[-1] - start_day).days
         points = []
         for index in range(hold_sessions + 1):
             if index in {0, hold_sessions} or index % max(1, hold_sessions // 5) == 0:
@@ -1091,8 +1120,13 @@ async def read_backtest_v2_result_chart(result_id: int, db: Session = Depends(ge
             "points": points,
             "target_date": projected_days[-1].isoformat(),
             "target_price": round(target_price, 2),
-            "label": f"ANTICIPATED SELL · {hold_sessions} sessions",
-            "disclaimer": "Scenario line based on the tested average/max holding period and take-profit setting; it is not a price prediction.",
+            "holding_sessions": hold_sessions,
+            "calendar_days": calendar_days,
+            "label": (
+                f"ANTICIPATED SELL · {hold_sessions} sessions · "
+                f"~{calendar_days} calendar days · NPR {target_price:,.2f}"
+            ),
+            "disclaimer": "Scenario line uses the tested average/max holding period and the selected strategy sell zone (or saved take-profit fallback); it is not a price prediction.",
         }
     chart_end = max(str(period.get("end") or ""), signal_date) or None
     candles = _market_ohlcv_candles(
@@ -1102,48 +1136,42 @@ async def read_backtest_v2_result_chart(result_id: int, db: Session = Depends(ge
         end_date=chart_end,
         limit=5000,
     )
-    assumptions = detail.get("assumptions") or {}
     latest_price = float(candles[-1]["close"]) if candles else float(detail.get("ltp") or 0)
     risk_levels = []
-    if latest_price > 0 and detail.get("current_signal_active") and signal_date:
+    entry_price = reference_price or latest_price
+    if entry_price > 0 and detail.get("current_signal_active") and signal_date:
         stop_pct = float(assumptions.get("stop_loss_pct") or 5)
         target_pct = float(assumptions.get("take_profit_pct") or 10)
         trailing_pct = assumptions.get("trailing_stop_pct")
         exit_rule_id = str(assumptions.get("exit_rule_id") or "")
-        protection_values = dict(assumptions.get("protection_latest_values") or {})
         atr_multiple = assumptions.get("atr_stop_multiple")
-        atr_value = protection_values.get("technical_atr_14")
-        stop_level = latest_price * (1 - stop_pct / 100)
-        if atr_multiple is not None and atr_value is not None:
-            stop_level = latest_price - float(atr_value) * float(atr_multiple)
-        sell_level = None
-        sell_label = f"SELL ZONE · +{target_pct:g}%"
-        if exit_rule_id == "sr_resistance_rejection_exit":
-            lower = protection_values.get("technical_sr_resistance_lower")
-            upper = protection_values.get("technical_sr_resistance_upper")
-            if lower is not None and upper is not None:
-                sell_level = (float(lower) + float(upper)) / 2
-                sell_label = "SELL ZONE · RESISTANCE"
-        elif exit_rule_id == "bollinger_middle_exit":
-            sell_level = protection_values.get("technical_bollinger_middle_20")
-            sell_label = "SELL ZONE · BOLLINGER MID"
-        elif exit_rule_id == "bollinger_upper_rejection_exit":
-            sell_level = protection_values.get("technical_bollinger_upper_20")
-            sell_label = "SELL ZONE · BOLLINGER UPPER"
-        elif exit_rule_id == "fibonacci_resistance_exit":
-            sell_level = protection_values.get("technical_fib_range_high_63")
-            sell_label = "SELL ZONE · FIB RESISTANCE"
-        try:
-            sell_level = float(sell_level) if sell_level is not None else latest_price * (1 + target_pct / 100)
-        except (TypeError, ValueError):
-            sell_level = latest_price * (1 + target_pct / 100)
+        stop_level = float(planning.get("protective_stop") or entry_price * (1 - stop_pct / 100))
+        sell_low = sell_low or entry_price * (1 + target_pct / 100)
+        sell_high = sell_high or sell_low
+        sell_level = (sell_low + sell_high) / 2
+        sell_method = {
+            "sr_resistance_rejection_exit": "RESISTANCE",
+            "bollinger_middle_exit": "BOLLINGER MID",
+            "bollinger_upper_rejection_exit": "BOLLINGER UPPER",
+            "fibonacci_resistance_exit": "FIB RESISTANCE",
+        }.get(exit_rule_id, f"+{target_pct:g}% TARGET")
+        buy_range_label = (
+            f"NPR {buy_low:,.2f}–{buy_high:,.2f}"
+            if buy_low > 0 and buy_high > 0 else "UNAVAILABLE"
+        )
+        sell_range_label = (
+            f"NPR {sell_low:,.2f}–{sell_high:,.2f}"
+            if abs(sell_high - sell_low) >= .01 else f"NPR {sell_level:,.2f}"
+        )
         risk_start = signal_date
         risk_end = str((projection or {}).get("target_date") or signal_date)
         risk_levels.extend([
             {
                 "kind": "buy_entry",
-                "value": round(latest_price, 2),
-                "label": "BUY SIGNAL",
+                "value": round(entry_price, 2),
+                "range_low": round(buy_low, 2) if buy_low > 0 else None,
+                "range_high": round(buy_high, 2) if buy_high > 0 else None,
+                "label": f"BUY NPR {entry_price:,.2f} · RANGE {buy_range_label}",
                 "start_date": risk_start,
                 "end_date": risk_end,
             },
@@ -1151,8 +1179,8 @@ async def read_backtest_v2_result_chart(result_id: int, db: Session = Depends(ge
                 "kind": "stop",
                 "value": round(stop_level, 2),
                 "label": (
-                    f"ATR STOP · {float(atr_multiple):g}×"
-                    if atr_multiple is not None else f"FIXED STOP · {stop_pct:g}%"
+                    f"ATR STOP {float(atr_multiple):g}× · NPR {stop_level:,.2f}"
+                    if atr_multiple is not None else f"FIXED STOP {stop_pct:g}% · NPR {stop_level:,.2f}"
                 ),
                 "start_date": risk_start,
                 "end_date": risk_end,
@@ -1160,17 +1188,20 @@ async def read_backtest_v2_result_chart(result_id: int, db: Session = Depends(ge
             {
                 "kind": "sell_target",
                 "value": round(sell_level, 2),
-                "label": sell_label,
+                "range_low": round(sell_low, 2),
+                "range_high": round(sell_high, 2),
+                "label": f"SELL {sell_method} · {sell_range_label}",
                 "start_date": risk_start,
                 "end_date": risk_end,
             },
         ])
         if trailing_pct is not None:
             trailing_pct = float(trailing_pct)
+            trailing_level = entry_price * (1 - trailing_pct / 100)
             risk_levels.append({
                 "kind": "trailing_stop",
-                "value": round(latest_price * (1 - trailing_pct / 100), 2),
-                "label": f"TRAILING STOP REFERENCE · {trailing_pct:g}%",
+                "value": round(trailing_level, 2),
+                "label": f"TRAILING STOP {trailing_pct:g}% · START NPR {trailing_level:,.2f}",
                 "start_date": risk_start,
                 "end_date": risk_end,
             })

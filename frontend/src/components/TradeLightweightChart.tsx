@@ -35,6 +35,8 @@ export type TradeChartProjection = {
   target_date: string;
   target_price: number;
   label: string;
+  holding_sessions?: number;
+  calendar_days?: number;
   disclaimer?: string;
 };
 export type TradeChartZone = {
@@ -52,6 +54,8 @@ export type TradeChartZoneSnapshot = { date: string; zones: TradeChartZone[] };
 export type TradeChartRiskLevel = {
   kind: 'buy_entry' | 'stop' | 'trailing_stop' | 'sell_target';
   value: number;
+  range_low?: number | null;
+  range_high?: number | null;
   label: string;
   start_date: string;
   end_date: string;
@@ -350,6 +354,10 @@ const TradeLightweightChart: React.FC<TradeLightweightChartProps> = ({
       riskLevels.forEach((level) => {
         const y = candleSeries.priceToCoordinate(Number(level.value));
         if (y == null) return;
+        const rangeTop = level.range_high == null
+          ? null : candleSeries.priceToCoordinate(Number(level.range_high));
+        const rangeBottom = level.range_low == null
+          ? null : candleSeries.priceToCoordinate(Number(level.range_low));
         const start = chart.timeScale().timeToCoordinate(toChartTime(level.start_date) as Time);
         const end = chart.timeScale().timeToCoordinate(toChartTime(level.end_date) as Time);
         if (start == null) return;
@@ -357,12 +365,18 @@ const TradeLightweightChart: React.FC<TradeLightweightChartProps> = ({
         if (rawEnd < 0 || start > plotWidth) return;
         const line = document.createElement('div');
         line.className = `trade-chart-risk-segment ${level.kind}`;
+        if (rangeTop != null && rangeBottom != null) {
+          line.classList.add('has-range');
+          line.style.top = `${Math.min(rangeTop, rangeBottom)}px`;
+          line.style.height = `${Math.max(3, Math.abs(rangeBottom - rangeTop))}px`;
+        } else {
+          line.style.top = `${y}px`;
+        }
         const left = Math.max(0, start);
         const availableWidth = Math.max(20, plotWidth - left);
         const requestedWidth = Math.max(70, Math.min(plotWidth, rawEnd) - left);
         line.style.left = `${left}px`;
         line.style.width = `${Math.min(availableWidth, requestedWidth)}px`;
-        line.style.top = `${y}px`;
         const label = document.createElement('span');
         label.textContent = level.label;
         line.appendChild(label);

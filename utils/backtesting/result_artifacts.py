@@ -42,8 +42,20 @@ def settings_hash(
     engine_version: str, indicator_version: str,
 ) -> str:
     defaults = dict(preset.get("defaults") or {})
-    min_days = int(config.get("min_holding_days") or defaults.get("min_holding_days") or 0)
-    max_days = int(config.get("max_holding_days") or defaults.get("max_holding_days") or 20)
+    use_preset_holding = bool(config.get("use_preset_holding_days"))
+    min_days = int(
+        max(
+            int(config.get("min_holding_days") or 0),
+            int(defaults.get("min_holding_days") or 0),
+        )
+        if use_preset_holding
+        else config.get("min_holding_days") or defaults.get("min_holding_days") or 0
+    )
+    max_days = int(
+        defaults.get("max_holding_days") or 20
+        if use_preset_holding
+        else config.get("max_holding_days") or defaults.get("max_holding_days") or 20
+    )
     identity = {
         "engine_version": engine_version, "indicator_version": indicator_version,
         "data_source": config.get("data_source") or "merolagani",
@@ -477,12 +489,13 @@ def store_symbol_artifacts(
                 rejection_key,symbol,stock_name,strategy_id,strategy_name,strategy_hash,
                 settings_hash,engine_version,indicator_engine_version,total_trades,win_rate_pct,
                 rejection_reason,policy_version,strategy_definition,owner_id,source_run_id,
-                last_tested_session,next_recheck_at,revalidation_state
+                last_tested_session,next_recheck_at,revalidation_state,trade_samples
             ) VALUES (
                 :key,:symbol,:stock_name,:strategy_id,:strategy_name,:strategy_hash,
                 :settings_hash,:engine_version,:indicator_version,:total_trades,:win_rate_pct,
                 :rejection_reason,:policy_version,CAST(:strategy_definition AS JSONB),:owner_id,
-                :source_run_id,:last_tested_session,:next_recheck_at,:revalidation_state
+                :source_run_id,:last_tested_session,:next_recheck_at,:revalidation_state,
+                CAST(:trade_samples AS JSONB)
             ) ON CONFLICT (
                 symbol,strategy_hash,settings_hash,engine_version,indicator_engine_version
             ) DO UPDATE SET
@@ -499,6 +512,7 @@ def store_symbol_artifacts(
                 last_tested_session=COALESCE(EXCLUDED.last_tested_session,backtest_rejected_strategies.last_tested_session),
                 next_recheck_at=EXCLUDED.next_recheck_at,
                 revalidation_state=EXCLUDED.revalidation_state,last_seen_at=NOW(),
+                trade_samples=EXCLUDED.trade_samples,
                 last_recheck_error=NULL
         """), [{
             "key": rejection_key(
@@ -525,6 +539,15 @@ def store_symbol_artifacts(
                 if is_revalidation_candidate(result) else None
             ),
             "revalidation_state": "frozen" if is_revalidation_candidate(result) else "ineligible",
+            "trade_samples": json.dumps([
+                {
+                    key: trade.get(key) for key in (
+                        "signal_date", "entry_date", "exit_date", "holding_days",
+                        "exit_reason", "return_pct", "pnl",
+                    )
+                }
+                for trade in list(result.get("trades") or [])
+            ], default=str),
         } for result, preset in rejected])
     technical = dict(output.get("technical_snapshot") or {})
     if not retained or not technical.get("as_of_date"):

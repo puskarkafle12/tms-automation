@@ -166,6 +166,13 @@
 .trade-chart-risk-segment.buy_entry { border-color: #22c55e; }
 .trade-chart-risk-segment.trailing_stop { border-color: #a78bfa; }
 .trade-chart-risk-segment.sell_target { border-color: #f59e0b; }
+.trade-chart-risk-segment.has-range {
+  border-bottom: 2px dashed;
+  box-sizing: border-box;
+}
+.trade-chart-risk-segment.buy_entry.has-range { background: rgba(34, 197, 94, .08); }
+.trade-chart-risk-segment.sell_target.has-range { background: rgba(245, 158, 11, .08); }
+.trade-chart-risk-segment.has-range span { bottom: calc(100% + 4px); }
 
 .trade-chart-risk-segment span {
   position: absolute;
