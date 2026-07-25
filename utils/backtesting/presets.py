@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from utils.backtesting.ipo_gate import (
+    IPO_WORKSPACE_GATE_DESCRIPTION,
+    IPO_WORKSPACE_TRADABILITY_GATE,
+)
 from typing import Any, Dict, List
 
 
@@ -307,15 +311,16 @@ def get_backtest_presets() -> List[Dict[str, Any]]:
             "International aftermarket evidence associates early return volatility with weaker long-run performance; this hypothesis waits for a more efficient, lower-volatility trend with accumulation.",
         ),
     )
-    ipo_tradability_gate = (
-        "PREVIOUS(field=ltp, offset=2) - PREVIOUS(field=ltp, offset=1) >= 1 "
-        "AND change_percent > 0 AND volume >= 8000"
-    )
+    ipo_tradability_gate = IPO_WORKSPACE_TRADABILITY_GATE
     for preset_id, name, condition, stop, target, holding, exit_rule_id, exit_condition, research_basis in new_ipo_aftermarket:
         preset = _preset(
             preset_id, name, "New IPO aftermarket research",
             f"({condition}) AND {ipo_tradability_gate}",
-            "Limited-history, completed-session IPO aftermarket hypothesis. Entry becomes eligible only after a prior session fell by at least NPR 1, the current recovery session is positive, and at least 8,000 shares traded.",
+            (
+                "Limited-history, completed-session IPO aftermarket hypothesis. Entry becomes "
+                f"eligible only after {IPO_WORKSPACE_GATE_DESCRIPTION}; the strategy must then "
+                "produce its own valid signal."
+            ),
             stop=stop, target=target, holding=holding,
             exit_rule_id=exit_rule_id, exit_condition=exit_condition,
             research_basis=research_basis,
@@ -343,7 +348,10 @@ def get_backtest_presets() -> List[Dict[str, Any]]:
         preset = _preset(
             preset_id, name, "New IPO aftermarket research",
             f"({condition}) AND {ipo_tradability_gate}",
-            "Causal IPO lifecycle hypothesis with an NPR 1 prior-session pullback gate, 8,000-share liquidity floor, profit-locking trailing stop, and explicit momentum exit.",
+            (
+                "Causal IPO lifecycle hypothesis with the shared prior-session red-candle "
+                "execution gate, profit-locking trailing stop, and explicit momentum exit."
+            ),
             stop=stop, target=target, holding=holding, trailing=trailing,
             exit_rule_id=exit_rule_id, exit_condition=exit_condition,
             research_basis=research_basis,
@@ -497,12 +505,128 @@ def get_backtest_presets() -> List[Dict[str, Any]]:
         preset = _preset(
             preset_id, name, "New IPO aftermarket research",
             f"({condition}) AND {ipo_tradability_gate}",
-            "Cross-stock Nepal IPO hypothesis. Entry requires the shared NPR 1 decline, positive recovery, and 8,000-share tradability gate; ranking uses pooled multi-IPO evidence.",
+            "Cross-stock Nepal IPO hypothesis. Entry requires the shared prior-session "
+            "red-candle gate; ranking uses pooled multi-IPO evidence.",
             stop=stop, target=target, holding=holding, trailing=trailing,
             exit_rule_id=exit_rule_id, exit_condition=exit_condition,
             research_basis=research_basis,
         )
         preset["family"] = "new_ipo_aftermarket"
+        presets.append(preset)
+
+    # Tier-1 Nepal IPO research pack. Shared buy constraint remains the prior
+    # completed red candle (close < open); entries fire only on later sessions.
+    # Listing age is intentionally NOT baked into conditions — set it on the
+    # IPO workspace (90 / 180 / 365 / 730 days) so researchers can compare.
+    ipo_tier1_research = (
+        (
+            "ipo_tier1_subscription_sector_flip",
+            "IPO Tier-1 · Early Strength Flip (≤90d recommended)",
+            (
+                "CHANGE_PERCENT(field=ltp, scans_back=5) BETWEEN 20 AND 80 "
+                "AND technical_volume_ratio_20 >= 1.2 "
+                "AND technical_close_location_value >= 0.65 "
+                "AND change_percent > 0 "
+                "AND technical_atr_percent <= 15"
+            ),
+            12, 25, 20, None, "ipo_momentum_rollover_exit",
+            "technical_ppo_histogram < 0 AND ltp < technical_ema_10_value",
+            (
+                "Nepal short-horizon aftermarket hypothesis for the first ~90 listing days. "
+                "Primary-market subscription multiples are not stored yet, so early "
+                "underpricing is proxied by a 20–80% five-session advance with "
+                "participation and a strong close. Workspace listing age should be set "
+                "to 90 (or lower) when testing this pack. Buy still requires the shared "
+                "prior-session red-candle gate — never on the red day itself."
+            ),
+            90,
+        ),
+        (
+            "ipo_tier1_controlled_momentum_recovery",
+            "IPO Tier-1 · Controlled Momentum Recovery (≤365/730d)",
+            (
+                "technical_ipo_post_peak_pullback = 1 "
+                "AND ltp > technical_ema_20_value "
+                "AND technical_higher_high_3 = 1 AND technical_higher_low_3 = 1 "
+                "AND technical_obv > AVERAGE(field=technical_obv, window=10) "
+                "AND technical_volume_ratio_20 >= 1.5 "
+                "AND technical_rsi_14 BETWEEN 40 AND 70 "
+                "AND CHANGE_PERCENT(field=ltp, scans_back=20) BETWEEN 5 AND 35 "
+                "AND technical_atr_percent <= 10"
+            ),
+            9, 20, 45, 5, "ipo_structure_break_exit",
+            "technical_higher_low_3 = 0 AND ltp < technical_ema_20_value",
+            (
+                "Core Tier-1 composite: first-peak 10–25% pullback zone, controlled "
+                "20-session momentum, HH/HL structure, rising OBV, and volume "
+                "confirmation. Recommended workspace listing ages: 365 and 730 for "
+                "side-by-side comparison. Shared red-candle gate still applies."
+            ),
+            365,
+        ),
+        (
+            "ipo_tier1_first_base_vwap_breakout",
+            "IPO Tier-1 · First-Base VWAP Breakout (30–180d)",
+            (
+                "ltp > technical_vwap_20 "
+                "AND technical_breakout_20 = 1 "
+                "AND technical_volume_ratio_20 >= 2 "
+                "AND technical_higher_low_3 = 1 "
+                "AND technical_cmf_20 > 0 "
+                "AND technical_atr_percent <= 8 "
+                "AND technical_price_zscore_20 BETWEEN -0.5 AND 1.5 "
+                "AND technical_historical_volatility_20 <= 55"
+            ),
+            8, 22, 60, 5, "ipo_vwap_flow_exit",
+            "ltp < technical_vwap_20 AND technical_cmf_20 < 0",
+            (
+                "First-base / structure breakout: reclaim VWAP, break the 20-session "
+                "high with ≥2× volume, rising lows, and contracting volatility. "
+                "Recommended workspace listing age ≤180 days (base needs seasoning). "
+                "Entries still wait for a prior red candle before any buy."
+            ),
+            180,
+        ),
+        (
+            "ipo_tier1_recovery_score_strong",
+            "IPO Tier-1 · Recovery Score ≥8 Strong Buy (≤730d)",
+            (
+                "technical_ipo_recovery_score >= 8 "
+                "AND technical_volume_ratio_20 >= 1.5 "
+                "AND technical_ppo_histogram > 0"
+            ),
+            9, 20, 45, 5, "ipo_distribution_rollover_exit",
+            "technical_ipo_recovery_score < 5 OR (ltp < technical_ema_20_value AND technical_cmf_20 < 0)",
+            (
+                "Composite daily SignalScore: EMA recovery after pullback (+2), VWAP "
+                "reclaim (+2), HH/HL (+2), RSI>50 (+1), OBV breakout (+1), volume "
+                "breakout (+1), controlled ATR (+1). Trade only when score ≥ 8 with "
+                "participation. Recommended listing age ≤730. Shared prior red-candle "
+                "gate remains mandatory."
+            ),
+            730,
+        ),
+    )
+    for (
+        preset_id, name, condition, stop, target, holding, trailing,
+        exit_rule_id, exit_condition, research_basis, recommended_age,
+    ) in ipo_tier1_research:
+        preset = _preset(
+            preset_id, name, "New IPO aftermarket research",
+            f"({condition}) AND {ipo_tradability_gate}",
+            (
+                "Tier-1 Nepal IPO research strategy. Buy constraint is unchanged: a "
+                f"prior completed session must close below its open ({IPO_WORKSPACE_GATE_DESCRIPTION}); "
+                "the strategy may fire only on later sessions. Listing age is chosen "
+                f"on the IPO workspace (recommended ≤{recommended_age} days for this strategy)."
+            ),
+            stop=stop, target=target, holding=holding, trailing=trailing,
+            exit_rule_id=exit_rule_id, exit_condition=exit_condition,
+            research_basis=research_basis,
+        )
+        preset["family"] = "new_ipo_aftermarket"
+        preset["tier"] = "ipo_tier1_research"
+        preset["recommended_listing_age_days"] = recommended_age
         presets.append(preset)
 
     adaptive_regime = (
@@ -598,8 +722,8 @@ def get_backtest_presets() -> List[Dict[str, Any]]:
         for number, name, stop, target, holding, trailing, limitation in supplied_nepse15
     )
 
-    if len(presets) != 170:
-        raise RuntimeError(f"Expected 170 unique-entry backtest presets, built {len(presets)}")
+    if len(presets) != 174:
+        raise RuntimeError(f"Expected 174 unique-entry backtest presets, built {len(presets)}")
     identities: Dict[str, str] = {}
     for preset in presets:
         prior = identities.setdefault(str(preset["source_hash"]), str(preset["id"]))

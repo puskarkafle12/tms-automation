@@ -25,6 +25,12 @@ from utils.backtesting.batch import (
     background_worker_limit, get_backtest_universe, initialize_background_worker,
     market_research_is_constrained,
 )
+from utils.backtesting.ipo_gate import (
+    IPO_WORKSPACE_GATE_DESCRIPTION,
+    IPO_WORKSPACE_GATE_VERSION,
+    IPO_WORKSPACE_TRADABILITY_GATE,
+    strip_ipo_tradability_gates,
+)
 from utils.backtesting.jobs import _symbol_metadata
 from utils.backtesting.presets import get_backtest_presets
 from utils.backtesting.professional import ROBUST_SCORE_VERSION, assign_robust_scores
@@ -62,16 +68,17 @@ _LAST_RECOMMENDATION_REFRESH_SLOT: Optional[str] = None
 _LAST_ARCHIVE_PURGE_AT: Optional[float] = None
 _LAST_REVALIDATION_ATTEMPT_AT: Optional[float] = None
 
-IPO_WORKSPACE_TRADABILITY_GATE = (
-    "PREVIOUS(field=ltp, offset=2) - PREVIOUS(field=ltp, offset=1) >= 1 "
-    "AND change_percent > 0 AND volume >= 8000"
-)
-
 
 def _apply_ipo_workspace_gate(
     presets: List[Dict[str, Any]], config: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
-    """Apply the executable Nepal IPO entry constraint to every selected preset."""
+    """Apply the executable Nepal IPO entry constraint to every selected preset.
+
+    Discovery multi-signal candidates keep their vectorized ``component_ids``
+    path. The gate is AND-ed onto that state in the batch worker. Forcing the
+    full string through ``compile_condition_signals`` was both extremely slow
+    and permanently zeroed sparse IPO discovery outcomes.
+    """
     if (
         str(config.get("run_type") or "") != "ipo_research"
         or not bool(config.get("apply_ipo_tradability_gate", True))
@@ -80,18 +87,29 @@ def _apply_ipo_workspace_gate(
     gated = []
     for source in presets:
         preset = dict(source)
-        condition = str(preset.get("condition") or "")
+        condition = strip_ipo_tradability_gates(str(preset.get("condition") or ""))
         if IPO_WORKSPACE_TRADABILITY_GATE not in condition:
-            preset["condition"] = f"({condition}) AND {IPO_WORKSPACE_TRADABILITY_GATE}"
-            preset["description"] = (
-                f"{preset.get('description') or ''} IPO workspace execution also requires "
-                "a prior-session decline of at least NPR 1, a positive recovery close, "
-                "and at least 8,000 shares of volume."
-            ).strip()
-            preset["source_hash"] = hashlib.sha256(
-                f"{preset.get('source_hash')}|ipo-workspace-gate-v1".encode("utf-8")
-            ).hexdigest()
-            preset["version"] = f"{preset.get('version') or 'preset'}+ipo-gate-v1"
+            preset["condition"] = (
+                f"({condition}) AND {IPO_WORKSPACE_TRADABILITY_GATE}"
+                if condition else IPO_WORKSPACE_TRADABILITY_GATE
+            )
+        else:
+            preset["condition"] = condition
+        preset["description"] = (
+            f"{preset.get('description') or ''} IPO workspace execution also requires "
+            f"{IPO_WORKSPACE_GATE_DESCRIPTION}."
+        ).strip()
+        preset["source_hash"] = hashlib.sha256(
+            f"{preset.get('source_hash')}|{IPO_WORKSPACE_GATE_VERSION}".encode("utf-8")
+        ).hexdigest()
+        preset["version"] = f"{preset.get('version') or 'preset'}+{IPO_WORKSPACE_GATE_VERSION}"
+        preset["apply_ipo_tradability_gate"] = True
+        preset["ipo_tradability_gate_condition"] = IPO_WORKSPACE_TRADABILITY_GATE
+        if preset.get("component_ids"):
+            # Keep discovery's fast component compiler; batch ANDs the gate.
+            preset.pop("force_condition_compiler", None)
+        else:
+            preset["force_condition_compiler"] = True
         gated.append(preset)
     return gated
 
@@ -108,6 +126,11 @@ def _scan_key(config: Dict[str, Any], universe: List[str], selected: List[Dict[s
         "symbols": requested_symbols or "all_matching_universe",
         "ordinary_shares_only": bool(config.get("ordinary_shares_only", True)),
         "max_listing_age_days": config.get("max_listing_age_days"),
+        "universe_membership_version": (
+            "adjusted-first-session-v2"
+            if config.get("max_listing_age_days") is not None
+            else "market-screener-v1"
+        ),
         "min_volume": config.get("min_volume"),
         "strategy_mode": config.get("strategy_mode") or "presets",
         "strategies": sorted((item.get("id"), item.get("source_hash")) for item in selected),
@@ -295,6 +318,23 @@ def _reuse_completed_shared_run(
     return run_id
 
 
+def _discovery_include_singles(config: Dict[str, Any]) -> bool:
+    """IPO discovery must sample single-base strategies; multi-signal AND is too sparse."""
+    return str(config.get("run_type") or "") == "ipo_research"
+
+
+def _generate_run_discovery_presets(config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    include_singles = _discovery_include_singles(config)
+    return generate_discovery_presets(
+        budget=int(config.get("discovery_budget") or 1000),
+        seed=int(config.get("discovery_seed") or 20260718),
+        base_ids=config.get("discovery_base_ids") or [],
+        min_holding_days=int(config.get("min_holding_days") if config.get("min_holding_days") is not None else 5),
+        max_holding_days=int(config.get("max_holding_days") or 60),
+        include_singles=include_singles,
+    )
+
+
 def create_run(configuration: Dict[str, Any], *, owner_id: str = "local") -> Dict[str, Any]:
     config = dict(configuration)
     start = date.fromisoformat(str(config["start_date"]))
@@ -307,16 +347,21 @@ def create_run(configuration: Dict[str, Any], *, owner_id: str = "local") -> Dic
         raise ValueError("Custom strategy mode requires a complete Strategy Language query.")
     if strategy_mode == "discovery":
         base_ids = config.get("discovery_base_ids") or config.get("preset_ids") or [item["id"] for item in get_backtest_presets()]
+        config["discovery_base_ids"] = list(dict.fromkeys(base_ids))
+        include_singles = _discovery_include_singles(config)
         selected = generate_discovery_presets(
             budget=int(config.get("discovery_budget") or 1000),
             seed=int(config.get("discovery_seed") or 20260718), base_ids=base_ids,
             min_holding_days=int(config.get("min_holding_days") if config.get("min_holding_days") is not None else 5),
             max_holding_days=int(config.get("max_holding_days") or 60),
+            include_singles=include_singles,
         )
         config["strategy_mode"] = "discovery"
-        config["discovery_base_ids"] = list(dict.fromkeys(base_ids))
         config["discovery_budget"] = len(selected)
-        config["discovery_space_size"] = discovery_space_size(len(config["discovery_base_ids"]))
+        config["discovery_include_singles"] = include_singles
+        config["discovery_space_size"] = discovery_space_size(
+            len(config["discovery_base_ids"]), include_singles=include_singles,
+        )
         config["preset_ids"] = []
     elif custom_query:
         custom_strategy = _custom_strategy_descriptor(custom_query, config)
@@ -578,11 +623,17 @@ def get_ipo_strategy_summary(run_id: str, *, owner_id: str = "local") -> Dict[st
             raise ValueError("Backtest run was not found.")
         config = dict(run["configuration"] or {})
         presets = {str(item["id"]): item for item in get_backtest_presets()}
-        selected_presets = {
-            strategy_id: presets[strategy_id]
-            for strategy_id in (config.get("preset_ids") or [])
-            if strategy_id in presets
-        }
+        selected_presets = (
+            {
+                str(item["id"]): item for item in _generate_run_discovery_presets(config)
+            }
+            if config.get("strategy_mode") == "discovery"
+            else {
+                strategy_id: presets[strategy_id]
+                for strategy_id in (config.get("preset_ids") or [])
+                if strategy_id in presets
+            }
+        )
         selected_presets = {
             str(preset["id"]): preset
             for preset in _apply_ipo_workspace_gate(
@@ -606,7 +657,8 @@ def get_ipo_strategy_summary(run_id: str, *, owner_id: str = "local") -> Dict[st
                        COALESCE((
                            SELECT jsonb_agg(jsonb_build_object(
                                'signal_date',t.signal_date,'entry_date',t.entry_date,
-                               'exit_date',t.exit_date,'holding_days',t.holding_days,
+                               'entry_price',t.entry_price,'exit_date',t.exit_date,
+                               'exit_price',t.exit_price,'holding_days',t.holding_days,
                                'exit_reason',t.exit_reason,'return_pct',t.return_pct,'pnl',t.pnl
                            ) ORDER BY t.sequence_no)
                            FROM backtest_trades t WHERE t.result_id=r.result_id
@@ -621,7 +673,8 @@ def get_ipo_strategy_summary(run_id: str, *, owner_id: str = "local") -> Dict[st
                        rejected.win_rate_pct,rejected.trade_samples,
                        rejected.strategy_hash,rejected.settings_hash
                 FROM backtest_rejected_strategies rejected
-                WHERE (rejected.owner_id=:owner_id OR rejected.owner_id IS NULL)
+                WHERE rejected.source_run_id=:run_id
+                  AND (rejected.owner_id=:owner_id OR rejected.owner_id IS NULL)
                   AND rejected.strategy_id=ANY(CAST(:preset_ids AS TEXT[]))
                   AND EXISTS (
                       SELECT 1 FROM backtest_run_symbols current_symbol
@@ -720,8 +773,7 @@ def get_ipo_strategy_summary(run_id: str, *, owner_id: str = "local") -> Dict[st
                 item["trade_samples"].append({
                     **dict(trade), "symbol": str(row["symbol"]), "trade_number": trade_number,
                 })
-        for strategy_id in config.get("preset_ids") or []:
-            preset = presets.get(str(strategy_id)) or {}
+        for strategy_id, preset in selected_presets.items():
             grouped.setdefault(str(strategy_id), {
                 "strategy_id": str(strategy_id),
                 "strategy_name": preset.get("name") or str(strategy_id),
@@ -758,13 +810,22 @@ def get_ipo_strategy_summary(run_id: str, *, owner_id: str = "local") -> Dict[st
                 key: {"trades": 0, "wins": 0, "win_rate_pct": 0.0}
                 for key in ("0_30", "31_60", "61_90", "91_180", "181_365")
             }
+            cumulative_first_trade_windows = {
+                str(days): {
+                    "days": days, "trades": 0, "wins": 0, "win_rate_pct": 0.0,
+                    "average_return_pct": 0.0, "stock_coverage_pct": 0.0,
+                    "confidence_lower_bound_pct": 0.0, "evidence_score": 0.0,
+                }
+                for days in (30, 60, 90, 180)
+            }
             entry_occurrences = {
                 key: {"trades": 0, "wins": 0, "win_rate_pct": 0.0}
                 for key in ("first", "second", "third")
             }
             holding_days = []
             exit_reasons: Dict[str, Dict[str, int]] = {}
-            for trade in source.pop("trade_samples", []):
+            first_trade_by_stock: Dict[str, Dict[str, Any]] = {}
+            for trade in source.get("trade_samples", []):
                 signal_value = trade.get("signal_date") or trade.get("entry_date")
                 signal_date = date.fromisoformat(str(signal_value)[:10]) if signal_value else None
                 won = float(trade.get("return_pct") or 0) > 0
@@ -774,6 +835,8 @@ def get_ipo_strategy_summary(run_id: str, *, owner_id: str = "local") -> Dict[st
                 listing_date = listing_dates.get(str(trade["symbol"]))
                 if signal_date and listing_date:
                     listing_age = (signal_date - listing_date).days
+                    trade["listing_age_days"] = listing_age
+                    first_trade_by_stock.setdefault(str(trade["symbol"]), trade)
                     lifecycle_key = None if listing_age < 0 else (
                         "0_30" if listing_age <= 30 else
                         "31_60" if listing_age <= 60 else
@@ -813,6 +876,45 @@ def get_ipo_strategy_summary(run_id: str, *, owner_id: str = "local") -> Dict[st
                 centre = rate + z * z / (2 * count)
                 spread = z * math.sqrt((rate * (1 - rate) + z * z / (4 * count)) / count)
                 return (centre - spread) / denominator
+
+            for days_text, stats in cumulative_first_trade_windows.items():
+                eligible = [
+                    trade for trade in first_trade_by_stock.values()
+                    if trade.get("listing_age_days") is not None
+                    and 0 <= int(trade["listing_age_days"]) <= int(days_text)
+                ]
+                stats["trades"] = len(eligible)
+                stats["wins"] = sum(
+                    float(trade.get("return_pct") or 0) > 0 for trade in eligible
+                )
+                stats["win_rate_pct"] = round(
+                    100 * stats["wins"] / stats["trades"], 2,
+                ) if stats["trades"] else 0.0
+                stats["average_return_pct"] = round(
+                    sum(float(trade.get("return_pct") or 0) for trade in eligible)
+                    / stats["trades"], 2,
+                ) if stats["trades"] else 0.0
+                stats["stock_coverage_pct"] = round(
+                    100 * stats["trades"] / max(1, int(run["symbols_total"] or 0)), 2,
+                )
+                stats["confidence_lower_bound_pct"] = round(
+                    100 * _wilson_lower_bound(stats), 2,
+                )
+                stats["evidence_score"] = round(
+                    stats["confidence_lower_bound_pct"] * .75
+                    + stats["stock_coverage_pct"] * .25, 2,
+                )
+
+            best_first_trade_horizon = max(
+                cumulative_first_trade_windows,
+                key=lambda key: (
+                    cumulative_first_trade_windows[key]["evidence_score"],
+                    cumulative_first_trade_windows[key]["trades"],
+                    -int(key),
+                ),
+            ) if any(
+                stats["trades"] for stats in cumulative_first_trade_windows.values()
+            ) else None
 
             best_lifecycle_window = max(
                 lifecycle_windows,
@@ -857,6 +959,8 @@ def get_ipo_strategy_summary(run_id: str, *, owner_id: str = "local") -> Dict[st
                 "market_proxy_regimes": regime_stats,
                 "first_30_days": lifecycle_windows["0_30"],
                 "lifecycle_windows": lifecycle_windows,
+                "cumulative_first_trade_windows": cumulative_first_trade_windows,
+                "best_first_trade_horizon": best_first_trade_horizon,
                 "best_lifecycle_window": best_lifecycle_window,
                 "entry_occurrences": entry_occurrences,
                 "exit_rule_id": preset.get("exit_rule_id"),
@@ -866,6 +970,7 @@ def get_ipo_strategy_summary(run_id: str, *, owner_id: str = "local") -> Dict[st
                 "exit_reasons": exit_reasons,
                 "cross_stock_qualified": qualified,
             })
+        items = [item for item in items if int(item.get("pooled_trades") or 0) > 0]
         items.sort(key=lambda item: (
             not item["cross_stock_qualified"], -item["evidence_score"],
             -item["confidence_lower_bound_pct"], -item["pooled_win_rate_pct"],
@@ -989,6 +1094,128 @@ def get_ipo_strategy_summary(run_id: str, *, owner_id: str = "local") -> Dict[st
         session.close()
 
 
+def get_ipo_strategy_detail(
+    run_id: str, strategy_id: str, *, owner_id: str = "local",
+) -> Dict[str, Any]:
+    """Return per-stock IPO trades for visual inspection of one selected strategy."""
+    session = _session()
+    try:
+        run = session.execute(text("""
+            SELECT configuration FROM backtest_runs
+            WHERE run_id=:run_id AND owner_id=:owner_id
+              AND deleted_at IS NULL AND archived_at IS NULL
+        """), {"run_id": run_id, "owner_id": owner_id}).mappings().first()
+        if not run:
+            raise ValueError("Backtest run was not found.")
+        config = dict(run["configuration"] or {})
+        catalog = {str(item["id"]): item for item in get_backtest_presets()}
+        if config.get("strategy_mode") == "discovery":
+            catalog.update({
+                str(item["id"]): item for item in _generate_run_discovery_presets(config)
+            })
+        if strategy_id not in catalog or (
+            config.get("strategy_mode") != "discovery"
+            and strategy_id not in {str(value) for value in config.get("preset_ids") or []}
+        ):
+            raise ValueError("Strategy is not part of this IPO research run.")
+        source_preset = catalog.get(strategy_id)
+        if not source_preset:
+            raise ValueError("Strategy definition was not found.")
+        preset = _apply_ipo_workspace_gate([source_preset], config)[0]
+        desired_strategy_hash = strategy_hash(preset)
+        desired_settings_hash = settings_hash(
+            config, preset, engine_version=BACKTEST_ENGINE_VERSION,
+            indicator_version=ENGINE_VERSION,
+        )
+        rows = session.execute(text("""
+            WITH candidates AS (
+                SELECT r.symbol,r.total_trades,r.wins,r.win_rate_pct,
+                       COALESCE((
+                           SELECT jsonb_agg(jsonb_build_object(
+                               'sequence_no',t.sequence_no,'signal_date',t.signal_date,
+                               'entry_date',t.entry_date,'entry_price',t.entry_price,
+                               'exit_date',t.exit_date,'exit_price',t.exit_price,
+                               'holding_days',t.holding_days,'exit_reason',t.exit_reason,
+                               'return_pct',t.return_pct,'pnl',t.pnl
+                           ) ORDER BY t.sequence_no)
+                           FROM backtest_trades t WHERE t.result_id=r.result_id
+                       ),'[]'::jsonb) AS trades,
+                       NULL::TEXT AS strategy_hash,NULL::TEXT AS settings_hash
+                FROM backtest_results r
+                WHERE r.run_id=:run_id AND r.preset_id=:strategy_id
+                UNION ALL
+                SELECT rejected.symbol,rejected.total_trades,
+                       ROUND(rejected.total_trades*rejected.win_rate_pct/100.0)::INTEGER,
+                       rejected.win_rate_pct,rejected.trade_samples,
+                       rejected.strategy_hash,rejected.settings_hash
+                FROM backtest_rejected_strategies rejected
+                WHERE rejected.source_run_id=:run_id
+                  AND (rejected.owner_id=:owner_id OR rejected.owner_id IS NULL)
+                  AND rejected.strategy_id=:strategy_id
+                  AND EXISTS (
+                      SELECT 1 FROM backtest_run_symbols current_symbol
+                      WHERE current_symbol.run_id=:run_id
+                        AND current_symbol.symbol=rejected.symbol
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM backtest_results kept
+                      WHERE kept.run_id=:run_id AND kept.symbol=rejected.symbol
+                        AND kept.preset_id=:strategy_id
+                  )
+            )
+            SELECT * FROM candidates ORDER BY symbol
+        """), {
+            "run_id": run_id, "owner_id": owner_id, "strategy_id": strategy_id,
+        }).mappings().all()
+        stock_results = []
+        for raw in rows:
+            row = dict(raw)
+            if row.get("strategy_hash") and (
+                str(row["strategy_hash"]) != desired_strategy_hash
+                or str(row["settings_hash"]) != desired_settings_hash
+            ):
+                continue
+            trades = []
+            for sequence, raw_trade in enumerate(list(row.get("trades") or []), start=1):
+                trade = dict(raw_trade)
+                trades.append({
+                    **trade,
+                    "sequence_no": int(trade.get("sequence_no") or sequence),
+                    "signal_date": str(trade.get("signal_date"))[:10]
+                    if trade.get("signal_date") else None,
+                    "entry_date": str(trade.get("entry_date"))[:10]
+                    if trade.get("entry_date") else None,
+                    "exit_date": str(trade.get("exit_date"))[:10]
+                    if trade.get("exit_date") else None,
+                    "entry_price": float(trade["entry_price"])
+                    if trade.get("entry_price") is not None else None,
+                    "exit_price": float(trade["exit_price"])
+                    if trade.get("exit_price") is not None else None,
+                    "return_pct": round(float(trade.get("return_pct") or 0), 2),
+                })
+            stock_results.append({
+                "symbol": str(row["symbol"]),
+                "total_trades": int(row.get("total_trades") or 0),
+                "wins": int(row.get("wins") or 0),
+                "win_rate_pct": round(float(row.get("win_rate_pct") or 0), 2),
+                "trades": trades,
+            })
+        defaults = dict(source_preset.get("defaults") or {})
+        return {
+            "strategy_id": strategy_id,
+            "strategy_name": source_preset.get("name") or strategy_id,
+            "description": source_preset.get("description") or "",
+            "condition": source_preset.get("condition") or "",
+            "exit_rule_id": source_preset.get("exit_rule_id"),
+            "stop_loss_pct": defaults.get("stop_loss_pct"),
+            "take_profit_pct": defaults.get("take_profit_pct"),
+            "trailing_stop_pct": defaults.get("trailing_stop_pct"),
+            "stock_results": stock_results,
+        }
+    finally:
+        session.close()
+
+
 def list_runs(*, owner_id: str = "local", page: int = 1, page_size: int = 25) -> Dict[str, Any]:
     session = _session()
     try:
@@ -1099,6 +1326,10 @@ def _persist_symbol_output(
         ), {"run_id": run_id, "symbol": symbol}).scalar()
         session.execute(text("DELETE FROM backtest_results WHERE run_id=:run_id AND symbol=:symbol"), {"run_id": run_id, "symbol": symbol})
         partial_rows = [dict(item) for item in (output.get("results") or [])]
+        tested_count = max(
+            int(output.get("combinations_tested") or 0),
+            len(partial_rows),
+        )
         assign_robust_scores(partial_rows)
         if cache_results:
             store_symbol_artifacts(
@@ -1217,7 +1448,7 @@ def _persist_symbol_output(
                       average_turnover_20=:average_turnover_20,last_tested_session=:last_tested_session
                WHERE run_id=:run_id AND symbol=:symbol"""
         ), {"status": status, "bars": int((output.get("technical_snapshot") or {}).get("bars_count") or 0),
-            "count": len(partial_rows), "error": output.get("error"),
+            "count": max(tested_count, len(partial_rows)), "error": output.get("error"),
             "ltp": profile.get("ltp"), "latest_volume": profile.get("latest_volume"),
             "average_volume_20": profile.get("average_volume_20"),
             "median_volume_20": profile.get("median_volume_20"),
@@ -1240,7 +1471,14 @@ def _persist_symbol_output(
             )
         session.execute(text(
             """UPDATE backtest_runs SET symbols_completed=(SELECT COUNT(*) FROM backtest_run_symbols WHERE run_id=:run_id AND status IN ('completed','failed')),
-                      combinations_completed=(SELECT COUNT(*) FROM backtest_results WHERE run_id=:run_id),
+                      combinations_completed=CASE
+                        WHEN (SELECT run_type FROM backtest_runs WHERE run_id=:run_id)='ipo_research'
+                        THEN (
+                          SELECT COUNT(*) FROM backtest_rejected_strategies
+                          WHERE source_run_id=:run_id
+                        )
+                        ELSE (SELECT COUNT(*) FROM backtest_results WHERE run_id=:run_id)
+                      END,
                       current_symbol=:symbol,
                       progress_pct=ROUND((100.0*(SELECT COUNT(*) FROM backtest_run_symbols WHERE run_id=:run_id AND status IN ('completed','failed'))/NULLIF(symbols_total,0))::numeric,1)::double precision,
                       heartbeat_at=NOW(),lease_expires_at=NOW()+INTERVAL '45 seconds',updated_at=NOW()
@@ -1418,11 +1656,22 @@ def run_claimed_run(run_id: str) -> None:
             adaptive_workers,
             market_constrained=market_constrained,
         )
+        # Large discovery payloads pickle poorly across processes. Claim only
+        # enough stocks to saturate the pool so workers start computing sooner.
+        discovery_budget = int(config.get("discovery_budget") or 0)
+        if str(config.get("strategy_mode") or "") == "discovery" and discovery_budget >= 500:
+            turn_size = min(turn_size, max(1, adaptive_workers))
+        # Prefer stocks with more history first so live IPO tables fill with
+        # trade-bearing outcomes instead of brand-new listings that can only
+        # produce zero-trade cache rows.
         symbol_rows = session.execute(text(
-            """SELECT symbol,last_tested_session
-               FROM backtest_run_symbols
-               WHERE run_id=:run_id AND status='queued'
-               ORDER BY symbol"""
+            """SELECT s.symbol,s.last_tested_session
+               FROM backtest_run_symbols s
+               WHERE s.run_id=:run_id AND s.status='queued'
+               ORDER BY (
+                 SELECT COUNT(*) FROM market_ohlcv_daily history
+                 WHERE history.symbol=s.symbol AND history.adjusted=TRUE
+               ) DESC NULLS LAST, s.symbol"""
         ), {"run_id": run_id}).mappings().all()
         symbol_rows = symbol_rows[:turn_size]
         symbols = [str(item["symbol"]) for item in symbol_rows]
@@ -1434,17 +1683,13 @@ def run_claimed_run(run_id: str) -> None:
     if config.get("strategy_mode") == "custom" and config.get("custom_strategy"):
         presets = [dict(config["custom_strategy"])]
     elif config.get("strategy_mode") == "discovery":
-        presets = generate_discovery_presets(
-            budget=int(config.get("discovery_budget") or 1000),
-            seed=int(config.get("discovery_seed") or 20260718),
-            base_ids=config.get("discovery_base_ids") or [],
-            min_holding_days=int(config.get("min_holding_days") if config.get("min_holding_days") is not None else 5),
-            max_holding_days=int(config.get("max_holding_days") or 60),
-        )
+        presets = _generate_run_discovery_presets(config)
         # A parser/compiler failure may have checkpointed a symbol with only a
         # fraction of the requested discovery candidates. Requeue those
         # checkpoints and reuse their valid artifacts instead of accepting an
-        # incomplete stock as finished.
+        # incomplete stock as finished. combinations_completed now tracks
+        # tested (retained + rejected) coverage, so thin IPO outcomes no longer
+        # look unfinished and re-loop forever.
         repair_session = _session()
         try:
             repair_session.execute(text(
@@ -1454,9 +1699,13 @@ def run_claimed_run(run_id: str) -> None:
                      AND combinations_completed < :expected"""
             ), {"run_id": run_id, "expected": len(presets)})
             symbols = repair_session.execute(text(
-                """SELECT symbol FROM backtest_run_symbols
-                   WHERE run_id=:run_id AND status='queued'
-                   ORDER BY symbol LIMIT :turn_size"""
+                """SELECT s.symbol FROM backtest_run_symbols s
+                   WHERE s.run_id=:run_id AND s.status='queued'
+                   ORDER BY (
+                     SELECT COUNT(*) FROM market_ohlcv_daily history
+                     WHERE history.symbol=s.symbol AND history.adjusted=TRUE
+                   ) DESC NULLS LAST, s.symbol
+                   LIMIT :turn_size"""
             ), {"run_id": run_id, "turn_size": turn_size}).scalars().all()
             repair_session.commit()
         except Exception:
@@ -1555,6 +1804,8 @@ def run_claimed_run(run_id: str) -> None:
                 engine_version=BACKTEST_ENGINE_VERSION, indicator_version=ENGINE_VERSION,
                 owner_id=owner_id, source_run_id=run_id,
             )
+            # Keep the run lease alive during large discovery cache lookups.
+            _control_state(run_id)
             cached_by_symbol[str(symbol)] = cached
             missing = list(cached["missing"])
             cached_session = cached.get("data_session")
@@ -1593,9 +1844,18 @@ def run_claimed_run(run_id: str) -> None:
                     "presets": missing, "settings": settings,
                 })
         cache_session.commit()
-    except Exception:
+    except Exception as exc:
         cache_session.rollback()
-        raise
+        fail_session = _session()
+        try:
+            fail_session.execute(text(
+                """UPDATE backtest_runs SET status='failed',error_summary=:error,finished_at=NOW(),
+                          lease_owner=NULL,lease_expires_at=NULL,updated_at=NOW() WHERE run_id=:run_id"""
+            ), {"run_id": run_id, "error": str(exc)[:4000]})
+            fail_session.commit()
+        finally:
+            fail_session.close()
+        return
     finally:
         cache_session.close()
     workers = (
@@ -1635,6 +1895,7 @@ def run_claimed_run(run_id: str) -> None:
             _persist_symbol_output(
                 run_id, {
                     "symbol": symbol, "results": cached["results"],
+                    "combinations_tested": int(cached.get("hits") or 0) + int(cached.get("rejected_hits") or 0),
                     "market_profile": cached["market_profile"],
                     "technical_snapshot": cached["technical_snapshot"], "error": None,
                 }, config=config, presets=[], cache_results=False,
@@ -1654,46 +1915,63 @@ def run_claimed_run(run_id: str) -> None:
             with ProcessPoolExecutor(
                 max_workers=workers, mp_context=context, initializer=initialize_background_worker,
             ) as executor:
-                futures = {
-                    executor.submit(
-                        _refresh_symbol_signals_task if task.get("signal_refresh") else _run_symbol_task,
-                        task,
-                    ): task
-                    for task in tasks
-                }
-                for future in as_completed(futures):
-                    control = _control_state(run_id)
-                    if control["cancel"] or control["pause"]:
-                        for pending in futures:
-                            pending.cancel()
+                # Submit in worker-sized waves so large discovery payloads start
+                # computing instead of spending minutes pickling the full turn.
+                wave_size = max(1, int(workers))
+                stop_requested = False
+                for wave_start in range(0, len(tasks), wave_size):
+                    if stop_requested:
                         break
-                    try:
-                        output = future.result()
-                    except Exception as exc:
-                        task = futures[future]
-                        output = {
-                            "symbol": task["symbol"],
-                            "signal_refresh": bool(task.get("signal_refresh")),
-                            "results": [],
-                            "error": str(exc),
-                        }
-                    if output.get("signal_refresh"):
-                        _persist_signal_refresh(run_id, output)
-                        signals_changed = signals_changed or bool(output.get("results"))
-                        continue
-                    cached = cached_by_symbol[str(output["symbol"])]
-                    computed = [dict(item) for item in (output.get("results") or [])]
-                    merged = {
-                        **output,
-                        "results": [*cached["results"], *computed],
-                        "market_profile": output.get("market_profile") or cached["market_profile"],
-                        "technical_snapshot": output.get("technical_snapshot") or cached["technical_snapshot"],
+                    wave = tasks[wave_start:wave_start + wave_size]
+                    futures = {
+                        executor.submit(
+                            _refresh_symbol_signals_task if task.get("signal_refresh") else _run_symbol_task,
+                            task,
+                        ): task
+                        for task in wave
                     }
-                    _persist_symbol_output(
-                        run_id, merged, config=config, presets=list(cached["missing"]),
-                        cache_results=bool(computed),
-                    )
-                    results_changed = True
+                    for future in as_completed(futures):
+                        control = _control_state(run_id)
+                        if control["cancel"] or control["pause"]:
+                            for pending in futures:
+                                pending.cancel()
+                            stop_requested = True
+                            break
+                        try:
+                            output = future.result()
+                        except Exception as exc:
+                            task = futures[future]
+                            output = {
+                                "symbol": task["symbol"],
+                                "signal_refresh": bool(task.get("signal_refresh")),
+                                "results": [],
+                                "error": str(exc),
+                            }
+                        if output.get("signal_refresh"):
+                            _persist_signal_refresh(run_id, output)
+                            signals_changed = signals_changed or bool(output.get("results"))
+                            continue
+                        cached = cached_by_symbol[str(output["symbol"])]
+                        computed = [dict(item) for item in (output.get("results") or [])]
+                        attempted = len(cached.get("missing") or [])
+                        merged = {
+                            **output,
+                            "results": [*cached["results"], *computed],
+                            # Count every attempted preset so parse/runtime failures
+                            # cannot leave a stock "incomplete" and requeue forever.
+                            "combinations_tested": (
+                                int(cached.get("hits") or 0)
+                                + int(cached.get("rejected_hits") or 0)
+                                + max(attempted, len(computed))
+                            ),
+                            "market_profile": output.get("market_profile") or cached["market_profile"],
+                            "technical_snapshot": output.get("technical_snapshot") or cached["technical_snapshot"],
+                        }
+                        _persist_symbol_output(
+                            run_id, merged, config=config, presets=list(cached["missing"]),
+                            cache_results=bool(computed),
+                        )
+                        results_changed = True
         control = _control_state(run_id)
         session = _session()
         try:
@@ -2586,12 +2864,7 @@ def permanently_delete_run(run_id: str, *, owner_id: str = "local") -> Dict[str,
         """), {"run_id": run_id, "owner_id": owner_id}).mappings().first()
         if not row:
             raise ValueError("Only archived workspaces can be permanently deleted.")
-        session.execute(text(
-            "DELETE FROM backtest_canonical_results WHERE run_id=:run_id AND owner_id=:owner_id"
-        ), {"run_id": run_id, "owner_id": owner_id})
-        session.execute(text(
-            "DELETE FROM backtest_runs WHERE run_id=:run_id AND owner_id=:owner_id"
-        ), {"run_id": run_id, "owner_id": owner_id})
+        _purge_run_rows(session, run_id=run_id, owner_id=owner_id)
         _rebuild_canonical_for_owner(session, owner_id)
         session.commit()
     except Exception:
@@ -2600,6 +2873,57 @@ def permanently_delete_run(run_id: str, *, owner_id: str = "local") -> Dict[str,
     finally:
         session.close()
     return list_archived_runs(owner_id=owner_id)
+
+
+def _purge_run_rows(session, *, run_id: str, owner_id: str) -> None:
+    """Remove one workspace and every row keyed to it, including IPO rejection cache."""
+    session.execute(text(
+        "DELETE FROM backtest_rejected_strategies WHERE source_run_id=:run_id"
+    ), {"run_id": run_id})
+    session.execute(text(
+        "DELETE FROM backtest_canonical_results WHERE run_id=:run_id AND owner_id=:owner_id"
+    ), {"run_id": run_id, "owner_id": owner_id})
+    session.execute(text(
+        "DELETE FROM backtest_runs WHERE run_id=:run_id AND owner_id=:owner_id"
+    ), {"run_id": run_id, "owner_id": owner_id})
+
+
+def delete_ipo_run(run_id: str, *, owner_id: str = "local") -> Dict[str, Any]:
+    """Hard-delete one IPO research workspace immediately (no archive step)."""
+    session = _session()
+    try:
+        row = session.execute(text("""
+            SELECT run_id, status, run_type
+            FROM backtest_runs
+            WHERE run_id=:run_id AND owner_id=:owner_id AND deleted_at IS NULL
+            FOR UPDATE
+        """), {"run_id": run_id, "owner_id": owner_id}).mappings().first()
+        if not row:
+            raise ValueError("IPO research workspace was not found.")
+        if str(row["run_type"] or "") != "ipo_research":
+            raise ValueError("Only IPO research workspaces can be deleted with this action.")
+        if row["status"] in {"queued", "running", "paused"}:
+            session.execute(text("""
+                UPDATE backtest_runs
+                SET cancel_requested=TRUE, status='cancelled', current_symbol=NULL,
+                    finished_at=COALESCE(finished_at,NOW()), updated_at=NOW(),
+                    lease_owner=NULL, lease_expires_at=NULL
+                WHERE run_id=:run_id AND owner_id=:owner_id
+            """), {"run_id": run_id, "owner_id": owner_id})
+        _purge_run_rows(session, run_id=run_id, owner_id=owner_id)
+        _rebuild_canonical_for_owner(session, owner_id)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+    listed = list_runs(owner_id=owner_id, page=1, page_size=50)
+    return {
+        "deleted_run_id": run_id,
+        "items": listed.get("ipo_items") or [],
+        "total": len(listed.get("ipo_items") or []),
+    }
 
 
 def purge_expired_archives(*, retention_days: int = ARCHIVE_RETENTION_DAYS) -> int:
@@ -2618,12 +2942,7 @@ def purge_expired_archives(*, retention_days: int = ARCHIVE_RETENTION_DAYS) -> i
               AND archived_at < NOW() - (:days * INTERVAL '1 day')
         """), {"days": int(retention_days)}).mappings().all()
         for row in rows:
-            session.execute(text(
-                "DELETE FROM backtest_canonical_results WHERE run_id=:run_id AND owner_id=:owner_id"
-            ), {"run_id": row["run_id"], "owner_id": row["owner_id"]})
-            session.execute(text(
-                "DELETE FROM backtest_runs WHERE run_id=:run_id AND owner_id=:owner_id"
-            ), {"run_id": row["run_id"], "owner_id": row["owner_id"]})
+            _purge_run_rows(session, run_id=str(row["run_id"]), owner_id=str(row["owner_id"]))
             deleted += 1
         if deleted:
             for owner_id in sorted({str(row["owner_id"]) for row in rows}):

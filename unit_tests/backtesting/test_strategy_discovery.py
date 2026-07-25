@@ -31,6 +31,17 @@ def test_discovery_is_deterministic_unique_and_billion_scale():
     assert len({item["exit_rule_id"] for item in first}) >= 8
 
 
+def test_ipo_discovery_can_sample_single_base_strategies():
+    base_ids = [item["id"] for item in get_backtest_presets() if str(item["id"]).startswith("ipo_")][:8]
+    candidates = generate_discovery_presets(
+        budget=80, seed=99, base_ids=base_ids, min_holding_days=5, max_holding_days=45,
+        include_singles=True,
+    )
+    widths = {len(item["component_ids"]) for item in candidates}
+    assert 1 in widths
+    assert discovery_space_size(len(base_ids), include_singles=True) > discovery_space_size(len(base_ids))
+
+
 def test_all_generated_nested_function_queries_parse():
     candidates = generate_discovery_presets(
         budget=1000, seed=20260718, min_holding_days=5, max_holding_days=90,

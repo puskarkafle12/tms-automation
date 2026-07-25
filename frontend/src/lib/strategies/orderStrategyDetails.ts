@@ -371,25 +371,37 @@ export function buildStrategyDetailLayout(
   const compiledConditions = flattenCompiledConditions(rule?.signal || rule?.when);
   const conditionCount = Math.max(liveConditions.length, previewConditions.length, compiledConditions.length);
   const currentRequired = String(snapshot?.current_required_display || '').split('/').map((item) => item.trim());
-  const conditions = Array.from({ length: conditionCount }, (_, index) => {
+    const conditions = Array.from({ length: conditionCount }, (_, index) => {
     const live = liveConditions[index] || {};
     const preview = previewConditions[index] || {};
     const compiled = compiledConditions[index] || {};
     const matched = typeof live.matched === 'boolean' ? live.matched : preview.matched;
-    const currentRaw = live.actual_value ?? preview.current_display ?? preview.current_value ?? (index === 0 ? currentRequired[0] : undefined);
-    const requiredRaw = live.expected_value ?? preview.required_display ?? preview.required_value ?? compiled.required ?? (index === 0 ? currentRequired[1] : undefined);
+    const label = String(
+      live.label
+      || preview.label
+      || compiled.label
+      || live.expression
+      || `Condition ${index + 1}`,
+    );
+    const isSlope = /slope/i.test(label) || String(live.expression || '').toUpperCase().startsWith('SLOPE');
+    const currentRaw = live.actual_value ?? live.current_display ?? preview.current_display ?? preview.current_value ?? (index === 0 && !isSlope ? currentRequired[0] : undefined);
+    const requiredRaw = live.expected_value ?? live.required_display ?? preview.required_display ?? preview.required_value ?? compiled.required ?? (index === 0 && !isSlope ? currentRequired[1] : undefined);
     const current = displayValue(currentRaw);
     const required = displayValue(requiredRaw);
     const status = matched === true ? 'satisfied' : matched === false ? 'waiting' : 'unavailable';
     return {
-      label: String(live.label || preview.label || compiled.label || live.expression || `Condition ${index + 1}`),
+      label,
       status,
-      current,
-      required,
+      current: current === '—' && isSlope ? 'n/a' : current,
+      required: required === '—' && isSlope ? '0' : required,
       explanation: status === 'satisfied'
         ? 'Current market data satisfies this condition.'
         : status === 'waiting'
-          ? `Waiting for ${required}; current value is ${current}.`
+          ? (isSlope
+            ? (currentRaw == null
+              ? 'Waiting for enough history to compute the slope (need multiple observations).'
+              : `Waiting for slope > ${required}; current slope is ${current}.`)
+            : `Waiting for ${required}; current value is ${current}.`)
           : 'A fresh market scan is required to evaluate this condition.',
     } as const;
   });

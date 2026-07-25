@@ -6,7 +6,7 @@ import hashlib
 import json
 from datetime import date, datetime, timedelta, timezone
 import os
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple, TypeVar
 
 from sqlalchemy import bindparam, text
 
@@ -21,6 +21,19 @@ from utils.backtesting.result_retention import (
 HISTORY_SOURCE_BY_RUN_SOURCE = {
     "merolagani": "merolagani_adjusted",
 }
+
+# Expanding IN lists explode into nested SQL tuples; keep batches under Postgres
+# max_stack_depth so large discovery budgets (e.g. 10k strategies) can resume.
+_SQL_IN_BATCH_SIZE = 400
+
+_T = TypeVar("_T")
+
+
+def _batched(items: Sequence[_T], size: int = _SQL_IN_BATCH_SIZE) -> Iterator[List[_T]]:
+    if size < 1:
+        size = _SQL_IN_BATCH_SIZE
+    for index in range(0, len(items), size):
+        yield list(items[index:index + size])
 
 
 def _digest(value: Any) -> str:
@@ -113,15 +126,17 @@ def store_strategy_definitions(session, presets: Sequence[Dict[str, Any]]) -> in
     unique = {strategy_hash(preset): preset for preset in presets}
     if not unique:
         return 0
-    existing = {
-        str(row["strategy_hash"])
-        for row in session.execute(text("""
-            SELECT strategy_hash FROM backtest_strategy_definitions
-            WHERE strategy_hash IN :hashes
-        """).bindparams(bindparam("hashes", expanding=True)), {
-            "hashes": list(unique),
-        }).mappings().all()
-    }
+    existing: set[str] = set()
+    for hash_batch in _batched(list(unique)):
+        existing.update(
+            str(row["strategy_hash"])
+            for row in session.execute(text("""
+                SELECT strategy_hash FROM backtest_strategy_definitions
+                WHERE strategy_hash IN :hashes
+            """).bindparams(bindparam("hashes", expanding=True)), {
+                "hashes": hash_batch,
+            }).mappings().all()
+        )
     pending = []
     for hashed, preset in unique.items():
         if hashed in existing:
@@ -216,20 +231,22 @@ def _legacy_artifacts(
     if not missing:
         return {}
     preset_ids = [str(item["id"]) for item in missing]
-    rows = session.execute(text("""
-        SELECT r.*,br.configuration,s.last_tested_session
-        FROM backtest_results r
-        JOIN backtest_runs br ON br.run_id=r.run_id
-        JOIN backtest_run_symbols s ON s.run_id=r.run_id AND s.symbol=r.symbol
-        WHERE r.symbol=:symbol AND r.preset_id IN :preset_ids
-          AND s.last_tested_session=:data_session AND br.status='completed'
-          AND br.deleted_at IS NULL AND br.archived_at IS NULL AND br.engine_version=:engine_version
-          AND br.indicator_engine_version=:indicator_version
-        ORDER BY br.finished_at DESC NULLS LAST,r.result_id DESC
-    """).bindparams(bindparam("preset_ids", expanding=True)), {
-        "symbol": symbol, "preset_ids": preset_ids, "data_session": data_session,
-        "engine_version": engine_version, "indicator_version": indicator_version,
-    }).mappings().all()
+    rows = []
+    for id_batch in _batched(preset_ids):
+        rows.extend(session.execute(text("""
+            SELECT r.*,br.configuration,s.last_tested_session
+            FROM backtest_results r
+            JOIN backtest_runs br ON br.run_id=r.run_id
+            JOIN backtest_run_symbols s ON s.run_id=r.run_id AND s.symbol=r.symbol
+            WHERE r.symbol=:symbol AND r.preset_id IN :preset_ids
+              AND s.last_tested_session=:data_session AND br.status='completed'
+              AND br.deleted_at IS NULL AND br.archived_at IS NULL AND br.engine_version=:engine_version
+              AND br.indicator_engine_version=:indicator_version
+            ORDER BY br.finished_at DESC NULLS LAST,r.result_id DESC
+        """).bindparams(bindparam("preset_ids", expanding=True)), {
+            "symbol": symbol, "preset_ids": id_batch, "data_session": data_session,
+            "engine_version": engine_version, "indicator_version": indicator_version,
+        }).mappings().all())
     desired = {str(preset["id"]): preset for preset in missing}
     selected: Dict[str, Dict[str, Any]] = {}
     for mapped in rows:
@@ -317,16 +334,19 @@ def _rejected_preset_ids(
     }
     if not identities:
         return set()
-    rows = session.execute(text("""
-        SELECT rejection_key,strategy_hash,settings_hash,total_trades,win_rate_pct
-        FROM backtest_rejected_strategies
-        WHERE symbol=:symbol AND engine_version=:engine_version
-          AND indicator_engine_version=:indicator_version
-          AND (strategy_hash,settings_hash) IN :identities
-    """).bindparams(bindparam("identities", expanding=True)), {
-        "symbol": symbol, "engine_version": engine_version, "indicator_version": indicator_version,
-        "identities": list(identities),
-    }).mappings().all()
+    rows = []
+    for identity_batch in _batched(list(identities)):
+        rows.extend(session.execute(text("""
+            SELECT rejection_key,strategy_hash,settings_hash,total_trades,win_rate_pct
+            FROM backtest_rejected_strategies
+            WHERE symbol=:symbol AND engine_version=:engine_version
+              AND indicator_engine_version=:indicator_version
+              AND (strategy_hash,settings_hash) IN :identities
+        """).bindparams(bindparam("identities", expanding=True)), {
+            "symbol": symbol, "engine_version": engine_version,
+            "indicator_version": indicator_version,
+            "identities": identity_batch,
+        }).mappings().all())
     rejected_rows = [
         row for row in rows
         if (str(row["strategy_hash"]), str(row["settings_hash"])) in identities
@@ -337,11 +357,17 @@ def _rejected_preset_ids(
             identities[(str(row["strategy_hash"]), str(row["settings_hash"]))]
             for row in rejected_rows
         ])
+        # IPO workspaces must re-home cache hits onto the active run so the
+        # IPO results table can audit every outcome for this workspace.
+        rehome_source = str(config.get("run_type") or "") == "ipo_research"
         session.execute(text("""
             UPDATE backtest_rejected_strategies
             SET skip_count=skip_count+1,last_seen_at=NOW(),
                 owner_id=COALESCE(owner_id,:owner_id),
-                source_run_id=COALESCE(source_run_id,:source_run_id),
+                source_run_id=CASE
+                    WHEN :rehome_source THEN CAST(:source_run_id AS VARCHAR)
+                    ELSE COALESCE(source_run_id,:source_run_id)
+                END,
                 last_tested_session=COALESCE(
                     last_tested_session,
                     (SELECT last_tested_session FROM backtest_run_symbols
@@ -353,6 +379,7 @@ def _rejected_preset_ids(
             "symbol": symbol,
             "owner_id": owner_id,
             "source_run_id": source_run_id,
+            "rehome_source": rehome_source,
         } for row in rejected_rows])
     return {
         str(identities[(str(row["strategy_hash"]), str(row["settings_hash"]))]["id"])
@@ -388,10 +415,12 @@ def load_symbol_artifacts(
                      engine_version=engine_version, indicator_version=indicator_version): preset
         for preset in presets
     }
-    rows = session.execute(text("""
-        SELECT artifact_key,result_payload,market_profile,technical_snapshot
-        FROM backtest_result_artifacts WHERE artifact_key IN :keys
-    """).bindparams(bindparam("keys", expanding=True)), {"keys": list(keyed)}).mappings().all()
+    rows = []
+    for key_batch in _batched(list(keyed)):
+        rows.extend(session.execute(text("""
+            SELECT artifact_key,result_payload,market_profile,technical_snapshot
+            FROM backtest_result_artifacts WHERE artifact_key IN :keys
+        """).bindparams(bindparam("keys", expanding=True)), {"keys": key_batch}).mappings().all())
     found: Dict[str, Dict[str, Any]] = {}
     profile: Dict[str, Any] = {}; technical: Dict[str, Any] = {}
     for row in rows:
@@ -437,11 +466,11 @@ def load_symbol_artifacts(
             if str(preset["id"]) not in found and str(preset["id"]) not in rejected_ids
         ]
     used_keys = [key for key, preset in keyed.items() if str(preset["id"]) in found]
-    if used_keys:
+    for key_batch in _batched(used_keys):
         session.execute(text("""
             UPDATE backtest_result_artifacts SET use_count=use_count+1,last_used_at=NOW()
             WHERE artifact_key IN :keys
-        """).bindparams(bindparam("keys", expanding=True)), {"keys": used_keys})
+        """).bindparams(bindparam("keys", expanding=True)), {"keys": key_batch})
     return {
         "results": [found[str(preset["id"])] for preset in presets if str(preset["id"]) in found],
         "missing": missing, "market_profile": profile, "technical_snapshot": technical,
@@ -508,7 +537,7 @@ def store_symbol_artifacts(
                     ELSE backtest_rejected_strategies.strategy_definition
                 END,
                 owner_id=COALESCE(EXCLUDED.owner_id,backtest_rejected_strategies.owner_id),
-                source_run_id=COALESCE(EXCLUDED.source_run_id,backtest_rejected_strategies.source_run_id),
+                source_run_id=EXCLUDED.source_run_id,
                 last_tested_session=COALESCE(EXCLUDED.last_tested_session,backtest_rejected_strategies.last_tested_session),
                 next_recheck_at=EXCLUDED.next_recheck_at,
                 revalidation_state=EXCLUDED.revalidation_state,last_seen_at=NOW(),
@@ -542,8 +571,8 @@ def store_symbol_artifacts(
             "trade_samples": json.dumps([
                 {
                     key: trade.get(key) for key in (
-                        "signal_date", "entry_date", "exit_date", "holding_days",
-                        "exit_reason", "return_pct", "pnl",
+                        "signal_date", "entry_date", "entry_price", "exit_date",
+                        "exit_price", "holding_days", "exit_reason", "return_pct", "pnl",
                     )
                 }
                 for trade in list(result.get("trades") or [])

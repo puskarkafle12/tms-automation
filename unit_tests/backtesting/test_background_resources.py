@@ -49,7 +49,7 @@ def test_off_hours_fill_spare_cores_and_keep_round_robin_bounded(monkeypatch):
     monkeypatch.setattr("utils.backtesting.batch.os.cpu_count", lambda: 8)
     workers = background_worker_limit(None, market_constrained=False)
     assert workers == 7
-    assert background_turn_size(workers, market_constrained=False) == 12
+    assert background_turn_size(workers, market_constrained=False) == 21
 
 
 def test_off_hours_worker_and_turn_caps_are_configurable(monkeypatch):
@@ -61,3 +61,11 @@ def test_off_hours_worker_and_turn_caps_are_configurable(monkeypatch):
     workers = background_worker_limit(None, market_constrained=False)
     assert workers == 4
     assert background_turn_size(workers, market_constrained=False) == 6
+
+
+def test_off_hours_default_uses_all_spare_cores_on_large_hosts(monkeypatch):
+    monkeypatch.delenv("BACKTEST_MAX_WORKERS", raising=False)
+    monkeypatch.delenv("BACKTEST_OFF_HOURS_MAX_WORKERS", raising=False)
+    monkeypatch.setenv("BACKTEST_RESERVED_CPUS", "1")
+    monkeypatch.setattr("utils.backtesting.batch.os.cpu_count", lambda: 10)
+    assert background_worker_limit(None, market_constrained=False) == 9

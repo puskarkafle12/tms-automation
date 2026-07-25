@@ -39,8 +39,10 @@ EXIT_RULES = (
 )
 
 
-def discovery_space_size(base_count: int) -> int:
+def discovery_space_size(base_count: int, *, include_singles: bool = False) -> int:
     signal_sets = math.comb(base_count, 2) + (math.comb(base_count, 3) if base_count >= 3 else 0)
+    if include_singles:
+        signal_sets += max(0, int(base_count))
     return signal_sets * RISK_CONFIGURATIONS * len(EXIT_RULES)
 
 
@@ -72,6 +74,7 @@ def _candidate(parts: Sequence[Dict[str, Any]], stop: int, target: int, holding:
 def generate_discovery_presets(
     *, budget: int, seed: int = 20260718, base_ids: Sequence[str] | None = None,
     min_holding_days: int = 5, max_holding_days: int = 90,
+    include_singles: bool = False,
 ) -> List[Dict[str, Any]]:
     """Sample unique candidates reproducibly without materializing the full search space."""
     catalog = {item["id"]: item for item in get_backtest_presets()}
@@ -83,13 +86,18 @@ def generate_discovery_presets(
     holding_options = tuple(value for value in HOLD_GRID if int(min_holding_days) <= value <= int(max_holding_days))
     if not holding_options:
         holding_options = (int(max_holding_days),)
-    limit = max(1, min(int(budget), discovery_space_size(len(base))))
+    limit = max(1, min(int(budget), discovery_space_size(len(base), include_singles=include_singles)))
     rng = random.Random(int(seed))
     selected: Dict[str, Dict[str, Any]] = {}
     attempts = 0
     while len(selected) < limit and attempts < limit * 30:
         attempts += 1
-        width = 3 if len(base) >= 3 and rng.random() < .6 else 2
+        if include_singles and rng.random() < .45:
+            width = 1
+        elif len(base) >= 3 and rng.random() < .6:
+            width = 3
+        else:
+            width = 2
         parts = rng.sample(base, width)
         candidate = _candidate(
             parts, rng.choice(STOP_GRID), rng.choice(TARGET_GRID),
@@ -97,7 +105,8 @@ def generate_discovery_presets(
         )
         selected[candidate["source_hash"]] = candidate
     if len(selected) < limit:
-        for width in (2, 3):
+        widths = ((1, 2, 3) if include_singles else (2, 3))
+        for width in widths:
             if width > len(base):
                 continue
             for parts in combinations(base, width):

@@ -8,6 +8,7 @@ from utils.backtesting.v2_query import (
     compile_strong_buy_sorts,
     latest_completed_market_session,
     _strategy_planning_range,
+    _with_ipo_trade_floor,
 )
 
 
@@ -19,6 +20,51 @@ def test_result_filters_are_parameterized_and_force_ordinary_shares():
     assert "s.security_type = 'ordinary_share'" in sql
     assert ":filter_0" in sql and ":filter_1" in sql
     assert params == {"filter_0": 10.0, "filter_1": "%NAB%"}
+
+
+def test_ipo_results_always_exclude_zero_trade_simulations():
+    assert _with_ipo_trade_floor("TRUE") == "r.total_trades > 0"
+    assert _with_ipo_trade_floor("") == "r.total_trades > 0"
+    assert _with_ipo_trade_floor("s.security_type = 'ordinary_share'") == (
+        "(s.security_type = 'ordinary_share') AND r.total_trades > 0"
+    )
+
+
+def test_ipo_cache_counts_report_trade_and_zero_trade_totals():
+    from utils.backtesting.v2_query import _ipo_cache_counts
+
+    class _Result:
+        def mappings(self):
+            return self
+
+        def one(self):
+            return {
+                "cached_total": 12,
+                "trade_outcomes": 3,
+                "zero_trade_outcomes": 9,
+            }
+
+    class _Session:
+        def execute(self, _statement, _params=None):
+            return _Result()
+
+    assert _ipo_cache_counts(_Session(), run_id="run-1", owner_id="local") == {
+        "cached_total": 12,
+        "trade_outcomes": 3,
+        "zero_trade_outcomes": 9,
+    }
+
+
+def test_csv_row_helper_serializes_nested_json():
+    from utils.backtesting.v2_query import _csv_row_from_result
+    row = _csv_row_from_result({
+        "symbol": "SIPD", "total_trades": 1, "warning_codes": ["cached"],
+        "current_evidence": {"reason": "ok"},
+    })
+    assert row["symbol"] == "SIPD"
+    assert row["total_trades"] == 1
+    assert row["warning_codes"] == '["cached"]'
+    assert '"reason":"ok"' in row["current_evidence"]
 
 
 def test_result_filters_allow_explicit_non_equity_universe():

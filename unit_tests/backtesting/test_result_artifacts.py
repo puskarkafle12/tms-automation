@@ -98,6 +98,23 @@ def test_rejection_ledger_skips_before_market_cache_context_is_available():
     assert payload["rejected_hits"] == 1
 
 
+def test_large_discovery_rejection_lookup_is_batched():
+    from utils.backtesting import result_artifacts as artifacts
+
+    presets = [_preset(f"discovery-{index}") for index in range(artifacts._SQL_IN_BATCH_SIZE + 25)]
+    session = _Session(lambda _sql, _params: _Result())
+    load_symbol_artifacts(
+        session, symbol="NABIL", presets=presets, config=_config(),
+        engine_version="engine-2", indicator_version="indicators-3",
+    )
+    rejection_calls = [
+        call for call in session.calls if "FROM backtest_rejected_strategies" in call[0]
+    ]
+    assert len(rejection_calls) == 2
+    assert len(rejection_calls[0][1]["identities"]) == artifacts._SQL_IN_BATCH_SIZE
+    assert len(rejection_calls[1][1]["identities"]) == 25
+
+
 def test_cached_rejection_is_linked_to_the_current_workspace_without_rerunning():
     preset = _preset("linkage-test")
     identity = (strategy_hash(preset), settings_hash(
@@ -118,7 +135,10 @@ def test_cached_rejection_is_linked_to_the_current_workspace_without_rerunning()
         engine_version="engine-2", indicator_version="indicators-3",
         owner_id="owner-1", source_run_id="run-1",
     )
-    linkage = next(call for call in session.calls if "source_run_id=COALESCE" in call[0])
+    linkage = next(
+        call for call in session.calls
+        if "UPDATE backtest_rejected_strategies" in call[0] and "source_run_id" in call[0]
+    )
     definition = next(call for call in session.calls if "INSERT INTO backtest_strategy_definitions" in call[0])
     assert payload["missing"] == []
     assert linkage[1][0]["owner_id"] == "owner-1"

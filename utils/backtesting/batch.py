@@ -6,7 +6,7 @@ import math
 import multiprocessing
 import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, Callable, Dict, List, Optional
 
 from sqlalchemy import text
@@ -49,9 +49,9 @@ def background_worker_limit(
     """Choose a bounded CPU process count without starving interactive traffic.
 
     During NEPSE pre-open/live hours research defaults to one process. Outside
-    that window it uses every spare CPU after the interactive reserve, up to the
-    off-hours safety cap. Child processes retain a low OS priority and one BLAS
-    thread, so API/database work can pre-empt research under load.
+    that window it uses every spare CPU after the interactive reserve. Child
+    processes retain a low OS priority and one BLAS thread, so API/database work
+    can pre-empt research under load.
     """
     reserved_cpus = _positive_env_int("BACKTEST_RESERVED_CPUS", 1)
     available_cpus = max(1, (os.cpu_count() or 2) - reserved_cpus)
@@ -59,15 +59,21 @@ def background_worker_limit(
     if constrained:
         phase_limit = _positive_env_int("BACKTEST_MARKET_MAX_WORKERS", 1)
     else:
-        phase_limit = _positive_env_int(
-            "BACKTEST_OFF_HOURS_MAX_WORKERS",
-            min(available_cpus, 8),
+        raw_off_hours = os.getenv("BACKTEST_OFF_HOURS_MAX_WORKERS", "").strip()
+        phase_limit = (
+            _positive_env_int("BACKTEST_OFF_HOURS_MAX_WORKERS", available_cpus)
+            if raw_off_hours
+            else available_cpus
         )
     raw_global_limit = os.getenv("BACKTEST_MAX_WORKERS", "").strip()
-    global_limit = _positive_env_int("BACKTEST_MAX_WORKERS", 12) if raw_global_limit else 12
+    global_limit = (
+        _positive_env_int("BACKTEST_MAX_WORKERS", available_cpus)
+        if raw_global_limit
+        else available_cpus
+    )
     configured_limit = min(phase_limit, global_limit)
     requested = max(1, int(requested_workers or configured_limit))
-    return min(requested, configured_limit, available_cpus, 12)
+    return min(requested, configured_limit, available_cpus)
 
 
 def background_turn_size(
@@ -78,12 +84,15 @@ def background_turn_size(
     """Return a fair stock quantum large enough to keep the process pool busy."""
     explicit = os.getenv("BACKTEST_ROUND_ROBIN_STOCKS_PER_TURN", "").strip()
     if explicit:
-        return min(24, _positive_env_int("BACKTEST_ROUND_ROBIN_STOCKS_PER_TURN", 1))
+        return min(64, _positive_env_int("BACKTEST_ROUND_ROBIN_STOCKS_PER_TURN", 1))
     constrained = market_research_is_constrained() if market_constrained is None else market_constrained
     if constrained:
         return 1
-    cap = _positive_env_int("BACKTEST_OFF_HOURS_STOCKS_PER_TURN", 12)
-    return max(1, min(24, cap, max(1, int(workers)) * 2))
+    worker_count = max(1, int(workers))
+    default_cap = max(12, worker_count * 3)
+    raw_cap = os.getenv("BACKTEST_OFF_HOURS_STOCKS_PER_TURN", "").strip()
+    cap = _positive_env_int("BACKTEST_OFF_HOURS_STOCKS_PER_TURN", default_cap) if raw_cap else default_cap
+    return max(1, min(64, cap, worker_count * 3))
 
 
 def initialize_background_worker() -> None:
@@ -109,7 +118,11 @@ def get_backtest_universe(
     session = SessionLocal()
     try:
         equity_filter = "AND c.combined_data->>'security_type' = 'ordinary_share'" if ordinary_shares_only else ""
-        age_filter = "AND NULLIF(c.combined_data->>'listing_age_days', '')::FLOAT <= :max_listing_age_days" if max_listing_age_days is not None else ""
+        age_filter = """AND (
+            SELECT MIN(history.session_date)
+            FROM market_ohlcv_daily history
+            WHERE history.symbol=d.symbol AND history.adjusted=TRUE
+        ) >= :listing_cutoff""" if max_listing_age_days is not None else ""
         volume_filter = "AND NULLIF(regexp_replace(COALESCE(c.combined_data->>'qty', c.combined_data->>'volume', c.combined_data->>'ml_quantity', ''), '[^0-9.]', '', 'g'), '')::FLOAT >= :min_volume" if min_volume is not None else ""
         symbol_filter = "AND d.symbol = ANY(:requested_symbols)" if requested else ""
         rows = session.execute(
@@ -125,7 +138,8 @@ def get_backtest_universe(
                 ORDER BY d.symbol
                 LIMIT 1000
                 """),
-            {"start_date": start_date, "end_date": end_date, "max_listing_age_days": max_listing_age_days,
+            {"start_date": start_date, "end_date": end_date,
+             "listing_cutoff": end_date - timedelta(days=max_listing_age_days) if max_listing_age_days is not None else None,
              "min_volume": min_volume, "requested_symbols": requested},
         ).scalars().all()
     finally:
@@ -213,13 +227,32 @@ def _run_symbol_task(task: Dict[str, Any]) -> Dict[str, Any]:
         try:
             entry_signals = None
             exit_signals = None
-            if preset.get("component_ids"):
+            if preset.get("force_condition_compiler"):
+                from utils.backtesting.accelerated import (
+                    compile_condition_signals, compile_preset_exit_signals,
+                )
+                entry_signals = compile_condition_signals(
+                    str(preset["condition"]), prepared_rows,
+                )
+                if preset.get("exit_condition"):
+                    exit_signals = compile_preset_exit_signals(preset["id"], prepared_rows)
+            elif preset.get("component_ids"):
                 from utils.backtesting.accelerated import compile_preset_signals
                 component_signals = [
                     compile_preset_signals(component_id, prepared_rows, trigger_on_cross=False)
                     for component_id in preset["component_ids"]
                 ]
                 combined_state = [all(values) for values in zip(*component_signals)]
+                gate_condition = str(preset.get("ipo_tradability_gate_condition") or "").strip()
+                if preset.get("apply_ipo_tradability_gate") and gate_condition:
+                    from utils.backtesting.accelerated import compile_condition_signals
+                    gate_signals = compile_condition_signals(
+                        gate_condition, prepared_rows, trigger_on_cross=False,
+                    )
+                    combined_state = [
+                        bool(state and gate)
+                        for state, gate in zip(combined_state, gate_signals)
+                    ]
                 entry_signals = combined_state.copy()
                 for index in range(1, len(entry_signals)):
                     entry_signals[index] = combined_state[index] and not combined_state[index - 1]

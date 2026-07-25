@@ -394,22 +394,38 @@ def _evaluate_node(
             to_value = args.get("to") or args.get("to_value") or args.get("value")
             matched = changed_from_to(field_name, history, from_value, to_value)
             return ConditionResult(expression=f"CHANGED_FROM_TO({field_name})", matched=matched, actual_value=flat.get(field_name))
-        if name == "STDDEV":
-            window = int(_plain_arg(args, ("scans", "window", "count"), 10))
-            values = _rolling_values(field_name, history, window)
-            actual = rolling_stddev(values)
-            threshold = _resolve_value(args.get("threshold") or args.get("value"), flat, history)
-            operator = str(_plain_arg(args, ("operator",), "lt"))
-            matched = _compare(actual, operator, threshold) if actual is not None and threshold is not None else actual is not None
-            return ConditionResult(expression=f"STDDEV({field_name}, {window})", matched=matched, actual_value=actual, expected_value=threshold)
         if name == "SLOPE":
             window = int(_plain_arg(args, ("scans", "window", "count"), 5))
             values = _rolling_values(field_name, history, window)
             actual = rolling_slope(values)
             threshold = _resolve_value(args.get("threshold") or args.get("value"), flat, history)
             operator = str(_plain_arg(args, ("operator",), "gt"))
-            matched = _compare(actual, operator, threshold) if actual is not None and threshold is not None else actual is not None
-            return ConditionResult(expression=f"SLOPE({field_name}, {window})", matched=matched, actual_value=actual, expected_value=threshold)
+            matched = _compare(actual, operator, threshold) if actual is not None and threshold is not None else False
+            op_text = {"gt": ">", "gte": "≥", "lt": "<", "lte": "≤", "eq": "=", "neq": "≠"}.get(operator, operator)
+            return ConditionResult(
+                expression=f"SLOPE({field_name}, {window}) {op_text} {threshold}",
+                matched=matched,
+                actual_value=actual,
+                expected_value=threshold,
+                message=(
+                    None if matched or actual is not None
+                    else f"Need at least 2 observations of {field_name} to compute slope"
+                ),
+            )
+        if name == "STDDEV":
+            window = int(_plain_arg(args, ("scans", "window", "count"), 10))
+            values = _rolling_values(field_name, history, window)
+            actual = rolling_stddev(values)
+            threshold = _resolve_value(args.get("threshold") or args.get("value"), flat, history)
+            operator = str(_plain_arg(args, ("operator",), "lt"))
+            matched = _compare(actual, operator, threshold) if actual is not None and threshold is not None else False
+            op_text = {"gt": ">", "gte": "≥", "lt": "<", "lte": "≤", "eq": "=", "neq": "≠"}.get(operator, operator)
+            return ConditionResult(
+                expression=f"STDDEV({field_name}, {window}) {op_text} {threshold}",
+                matched=matched,
+                actual_value=actual,
+                expected_value=threshold,
+            )
         if name == "TREND":
             window = int(args.get("scans") or args.get("window") or args.get("count") or 5)
             min_move = float(args.get("min_move_pct") or args.get("min_each_change_pct") or 0.05)

@@ -278,7 +278,150 @@ def compile_result_sorts(body: Dict[str, Any]) -> Tuple[str, str, List[Dict[str,
     return ",".join(inner), ",".join(outer), normalized
 
 
+def _with_ipo_trade_floor(where: str) -> str:
+    """IPO result tables only rank simulations that produced at least one trade.
+
+    Zero-trade rows all share win_rate=0 and crowd the ranking with noise that
+    cannot be interpreted as swing performance.
+    """
+    floor = "r.total_trades > 0"
+    if not where or where == "TRUE":
+        return floor
+    return f"({where}) AND {floor}"
+
+
+def _ipo_cache_counts(session, *, run_id: str, owner_id: str) -> Dict[str, int]:
+    row = session.execute(text("""
+        SELECT COUNT(*)::INTEGER AS cached_total,
+               COUNT(*) FILTER (WHERE COALESCE(total_trades, 0) > 0)::INTEGER AS trade_outcomes,
+               COUNT(*) FILTER (WHERE COALESCE(total_trades, 0) <= 0)::INTEGER AS zero_trade_outcomes
+        FROM backtest_rejected_strategies
+        WHERE source_run_id=:run_id
+          AND (owner_id=:owner_id OR owner_id IS NULL)
+    """), {"run_id": run_id, "owner_id": owner_id}).mappings().one()
+    return {
+        "cached_total": int(row["cached_total"] or 0),
+        "trade_outcomes": int(row["trade_outcomes"] or 0),
+        "zero_trade_outcomes": int(row["zero_trade_outcomes"] or 0),
+    }
+
+
+def _query_ipo_cached_results(
+    session, run_id: str, body: Dict[str, Any], *, owner_id: str,
+) -> Dict[str, Any]:
+    """Expose IPO scan outcomes that produced trades, without promoting them.
+
+    IPO research is intentionally sparse: low-evidence outcomes are stored in
+    ``backtest_rejected_strategies`` instead of the retained-results table.
+    Zero-trade simulations stay in the cache for progress accounting but are
+    excluded from the research table by default — a 0% win rate with 0 trades is
+    not a meaningful swing result. Pass ``include_zero_trade_simulations`` to
+    inspect the raw cache while a sparse IPO is still filling trade evidence.
+    """
+    page = max(1, int(body.get("page") or 1))
+    page_size = min(100, max(1, int(body.get("page_size") or 100)))
+    inner_order, _, sorts = compile_result_sorts(body)
+    where, params = compile_filters(
+        body.get("filters"), include_non_equities=bool(body.get("include_non_equities")),
+    )
+    include_zero_trades = bool(body.get("include_zero_trade_simulations"))
+    if not include_zero_trades:
+        where = _with_ipo_trade_floor(where)
+    params.update({"run_id": run_id, "owner_id": owner_id, "limit": page_size,
+                   "offset": (page - 1) * page_size})
+    cache_counts = _ipo_cache_counts(session, run_id=run_id, owner_id=owner_id)
+    requested_fields = [
+        str(field) for field in body.get("select_fields") or []
+        if str(field) in RESULT_FIELDS
+    ]
+    selected_keys = list(dict.fromkeys(["result_id", "run_id", *requested_fields])) if requested_fields else list(RESULT_FIELDS)
+    select = ",".join(f"{RESULT_FIELDS[key]} AS {key}" for key in selected_keys)
+    cached_rows = """
+        WITH ipo_cached_rows AS (
+            SELECT
+                (-ROW_NUMBER() OVER (ORDER BY rejected.rejection_key))::BIGINT AS result_id,
+                rejected.rejection_key AS cache_key,
+                CAST(:run_id AS VARCHAR) AS run_id,
+                rejected.symbol, rejected.strategy_id AS preset_id,
+                rejected.strategy_name AS preset_name,
+                'ipo_cached'::VARCHAR AS preset_family,
+                'New IPO cached evidence'::VARCHAR AS category,
+                0::INTEGER AS bars,
+                rejected.total_trades,
+                ROUND(rejected.total_trades * rejected.win_rate_pct / 100.0)::INTEGER AS wins,
+                GREATEST(0, rejected.total_trades - ROUND(rejected.total_trades * rejected.win_rate_pct / 100.0)::INTEGER) AS losses,
+                rejected.win_rate_pct,
+                NULL::DOUBLE PRECISION AS win_rate_ci_low,
+                NULL::DOUBLE PRECISION AS win_rate_ci_high,
+                0::DOUBLE PRECISION AS confidence_score,
+                0::DOUBLE PRECISION AS robust_score,
+                NULL::DOUBLE PRECISION AS net_return_pct,
+                NULL::DOUBLE PRECISION AS max_drawdown_pct,
+                NULL::DOUBLE PRECISION AS sharpe_ratio,
+                NULL::DOUBLE PRECISION AS sortino_ratio,
+                NULL::DOUBLE PRECISION AS profit_factor,
+                NULL::DOUBLE PRECISION AS expectancy_pct,
+                NULL::DOUBLE PRECISION AS exposure_pct,
+                NULL::DOUBLE PRECISION AS average_holding_days,
+                0::INTEGER AS oos_trades,
+                NULL::DOUBLE PRECISION AS oos_win_rate_pct,
+                NULL::DOUBLE PRECISION AS oos_return_pct,
+                NULL::DOUBLE PRECISION AS oos_expectancy_pct,
+                NULL::DOUBLE PRECISION AS oos_sharpe_ratio,
+                NULL::DOUBLE PRECISION AS oos_max_drawdown_pct,
+                NULL::DOUBLE PRECISION AS walk_forward_profitable_pct,
+                NULL::DOUBLE PRECISION AS fdr_q_value,
+                NULL::DOUBLE PRECISION AS data_completeness_pct,
+                NULL::DOUBLE PRECISION AS liquidity_score,
+                'cached_low_evidence'::VARCHAR AS sample_quality,
+                'cached_not_recommended'::VARCHAR AS recommendation_status,
+                jsonb_build_array('Below normal retention; shown only in this IPO research workspace.') AS warning_codes,
+                rejected.latest_signal_evidence AS technical_snapshot,
+                FALSE AS current_signal_active,
+                COALESCE(rejected.latest_signal_status, 'no_signal') AS current_signal_status,
+                rejected.latest_signal_date AS current_signal_date,
+                0::DOUBLE PRECISION AS current_technical_score,
+                0::DOUBLE PRECISION AS reliability_score,
+                FALSE AS strong_buy_qualified,
+                rejected.latest_signal_evidence AS current_evidence,
+                rejected.strategy_definition AS assumptions
+            FROM backtest_rejected_strategies rejected
+            WHERE rejected.source_run_id=:run_id
+              AND (rejected.owner_id=:owner_id OR rejected.owner_id IS NULL)
+        )
+    """
+    base = "FROM ipo_cached_rows r JOIN backtest_run_symbols s ON s.run_id=r.run_id AND s.symbol=r.symbol"
+    total = int(session.execute(text(f"{cached_rows} SELECT COUNT(*) {base} WHERE {where}"), params).scalar() or 0)
+    rows = session.execute(text(
+        f"{cached_rows} SELECT {select},r.cache_key {base} WHERE {where} "
+        f"ORDER BY {inner_order} LIMIT :limit OFFSET :offset"
+    ), params).mappings().all()
+    items = []
+    for row in rows:
+        item = dict(row)
+        item["warning_codes"] = list(item.get("warning_codes") or [])
+        item["cached_evidence"] = True
+        items.append(item)
+    return {
+        "items": items, "page": page, "page_size": page_size, "total": total,
+        "pages": ceil(total / page_size) if total else 0, "sorts": sorts,
+        "sort_by": sorts[0]["field"], "sort_direction": sorts[0]["direction"],
+        "unique_by_symbol": False, "unique_by_strategy": False,
+        "selected_columns": selected_keys, "cache_only": True,
+        "include_zero_trade_simulations": include_zero_trades,
+        **cache_counts,
+    }
+
+
 def query_results(session, run_id: str, body: Dict[str, Any], *, owner_id: str = "local") -> Dict[str, Any]:
+    if run_id != "all":
+        run_type = session.execute(text("""
+            SELECT run_type FROM backtest_runs
+            WHERE run_id=:run_id AND owner_id=:owner_id
+              AND deleted_at IS NULL AND archived_at IS NULL
+        """), {"run_id": run_id, "owner_id": owner_id}).scalar()
+        if run_type == "ipo_research":
+            return _query_ipo_cached_results(session, run_id, body, owner_id=owner_id)
     page = max(1, int(body.get("page") or 1))
     page_size = min(100, max(1, int(body.get("page_size") or 100)))
     inner_order, outer_order, sorts = compile_result_sorts(body)
@@ -384,31 +527,72 @@ def query_result_symbols(
     return sorted({item["symbol"] for item in query_result_selections(session, run_id, body, owner_id=owner_id)})
 
 
+def _csv_row_from_result(item: Dict[str, Any]) -> Dict[str, Any]:
+    row = {key: item.get(key) for key in RESULT_FIELDS}
+    for key, value in list(row.items()):
+        if isinstance(value, (dict, list)):
+            row[key] = json.dumps(value, separators=(",", ":"), default=str)
+    return row
+
+
 def stream_results_csv(session_factory, run_id: str, body: Dict[str, Any], *, owner_id: str):
     """Stream every matching normalized result without loading the export into memory."""
-    inner_order, _, _ = compile_result_sorts(body)
-    where, params = compile_filters(body.get("filters"), include_non_equities=bool(body.get("include_non_equities")))
-    where = f"({where}) AND {RETAINED_RESULT_SQL}"
-    params.update({"run_id": run_id, "owner_id": owner_id})
-    ownership = "br.owner_id=:owner_id AND br.deleted_at IS NULL AND br.archived_at IS NULL"
-    base = "FROM backtest_results r JOIN backtest_run_symbols s ON s.run_id=r.run_id AND s.symbol=r.symbol JOIN backtest_runs br ON br.run_id=r.run_id"
-    select = ",".join(f"{column} AS {key}" for key, column in RESULT_FIELDS.items())
-    statement = text(
-        f"SELECT {select} {base} WHERE (:run_id='all' OR r.run_id=:run_id) AND {ownership} AND {where} "
-        f"ORDER BY {inner_order}"
-    )
     buffer = io.StringIO()
     writer = csv.DictWriter(buffer, fieldnames=list(RESULT_FIELDS), extrasaction="ignore")
     writer.writeheader()
     yield buffer.getvalue(); buffer.seek(0); buffer.truncate(0)
     session = session_factory()
     try:
+        run_type = None
+        if run_id != "all":
+            run_type = session.execute(text("""
+                SELECT run_type FROM backtest_runs
+                WHERE run_id=:run_id AND owner_id=:owner_id
+                  AND deleted_at IS NULL AND archived_at IS NULL
+            """), {"run_id": run_id, "owner_id": owner_id}).scalar()
+        # IPO outcomes live in the rejection cache, not backtest_results.
+        if run_type == "ipo_research":
+            page = 1
+            page_size = 500
+            while True:
+                payload = query_results(
+                    session, run_id,
+                    {**body, "page": page, "page_size": page_size},
+                    owner_id=owner_id,
+                )
+                items = list(payload.get("items") or [])
+                if not items:
+                    break
+                for item in items:
+                    writer.writerow(_csv_row_from_result(item))
+                    if buffer.tell() >= 64 * 1024:
+                        yield buffer.getvalue(); buffer.seek(0); buffer.truncate(0)
+                if page >= int(payload.get("pages") or 0):
+                    break
+                page += 1
+            if buffer.tell():
+                yield buffer.getvalue()
+            return
+
+        inner_order, _, _ = compile_result_sorts(body)
+        where, params = compile_filters(
+            body.get("filters"), include_non_equities=bool(body.get("include_non_equities")),
+        )
+        where = f"({where}) AND {RETAINED_RESULT_SQL}"
+        params.update({"run_id": run_id, "owner_id": owner_id})
+        ownership = "br.owner_id=:owner_id AND br.deleted_at IS NULL AND br.archived_at IS NULL"
+        base = (
+            "FROM backtest_results r "
+            "JOIN backtest_run_symbols s ON s.run_id=r.run_id AND s.symbol=r.symbol "
+            "JOIN backtest_runs br ON br.run_id=r.run_id"
+        )
+        select = ",".join(f"{column} AS {key}" for key, column in RESULT_FIELDS.items())
+        statement = text(
+            f"SELECT {select} {base} WHERE (:run_id='all' OR r.run_id=:run_id) AND {ownership} AND {where} "
+            f"ORDER BY {inner_order}"
+        )
         for row in session.execute(statement, params).mappings().yield_per(1000):
-            item = dict(row)
-            for key, value in list(item.items()):
-                if isinstance(value, (dict, list)):
-                    item[key] = json.dumps(value, separators=(",", ":"), default=str)
-            writer.writerow(item)
+            writer.writerow(_csv_row_from_result(dict(row)))
             if buffer.tell() >= 64 * 1024:
                 yield buffer.getvalue(); buffer.seek(0); buffer.truncate(0)
         if buffer.tell():
@@ -417,7 +601,57 @@ def stream_results_csv(session_factory, run_id: str, body: Dict[str, Any], *, ow
         session.close()
 
 
-def result_detail(session, result_id: int, *, owner_id: str = "local") -> Dict[str, Any]:
+def _cached_ipo_result_detail(session, cache_key: str, *, owner_id: str) -> Dict[str, Any]:
+    """Return an audit-only result shape for one IPO cache entry.
+
+    This deliberately reads the rejection cache rather than inserting a normal
+    backtest result, so opening a chart never promotes it to recommendations.
+    """
+    row = session.execute(text("""
+        SELECT rejected.rejection_key AS cache_key,rejected.source_run_id AS run_id,
+               rejected.symbol,rejected.strategy_id AS preset_id,rejected.strategy_name AS preset_name,
+               'New IPO cached evidence' AS category,rejected.total_trades,
+               ROUND(rejected.total_trades * rejected.win_rate_pct / 100.0)::INTEGER AS wins,
+               GREATEST(0,rejected.total_trades-ROUND(rejected.total_trades * rejected.win_rate_pct / 100.0)::INTEGER) AS losses,
+               rejected.win_rate_pct,rejected.latest_signal_status AS current_signal_status,
+               rejected.latest_signal_date AS current_signal_date,rejected.latest_signal_evidence AS current_evidence,
+               rejected.latest_signal_evidence AS technical_snapshot,rejected.trade_samples,
+               COALESCE(NULLIF(rejected.strategy_definition,'{}'::jsonb),definition.definition,'{}'::jsonb) AS assumptions,
+               run.configuration AS run_configuration,s.ltp,s.latest_volume,s.average_volume_20,s.sector
+        FROM backtest_rejected_strategies rejected
+        JOIN backtest_runs run ON run.run_id=rejected.source_run_id
+        JOIN backtest_run_symbols s ON s.run_id=run.run_id AND s.symbol=rejected.symbol
+        LEFT JOIN backtest_strategy_definitions definition ON definition.strategy_hash=rejected.strategy_hash
+        WHERE rejected.rejection_key=:cache_key
+          AND (rejected.owner_id=:owner_id OR rejected.owner_id IS NULL)
+          AND run.owner_id=:owner_id
+          AND run.run_type='ipo_research' AND run.deleted_at IS NULL AND run.archived_at IS NULL
+    """), {"cache_key": cache_key, "owner_id": owner_id}).mappings().first()
+    if not row:
+        raise ResultQueryError("Cached IPO research result was not found.")
+    output = dict(row)
+    assumptions = dict(output.get("assumptions") or {})
+    configuration = dict(output.pop("run_configuration") or {})
+    assumptions.setdefault("period", {
+        "start": configuration.get("start_date"), "end": configuration.get("end_date"),
+    })
+    assumptions.setdefault("initial_capital", configuration.get("initial_capital") or 100000)
+    output.update({
+        "assumptions": assumptions, "warning_codes": [
+            "Below normal retention; IPO research only and not a recommendation."
+        ], "recommendation_status": "cached_not_recommended", "sample_quality": "cached_low_evidence",
+        "current_signal_active": False, "current_technical_score": 0.0,
+        "reliability_score": 0.0, "strong_buy_qualified": False,
+        "net_return_pct": None, "max_drawdown_pct": None, "sharpe_ratio": None,
+        "sortino_ratio": None, "profit_factor": None, "expectancy_pct": None,
+        "confidence_score": 0.0, "average_holding_days": None,
+    })
+    return output
+
+
+def result_detail(session, result_id: int, *, owner_id: str = "local", cache_key: str | None = None) -> Dict[str, Any]:
+    if cache_key:
+        return _cached_ipo_result_detail(session, cache_key, owner_id=owner_id)
     select = ",".join(f"{column} AS {key}" for key, column in RESULT_FIELDS.items())
     row = session.execute(text(
         f"SELECT {select},r.assumptions,r.technical_snapshot FROM backtest_results r "
@@ -432,7 +666,25 @@ def result_detail(session, result_id: int, *, owner_id: str = "local") -> Dict[s
     return output
 
 
-def result_trades(session, result_id: int, *, owner_id: str = "local") -> List[Dict[str, Any]]:
+def result_trades(session, result_id: int, *, owner_id: str = "local", cache_key: str | None = None) -> List[Dict[str, Any]]:
+    if cache_key:
+        detail = _cached_ipo_result_detail(session, cache_key, owner_id=owner_id)
+        trades = list(detail.get("trade_samples") or [])
+        normalized = []
+        for index, raw in enumerate(trades, start=1):
+            trade = dict(raw or {})
+            return_pct = float(trade.get("return_pct") or 0)
+            normalized.append({
+                "trade_id": -index, "sequence_no": index, "signal_date": trade.get("signal_date"),
+                "entry_date": trade.get("entry_date"), "entry_price": trade.get("entry_price"),
+                "exit_date": trade.get("exit_date"), "exit_price": trade.get("exit_price"),
+                "holding_days": trade.get("holding_days") or 0, "exit_reason": trade.get("exit_reason") or "saved exit",
+                "return_pct": return_pct, "gross_return_pct": return_pct, "pnl": trade.get("pnl") or 0,
+                "result": "win" if return_pct >= 0 else "loss", "quantity": 0,
+                "broker_commission": 0, "sebon_fee": 0, "dp_charge": 0, "capital_gains_tax": 0,
+                "capital_gains_tax_rate_pct": 0, "total_charges": 0,
+            })
+        return normalized
     rows = session.execute(text(
         "SELECT t.* FROM backtest_trades t JOIN backtest_results r ON r.result_id=t.result_id "
         "JOIN backtest_runs br ON br.run_id=r.run_id WHERE t.result_id=:result_id AND br.owner_id=:owner_id "

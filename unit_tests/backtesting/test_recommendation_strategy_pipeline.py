@@ -42,55 +42,64 @@ def test_new_ipo_presets_are_distinct_limited_history_hypotheses():
         preset for preset in get_backtest_presets()
         if preset["category"] == "New IPO aftermarket research"
     ]
-    assert len(presets) == 30
+    assert len(presets) == 34
     assert {preset["family"] for preset in presets} == {"new_ipo_aftermarket"}
     assert all("technical_sma_200" not in preset["condition"] for preset in presets)
     assert all(preset["exit_rule_id"] and preset["exit_condition"] for preset in presets)
-    assert all("PREVIOUS(field=ltp, offset=2) - PREVIOUS(field=ltp, offset=1) >= 1" in preset["condition"] for preset in presets)
-    assert all("volume >= 8000" in preset["condition"] for preset in presets)
+    assert all("PREVIOUS(field=ltp, offset=1) < PREVIOUS(field=open, offset=1)" in preset["condition"] for preset in presets)
+    assert all("PREVIOUS(field=change_percent, offset=1) <= -4" not in preset["condition"] for preset in presets)
+    assert all("PREVIOUS(field=volume, offset=1) > 5000" not in preset["condition"] for preset in presets)
+    tier1 = [preset for preset in presets if preset.get("tier") == "ipo_tier1_research"]
+    assert len(tier1) == 4
+    assert {preset["recommended_listing_age_days"] for preset in tier1} == {90, 180, 365, 730}
     lifecycle = {preset["id"]: preset for preset in presets}
     assert lifecycle["ipo_markup_peak_protection"]["defaults"]["trailing_stop_pct"] == 7
     assert lifecycle["ipo_post_spike_recovery"]["defaults"]["take_profit_pct"] == 16
     assert lifecycle["ipo_post_spike_recovery"]["defaults"]["trailing_stop_pct"] == 5
 
 
-def test_new_ipo_tradability_gate_rejects_unfillable_listing_rises():
+def test_new_ipo_tradability_gate_allows_buy_only_after_prior_red_candle():
     query = '''STRATEGY_VERSION 1
 SIDE BUY
 RULE "IPO tradability gate" FOR SYMBOL "IPO" {
-  WHEN PREVIOUS(field=ltp, offset=2) - PREVIOUS(field=ltp, offset=1) >= 1 AND change_percent > 0 AND volume >= 8000
+  WHEN PREVIOUS(field=ltp, offset=1) < PREVIOUS(field=open, offset=1)
   ORDER PERCENT_OF_AVAILABLE_CASH 100
 }'''
     rule = parse_strategy_query(query).rules[0]
 
-    def matches(prior_prices, *, volume=8000, change_percent=1):
+    def matches(*, decline_close=95, decline_open=98):
         history = TargetHistory()
-        current_price = prior_prices[-1] + 1
-        for index, price in enumerate([*prior_prices, current_price]):
-            append_observation(
-                history, "ltp", price, source_timestamp=f"2026-01-{index + 1:02d}",
-                policy="count_only_new_trade",
-            )
+        observations = {
+            "ltp": [100, decline_close, decline_close + 1],
+            "open": [100, decline_open, decline_close],
+            "change_percent": [0, -3, 1],
+            "volume": [1000, 100, 1000],
+        }
+        for field, values in observations.items():
+            for index, value in enumerate(values):
+                append_observation(
+                    history, field, value,
+                    source_timestamp=f"2026-01-{index + 1:02d}",
+                    policy="count_only_new_trade",
+                )
         result = evaluate_rule(
             rule, "IPO",
-            {"ltp": current_price, "change_percent": change_percent, "volume": volume},
+            {"ltp": decline_close + 1, "open": decline_close, "change_percent": 1, "volume": 1000},
             history, trigger_on_cross=False,
         )
         return result.final_result
 
-    assert matches([100, 99]) is True
-    assert matches([100, 101]) is False
-    assert matches([100, 99.5]) is False
-    assert matches([100, 99], volume=7999) is False
-    assert matches([100, 99], change_percent=0) is False
+    assert matches() is True
+    assert matches(decline_close=99, decline_open=98) is False
+    assert matches(decline_close=98, decline_open=98) is False
 
 
 def test_new_ipo_presets_use_generic_causal_compiler_fallback():
     rows = [
-        {"session_date": "2026-01-01", "ltp": 100, "volume": 1000, "change_percent": 0},
-        {"session_date": "2026-01-02", "ltp": 99, "volume": 9000, "change_percent": -1},
+        {"session_date": "2026-01-01", "ltp": 100, "open": 100, "volume": 1000, "change_percent": 0},
+        {"session_date": "2026-01-02", "ltp": 95, "open": 98, "volume": 9000, "change_percent": -5},
         {
-            "session_date": "2026-01-03", "ltp": 100, "volume": 8000, "change_percent": 1,
+            "session_date": "2026-01-03", "ltp": 100, "open": 96, "volume": 8000, "change_percent": 5.26,
             "technical_vwap_20": 95, "technical_price_zscore_20": 0,
             "technical_cmf_20": .1,
         },
@@ -109,7 +118,26 @@ def test_ipo_workspace_applies_tradability_gate_to_every_catalog_strategy():
     )
     assert IPO_WORKSPACE_TRADABILITY_GATE in gated_normal["condition"]
     assert gated_normal["source_hash"] != normal["source_hash"]
+    assert gated_normal["force_condition_compiler"] is True
+    assert gated_normal["apply_ipo_tradability_gate"] is True
     assert gated_dedicated["condition"].count(IPO_WORKSPACE_TRADABILITY_GATE) == 1
+
+
+def test_ipo_workspace_keeps_discovery_component_path_instead_of_force_compiler():
+    candidate = generate_discovery_presets(
+        budget=1, seed=7,
+        base_ids=[item["id"] for item in get_backtest_presets() if str(item["id"]).startswith("ipo_")][:3],
+        min_holding_days=5, max_holding_days=60, include_singles=True,
+    )[0]
+    assert candidate.get("component_ids")
+    gated = _apply_ipo_workspace_gate(
+        [candidate],
+        {"run_type": "ipo_research", "apply_ipo_tradability_gate": True},
+    )[0]
+    assert gated["apply_ipo_tradability_gate"] is True
+    assert gated.get("force_condition_compiler") is not True
+    assert gated["ipo_tradability_gate_condition"] == IPO_WORKSPACE_TRADABILITY_GATE
+    assert IPO_WORKSPACE_TRADABILITY_GATE in gated["condition"]
 
 
 def test_combined_buy_and_sell_queries_share_the_schedule_monitor_contract():

@@ -16,7 +16,7 @@ from ta.trend import AroonIndicator, MassIndex, PSARIndicator, TRIXIndicator, Vo
 from ta.volatility import KeltnerChannel, UlcerIndex
 from ta.volume import ForceIndexIndicator, VolumePriceTrendIndicator, VolumeWeightedAveragePrice
 
-ENGINE_VERSION = "ohlcv-ta-v5-zones-ta-0.11.0"
+ENGINE_VERSION = "ohlcv-ta-v6-ipo-score-ta-0.11.0"
 
 NUMERIC_FIELDS = (
     "technical_sma_10_value", "technical_sma_20_value", "technical_sma_50_value",
@@ -66,6 +66,7 @@ NUMERIC_FIELDS = (
     "technical_fib_retracement_382", "technical_fib_retracement_500",
     "technical_fib_retracement_618", "technical_fib_pullback_entry",
     "technical_fib_resistance_exit",
+    "technical_ipo_recovery_score", "technical_ipo_post_peak_pullback",
     "technical_buy_score", "technical_sell_score", "technical_signal_score",
     *(f"technical_nepse15_entry_{index}" for index in range(1, 16)),
     *(f"technical_nepse15_exit_{index}" for index in range(1, 16)),
@@ -629,6 +630,30 @@ def calculate_indicator_rows(bars: Sequence[Any]) -> List[Dict[str, Any]]:
         (adx > 20) & rsi.between(55, 75) & (volume_ratio > 1.1) & (close > prior_high10)
     ).astype(float)
     frame["technical_nepse15_exit_15"] = close_below_ema20_twice.astype(float)
+
+    # Nepal IPO recovery composite (causal). Listing-age limits stay on the
+    # workspace; buy eligibility still requires the shared prior red-candle gate.
+    peak40 = high.shift(1).rolling(40, min_periods=15).max()
+    post_peak_pullback = (close <= peak40 * 0.90) & (close >= peak40 * 0.75)
+    frame["technical_ipo_post_peak_pullback"] = post_peak_pullback.astype(float)
+    vwap20 = frame["technical_vwap_20"]
+    ema_recovery = (close > ema20) & post_peak_pullback
+    vwap_reclaim = (close > vwap20) & (close.shift(1) <= vwap20.shift(1))
+    hh_hl = (frame["technical_higher_high_3"] >= 1) & (frame["technical_higher_low_3"] >= 1)
+    rsi_bull = rsi > 50
+    obv_breakout = obv > obv.shift(1).rolling(20, min_periods=10).max()
+    volume_breakout = volume_ratio >= 1.5
+    atr_pct = frame["technical_atr_percent"]
+    controlled_vol = (atr_pct <= 10) & (atr_pct <= atr_pct.shift(1).rolling(20, min_periods=10).max())
+    frame["technical_ipo_recovery_score"] = (
+        ema_recovery.astype(float) * 2.0
+        + vwap_reclaim.astype(float) * 2.0
+        + hh_hl.astype(float) * 2.0
+        + rsi_bull.astype(float)
+        + obv_breakout.astype(float)
+        + volume_breakout.astype(float)
+        + controlled_vol.fillna(False).astype(float)
+    )
 
     # Consolidate blocks after the extended field insertions. This keeps the
     # final label/score calculations fast when a whole market is prepared.

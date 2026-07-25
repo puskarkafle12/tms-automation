@@ -36,11 +36,12 @@ services:
       ZROK_STALE_ENV_ZIDS: ${ZROK_STALE_ENV_ZIDS:-}
       ZROK_RESET_SHARES: ${ZROK_RESET_SHARES:-all}
       # Adaptive research capacity: one low-priority process while NEPSE is
-      # active, then every spare core after hours. A global cap is optional.
+      # active, then every spare core after hours (leave RESERVED_CPUS free).
+      # Empty OFF_HOURS / MAX_WORKERS means "use all spare cores".
       BACKTEST_MAX_WORKERS: ${BACKTEST_MAX_WORKERS:-}
       BACKTEST_MARKET_MAX_WORKERS: ${BACKTEST_MARKET_MAX_WORKERS:-1}
-      BACKTEST_OFF_HOURS_MAX_WORKERS: ${BACKTEST_OFF_HOURS_MAX_WORKERS:-8}
-      BACKTEST_OFF_HOURS_STOCKS_PER_TURN: ${BACKTEST_OFF_HOURS_STOCKS_PER_TURN:-12}
+      BACKTEST_OFF_HOURS_MAX_WORKERS: ${BACKTEST_OFF_HOURS_MAX_WORKERS:-}
+      BACKTEST_OFF_HOURS_STOCKS_PER_TURN: ${BACKTEST_OFF_HOURS_STOCKS_PER_TURN:-}
       BACKTEST_RESERVED_CPUS: ${BACKTEST_RESERVED_CPUS:-1}
       # Mild niceness: yield under load, but use idle CPU for faster scans.
       BACKTEST_WORKER_NICE: ${BACKTEST_WORKER_NICE:-5}

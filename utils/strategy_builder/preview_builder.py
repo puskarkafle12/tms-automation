@@ -366,7 +366,13 @@ def _describe_function_node(node: Dict[str, Any], flat: Dict[str, Any]) -> Condi
     threshold = args.get("threshold")
     if isinstance(threshold, dict):
         threshold = _literal_value(threshold)
+    operator = args.get("operator")
+    if isinstance(operator, dict):
+        operator = _literal_value(operator)
+    operator = str(operator or "").strip().lower() or None
     scans = args.get("scans") or args.get("count") or args.get("window")
+    if isinstance(scans, dict):
+        scans = _literal_value(scans)
 
     estimated_price = None
     is_exact = False
@@ -376,6 +382,10 @@ def _describe_function_node(node: Dict[str, Any], flat: Dict[str, Any]) -> Condi
             is_exact = True
         except (TypeError, ValueError):
             pass
+
+    op_text = {
+        "gt": ">", "gte": "≥", "lt": "<", "lte": "≤", "eq": "=", "neq": "≠",
+    }.get(operator or "", operator or ">")
 
     if name == "CROSSES_ABOVE":
         text = f"{label} crosses above {format_preview_value(field_key, threshold)}"
@@ -387,10 +397,14 @@ def _describe_function_node(node: Dict[str, Any], flat: Dict[str, Any]) -> Condi
         text = f"{label} remains below {format_preview_value(field_key, threshold)} for {scans or 1} scan(s)"
     elif name == "CONSECUTIVE_RISES":
         min_pct = args.get("min_total_change_pct")
+        if isinstance(min_pct, dict):
+            min_pct = _literal_value(min_pct)
         suffix = f" with at least {min_pct}% total gain" if min_pct is not None else ""
         text = f"{label} rises for {args.get('count', scans or 2)} consecutive observation(s){suffix}"
     elif name == "CONSECUTIVE_DROPS":
         min_pct = args.get("min_total_change_pct")
+        if isinstance(min_pct, dict):
+            min_pct = _literal_value(min_pct)
         suffix = f" with at least {min_pct}% total loss" if min_pct is not None else ""
         text = f"{label} drops for {args.get('count', scans or 2)} consecutive observation(s){suffix}"
     elif name == "TRUE_FOR_SCANS":
@@ -402,15 +416,62 @@ def _describe_function_node(node: Dict[str, Any], flat: Dict[str, Any]) -> Condi
         text = f"REFERENCE({field_ref})"
     elif name in {"UNIVERSE_PERCENTILE", "SECTOR_PERCENTILE"}:
         text = f"{name.replace('_', ' ').title()} for {label}"
+    elif name == "SLOPE":
+        text = (
+            f"Slope of {label} over {scans or 5} bars {op_text} "
+            f"{format_preview_value(None, threshold)}"
+        )
+    elif name == "STDDEV":
+        text = (
+            f"Stddev of {label} over {scans or 10} bars {op_text} "
+            f"{format_preview_value(None, threshold)}"
+        )
+    elif name == "TREND":
+        expected = args.get("value")
+        if isinstance(expected, dict):
+            expected = _literal_value(expected)
+        text = f"Trend of {label} over {scans or 5} bars is {expected or 'UP/DOWN'}"
+        return ConditionPreview(
+            strategy_text=text,
+            # Rolling helpers must not display the raw field level as "current".
+            current_display=None,
+            target_display=str(expected) if expected is not None else None,
+            value_unit=None,
+            estimated_price=None,
+            estimated_price_available=False,
+            is_exact_price=False,
+        )
+    elif name in {"AVERAGE", "MIN_VALUE", "MAX_VALUE", "SUM_VALUE"}:
+        text = (
+            f"{name.replace('_', ' ').title()} of {label} over {scans or 5} bars"
+            + (f" {op_text} {format_preview_value(None, threshold)}" if threshold is not None else "")
+        )
     else:
-        rendered_args = ", ".join(f"{key}={value}" for key, value in args.items())
-        text = f"{name}({rendered_args})"
+        rendered_args = []
+        for key, value in args.items():
+            plain = _literal_value(value)
+            if isinstance(plain, dict) and plain.get("type") == "field":
+                plain = plain.get("name")
+            rendered_args.append(f"{key}={plain}")
+        text = f"{name}({', '.join(rendered_args)})"
 
+    # Rolling/statistical functions compare a derived metric to a threshold.
+    # Never seed "current" from the underlying field level (e.g. KAMA price),
+    # or the UI looks like it is waiting for the price to reach 0.
+    rolling_metric = name in {
+        "SLOPE", "STDDEV", "AVERAGE", "MIN_VALUE", "MAX_VALUE", "SUM_VALUE",
+    }
     return ConditionPreview(
         strategy_text=text,
-        current_display=format_preview_value(field_key, flat.get(field_key)) if field_key else None,
-        target_display=format_preview_value(field_key, threshold) if threshold is not None else None,
-        value_unit=infer_unit(field_key) if field_key else None,
+        current_display=(
+            None if rolling_metric
+            else (format_preview_value(field_key, flat.get(field_key)) if field_key else None)
+        ),
+        target_display=(
+            format_preview_value(None, threshold) if threshold is not None and rolling_metric
+            else (format_preview_value(field_key, threshold) if threshold is not None else None)
+        ),
+        value_unit=None if rolling_metric else (infer_unit(field_key) if field_key else None),
         estimated_price=estimated_price,
         estimated_price_available=estimated_price is not None,
         is_exact_price=is_exact,
@@ -469,16 +530,24 @@ def _enrich_conditions_from_evaluation(
             merged.matched = result.matched
             if result.actual_value is not None:
                 merged.current_value = result.actual_value
-                field_guess = None
-                if " " in result.expression:
-                    field_guess = result.expression.split(" ")[0]
-                merged.current_display = format_preview_value(field_guess, result.actual_value)
+                merged.current_display = format_preview_value(None, result.actual_value)
+            else:
+                # Do not keep a misleading underlying-field seed value.
+                merged.current_value = None
+                if merged.strategy_text and merged.strategy_text.lower().startswith((
+                    "slope of ", "stddev of ", "average of ", "min value of ",
+                    "max value of ", "sum value of ",
+                )):
+                    merged.current_display = None
             if result.expected_value is not None:
                 merged.target_value = result.expected_value
-                field_guess = None
-                if " " in result.expression:
-                    field_guess = result.expression.split(" ")[0]
-                merged.target_display = format_preview_value(field_guess, result.expected_value)
+                merged.target_display = format_preview_value(None, result.expected_value)
+            if result.expression and (
+                not merged.strategy_text
+                or "={'type':" in merged.strategy_text
+                or merged.strategy_text.upper().startswith(("SLOPE(FIELD=", "STDDEV(FIELD="))
+            ):
+                merged.strategy_text = str(result.expression)
         enriched.append(merged)
     if not enriched and eval_conditions:
         for result in eval_conditions:

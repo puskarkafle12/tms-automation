@@ -383,6 +383,16 @@ async def permanently_delete_backtest_v2_run(run_id: str, current_user: Frontend
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.delete("/backtests/v2/runs/{run_id}/ipo", status_code=200)
+async def delete_backtest_v2_ipo_run(run_id: str, current_user: FrontendUser = Depends(require_permission("backtest"))):
+    """Permanently delete one IPO research workspace and its cached scan outcomes."""
+    from utils.backtesting.v2_jobs import delete_ipo_run
+    try:
+        return await run_in_threadpool(delete_ipo_run, run_id, owner_id=str(current_user.id))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.get("/backtests/v2/runs/{run_id}")
 async def read_backtest_v2_run(run_id: str, current_user: FrontendUser = Depends(require_permission("backtest"))):
     from utils.backtesting.v2_jobs import get_run
@@ -398,6 +408,21 @@ async def read_backtest_v2_ipo_strategy_summary(run_id: str, current_user: Front
     try:
         return await run_in_threadpool(
             get_ipo_strategy_summary, run_id, owner_id=str(current_user.id),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/backtests/v2/runs/{run_id}/ipo-strategy-summary/{strategy_id}")
+async def read_backtest_v2_ipo_strategy_detail(
+    run_id: str, strategy_id: str,
+    current_user: FrontendUser = Depends(require_permission("backtest")),
+):
+    from utils.backtesting.v2_jobs import get_ipo_strategy_detail
+    try:
+        return await run_in_threadpool(
+            get_ipo_strategy_detail, run_id, strategy_id,
+            owner_id=str(current_user.id),
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -673,6 +698,14 @@ async def export_backtest_v2_results_csv(
     except ResultQueryError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     filename = f"backtest-{run_id[:12]}-results.csv" if run_id != "all" else "all-backtest-results.csv"
+    run_type = None
+    if run_id != "all":
+        run_type = db.execute(text(
+            "SELECT run_type FROM backtest_runs WHERE run_id=:run_id AND owner_id=:owner_id "
+            "AND deleted_at IS NULL AND archived_at IS NULL"
+        ), {"run_id": run_id, "owner_id": str(current_user.id)}).scalar()
+    if run_type == "ipo_research":
+        filename = f"ipo-research-{run_id[:12]}-results.csv"
     return StreamingResponse(stream, media_type="text/csv; charset=utf-8", headers={
         "Content-Disposition": f'attachment; filename="{filename}"', "Cache-Control": "no-store",
     })
@@ -786,10 +819,10 @@ async def read_backtest_v2_strong_buy_stock(
 
 
 @router.get("/backtests/v2/results/{result_id}")
-async def read_backtest_v2_result(result_id: int, db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("backtest"))):
+async def read_backtest_v2_result(result_id: int, cache_key: Optional[str] = Query(None), db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("backtest"))):
     from utils.backtesting.v2_query import ResultQueryError, result_detail
     try:
-        return result_detail(db, result_id, owner_id=str(current_user.id))
+        return result_detail(db, result_id, owner_id=str(current_user.id), cache_key=cache_key)
     except ResultQueryError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -953,22 +986,23 @@ async def read_backtest_v2_result_strategy_query(
 async def read_backtest_v2_result_trades(
     result_id: int, page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=100),
     result_filter: str = Query("all", pattern="^(all|wins|losses|stop_loss|take_profit)$"),
-    start_date: Optional[date] = None, end_date: Optional[date] = None, db: Session = Depends(get_db),
+    start_date: Optional[date] = None, end_date: Optional[date] = None, cache_key: Optional[str] = Query(None), db: Session = Depends(get_db),
     current_user: FrontendUser = Depends(require_permission("backtest")),
 ):
     from utils.backtesting.v2_query import ResultQueryError, result_detail, result_trades
     try:
-        detail = result_detail(db, result_id, owner_id=str(current_user.id))
+        detail = result_detail(db, result_id, owner_id=str(current_user.id), cache_key=cache_key)
     except ResultQueryError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    trades = result_trades(db, result_id, owner_id=str(current_user.id))
+    trades = result_trades(db, result_id, owner_id=str(current_user.id), cache_key=cache_key)
     equity = float((detail.get("assumptions") or {}).get("initial_capital") or 100000)
     peak = equity
     for trade in trades:
         equity += float(trade.get("pnl") or 0)
         peak = max(peak, equity)
         trade["result"] = "win" if float(trade.get("pnl") or 0) > 0 else "loss" if float(trade.get("pnl") or 0) < 0 else "break_even"
-        trade["gross_return_pct"] = round((float(trade["exit_price"]) / float(trade["entry_price"]) - 1) * 100, 2)
+        if trade.get("entry_price") and trade.get("exit_price"):
+            trade["gross_return_pct"] = round((float(trade["exit_price"]) / float(trade["entry_price"]) - 1) * 100, 2)
         trade["net_return_pct"] = trade["return_pct"]
         trade["running_equity"] = round(equity, 2)
         trade["drawdown_after_trade_pct"] = round((peak - equity) / peak * 100, 2) if peak else 0
@@ -1048,17 +1082,17 @@ async def read_market_ohlcv(
 
 
 @router.get("/backtests/v2/results/{result_id}/chart")
-async def read_backtest_v2_result_chart(result_id: int, db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("backtest"))):
+async def read_backtest_v2_result_chart(result_id: int, cache_key: Optional[str] = Query(None), db: Session = Depends(get_db), current_user: FrontendUser = Depends(require_permission("backtest"))):
     from utils.backtesting.support_resistance import chart_zone_history, current_zones
     from utils.backtesting.v2_query import (
         ResultQueryError, _strategy_planning_range, result_detail, result_trades,
     )
     from utils.market_status import TRADING_WEEKDAYS
     try:
-        detail = result_detail(db, result_id, owner_id=str(current_user.id))
+        detail = result_detail(db, result_id, owner_id=str(current_user.id), cache_key=cache_key)
     except ResultQueryError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    trades = result_trades(db, result_id, owner_id=str(current_user.id))
+    trades = result_trades(db, result_id, owner_id=str(current_user.id), cache_key=cache_key)
     capital = float((detail.get("assumptions") or {}).get("initial_capital") or 100000)
     equity = capital
     curve = []
