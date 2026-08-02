@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import multiprocessing
 import os
+import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import date, timedelta
 from typing import Any, Callable, Dict, List, Optional
@@ -41,6 +42,30 @@ def _positive_env_int(name: str, fallback: int) -> int:
         return fallback
 
 
+def _nonnegative_env_float(name: str, fallback: float) -> float:
+    try:
+        return max(0.0, float(os.getenv(name, str(fallback))))
+    except ValueError:
+        return fallback
+
+
+def background_chunk_delay_seconds() -> float:
+    """Small yield between background scan chunks to protect web/API traffic."""
+    return _nonnegative_env_float("BACKTEST_CHUNK_DELAY_SECONDS", 1.0)
+
+
+def background_cache_worker_limit(requested_workers: int) -> int:
+    """Limit DB/cache helper threads used by background scans."""
+    configured = _positive_env_int("BACKTEST_CACHE_MAX_WORKERS", 1)
+    return max(1, min(int(requested_workers or 1), configured))
+
+
+def background_refresh_worker_limit(requested_workers: int) -> int:
+    """Limit network tail-refresh helper threads used by background scans."""
+    configured = _positive_env_int("BACKTEST_REFRESH_FETCH_WORKERS", 2)
+    return max(1, min(int(requested_workers or 1), configured))
+
+
 def background_worker_limit(
     requested_workers: Optional[int],
     *,
@@ -56,10 +81,10 @@ def background_worker_limit(
     reserved_cpus = _positive_env_int("BACKTEST_RESERVED_CPUS", 1)
     available_cpus = max(1, (os.cpu_count() or 2) - reserved_cpus)
     constrained = market_research_is_constrained() if market_constrained is None else market_constrained
+    raw_off_hours = os.getenv("BACKTEST_OFF_HOURS_MAX_WORKERS", "").strip()
     if constrained:
         phase_limit = _positive_env_int("BACKTEST_MARKET_MAX_WORKERS", 1)
     else:
-        raw_off_hours = os.getenv("BACKTEST_OFF_HOURS_MAX_WORKERS", "").strip()
         phase_limit = (
             _positive_env_int("BACKTEST_OFF_HOURS_MAX_WORKERS", available_cpus)
             if raw_off_hours
@@ -69,7 +94,7 @@ def background_worker_limit(
     global_limit = (
         _positive_env_int("BACKTEST_MAX_WORKERS", available_cpus)
         if raw_global_limit
-        else available_cpus
+        else available_cpus if raw_off_hours else 1
     )
     configured_limit = min(phase_limit, global_limit)
     requested = max(1, int(requested_workers or configured_limit))
@@ -84,15 +109,15 @@ def background_turn_size(
     """Return a fair stock quantum large enough to keep the process pool busy."""
     explicit = os.getenv("BACKTEST_ROUND_ROBIN_STOCKS_PER_TURN", "").strip()
     if explicit:
-        return min(64, _positive_env_int("BACKTEST_ROUND_ROBIN_STOCKS_PER_TURN", 1))
+        return min(16, _positive_env_int("BACKTEST_ROUND_ROBIN_STOCKS_PER_TURN", 1))
     constrained = market_research_is_constrained() if market_constrained is None else market_constrained
     if constrained:
         return 1
     worker_count = max(1, int(workers))
-    default_cap = max(12, worker_count * 3)
+    default_cap = worker_count
     raw_cap = os.getenv("BACKTEST_OFF_HOURS_STOCKS_PER_TURN", "").strip()
     cap = _positive_env_int("BACKTEST_OFF_HOURS_STOCKS_PER_TURN", default_cap) if raw_cap else default_cap
-    return max(1, min(64, cap, worker_count * 3))
+    return max(1, min(16, cap, max(1, worker_count * 2)))
 
 
 def initialize_background_worker() -> None:
@@ -827,6 +852,9 @@ def run_market_batch_backtest(
             combinations += len(output.get("results", []))
             if progress_callback:
                 progress_callback(len(symbol_outputs), len(universe), output["symbol"], combinations, output)
+            delay = background_chunk_delay_seconds()
+            if delay:
+                time.sleep(delay)
     elif tasks:
         context = multiprocessing.get_context("spawn")
         with ProcessPoolExecutor(
@@ -839,6 +867,9 @@ def run_market_batch_backtest(
                 combinations += len(output.get("results", []))
                 if progress_callback:
                     progress_callback(len(symbol_outputs), len(universe), output["symbol"], combinations, output)
+                delay = background_chunk_delay_seconds()
+                if delay:
+                    time.sleep(delay)
 
     return build_batch_result(
         symbol_outputs=symbol_outputs, selected_presets=selected_presets,

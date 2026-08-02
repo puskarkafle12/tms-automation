@@ -7,6 +7,7 @@ import CategoricalHeaderFilter, {
   isCategoricalColumn,
   uniqueCategoricalValues,
 } from "../../components/table/CategoricalHeaderFilter";
+import RecommendationTradingBot from "./RecommendationTradingBot";
 import "./Recommendations.css";
 
 type Row = Record<string, any>;
@@ -17,6 +18,8 @@ type Page = {
   pages: number;
   persisted: boolean;
   trading_session?: string;
+  latest_market_session?: string;
+  recommendations_stale?: boolean;
 };
 type AiAnswer = {
   generated_query: string;
@@ -35,6 +38,7 @@ const recommendationPrompts = [
 const RECOMMENDATION_COLUMN_WIDTHS_KEY = "tms-recommendation-column-widths-v1";
 const RECOMMENDATION_VISIBLE_COLUMNS_KEY = "tms-recommendation-visible-columns-v3";
 const RECOMMENDATION_FILTER_HISTORY_KEY = "tms-recommendation-filter-history-v1";
+const RECOMMENDATION_QUERY_CACHE_KEY = "tms-recommendation-query-cache-v1";
 const DEFAULT_VISIBLE_COLUMNS: Record<"buy" | "sell", string[]> = {
   buy: ["symbol", "current_signal_status", "recommendation_score", "current_ltp", "win_rate_pct", "buy_range", "sell_range", "current_ltp_estimated_profit_pct", "current_ltp_estimated_loss_pct", "preset_name", "total_trades", "average_holding_days", "average_volume_20"],
   sell: ["symbol", "current_signal_status", "recommendation_score", "ltp", "holding_quantity", "selected_sell_strategy", "selected_stop_strategy", "preset_name", "win_rate_pct", "total_trades", "net_return_pct", "average_holding_days"],
@@ -100,6 +104,7 @@ const Recommendations: React.FC = () => {
   const [recommendationSide, setRecommendationSide] = useState<"buy" | "sell">(
     savedFilterState.recommendationSide === "sell" ? "sell" : "buy",
   );
+  const [workspaceMode, setWorkspaceMode] = useState<"recommendations" | "bot">("recommendations");
   const [signal, setSignal] = useState(String(savedFilterState.signal || "actionable"));
   const [search, setSearch] = useState(String(savedFilterState.search || ""));
   const [minimumWin, setMinimumWin] = useState(String(savedFilterState.minimumWin ?? ""));
@@ -151,6 +156,41 @@ const Recommendations: React.FC = () => {
   });
   const [columnPreferencesLoaded, setColumnPreferencesLoaded] = useState(false);
   const [filterPreferencesLoaded, setFilterPreferencesLoaded] = useState(false);
+  const recommendationCacheKey = useCallback(
+    (page: number) => JSON.stringify({
+      side: recommendationSide,
+      signal: appliedRules.signal,
+      search: appliedRules.search,
+      minimumWin: appliedRules.minimumWin,
+      minimumTrades: appliedRules.minimumTrades,
+      minimumScore: appliedRules.minimumScore,
+      sortField: sort.field,
+      sortDirection: sort.direction,
+      page,
+      pageSize: 50,
+    }),
+    [appliedRules, recommendationSide, sort],
+  );
+  const readCachedRecommendations = useCallback((page: number): Page | null => {
+    try {
+      const cache = JSON.parse(sessionStorage.getItem(RECOMMENDATION_QUERY_CACHE_KEY) || "{}");
+      const hit = cache[recommendationCacheKey(page)];
+      if (!hit || !hit.data || Date.now() - Number(hit.savedAt || 0) > 10 * 60 * 1000) return null;
+      return hit.data as Page;
+    } catch {
+      return null;
+    }
+  }, [recommendationCacheKey]);
+  const writeCachedRecommendations = useCallback((page: number, nextData: Page) => {
+    try {
+      const cache = JSON.parse(sessionStorage.getItem(RECOMMENDATION_QUERY_CACHE_KEY) || "{}");
+      cache[recommendationCacheKey(page)] = { savedAt: Date.now(), data: nextData };
+      const entries = Object.entries(cache).slice(-20);
+      sessionStorage.setItem(RECOMMENDATION_QUERY_CACHE_KEY, JSON.stringify(Object.fromEntries(entries)));
+    } catch {
+      // Session storage is a convenience cache only.
+    }
+  }, [recommendationCacheKey]);
   useEffect(() => {
     localStorage.setItem(`${RECOMMENDATION_VISIBLE_COLUMNS_KEY}:${preferenceUserId}:${recommendationSide}`, JSON.stringify(visibleColumns[recommendationSide]));
   }, [preferenceUserId, recommendationSide, visibleColumns]);
@@ -281,7 +321,9 @@ const Recommendations: React.FC = () => {
   };
   const load = useCallback(
     async (page = 1) => {
-      setBusy(true);
+      const cached = readCachedRecommendations(page);
+      if (cached) setData(cached);
+      setBusy(!cached);
       setError("");
       const endpoint =
         recommendationSide === "sell"
@@ -307,10 +349,13 @@ const Recommendations: React.FC = () => {
         recommendationSide === "sell" ? 120000 : 30000,
       );
       setBusy(false);
-      if (response.ok) setData(response.data);
+      if (response.ok) {
+        setData(response.data);
+        writeCachedRecommendations(page, response.data);
+      }
       else setError(response.error || "Could not load recommendations.");
     },
-    [appliedRules, recommendationSide, sort],
+    [appliedRules, readCachedRecommendations, recommendationSide, sort, writeCachedRecommendations],
   );
   useEffect(() => {
     const page = initialLoadPageRef.current;
@@ -329,6 +374,7 @@ const Recommendations: React.FC = () => {
     setRefreshMessage("Refreshing from cached strategies and the latest market data…");
     const response = await fetchJson<{ materialized: number }>("/api/market-recommendations/refresh", { method: "POST" }, 120000);
     if (response.ok) {
+      sessionStorage.removeItem(RECOMMENDATION_QUERY_CACHE_KEY);
       await load(1);
       setRefreshMessage(`Refreshed ${response.data.materialized.toLocaleString()} stock recommendations.`);
     } else {
@@ -686,18 +732,25 @@ const Recommendations: React.FC = () => {
           </small>
           <button type="button" className="recommendation-manual-refresh" disabled={refreshBusy} onClick={() => void refreshFilteredRecommendations()}>{refreshBusy ? "Refreshing…" : "Refresh filtered data"}</button>
           <button type="button" className="recommendation-manual-refresh" disabled={refreshBusy} onClick={() => void refreshRecommendations()}>{refreshBusy ? "Refreshing…" : "Refresh all recommendations"}</button>
-          <small>Automatic NPT refresh: 10:00 · 12:30 · 15:00 · 16:00 on configured trading days</small>
+          <small>
+            Automatic NPT refresh: after 15:00 on trading days only
+            {data.recommendations_stale ? " · showing latest cached session until refresh completes" : ""}
+          </small>
           {refreshMessage && <small role="status">{refreshMessage}</small>}
         </div>
       </header>
       <nav className="recommendation-side-tabs" aria-label="Recommendation side">
-        <button type="button" className={recommendationSide === "buy" ? "active buy" : ""} onClick={() => changeRecommendationSide("buy")}>
+        <button type="button" className={workspaceMode === "recommendations" && recommendationSide === "buy" ? "active buy" : ""} onClick={() => { setWorkspaceMode("recommendations"); changeRecommendationSide("buy"); }}>
           <b>Buy recommendations</b><span>Fresh entry signals across ordinary shares</span>
         </button>
-        <button type="button" className={recommendationSide === "sell" ? "active sell" : ""} onClick={() => changeRecommendationSide("sell")}>
+        <button type="button" className={workspaceMode === "recommendations" && recommendationSide === "sell" ? "active sell" : ""} onClick={() => { setWorkspaceMode("recommendations"); changeRecommendationSide("sell"); }}>
           <b>Sell recommendations</b><span>Tested exit signals from combined holdings</span>
         </button>
+        <button type="button" className={workspaceMode === "bot" ? "active bot" : ""} onClick={() => setWorkspaceMode("bot")}>
+          <b>Recommendation Auto Trading Bot</b><span>Past-period replay · paper draft · locked live setup</span>
+        </button>
       </nav>
+      {workspaceMode === "bot" ? <RecommendationTradingBot /> : <>
       <section className="recommendation-controls">
         <label>
           Signal
@@ -1030,6 +1083,7 @@ const Recommendations: React.FC = () => {
           order automatically.
         </span>
       </footer>
+      </>}
     </div>
   );
 };

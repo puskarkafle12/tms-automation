@@ -16,6 +16,9 @@ services:
       DB_PASSWORD: pk
       DB_HOST: 127.0.0.1
       DB_NAME: stock
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-6}
+      DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-4}
+      DB_POOL_TIMEOUT: ${DB_POOL_TIMEOUT:-10}
       FRONTEND_SEED_USER: ${FRONTEND_SEED_USER:-admin}
       FRONTEND_SEED_PASSWORD: ${FRONTEND_SEED_PASSWORD:-nepse2026}
       # Keep the browser session signed in across reloads (30 days).
@@ -35,19 +38,24 @@ services:
       ZROK_RESERVED_NAME: ${ZROK_RESERVED_NAME:-tmsautomationlive}
       ZROK_STALE_ENV_ZIDS: ${ZROK_STALE_ENV_ZIDS:-}
       ZROK_RESET_SHARES: ${ZROK_RESET_SHARES:-all}
-      # Adaptive research capacity: one low-priority process while NEPSE is
-      # active, then every spare core after hours (leave RESERVED_CPUS free).
-      # Empty OFF_HOURS / MAX_WORKERS means "use all spare cores".
-      BACKTEST_MAX_WORKERS: ${BACKTEST_MAX_WORKERS:-}
+      # Dell i7 laptop-server defaults: keep scans useful while reserving CPU
+      # for FastAPI, PostgreSQL, browser sessions, and the dashboard.
+      BACKTEST_MAX_WORKERS: ${BACKTEST_MAX_WORKERS:-2}
       BACKTEST_MARKET_MAX_WORKERS: ${BACKTEST_MARKET_MAX_WORKERS:-1}
-      BACKTEST_OFF_HOURS_MAX_WORKERS: ${BACKTEST_OFF_HOURS_MAX_WORKERS:-}
-      BACKTEST_OFF_HOURS_STOCKS_PER_TURN: ${BACKTEST_OFF_HOURS_STOCKS_PER_TURN:-}
-      BACKTEST_RESERVED_CPUS: ${BACKTEST_RESERVED_CPUS:-1}
+      BACKTEST_OFF_HOURS_MAX_WORKERS: ${BACKTEST_OFF_HOURS_MAX_WORKERS:-2}
+      BACKTEST_OFF_HOURS_STOCKS_PER_TURN: ${BACKTEST_OFF_HOURS_STOCKS_PER_TURN:-2}
+      BACKTEST_CACHE_MAX_WORKERS: ${BACKTEST_CACHE_MAX_WORKERS:-1}
+      BACKTEST_CHUNK_DELAY_SECONDS: ${BACKTEST_CHUNK_DELAY_SECONDS:-1}
+      BACKTEST_RESERVED_CPUS: ${BACKTEST_RESERVED_CPUS:-2}
+      BACKTEST_DAILY_REFRESH_AFTER_HOUR_NEPAL: ${BACKTEST_DAILY_REFRESH_AFTER_HOUR_NEPAL:-15}
+      BACKTEST_DAILY_REFRESH_AFTER_MINUTE_NEPAL: ${BACKTEST_DAILY_REFRESH_AFTER_MINUTE_NEPAL:-0}
+      BACKTEST_RECOMMENDATION_REFRESH_AFTER_HOUR_NEPAL: ${BACKTEST_RECOMMENDATION_REFRESH_AFTER_HOUR_NEPAL:-15}
+      BACKTEST_RECOMMENDATION_REFRESH_AFTER_MINUTE_NEPAL: ${BACKTEST_RECOMMENDATION_REFRESH_AFTER_MINUTE_NEPAL:-0}
       # Mild niceness: yield under load, but use idle CPU for faster scans.
       BACKTEST_WORKER_NICE: ${BACKTEST_WORKER_NICE:-5}
       # Tail discovery is network-bound; modest concurrency makes daily
       # incremental checks fast without increasing strategy replay CPU.
-      BACKTEST_REFRESH_FETCH_WORKERS: ${BACKTEST_REFRESH_FETCH_WORKERS:-4}
+      BACKTEST_REFRESH_FETCH_WORKERS: ${BACKTEST_REFRESH_FETCH_WORKERS:-1}
       # Prevent NumPy/BLAS inside each scan process from creating its own CPU
       # pool and starving normal API/dashboard requests.
       OMP_NUM_THREADS: ${BACKTEST_NUMERIC_THREADS:-1}

@@ -21,9 +21,10 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import text
 
 from utils.backtesting.batch import (
-    _refresh_symbol_signals_task, _run_symbol_task, background_turn_size,
-    background_worker_limit, get_backtest_universe, initialize_background_worker,
-    market_research_is_constrained,
+    _refresh_symbol_signals_task, _run_symbol_task, background_cache_worker_limit,
+    background_chunk_delay_seconds, background_refresh_worker_limit,
+    background_turn_size, background_worker_limit, get_backtest_universe,
+    initialize_background_worker, market_research_is_constrained,
 )
 from utils.backtesting.ipo_gate import (
     IPO_WORKSPACE_GATE_DESCRIPTION,
@@ -61,8 +62,10 @@ _WORKER_PROCESS: Optional[subprocess.Popen] = None
 _REFRESH_WORKER_PROCESS: Optional[subprocess.Popen] = None
 _WORKER_ID = f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
 NEPAL_TZ = ZoneInfo("Asia/Kathmandu")
-DAILY_REFRESH_HOURS = (10, 16)
-RECOMMENDATION_REFRESH_SLOTS = ((10, 0), (12, 30), (15, 0), (16, 0))
+DAILY_REFRESH_AFTER_HOUR_NEPAL = 15
+DAILY_REFRESH_AFTER_MINUTE_NEPAL = 0
+RECOMMENDATION_REFRESH_AFTER_HOUR_NEPAL = 15
+RECOMMENDATION_REFRESH_AFTER_MINUTE_NEPAL = 0
 _LAST_DAILY_REFRESH_SLOT: Optional[str] = None
 _LAST_RECOMMENDATION_REFRESH_SLOT: Optional[str] = None
 _LAST_ARCHIVE_PURGE_AT: Optional[float] = None
@@ -1728,10 +1731,7 @@ def run_claimed_run(run_id: str) -> None:
         # cache without replaying any strategy.
         from utils.backtesting.service import fetch_historical_bars
 
-        refresh_workers = min(
-            8,
-            max(1, int(os.getenv("BACKTEST_REFRESH_FETCH_WORKERS", "4"))),
-        )
+        refresh_workers = background_refresh_worker_limit(len(symbols))
 
         def refresh_tail(symbol: str) -> None:
             if str(config.get("data_source") or "merolagani") == "merolagani":
@@ -1905,7 +1905,7 @@ def run_claimed_run(run_id: str) -> None:
         if cache_only_outputs:
             # DB/checkpoint writes are I/O bound; a small thread pool finishes
             # unchanged stocks quickly without adding strategy CPU load.
-            cache_workers = min(4, max(1, len(cache_only_outputs)))
+            cache_workers = background_cache_worker_limit(len(cache_only_outputs))
             with ThreadPoolExecutor(max_workers=cache_workers, thread_name_prefix="backtest-cache") as cache_executor:
                 for changed in cache_executor.map(persist_cached, cache_only_outputs):
                     if changed:
@@ -1972,6 +1972,9 @@ def run_claimed_run(run_id: str) -> None:
                             cache_results=bool(computed),
                         )
                         results_changed = True
+                        delay = background_chunk_delay_seconds()
+                        if delay:
+                            time.sleep(delay)
         control = _control_state(run_id)
         session = _session()
         try:
@@ -2304,21 +2307,25 @@ def refresh_runs_incrementally_for_symbols(
 
 
 def _queue_scheduled_refreshes() -> int:
-    """Resume continuing scans pre-market and after close when newer data exists."""
+    """Resume continuing scans once per trading day after market close."""
     global _LAST_DAILY_REFRESH_SLOT
     if os.getenv("BACKTEST_DAILY_REFRESH_ENABLED", "true").strip().lower() not in {"1", "true", "yes", "on"}:
         return 0
     now = datetime.now(NEPAL_TZ)
-    if now.hour not in DAILY_REFRESH_HOURS:
-        return 0
     from utils.market_status import get_market_hours_status
     if not get_market_hours_status(now)["is_trading_day"]:
         return 0
-    slot = f"{now.date().isoformat()}T{now.hour:02d}:00+05:45"
-    check_minute = f"{slot}:{now.minute:02d}"
-    if check_minute == _LAST_DAILY_REFRESH_SLOT:
+    try:
+        refresh_hour = max(0, min(23, int(os.getenv("BACKTEST_DAILY_REFRESH_AFTER_HOUR_NEPAL", str(DAILY_REFRESH_AFTER_HOUR_NEPAL)))))
+        refresh_minute = max(0, min(59, int(os.getenv("BACKTEST_DAILY_REFRESH_AFTER_MINUTE_NEPAL", str(DAILY_REFRESH_AFTER_MINUTE_NEPAL)))))
+    except ValueError:
+        refresh_hour = DAILY_REFRESH_AFTER_HOUR_NEPAL
+        refresh_minute = DAILY_REFRESH_AFTER_MINUTE_NEPAL
+    if (now.hour, now.minute) < (refresh_hour, refresh_minute):
         return 0
-    _LAST_DAILY_REFRESH_SLOT = check_minute
+    slot = f"{now.date().isoformat()}T{refresh_hour:02d}:{refresh_minute:02d}+05:45"
+    if slot == _LAST_DAILY_REFRESH_SLOT:
+        return 0
     session = _session()
     queued = 0
     try:
@@ -2373,6 +2380,7 @@ def _queue_scheduled_refreshes() -> int:
             )
             queued += 1
         session.commit()
+        _LAST_DAILY_REFRESH_SLOT = slot
         return queued
     except Exception:
         session.rollback()
@@ -2382,7 +2390,7 @@ def _queue_scheduled_refreshes() -> int:
 
 
 def _refresh_scheduled_recommendations() -> int:
-    """Refresh owner-private recommendation projections around the NEPSE session."""
+    """Refresh owner-private recommendation projections once after market close."""
     global _LAST_RECOMMENDATION_REFRESH_SLOT
     if os.getenv("BACKTEST_DAILY_REFRESH_ENABLED", "true").strip().lower() not in {"1", "true", "yes", "on"}:
         return 0
@@ -2390,14 +2398,17 @@ def _refresh_scheduled_recommendations() -> int:
     from utils.market_status import get_market_hours_status
     if not get_market_hours_status(now)["is_trading_day"]:
         return 0
-    available = [(hour, minute) for hour, minute in RECOMMENDATION_REFRESH_SLOTS if (hour, minute) <= (now.hour, now.minute)]
-    if not available:
+    try:
+        refresh_hour = max(0, min(23, int(os.getenv("BACKTEST_RECOMMENDATION_REFRESH_AFTER_HOUR_NEPAL", str(RECOMMENDATION_REFRESH_AFTER_HOUR_NEPAL)))))
+        refresh_minute = max(0, min(59, int(os.getenv("BACKTEST_RECOMMENDATION_REFRESH_AFTER_MINUTE_NEPAL", str(RECOMMENDATION_REFRESH_AFTER_MINUTE_NEPAL)))))
+    except ValueError:
+        refresh_hour = RECOMMENDATION_REFRESH_AFTER_HOUR_NEPAL
+        refresh_minute = RECOMMENDATION_REFRESH_AFTER_MINUTE_NEPAL
+    if (now.hour, now.minute) < (refresh_hour, refresh_minute):
         return 0
-    hour, minute = available[-1]
-    slot = f"{now.date().isoformat()}T{hour:02d}:{minute:02d}+05:45"
+    slot = f"{now.date().isoformat()}T{refresh_hour:02d}:{refresh_minute:02d}+05:45"
     if slot == _LAST_RECOMMENDATION_REFRESH_SLOT:
         return 0
-    _LAST_RECOMMENDATION_REFRESH_SLOT = slot
     session = _session()
     refreshed = 0
     try:
@@ -2409,6 +2420,7 @@ def _refresh_scheduled_recommendations() -> int:
             materialize_recommendations(session, owner_id=str(owner_id))
             refreshed += 1
         session.commit()
+        _LAST_RECOMMENDATION_REFRESH_SLOT = slot
         return refreshed
     except Exception:
         session.rollback()

@@ -11,8 +11,8 @@ engine = create_engine(
     # Keep the bundled PostgreSQL responsive under browser polling and scans.
     # A huge pool turns a request burst into dozens of competing PostgreSQL
     # processes; bounded queues give normal traffic fair access instead.
-    pool_size=max(2, int(os.getenv("DB_POOL_SIZE", "10"))),
-    max_overflow=max(0, int(os.getenv("DB_MAX_OVERFLOW", "10"))),
+    pool_size=max(2, int(os.getenv("DB_POOL_SIZE", "6"))),
+    max_overflow=max(0, int(os.getenv("DB_MAX_OVERFLOW", "4"))),
     pool_timeout=max(1, int(os.getenv("DB_POOL_TIMEOUT", "10"))),
     pool_pre_ping=True,
 )
@@ -227,6 +227,20 @@ def ensure_performance_indexes():
         "CREATE TABLE IF NOT EXISTS strategy_warnings (id SERIAL PRIMARY KEY, plan_id INTEGER NOT NULL, rule_id INTEGER, symbol VARCHAR, warning_code VARCHAR NOT NULL, message TEXT NOT NULL, is_acknowledged BOOLEAN DEFAULT FALSE, created_at TIMESTAMP DEFAULT NOW())",
         "CREATE INDEX IF NOT EXISTS ix_strategy_plans_client_status ON strategy_plans (client_id, status)",
         "CREATE INDEX IF NOT EXISTS ix_strategy_targets_plan_symbol ON strategy_targets (plan_id, symbol)",
+        """CREATE TABLE IF NOT EXISTS recommendation_trading_bots (
+            id BIGSERIAL PRIMARY KEY,
+            owner_id VARCHAR(100) NOT NULL,
+            name VARCHAR(200) NOT NULL,
+            client_id VARCHAR(100),
+            execution_mode VARCHAR(20) NOT NULL DEFAULT 'historical',
+            status VARCHAR(30) NOT NULL DEFAULT 'draft',
+            configuration JSONB NOT NULL DEFAULT '{}'::jsonb,
+            last_backtest JSONB,
+            live_confirmation_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )""",
+        "CREATE INDEX IF NOT EXISTS ix_recommendation_bots_owner ON recommendation_trading_bots(owner_id,status,updated_at DESC)",
         """CREATE TABLE IF NOT EXISTS scheduled_field_references (
             id SERIAL PRIMARY KEY,
             scheduled_order_id INTEGER NOT NULL REFERENCES scheduled_orders(order_id) ON DELETE CASCADE,

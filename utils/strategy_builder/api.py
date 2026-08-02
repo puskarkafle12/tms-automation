@@ -234,6 +234,7 @@ class BacktestV2StrongBuyQuery(BaseModel):
 class MarketRecommendationQuery(BaseModel):
     signal: str = Field(default="actionable", pattern="^(actionable|strong_buy|buy|near_trigger|all)$")
     signal_date: Optional[date] = None
+    force_refresh: bool = False
     minimum_win_rate: float = Field(default=0, ge=0, le=100)
     minimum_trades: int = Field(default=5, ge=0)
     minimum_score: float = Field(default=0, ge=0, le=100)
@@ -254,6 +255,20 @@ class TableColumnPreferenceRequest(BaseModel):
 
 class TableFilterPreferenceRequest(BaseModel):
     state: Dict[str, Any] = Field(default_factory=dict)
+
+
+class RecommendationBotBacktestRequest(BaseModel):
+    config: Dict[str, Any] = Field(default_factory=dict)
+
+
+class RecommendationBotSaveRequest(RecommendationBotBacktestRequest):
+    name: str = Field(min_length=2, max_length=200)
+    execution_mode: str = Field(default="historical", pattern="^(historical|paper|live)$")
+    client_id: Optional[str] = Field(default=None, max_length=100)
+
+
+class RecommendationBotLiveConfirmRequest(BaseModel):
+    confirmation: str = Field(min_length=1, max_length=120)
 
 
 def _read_table_columns(db: Session, *, owner_id: str, name: str) -> List[str]:
@@ -629,6 +644,174 @@ async def save_recommendation_filters(
         db, owner_id=str(current_user.id), name="ui:recommendations:filters:v2",
         state=body.state,
     )
+
+
+@router.get("/recommendation-trading-bots/catalog")
+async def recommendation_trading_bot_catalog(
+    current_user: FrontendUser = Depends(require_permission("recommendations")),
+):
+    from utils.backtesting.recommendation_bot import filter_catalog
+    return {
+        "filters": filter_catalog(),
+        "operators": ["gte", "gt", "lte", "lt", "eq", "neq", "contains"],
+        "default_config": {
+            "lookback_days": 180, "initial_capital": 100000,
+            "minimum_win_rate": 75, "minimum_prior_trades": 25,
+            "minimum_confidence": 55, "minimum_average_volume": 10000,
+            "minimum_prior_expectancy_pct": 3, "minimum_prior_profit_factor": 1.7,
+            "recent_trade_window": 12, "minimum_recent_win_rate": 60,
+            "minimum_recent_expectancy_pct": 1,
+            "min_holding_days": 5, "max_holding_days": 45,
+            "max_positions": 1, "max_stock_pct": 10,
+            "max_sector_pct": 40, "cash_reserve_pct": 5,
+            "max_volume_participation_pct": 5,
+            "exit_strategy": "strategy_exit",
+            "hard_stop_pct": 7, "trailing_stop_pct": 8,
+            "take_profit_pct": 15, "slippage_pct": 0.1,
+            "symbol_cooldown_days": 20, "ranking_mode": "risk_adjusted_expectancy",
+            "filters": [],
+        },
+    }
+
+
+@router.post("/recommendation-trading-bots/backtest")
+async def backtest_recommendation_trading_bot(
+    body: RecommendationBotBacktestRequest,
+    db: Session = Depends(get_db),
+    current_user: FrontendUser = Depends(require_permission("recommendations")),
+):
+    from utils.backtesting.recommendation_bot import replay_recommendation_bot
+    try:
+        return await run_in_threadpool(
+            replay_recommendation_bot, db, body.config, owner_id=str(current_user.id),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/recommendation-trading-bots")
+async def list_recommendation_trading_bots(
+    db: Session = Depends(get_db),
+    current_user: FrontendUser = Depends(require_permission("recommendations")),
+):
+    rows = db.execute(text("""
+        SELECT id,name,client_id,execution_mode,status,configuration,last_backtest,
+               live_confirmation_at,created_at,updated_at
+        FROM recommendation_trading_bots
+        WHERE owner_id=:owner_id ORDER BY updated_at DESC,id DESC
+    """), {"owner_id": str(current_user.id)}).mappings().all()
+    return {"items": [dict(row) for row in rows]}
+
+
+@router.post("/recommendation-trading-bots", status_code=201)
+async def save_recommendation_trading_bot(
+    body: RecommendationBotSaveRequest,
+    db: Session = Depends(get_db),
+    current_user: FrontendUser = Depends(require_permission("recommendations")),
+):
+    from utils.backtesting.recommendation_bot import replay_recommendation_bot
+    if body.execution_mode in {"paper", "live"}:
+        if not body.client_id:
+            raise HTTPException(status_code=400, detail="A TMS client is required for paper or live mode.")
+        require_owned_client(db, current_user, body.client_id)
+    try:
+        validation_config = {
+            **body.config,
+            # A live request must be judged using a frozen chronological
+            # holdout, never only by the displayed in-sample replay.
+            **({"analyze_accuracy": True} if body.execution_mode == "live" else {}),
+        }
+        replay = await run_in_threadpool(
+            replay_recommendation_bot, db, validation_config, owner_id=str(current_user.id),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if body.execution_mode == "live" and not bool(replay["deployment_gate"].get("paper_ready")):
+        reasons = " ".join(replay["deployment_gate"].get("reasons") or [])
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Live deployment is blocked because this configuration did not pass the causal validation gate. "
+                f"{reasons}"
+            ),
+        )
+    status = {
+        "historical": "saved", "paper": "paper_draft", "live": "pending_live_confirmation",
+    }[body.execution_mode]
+    row = db.execute(text("""
+        INSERT INTO recommendation_trading_bots
+            (owner_id,name,client_id,execution_mode,status,configuration,last_backtest)
+        VALUES (:owner_id,:name,:client_id,:mode,:status,CAST(:configuration AS JSONB),CAST(:last_backtest AS JSONB))
+        RETURNING id,name,client_id,execution_mode,status,configuration,last_backtest,created_at,updated_at
+    """), {
+        "owner_id": str(current_user.id), "name": body.name,
+        "client_id": body.client_id, "mode": body.execution_mode, "status": status,
+        "configuration": json.dumps(replay["config"]),
+        "last_backtest": json.dumps({
+            "start_date": replay["start_date"], "end_date": replay["end_date"],
+            "summary": replay["summary"], "candidate_signals": replay["candidate_signals"],
+        }),
+    }).mappings().one()
+    db.commit()
+    return {
+        **dict(row), "activation_required": body.execution_mode != "historical",
+        "message": (
+            "Paper bot draft saved; review and activate it before simulated order monitoring starts."
+            if body.execution_mode == "paper"
+            else "Live bot is locked. A separate explicit confirmation and final TMS preflight are required."
+            if body.execution_mode == "live"
+            else "Historical bot configuration saved."
+        ),
+    }
+
+
+@router.post("/recommendation-trading-bots/{bot_id}/confirm-live")
+async def confirm_recommendation_trading_bot_live(
+    bot_id: int, body: RecommendationBotLiveConfirmRequest,
+    db: Session = Depends(get_db),
+    current_user: FrontendUser = Depends(require_permission("schedule_orders")),
+):
+    if body.confirmation.strip() != "ENABLE LIVE RECOMMENDATION BOT":
+        raise HTTPException(
+            status_code=400,
+            detail='Type "ENABLE LIVE RECOMMENDATION BOT" exactly to unlock the final live preflight.',
+        )
+    row = db.execute(text("""
+        SELECT id,name,client_id,execution_mode,status,configuration,live_confirmation_at
+        FROM recommendation_trading_bots
+        WHERE id=:bot_id AND owner_id=:owner_id AND execution_mode='live'
+          AND status='pending_live_confirmation'
+    """), {"bot_id": bot_id, "owner_id": str(current_user.id)}).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Pending live bot was not found.")
+    require_owned_client(db, current_user, str(row["client_id"]))
+    from utils.backtesting.recommendation_bot import replay_recommendation_bot
+    try:
+        replay = await run_in_threadpool(
+            replay_recommendation_bot, db,
+            {**dict(row["configuration"] or {}), "analyze_accuracy": True},
+            owner_id=str(current_user.id),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not bool(replay["deployment_gate"].get("paper_ready")):
+        reasons = " ".join(replay["deployment_gate"].get("reasons") or [])
+        raise HTTPException(
+            status_code=400,
+            detail=f"Live confirmation is blocked by the latest causal validation. {reasons}",
+        )
+    row = db.execute(text("""
+        UPDATE recommendation_trading_bots
+        SET status='ready_for_live_preflight',live_confirmation_at=NOW(),updated_at=NOW()
+        WHERE id=:bot_id AND owner_id=:owner_id AND execution_mode='live'
+          AND status='pending_live_confirmation'
+        RETURNING id,name,client_id,execution_mode,status,configuration,live_confirmation_at
+    """), {"bot_id": bot_id, "owner_id": str(current_user.id)}).mappings().first()
+    db.commit()
+    return {
+        **dict(row), "orders_submitted": 0,
+        "message": "Live mode is unlocked for final account, balance, market-hours and risk preflight. No order was submitted.",
+    }
 
 
 @router.get("/backtests/v2/symbols")

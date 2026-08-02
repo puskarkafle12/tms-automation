@@ -645,24 +645,30 @@ const TradeLightweightChart: React.FC<TradeLightweightChartProps> = ({
       const nextIndex = indexByDate.get(timeKey(param.time));
       if (nextIndex != null) setActiveCandleIndex(nextIndex);
     };
+    const onWheel = (event: WheelEvent) => {
+      // Keep wheel zoom focused on the chart instead of bubbling to the page.
+      event.stopPropagation();
+    };
 
     chart.subscribeCrosshairMove(onCrosshair);
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
     window.addEventListener('blur', onBlur);
-    el.addEventListener('pointerdown', onPointerDown, true);
+    el.addEventListener('pointerdown', onPointerDown);
     el.addEventListener('pointermove', onPointerMove);
     el.addEventListener('pointerup', onPointerUp);
     el.addEventListener('pointercancel', onPointerUp);
+    el.addEventListener('wheel', onWheel);
 
     return () => {
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
       window.removeEventListener('blur', onBlur);
-      el.removeEventListener('pointerdown', onPointerDown, true);
+      el.removeEventListener('pointerdown', onPointerDown);
       el.removeEventListener('pointermove', onPointerMove);
       el.removeEventListener('pointerup', onPointerUp);
       el.removeEventListener('pointercancel', onPointerUp);
+      el.removeEventListener('wheel', onWheel);
       chart.unsubscribeCrosshairMove(onCrosshair);
       chart.timeScale().unsubscribeVisibleLogicalRangeChange(syncZones);
       chart.timeScale().unsubscribeVisibleLogicalRangeChange(syncRiskLevels);

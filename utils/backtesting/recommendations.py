@@ -138,7 +138,8 @@ def query_recommendations(session, body: Dict[str, Any], *, owner_id: str = "loc
     if not sort_sql:
         raise ValueError("Unsupported recommendation sort field.")
     direction = "ASC" if str(body.get("sort_direction") or "desc").lower() == "asc" else "DESC"
-    fresh_session = body.get("signal_date") or latest_completed_market_session(session)
+    requested_session = body.get("signal_date")
+    latest_session = latest_completed_market_session(session)
     stored_session = session.execute(text(
         "SELECT MAX(signal_date) FROM market_backtest_recommendations WHERE owner_id=:owner_id"
     ), {"owner_id": owner_id}).scalar()
@@ -146,13 +147,24 @@ def query_recommendations(session, body: Dict[str, Any], *, owner_id: str = "loc
         "SELECT payload->>'recommendation_score_version' FROM market_backtest_recommendations "
         "WHERE owner_id=:owner_id ORDER BY refreshed_at DESC LIMIT 1"
     ), {"owner_id": owner_id}).scalar()
-    if (stored_session is None
-            or stored_score_version != RECOMMENDATION_SCORE_VERSION
-            or (fresh_session is not None and stored_session < fresh_session)):
+    if (bool(body.get("force_refresh"))
+            or stored_session is None
+            or stored_score_version != RECOMMENDATION_SCORE_VERSION):
         materialize_recommendations(session, owner_id=owner_id)
         session.commit()
+        stored_session = session.execute(text(
+            "SELECT MAX(signal_date) FROM market_backtest_recommendations WHERE owner_id=:owner_id"
+        ), {"owner_id": owner_id}).scalar()
+        stored_score_version = session.execute(text(
+            "SELECT payload->>'recommendation_score_version' FROM market_backtest_recommendations "
+            "WHERE owner_id=:owner_id ORDER BY refreshed_at DESC LIMIT 1"
+        ), {"owner_id": owner_id}).scalar()
+    # Normal queries are cached reads. If a newer market session exists but has
+    # not been refreshed yet, keep showing the latest stored recommendation
+    # session instead of returning an empty/slow page.
+    serving_session = requested_session or stored_session or latest_session
     params = {
-        "owner_id": owner_id, "fresh": fresh_session,
+        "owner_id": owner_id, "fresh": serving_session,
         "min_win": max(0, float(body.get("minimum_win_rate") or 0)),
         "min_trades": max(0, int(body.get("minimum_trades") or 0)),
         "min_score": float(body.get("minimum_score") or 0), "search": f"%{str(body.get('search') or '').strip()}%",
@@ -186,7 +198,10 @@ def query_recommendations(session, body: Dict[str, Any], *, owner_id: str = "loc
         items.append(item)
     return {"items": items, "total": total, "page": page, "page_size": page_size,
             "pages": (total + page_size - 1) // page_size, "persisted": True,
-            "trading_session": fresh_session.isoformat() if hasattr(fresh_session, "isoformat") else fresh_session}
+            "trading_session": serving_session.isoformat() if hasattr(serving_session, "isoformat") else serving_session,
+            "latest_market_session": latest_session.isoformat() if hasattr(latest_session, "isoformat") else latest_session,
+            "recommendations_stale": bool(latest_session and stored_session and stored_session < latest_session),
+            "recommendation_score_version": stored_score_version}
 
 
 def query_recommendation_selections(

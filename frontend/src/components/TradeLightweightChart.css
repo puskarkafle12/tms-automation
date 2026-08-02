@@ -106,6 +106,7 @@
   position: relative;
   width: 100%;
   height: calc(100% - 40px);
+  overscroll-behavior: contain;
 }
 
 .trade-chart-zone-layer {
@@ -242,6 +243,7 @@
   height: 100%;
   cursor: grab;
   touch-action: none;
+  overscroll-behavior: contain;
 }
 
 .trade-chart-canvas:active {

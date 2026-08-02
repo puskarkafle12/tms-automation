@@ -64,23 +64,28 @@ def replay_shared_capital(trades: List[Dict[str, Any]], initial: float, allocati
     cash = initial
     positions: Dict[str, Dict[str, Any]] = {}
     sector_cost: Dict[str, float] = defaultdict(float)
-    exits: Dict[Any, List[Dict[str, Any]]] = defaultdict(list)
-    entries: Dict[Any, List[Dict[str, Any]]] = defaultdict(list)
-    for trade in trades:
-        entries[trade["entry_date"]].append(trade)
-        exits[trade["exit_date"]].append(trade)
+    last_exit_by_symbol: Dict[str, date] = {}
+    exits: Dict[Any, List[tuple[int, Dict[str, Any]]]] = defaultdict(list)
+    entries: Dict[Any, List[tuple[int, Dict[str, Any]]]] = defaultdict(list)
+    # A symbol can have overlapping candidates. Match exits to the exact
+    # candidate so a rejected overlap cannot liquidate the funded position.
+    for trade_key, trade in enumerate(trades):
+        entries[trade["entry_date"]].append((trade_key, trade))
+        exits[trade["exit_date"]].append((trade_key, trade))
     dates = sorted(set(entries) | set(exits))
     accepted = rejected = fees = wins = 0
+    executions: List[Dict[str, Any]] = []
     taxes = broker_total = sebon_total = dp_total = 0.0
     realized_pnl = 0.0
     peak = initial
     max_drawdown = 0.0
     curve: List[Dict[str, Any]] = []
     for session_date in dates:
-        for source in exits[session_date]:
-            position = positions.pop(source["symbol"], None)
-            if not position:
+        for trade_key, source in exits[session_date]:
+            position = positions.get(source["symbol"])
+            if not position or position["trade_key"] != trade_key:
                 continue
+            positions.pop(source["symbol"])
             gross = position["quantity"] * float(source["exit_price"])
             exit_charges = sell_charges(
                 gross, as_date(session_date), entry_total_cost=position["entry_total"],
@@ -100,21 +105,46 @@ def replay_shared_capital(trades: List[Dict[str, Any]], initial: float, allocati
             dp_total += exit_charges["dp_charge"]
             wins += int(pnl > 0)
             sector_cost[position["sector"]] -= position["cost"]
-        for source in entries[session_date]:
+            last_exit_by_symbol[source["symbol"]] = as_date(session_date)
+            if allocation.get("capture_executions"):
+                executions.append({
+                    **source,
+                    "quantity": position["quantity"],
+                    "entry_total": round(position["entry_total"], 2),
+                    "exit_value_after_charges": round(gross - exit_fee, 2),
+                    "net_pnl": round(pnl, 2),
+                    "net_return_pct": round(100 * pnl / position["entry_total"], 4)
+                    if position["entry_total"] else 0,
+                    "total_charges": round(position["entry_fee"] + exit_fee, 2),
+                })
+        for trade_key, source in entries[session_date]:
             symbol = source["symbol"]
             sector = source["sector"]
             if symbol in positions or len(positions) >= int(allocation["max_positions"]):
                 rejected += 1
                 continue
-            reserve = initial * float(allocation["cash_reserve_pct"]) / 100
-            stock_cap = initial * float(allocation["max_stock_pct"]) / 100
-            sector_room = initial * float(allocation["max_sector_pct"]) / 100 - sector_cost[sector]
+            cooldown_days = max(0, int(allocation.get("symbol_cooldown_days") or 0))
+            previous_exit = last_exit_by_symbol.get(symbol)
+            if previous_exit and (as_date(session_date) - previous_exit).days < cooldown_days:
+                rejected += 1
+                continue
+            allocation_equity = (
+                cash + sum(item["cost"] for item in positions.values())
+                if allocation.get("allocation_basis") == "current_equity"
+                else initial
+            )
+            reserve = allocation_equity * float(allocation["cash_reserve_pct"]) / 100
+            stock_cap = allocation_equity * float(allocation["max_stock_pct"]) / 100
+            sector_room = allocation_equity * float(allocation["max_sector_pct"]) / 100 - sector_cost[sector]
             available = min(stock_cap, sector_room, max(0.0, cash - reserve))
             entry_price = float(source["entry_price"])
             quantity = maximum_affordable_quantity(available, entry_price, as_date(session_date), **charge_options)
+            lot_size = max(1, int(allocation.get("quantity_lot_size") or 1))
+            quantity = (quantity // lot_size) * lot_size
             latest_volume = float(source.get("latest_volume") or 0)
             if latest_volume > 0:
                 quantity = min(quantity, int(latest_volume * float(allocation["max_volume_participation_pct"]) / 100))
+                quantity = (quantity // lot_size) * lot_size
             if quantity <= 0:
                 rejected += 1
                 continue
@@ -128,7 +158,7 @@ def replay_shared_capital(trades: List[Dict[str, Any]], initial: float, allocati
             sector_cost[sector] += cost
             positions[symbol] = {"quantity": quantity, "entry_price": entry_price, "entry_fee": entry_fee,
                                  "entry_total": cost + entry_fee, "entry_charges": entry_charges,
-                                 "cost": cost, "sector": sector}
+                                 "cost": cost, "sector": sector, "trade_key": trade_key}
             accepted += 1
         equity = cash + sum(item["cost"] for item in positions.values())
         peak = max(peak, equity)
@@ -136,7 +166,7 @@ def replay_shared_capital(trades: List[Dict[str, Any]], initial: float, allocati
         max_drawdown = max(max_drawdown, drawdown)
         curve.append({"date": session_date.isoformat(), "equity": round(equity, 2), "cash": round(cash, 2), "positions": len(positions), "drawdown_pct": round(drawdown, 4)})
     final_equity = cash + sum(item["cost"] for item in positions.values())
-    return {
+    summary = {
         "initial_capital": round(initial, 2), "final_equity": round(final_equity, 2),
         "net_return_pct": round((final_equity / initial - 1) * 100, 4) if initial else 0,
         "realized_pnl": round(realized_pnl, 2), "max_drawdown_pct": round(max_drawdown, 4),
@@ -145,4 +175,7 @@ def replay_shared_capital(trades: List[Dict[str, Any]], initial: float, allocati
         "total_charges": round(fees + taxes, 2),
         "broker_commission": round(broker_total, 2), "sebon_fees": round(sebon_total, 2),
         "dp_charges": round(dp_total, 2), "open_positions_at_end": len(positions),
-    }, curve
+    }
+    if allocation.get("capture_executions"):
+        summary["executions"] = executions
+    return summary, curve
