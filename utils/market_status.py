@@ -53,6 +53,24 @@ def format_nepal_datetime(now: Optional[datetime] = None) -> Dict[str, str]:
     return payload
 
 
+def get_next_market_poll_start(now: Optional[datetime] = None) -> datetime:
+    """Return the next Nepal time when the app should poll TMS market status."""
+    current = now or get_nepal_now()
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=NEPAL_TZ)
+    else:
+        current = current.astimezone(NEPAL_TZ)
+
+    candidate = current.date()
+    while True:
+        if candidate.weekday() in MARKET_POLL_WEEKDAYS:
+            open_dt = datetime.combine(candidate, MARKET_OPEN, tzinfo=NEPAL_TZ)
+            close_dt = datetime.combine(candidate, MARKET_CLOSE, tzinfo=NEPAL_TZ)
+            if current <= close_dt:
+                return current if current >= open_dt else open_dt
+        candidate += timedelta(days=1)
+
+
 def nepal_date_utc_bounds(nepal_date: date) -> tuple[datetime, datetime]:
     start = datetime.combine(nepal_date, time.min, tzinfo=NEPAL_TZ)
     end = start + timedelta(days=1)

@@ -10,6 +10,9 @@ export interface MarketStatus {
   nepal_date_formatted: string;
   nepal_time_display: string;
   timezone: string;
+  market_hours_label?: string;
+  market_poll_hours_label?: string;
+  next_market_poll_at?: ApiTimestamp;
   is_trading_day: boolean;
   is_pre_open: boolean;
   is_continuous_session: boolean;

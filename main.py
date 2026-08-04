@@ -67,10 +67,12 @@ from utils.tms_user_loader import (
 )
 from utils.api_time import format_api_timestamp, get_server_time_payload, is_continuous_market_timestamp
 from utils.market_status import (
+    MARKET_HOURS_LABEL,
     MARKET_LIVE_POLL_INTERVAL_SECONDS,
     MARKET_POLL_HOURS_LABEL,
     format_nepal_datetime,
     get_market_hours_status,
+    get_next_market_poll_start,
     get_nepal_now,
     is_market_polling_window,
     nepal_date_utc_bounds,
@@ -1261,6 +1263,7 @@ async def get_market_status(db: Session = Depends(get_db)):
     hours = get_market_hours_status(now)
     polling_window = is_market_polling_window(now)
     nepal = format_nepal_datetime(now)
+    next_poll = format_nepal_datetime(get_next_market_poll_start(now))
 
     tms_session_active = False
     tms_session_message = "DNA logged off"
@@ -1335,6 +1338,9 @@ async def get_market_status(db: Session = Depends(get_db)):
         "nepal_date_formatted": nepal["date"],
         "nepal_time_display": nepal["display"],
         "timezone": nepal["timezone"],
+        "market_hours_label": MARKET_HOURS_LABEL,
+        "market_poll_hours_label": MARKET_POLL_HOURS_LABEL,
+        "next_market_poll_at": next_poll,
         "is_trading_day": hours["is_trading_day"],
         "is_pre_open": hours["is_pre_open"],
         "is_continuous_session": hours["is_continuous"],
@@ -3165,6 +3171,7 @@ async def get_order_status_logs(
     scheduler_status = get_scheduler_display_status()
     monitor_phase = scheduler_status["scheduled_phase"]
     market_open = get_market_hours_status()["market_hours_open"]
+    status_checked_at = get_nepal_now()
     for order in scheduled_orders:
         live_snapshot = live_quote_manager.get_snapshot(order.script_name)
         if not market_open and not live_snapshot:
@@ -3280,6 +3287,10 @@ async def get_order_status_logs(
             "cancelled_reason": order.cancelled_reason,
             "scanning_count": scanning_count,
             "current_price": int(round(current_price_val)) if current_price_val is not None else None,
+            "status_checked_at": format_api_timestamp(status_checked_at),
+            "last_monitor_at": format_api_timestamp(scan_log.timestamp)
+            if scan_log
+            else None,
             "last_scan_at": format_api_timestamp(scan_log.timestamp)
             if scan_log and is_continuous_market_timestamp(scan_log.timestamp)
             else None,

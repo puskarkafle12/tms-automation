@@ -6,7 +6,7 @@ export const isLocalAppOrigin = (): boolean => {
   return hostname === 'localhost' || hostname === '127.0.0.1';
 };
 
-/** Reset apiUrl when it points at ngrok or a bare backend port while the UI is local. */
+/** Reset apiUrl when it points at a tunnel or a bare backend port while the UI is local. */
 export const shouldResetStoredApiUrl = (stored: string | null | undefined): boolean => {
   const trimmed = stored?.trim();
   if (!trimmed) {
@@ -15,7 +15,7 @@ export const shouldResetStoredApiUrl = (stored: string | null | undefined): bool
   if (!isLocalAppOrigin()) {
     return false;
   }
-  if (/ngrok/i.test(trimmed)) {
+  if (/(ngrok|zrok|shares\.zrok\.io)/i.test(trimmed)) {
     return true;
   }
   if (/^https?:\/\/(localhost|127\.0\.0\.1):8000\/?$/i.test(trimmed)) {

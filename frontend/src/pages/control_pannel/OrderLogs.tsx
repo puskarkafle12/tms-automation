@@ -120,6 +120,8 @@ interface ScheduledOrderRow {
   nepse_alpha_last_source?: string | null;
   nepse_alpha_last_fetched_at?: number | string | null;
   current_price?: number | null;
+  status_checked_at?: ApiTimeValue;
+  last_monitor_at?: ApiTimeValue;
   last_checked_ltp?: number | null;
   last_scan_at?: ApiTimeValue;
   failed_reason?: string | null;

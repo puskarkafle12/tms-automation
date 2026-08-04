@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from utils.api_time import format_api_timestamp, is_continuous_market_timestamp, seconds_until_market_open
-from utils.market_status import MARKET_OPEN, NEPAL_TZ
+from utils.market_status import MARKET_OPEN, NEPAL_TZ, get_next_market_poll_start
 
 
 class ApiTimeTest(unittest.TestCase):
@@ -47,6 +47,17 @@ class ApiTimeTest(unittest.TestCase):
         monday_open = datetime(2026, 6, 22, 11, 0, tzinfo=NEPAL_TZ)
 
         self.assertEqual(seconds_until_market_open(sunday), (monday_open - sunday).total_seconds())
+
+    def test_next_market_poll_start_after_close(self):
+        after_close = datetime(2026, 8, 4, 22, 16, tzinfo=NEPAL_TZ)
+        expected = datetime(2026, 8, 5, 11, 0, tzinfo=NEPAL_TZ)
+
+        self.assertEqual(get_next_market_poll_start(after_close), expected)
+
+    def test_next_market_poll_start_during_window_is_now(self):
+        live = datetime(2026, 8, 5, 12, 15, tzinfo=NEPAL_TZ)
+
+        self.assertEqual(get_next_market_poll_start(live), live)
 
 
 if __name__ == "__main__":

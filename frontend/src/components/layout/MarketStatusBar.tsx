@@ -23,7 +23,7 @@ const buildStatusTitle = (status: MarketStatus | null) => {
   const parts = [
     dnaStatus,
     status.tms_session_message,
-    'DNA market check: Sun–Fri 11:00 AM–3:00 PM',
+    `DNA market check: ${status.market_poll_hours_label || 'Sun–Fri 11:00 AM–3:00 PM'}`,
   ];
 
   if (status.market_phase === 'open') {
@@ -33,7 +33,10 @@ const buildStatusTitle = (status: MarketStatus | null) => {
   } else if (status.market_phase === 'checking') {
     parts.push('Checking the shared TMS market session');
   } else if (!status.market_polling_window) {
-    parts.push('Outside the Sun–Fri market polling window');
+    parts.push('Outside the market polling window');
+    if (status.next_market_poll_at?.display) {
+      parts.push(`Next market check: ${status.next_market_poll_at.display}`);
+    }
   }
 
   if (status.client_id) {

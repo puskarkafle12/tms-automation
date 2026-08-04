@@ -1,10 +1,11 @@
 import { shouldResetStoredApiUrl } from './api';
 
 describe('api url helpers', () => {
-  test('resets missing, ngrok, and localhost:8000 URLs on local app', () => {
+  test('resets missing, tunnel, and localhost:8000 URLs on local app', () => {
     expect(shouldResetStoredApiUrl(null)).toBe(true);
     expect(shouldResetStoredApiUrl('')).toBe(true);
     expect(shouldResetStoredApiUrl('https://foo.ngrok-free.dev')).toBe(true);
+    expect(shouldResetStoredApiUrl('https://tmsautomationlive.shares.zrok.io')).toBe(true);
     expect(shouldResetStoredApiUrl('http://localhost:8000')).toBe(true);
     expect(shouldResetStoredApiUrl('http://127.0.0.1:8000/')).toBe(true);
   });

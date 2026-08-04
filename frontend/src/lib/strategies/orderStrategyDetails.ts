@@ -319,6 +319,7 @@ export function buildStrategyDetailLayout(
     order.monitoring_active === true ? 'Yes' : order.monitoring_active === false ? 'No' : undefined,
   );
   pushDetail(secondary, 'Live Status', helpers.formatLiveScanStatus(order));
+  pushDetail(secondary, 'Status Checked', order.status_checked_at, helpers.formatDateTime);
   pushDetail(secondary, 'Stock Quote Checks', stockQuoteCheckCount(order), helpers.formatScanCount);
   if (order.requires_nepse_alpha === false) {
     secondary.push({ label: 'Nepse Alpha', value: 'Not used by this strategy', kind: 'muted' });
@@ -341,9 +342,16 @@ export function buildStrategyDetailLayout(
   pushDetail(primary, 'Top Buy', firstDepthPrice(order.socket_top_buy), helpers.formatCurrency);
   pushDetail(primary, 'Top Sell', firstDepthPrice(order.socket_top_sell), helpers.formatCurrency);
 
+  if (order.last_monitor_at) {
+    secondary.push({
+      label: 'Last Monitor Update',
+      value: helpers.formatDateTime(order.last_monitor_at),
+    });
+  }
+
   if (order.last_scan_at) {
     secondary.push({
-      label: 'Last Scan',
+      label: 'Last Live Quote Scan',
       value: helpers.formatDateTime(order.last_scan_at),
     });
   }
