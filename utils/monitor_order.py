@@ -28,7 +28,7 @@ from utils.strategies.normalize import normalize_tms_quote
 from utils.strategies.order_context import build_scanner_memory, update_scan_history
 from utils.strategies.registry import decision_to_execute_dict, evaluate_strategy
 from utils.strategies.types import ScriptDetails
-from utils.tms_user_loader import load_tms_users_instances
+from utils.tms_user_loader import get_auto_login_diagnostic, load_tms_users_instances
 from utils.monitor_scan_settings import (
     advance_nepse_alpha_scan_due_at,
     advance_tms_scan_due_at,
@@ -45,6 +45,7 @@ MONITOR_SOCKET_RETRY_ATTEMPTS = 3
 MONITOR_SOCKET_RETRY_DELAY_SECONDS = 20
 MONITOR_SOCKET_FALLBACK_COOLDOWN_SECONDS = 60.0
 MONITOR_SOCKET_FAILURE_THRESHOLD = 3
+GATE_DIAGNOSTIC_HEARTBEAT_SECONDS = 5 * 60
 TERMINAL_STATUSES = {
     "order_placed",
     "Executed",
@@ -874,6 +875,7 @@ async def monitor_order_task_func():
     last_nepse_alpha_details: Dict[int, ScriptDetails] = {}
     price_fetch_sem: Optional[asyncio.Semaphore] = None
     price_fetch_sem_limit = 0
+    last_gate_diagnostic: Dict[int, tuple[str, float]] = {}
 
     try:
         while config.is_running:
@@ -962,6 +964,19 @@ async def monitor_order_task_func():
                     try:
                         for order in pending_orders:
                             key = (order.client_id, order.script_name)
+                            auto_login_diagnostic = get_auto_login_diagnostic(order.client_id)
+                            diagnostic = execution_gate["diagnostic"]
+                            if auto_login_diagnostic:
+                                diagnostic = f"{diagnostic}; {auto_login_diagnostic}"
+                            diagnostic = f"DIAGNOSTIC: {diagnostic}"
+                            previous = last_gate_diagnostic.get(order.order_id)
+                            should_persist = (
+                                previous is None
+                                or previous[0] != diagnostic
+                                or now - previous[1] >= GATE_DIAGNOSTIC_HEARTBEAT_SECONDS
+                            )
+                            if should_persist:
+                                last_gate_diagnostic[order.order_id] = (diagnostic, now)
                             await store_or_update_logs(
                                 db,
                                 order.client_id,
@@ -969,9 +984,9 @@ async def monitor_order_task_func():
                                 count_dict.get(key, 0),
                                 None,
                                 False,
-                                execution_gate["message"],
+                                diagnostic if should_persist else None,
                                 commit=False,
-                                touch_timestamp=False,
+                                touch_timestamp=should_persist,
                             )
                         db.commit()
                     finally:

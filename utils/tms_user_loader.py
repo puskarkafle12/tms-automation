@@ -10,6 +10,7 @@ from utils.tms_client_resolver import get_tms_user_for_client
 AUTO_LOGIN_RETRY_BASE_SECONDS = 60.0
 AUTO_LOGIN_RETRY_MAX_SECONDS = 15 * 60.0
 _auto_login_failures: Dict[str, tuple[int, float]] = {}
+_auto_login_errors: Dict[str, str] = {}
 
 
 def auto_login_retry_allowed(client_id: str) -> bool:
@@ -19,13 +20,28 @@ def auto_login_retry_allowed(client_id: str) -> bool:
 
 def record_auto_login_success(client_id: str) -> None:
     _auto_login_failures.pop(str(client_id), None)
+    _auto_login_errors.pop(str(client_id), None)
 
 
-def record_auto_login_failure(client_id: str) -> None:
+def record_auto_login_failure(client_id: str, error: Exception | None = None) -> None:
     key = str(client_id)
     attempts = _auto_login_failures.get(key, (0, 0.0))[0] + 1
     delay = min(AUTO_LOGIN_RETRY_MAX_SECONDS, AUTO_LOGIN_RETRY_BASE_SECONDS * (2 ** (attempts - 1)))
     _auto_login_failures[key] = (attempts, time.monotonic() + delay)
+    if error is not None:
+        _auto_login_errors[key] = f"{type(error).__name__}: {error}"[:300]
+
+
+def get_auto_login_diagnostic(client_id: str) -> str | None:
+    """Return the most recent safe-to-display recovery failure for a client."""
+    key = str(client_id)
+    failure = _auto_login_failures.get(key)
+    if failure is None:
+        return None
+    attempts, retry_at = failure
+    retry_in = max(0, int(retry_at - time.monotonic()))
+    error = _auto_login_errors.get(key, "login recovery failed")
+    return f"auto-login attempt {attempts} failed ({error}); retry in about {retry_in}s"
 
 
 async def load_tms_users_instances(client_ids, tms_instances: Dict):
@@ -61,9 +77,9 @@ async def load_tms_users_instances(client_ids, tms_instances: Dict):
                     allow_full_login=True,
                 )
                 record_auto_login_success(client_id)
-            except Exception:
+            except Exception as exc:
                 tms_instances.pop(client_id, None)
-                record_auto_login_failure(client_id)
+                record_auto_login_failure(client_id, exc)
     finally:
         db.close()
     return tms_instances

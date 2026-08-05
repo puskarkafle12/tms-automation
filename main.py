@@ -78,7 +78,7 @@ from utils.market_status import (
     nepal_date_utc_bounds,
     outside_market_hours_message,
 )
-from utils.market_live_state import get_shared_dna_session
+from utils.market_live_state import get_shared_dna_session, get_shared_dna_session_snapshot
 import config.tms_config as tms_config
 from config.app_build_info import get_app_build_info
 from utils.external_data_sources.nepse_alpha.ai_query import ScreenerAiError, test_all_llm_connections
@@ -1364,6 +1364,57 @@ async def get_market_status(db: Session = Depends(get_db)):
     }
     market_status_cache = (cache_now, payload)
     return payload
+
+
+@app.get("/api/monitor-diagnostics")
+async def get_monitor_diagnostics(
+    db: Session = Depends(get_db),
+    current_user: FrontendUser = Depends(require_permission("order_logs")),
+):
+    """Read-only production diagnostics for scheduled-order monitoring."""
+    now = get_nepal_now()
+    polling_window = is_market_polling_window(now)
+    dna = get_shared_dna_session_snapshot()
+    scheduler = get_scheduler_display_status()
+    orders = (
+        db.query(ScheduledOrder)
+        .filter(ScheduledOrder.owner_user_id == current_user.id)
+        .filter(ScheduledOrder.status.notin_(("Executed", "Cancelled", "Failed", "Expired")))
+        .order_by(ScheduledOrder.updated_at.desc())
+        .all()
+    )
+    order_diagnostics = []
+    for order in orders:
+        scan_log = (
+            db.query(OrderLog)
+            .filter(OrderLog.client_id == order.client_id, OrderLog.script_name == order.script_name)
+            .order_by(OrderLog.timestamp.desc())
+            .first()
+        )
+        diagnostic_events = [
+            line for line in str(scan_log.logs or "").splitlines()
+            if line.startswith("DIAGNOSTIC:")
+        ] if scan_log else []
+        order_diagnostics.append({
+            "order_id": order.order_id,
+            "client_id": order.client_id,
+            "script_name": order.script_name,
+            "status": order.status,
+            "last_monitor_update": format_api_timestamp(scan_log.timestamp) if scan_log else None,
+            "last_price": scan_log.current_price if scan_log else None,
+            "scan_count": int(scan_log.scanning_count or 0) if scan_log else 0,
+            "recent_diagnostics": diagnostic_events[-10:],
+        })
+
+    return {
+        "server_time": format_nepal_datetime(now),
+        "market_polling_window": polling_window,
+        "next_market_poll_at": format_nepal_datetime(get_next_market_poll_start(now)),
+        "scheduler": scheduler,
+        "market_live_decision": dna,
+        "tms_request_cache": TmsUser.tms_request_cache_status(),
+        "orders": order_diagnostics,
+    }
 
 
 def _decode_tms_account_password(password: Optional[str]) -> str:
