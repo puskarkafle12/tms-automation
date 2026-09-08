@@ -1,6 +1,6 @@
 import asyncio
 import base64
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from http.cookies import SimpleCookie
 import json
 import time as monotonic_time
@@ -47,6 +47,7 @@ class TmsUser:
     _quote_circuit_cooldown = 15.0
     _stock_grabber_socket_wait_seconds = 0.15
     _full_login_lock: Optional[asyncio.Lock] = None
+    _password_rotation_locks: Dict[str, asyncio.Lock] = {}
     _non_live_request_cache: Dict[str, tuple[float, int, object]] = {}
     _non_live_request_cache_ttl = 3600.0
     _market_live_override: Optional[tuple[float, bool]] = None
@@ -523,42 +524,78 @@ class TmsUser:
                 f"TMS password expired on {password_expiry}. Enable auto rotation to continue."
             )
 
-        old_password = self.password
-        plain_password = self.decode_password_payload(old_password)
-        candidates = self.rotation_password_candidates(plain_password)
-        last_error: Optional[Exception] = None
-        current_label = self.describe_numbered_password(
-            self.password_rotation_number(plain_password)
-        )
-
-        for new_label, new_plain in candidates:
-            new_password = self.encode_base64(new_plain)
-            try:
-                await self.change_password(old_password, new_password)
-                self.password = new_password
-                await self.save_login_info()
-                await self.save_password_backup(new_password, new_label)
+        async with self._get_password_rotation_lock(self.client_id):
+            saved_password, recently_rotated = self._password_rotation_state()
+            if saved_password and saved_password != self.password:
+                self.password = saved_password
                 return {
-                    "rotated": True,
-                    "password_changed": True,
-                    "new_password_plain": new_plain,
-                    "message": (
-                        f"TMS password expired on {password_expiry}. "
-                        f"Changed from {current_label} to {new_label}. "
-                        f"Use this new password for future logins: {new_plain}"
-                    ),
+                    "rotated": False,
+                    "message": "Password was already rotated by another login request.",
                 }
-            except Exception as exc:
-                last_error = exc
-                continue
+            if recently_rotated:
+                return {
+                    "rotated": False,
+                    "message": "Password rotation already completed recently.",
+                }
 
-        self.password = old_password
-        tried = ", ".join(label for label, _ in candidates[:12])
-        if len(candidates) > 12:
-            tried += f", ... (+{len(candidates) - 12} more)"
-        raise LoginFailedException(
-            f"Password rotation failed after trying {len(candidates)} new password(s) [{tried}]: {last_error}"
-        )
+            old_password = self.password
+            plain_password = self.decode_password_payload(old_password)
+            candidates = self.rotation_password_candidates(plain_password)
+            last_error: Optional[Exception] = None
+            current_label = self.describe_numbered_password(
+                self.password_rotation_number(plain_password)
+            )
+
+            for new_label, new_plain in candidates:
+                new_password = self.encode_base64(new_plain)
+                try:
+                    await self.change_password(old_password, new_password)
+                    self.password = new_password
+                    await self.save_login_info()
+                    await self.save_password_backup(new_password, new_label)
+                    return {
+                        "rotated": True,
+                        "password_changed": True,
+                        "new_password_plain": new_plain,
+                        "message": (
+                            f"TMS password expired on {password_expiry}. "
+                            f"Changed from {current_label} to {new_label}. "
+                            f"Use this new password for future logins: {new_plain}"
+                        ),
+                    }
+                except Exception as exc:
+                    last_error = exc
+                    continue
+
+            self.password = old_password
+            tried = ", ".join(label for label, _ in candidates[:12])
+            if len(candidates) > 12:
+                tried += f", ... (+{len(candidates) - 12} more)"
+            raise LoginFailedException(
+                f"Password rotation failed after trying {len(candidates)} new password(s) [{tried}]: {last_error}"
+            )
+
+    def _password_rotation_state(self) -> tuple[Optional[str], bool]:
+        """Read the authoritative password and suppress stale expiry replays."""
+        db = get_db_session()
+        try:
+            user = db.query(User).filter(User.client_id == self.client_id).first()
+            saved_password = user.password if user else None
+            if not saved_password:
+                return saved_password, False
+            recent_rotation = (
+                db.query(TmsPasswordBackup)
+                .filter(
+                    TmsPasswordBackup.client_id == self.client_id,
+                    TmsPasswordBackup.password == saved_password,
+                    TmsPasswordBackup.rotation_label.like("rotation %"),
+                    TmsPasswordBackup.created_at >= datetime.utcnow() - timedelta(days=1),
+                )
+                .first()
+            )
+            return saved_password, recent_rotation is not None
+        finally:
+            db.close()
 
     async def change_password(self, current_password: str, new_password: str) -> Dict:
         if not self.tokens or not self.headers:
@@ -620,7 +657,6 @@ class TmsUser:
         try:
             user = db.query(User).filter(User.client_id == self.client_id, User.broker_no == self.broker_no).first()
             if user:
-                user.auto_login = True
                 if user.password != self.password:
                     user.password = self.password
                     db.commit()
@@ -1419,6 +1455,15 @@ class TmsUser:
         if cls._full_login_lock is None:
             cls._full_login_lock = asyncio.Lock()
         return cls._full_login_lock
+
+    @classmethod
+    def _get_password_rotation_lock(cls, client_id: Optional[str]) -> asyncio.Lock:
+        key = str(client_id or "")
+        lock = cls._password_rotation_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            cls._password_rotation_locks[key] = lock
+        return lock
 
     @classmethod
     def set_market_live_override(cls, market_live: bool) -> None:

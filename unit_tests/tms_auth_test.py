@@ -11,6 +11,7 @@ class TestTmsAuthFlow(unittest.IsolatedAsyncioTestCase):
 
         self.TmsUser = TmsUser
         self.TmsUser._full_login_lock = None
+        self.TmsUser._password_rotation_locks.clear()
 
     def _sample_session(self):
         return {
@@ -127,6 +128,41 @@ class TestTmsAuthFlow(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(user1._full_login_and_persist(), user2._full_login_and_persist())
 
         self.assertEqual(max_active_logins, 1)
+
+    async def test_expired_password_is_rotated_only_once_for_concurrent_requests(self):
+        encoded_old = self.TmsUser.encode_base64("Abc@def9")
+        users = [
+            self.TmsUser(broker_no="35", username="client1", password=encoded_old)
+            for _ in range(2)
+        ]
+        current_password = encoded_old
+        change_count = 0
+
+        def rotation_state():
+            return current_password, current_password != encoded_old
+
+        async def change_password(_old_password, new_password):
+            nonlocal current_password, change_count
+            change_count += 1
+            await asyncio.sleep(0.01)
+            current_password = new_password
+            return {"status": 200}
+
+        for user in users:
+            user.login_response = {"password_expiry": "2020-01-01"}
+            user.tokens = {"XSRF-TOKEN": "token"}
+            user._password_rotation_state = MagicMock(side_effect=rotation_state)
+            user.change_password = AsyncMock(side_effect=change_password)
+            user.save_login_info = AsyncMock()
+            user.save_password_backup = AsyncMock()
+
+        results = await asyncio.gather(*[
+            user.rotate_password_if_expired() for user in users
+        ])
+
+        self.assertEqual(change_count, 1)
+        self.assertEqual(sum(bool(result["rotated"]) for result in results), 1)
+        self.assertEqual(users[1].password, current_password)
 
     async def test_tms_loader_allows_full_login_for_background_recovery(self):
         from utils import tms_user_loader
