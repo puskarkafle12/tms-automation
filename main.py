@@ -1,5 +1,7 @@
 import logging
 import json
+import os
+import secrets
 import uuid
 import aiohttp
 import time as monotonic_time
@@ -94,9 +96,9 @@ from utils.strategy_builder.reference_display import (
 )
 from utils.live_quote_socket import is_live_socket_snapshot, live_quote_manager
 
-app = FastAPI(debug=True)
+app = FastAPI(debug=os.getenv("ENVIRONMENT", "test").lower() not in {"prod", "production"})
 app.include_router(strategy_builder_router)
-SECRET_KEY = "your_secret_key_here"
+SECRET_KEY = os.getenv("SECRET_KEY") or secrets.token_urlsafe(32)
 FRONTEND_BUILD_DIR = Path(__file__).resolve().parent / "frontend" / "build"
 
 # Store running tasks and updates
@@ -3930,7 +3932,6 @@ async def frontend_login(user_login: UserLogin, db: Session = Depends(get_db)):
     timestamp = datetime.utcnow().timestamp()
     payload = {
         "username": username,
-        "password": password,
         "timestamp": timestamp
     }
     access_token = jwt.encode(payload, SECRET_KEY, algorithm="HS256")

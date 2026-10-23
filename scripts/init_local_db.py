@@ -15,13 +15,15 @@ from models import frontend_user, logged_in_user, order_log, order_status_log, s
 
 def main() -> None:
     seed_user = os.getenv("FRONTEND_SEED_USER", "admin")
-    seed_password = os.getenv("FRONTEND_SEED_PASSWORD", "admin")
+    seed_password = os.getenv("FRONTEND_SEED_PASSWORD")
 
     Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     try:
         existing = db.query(FrontendUser).filter(FrontendUser.username == seed_user).first()
         if not existing:
+            if not seed_password:
+                raise RuntimeError("FRONTEND_SEED_PASSWORD must be set before creating a frontend user")
             db.add(FrontendUser(username=seed_user, password=seed_password))
             db.commit()
             print(f"Seeded frontend user: {seed_user}")

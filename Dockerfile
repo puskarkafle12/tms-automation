@@ -41,13 +41,10 @@ ENV PYTHONUNBUFFERED=1 \
     PATH="/opt/venv/bin:$PATH" \
     PGDATA=/var/lib/postgresql/data \
     DB_USER=pk \
-    DB_PASSWORD=pk \
     DB_HOST=127.0.0.1 \
     DB_NAME=stock \
     FRONTEND_SEED_USER=admin \
-    FRONTEND_SEED_PASSWORD=admin \
     TUNNEL_PROVIDER=ngrok \
-    NGROK_AUTHTOKEN=REDACTED_CREDENTIAL \
     NGROK_DOMAIN=untrained-pleading-unmarked.ngrok-free.dev \
     ZROK_ENV_TOKEN=
 

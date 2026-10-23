@@ -46,4 +46,4 @@ if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
     exit 127
 fi
 
-exec "$PYTHON_BIN" scripts/run_latest_commit_docker.py --pull-git --branch "$PRIMARY_BRANCH" "$@"
+exec "$PYTHON_BIN" scripts/run_latest_commit_docker.py --pull-git "$@"

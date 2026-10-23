@@ -3,11 +3,11 @@ set -euo pipefail
 
 : "${PGDATA:=/var/lib/postgresql/data}"
 : "${DB_USER:=pk}"
-: "${DB_PASSWORD:=pk}"
+: "${DB_PASSWORD:?DB_PASSWORD must be set}"
 : "${DB_HOST:=127.0.0.1}"
 : "${DB_NAME:=stock}"
 : "${FRONTEND_SEED_USER:=admin}"
-: "${FRONTEND_SEED_PASSWORD:=admin}"
+: "${FRONTEND_SEED_PASSWORD:?FRONTEND_SEED_PASSWORD must be set}"
 : "${NGROK_AUTHTOKEN:=}"
 : "${NGROK_DOMAIN:=}"
 : "${ZROK_ENV_TOKEN:=}"

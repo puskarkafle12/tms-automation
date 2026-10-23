@@ -4,6 +4,8 @@ __pycache__
 traded_difference.txt
 test.py
 .env
+.env.*
+!.env.example
 .venv/
 *.log
 *.json
@@ -22,6 +24,4 @@ data/captcha_debug/
 data/captcha_empty/
 # Ignore everything in the alembic folder
 alembic/*
-# Do not ignore the .env file inside the alembic folder
-!alembic/.env
 !alembic/script.py.mako

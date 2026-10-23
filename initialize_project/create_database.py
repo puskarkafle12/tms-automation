@@ -75,7 +75,9 @@ def create_user():
         ON CONFLICT (username) DO NOTHING;
         '''
         seed_user = os.getenv("FRONTEND_SEED_USER", "admin")
-        seed_password = os.getenv("FRONTEND_SEED_PASSWORD", "changeme")
+        seed_password = os.getenv("FRONTEND_SEED_PASSWORD")
+        if not seed_password:
+            raise RuntimeError("FRONTEND_SEED_PASSWORD must be set before creating a frontend user")
         cursor.execute(insert_user_query, (seed_user, seed_password))
         connection.commit()
         print("User inserted successfully.")

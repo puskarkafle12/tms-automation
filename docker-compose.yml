@@ -13,11 +13,11 @@ services:
       - 1.1.1.1
     environment:
       DB_USER: pk
-      DB_PASSWORD: pk
+      DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
       DB_HOST: 127.0.0.1
       DB_NAME: stock
       FRONTEND_SEED_USER: admin
-      FRONTEND_SEED_PASSWORD: admin
+      FRONTEND_SEED_PASSWORD: ${FRONTEND_SEED_PASSWORD:?Set FRONTEND_SEED_PASSWORD in .env}
       ENVIRONMENT: ${ENVIRONMENT:-prod}
       TUNNEL_PROVIDER: ${TUNNEL_PROVIDER:-ngrok}
       NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:-}
