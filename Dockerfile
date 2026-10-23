@@ -47,7 +47,6 @@ ENV PYTHONUNBUFFERED=1 \
     FRONTEND_SEED_USER=admin \
     FRONTEND_SEED_PASSWORD=admin \
     TUNNEL_PROVIDER=ngrok \
-    NGROK_AUTHTOKEN=REDACTED_CREDENTIAL \
     NGROK_DOMAIN=untrained-pleading-unmarked.ngrok-free.dev \
     ZROK_ENV_TOKEN=
 
